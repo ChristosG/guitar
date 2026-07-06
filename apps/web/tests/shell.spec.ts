@@ -7,6 +7,10 @@ test("serves the shell translated per locale", async ({ page }) => {
   await expect(page.getByTestId("app-title")).toHaveText(/Βοηθός Δασκάλου Κιθάρας/);
 });
 
+// no-store is a production/deploy concern (Cloudflare edge). The dev server
+// (`next dev`) sets cache headers differently, so it's asserted in scripts/smoke.sh
+// against the real standalone container, not here against dev.
+
 test("theme toggle flips the html class (light default)", async ({ page }) => {
   await page.goto("/en");
   const html = page.locator("html");

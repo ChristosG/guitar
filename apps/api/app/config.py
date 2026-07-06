@@ -13,4 +13,7 @@ class Settings(BaseSettings):
     embed_model: str = "qwen3-emb-4b"
     embed_dim: int = 2560
 
+    # Comma-separated allowlist of browser origins the API accepts (CORS).
+    cors_origins: str = "http://localhost:3000,http://localhost:8790,https://guitar.cgrigoriadis.online"
+
 settings = Settings()

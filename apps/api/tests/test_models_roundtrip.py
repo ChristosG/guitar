@@ -1,7 +1,22 @@
+import pytest
+from sqlalchemy import text
+
 from app.db import Base, engine, SessionLocal
 from app.models.student import Student
 from app.models.block import Block
 from app.models.knowledge import KnowledgeSource, Chunk
+
+# Skip cleanly (not error) when no DB is reachable — e.g. a bare `pytest` on a fresh
+# checkout without DATABASE_URL pointing at a running Postgres.
+try:
+    with engine.connect() as _c:
+        _c.execute(text("SELECT 1"))
+except Exception:
+    pytest.skip(
+        "database not reachable — set DATABASE_URL to a running Postgres",
+        allow_module_level=True,
+    )
+
 
 def setup_module(_):
     Base.metadata.create_all(engine)  # test DB build (Alembic verified separately)

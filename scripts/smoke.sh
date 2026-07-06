@@ -10,4 +10,7 @@ curl -sf http://localhost:8791/health/live >/dev/null
 echo "api live: OK"
 curl -sf http://localhost:8790/el >/dev/null
 echo "web el:   OK"
+# HTML must be no-store (App-Router Vary:rsc trap, spec §5.4). grep -q fails → set -e aborts.
+curl -sI http://localhost:8790/el | grep -qi 'cache-control: no-store'
+echo "web no-store: OK"
 echo "ready: $(curl -s http://localhost:8791/health/ready)"
