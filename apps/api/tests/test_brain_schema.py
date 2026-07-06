@@ -49,7 +49,10 @@ def test_domain_and_cosine_order():
 
         query = [0.9, 0.1, 0.0] + [0.0] * (dim - 3)
         rows = db.scalars(
-            select(Chunk).order_by(Chunk.embedding.cosine_distance(query)).limit(1)
+            select(Chunk)
+            .where(Chunk.source_id == src.id)  # scope to this test's rows (shared persistent DB)
+            .order_by(Chunk.embedding.cosine_distance(query))
+            .limit(1)
         ).all()
         assert rows and rows[0].text == "c_a"  # closest by angle to the query axis
     finally:
