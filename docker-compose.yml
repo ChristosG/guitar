@@ -1,0 +1,48 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-guitar}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-guitar}
+      POSTGRES_DB: ${POSTGRES_DB:-guitar}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-guitar} -d ${POSTGRES_DB:-guitar}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [appnet]
+
+  api:
+    build: { context: ./apps/api }
+    env_file: .env
+    depends_on:
+      postgres: { condition: service_healthy }
+    ports:
+      - "127.0.0.1:${API_PORT:-8791}:8000"
+    networks: [appnet, platform-net]   # platform-net → reach qwen-vllm / qwen-emb-vllm
+
+  worker:
+    build: { context: ./apps/api }
+    env_file: .env
+    command: ["python", "-c", "print('worker stub — ingestion lands in the Brain plan'); import time; time.sleep(1e9)"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [appnet, platform-net]
+
+  web:
+    build: { context: ./apps/web }
+    env_file: .env
+    depends_on: [api]
+    ports:
+      - "127.0.0.1:${WEB_PORT:-8790}:3000"
+    networks: [appnet]
+
+volumes:
+  pgdata:
+
+networks:
+  appnet:
+  platform-net:
+    external: true
