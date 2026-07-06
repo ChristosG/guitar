@@ -131,12 +131,13 @@ Two planes over that tree:
 ### 5.1 Topology (Docker Compose on Chris's PC → tunneled to his domain)
 
 ```
-Browser ── Chris's domain (nginx reverse-proxy + password gate + Cloudflare tunnel)
-  │
-  ▼  Next.js cockpit — React/TS · Tailwind+shadcn · light/dark · i18n GR/EN
-  │   renders artifacts CLIENT-side: AlphaTab · svguitar · custom SVG
-  │  HTTP/JSON (CRUD) + SSE (streaming chat)
-  ▼
+Browser
+  ├─ guitar.cgrigoriadis.online     → host nginx → 127.0.0.1:8790  Next.js cockpit (web)
+  └─ guitar-api.cgrigoriadis.online → host nginx → 127.0.0.1:8791  FastAPI (REST + SSE)
+     Cloudflare orange-cloud → home IP:443 → host nginx · origin-locked · NO auth (PoC)
+
+Next.js cockpit — React/TS · Tailwind+shadcn · light/dark · i18n GR/EN
+  renders artifacts CLIENT-side: AlphaTab · svguitar · custom SVG   (HTTP/JSON + SSE)
 FastAPI orchestrator (Python)
   ├─ REST: students, curricula, blocks, sessions, notes, artifacts, sources
   ├─ /chat SSE → LangGraph agent (ReAct loop, tool-calling)
@@ -162,7 +163,7 @@ App containers join the existing external `platform-net`, reaching models by ali
 - **Backend:** **FastAPI + LangGraph** (Python) — reuses the vLLM/LangGraph patterns and the agentic-gotchas playbook; unlocks **`music21`** for server-side music validation. SQLAlchemy + Alembic; pgvector; Pydantic (schemas + guided-JSON + artifact-spec validation).
 - **DB:** **Postgres + pgvector** — one store for relational data, embeddings, and LangGraph checkpoints.
 - **Provider seam:** `LLMProvider` interface (chat · stream · tools · guided-JSON · embed) with `QwenVLLM` and `Claude` impls; provider-neutral prompts/tools; flag flips it.
-- **Deploy:** Docker Compose (`web`, `api`, `worker`, `postgres`) on `platform-net`; **nginx** reverse-proxy + basic-auth password gate; Cloudflare tunnel to the domain. `.env` holds the four model values + provider flag (+ Claude key later).
+- **Deploy:** Docker Compose (`web`, `api`, `worker`, `postgres`); `api` also joins `platform-net` to reach the vLLM containers. Services publish on **loopback ports**, fronted by **host nginx** + Cloudflare per Chris's CG Labs playbook (§5.4). `.env` holds the four model values + provider flag (+ Claude key later).
 
 ### 5.3 Model integration specifics (from the vLLM reference)
 
@@ -171,13 +172,32 @@ App containers join the existing external `platform-net`, reaching models by ali
 - **Agentic-gotchas playbook baked in:** tool-first imperative system prompt; facts kept out of the prompt (forces retrieval); streaming tool-call arg accumulation by index; hallucinated-tool guard; bounded repair (cap consecutive errors); `MAX_STEPS`; prefix-stable system+tools for KV cache.
 - Qwen LLM is a **vision** model (`mm-processor-kwargs`) → we can caption figures/photos during ingest.
 
+### 5.4 Deployment (Cloudflare + host nginx — the CG Labs playbook)
+
+Per `/mnt/nvme2TB/cloudflare/EXPOSE-A-NEW-APP.md`. **Not** a Cloudflare tunnel: Cloudflare orange-cloud proxy → home-IP `:443` (DDNS-managed A record) → **host nginx** (one vhost per subdomain) → docker on `127.0.0.1:PORT`; origin-locked so only Cloudflare edge IPs are answered.
+
+Chat uses **browser SSE**, so there are **two** browser-reachable origins → two single-level subdomains, each its own vhost + cert:
+
+| Subdomain | → loopback | Serves |
+|---|---|---|
+| `guitar.cgrigoriadis.online` | `127.0.0.1:8790` | Next.js app (web) |
+| `guitar-api.cgrigoriadis.online` | `127.0.0.1:8791` | FastAPI (REST + SSE) |
+
+*(ports provisional — must not collide with cglabs 11995 / imatter 58008 / themis 3000–8600.)*
+
+- **No auth** (PoC): single trusted user; app is origin-locked and behind Cloudflare. Real auth deferred.
+- **[agent] steps:** containerize (Next.js `output:"standalone"`, loopback ports); create the two DNS records via `/home/chris/dns_resolution` (`ddns.conf` `RECORDS+=…`, `proxied=true`, `./update-dns.sh --force` — never read/print the DNS token); write both vhosts into the app repo's `deploy/nginx/` (the API vhost uses the SSE variant: `proxy_buffering off; proxy_cache off; proxy_set_header Connection ""`, long `proxy_read_timeout`); the **app owns CORS** (allowlist `https://guitar.cgrigoriadis.online`).
+- **[sudo → Chris] steps:** install vhosts into `/etc/nginx/sites-{available,enabled}`, `nginx -t && reload`, `certbot --nginx -d <sub>` per subdomain; ensure the origin-lockdown snippet is included; cache rules are per-zone and already applied (`cf-cache-rules.sh cgrigoriadis.online` if ever needed).
+- **Next.js caching:** middleware sets `Cache-Control: no-store` on HTML (App-Router `Vary: rsc` trap); `/_next/static/**` stays immutable.
+- **Docker networks:** `api` joins both the app network (→ `postgres`) and `platform-net` (→ `qwen-vllm:6888`, `qwen-emb-vllm:8090`).
+
 ---
 
 ## 6. The four engines
 
 ### 6.1 Knowledge Brain (RAG)
 
-- **Ingest:** PDF (PyMuPDF), pasted text, **URL** (readability extraction — his 8 course pages ingest directly), notes, images (VL captioning).
+- **Ingest (high-variability, best-effort for PoC):** PDF (PyMuPDF), pasted text, **transcripts**, **URL** (readability extraction — his 8 course pages ingest directly), notes, images (VL captioning). Sources may be **EN, GR, or mixed** and of unknown structure; the pipeline degrades gracefully — falls back to sliding-window chunking when no headings are detected.
 - **Structure-aware chunking:** detect headings/TOC → chunk on semantic boundaries carrying `section_path` + `page` + `domain tag` (tone / beginner / theory). Metadata does double duty: better retrieval *and* the auto-structure seed for the Curriculum engine.
 - **Embed & retrieve** per the reference: Qwen embeddings → L2-normalize → pgvector; asymmetric queries; cosine top-k + filters (source/section/domain/language).
 - **Cross-lingual:** store source language, embed as-is (multilingual embeddings), **answer in the target locale** regardless — his English book can ground a Greek answer.
@@ -229,7 +249,7 @@ One pipe, many kinds — covering **both** tracks:
 ## 7. Cross-cutting
 
 - **i18n (GR/EN):** next-intl for UI; `language` on every content entity; generation in target locale; cross-lingual retrieval.
-- **Auth-lite:** single-tutor password gate for the exposed PoC; real multi-tenant auth deferred.
+- **No auth (PoC):** single trusted user; the app is origin-locked behind Cloudflare (direct-to-home-IP → 403). Real multi-tenant auth deferred to productization.
 - **Config/secrets:** `.env` (4 model values + provider flag; Claude key later).
 - **Observability:** structured logs + a trace of agent steps / tool calls / approvals (feeds the "verify results, judge before moving on" requirement; Logfire-ready).
 
@@ -257,7 +277,7 @@ Foundations first, then engines bottom-up, then the cockpit that ties them toget
 5. **Agent + Tools + HITL** — LangGraph loop + tools + interrupt/approve; chat UI + approval cards. *Verify:* drive the **real model** end-to-end (see §10) for Prep, Recreate-tone, add-note.
 6. **Cockpit integration & polish** — Today/Students/Curricula/Knowledge/Notes wired together; the Prep path; glanceability pass.
 7. **Seed content** — author the two flagship curricula + iconic-tone recipes; ingest the book + 8 pages.
-8. **Deploy** — nginx + password gate + Cloudflare tunnel; smoke test on the domain; hand to the client.
+8. **Deploy** — per §5.4 (host nginx + Cloudflare, two subdomains, no auth); smoke test on `guitar.cgrigoriadis.online`; hand to the client.
 
 ---
 
@@ -267,7 +287,7 @@ Chris's explicit ask: meticulous, tested, verify on results, judge before moving
 
 - **TDD where logic is real** (segmentation math/pacing, chunking boundaries, spec validators, retrieval assembly, HITL state transitions).
 - **Drive the real model end-to-end — the load-bearing rule.** Per the gotchas: *unit tests pass while the live product never calls a tool.* So every agent/tool feature is verified against the actual vLLM endpoint (tool actually fires, arguments valid, HITL interrupt/resume works), not just mocked.
-- **Greek-quality benchmark:** before committing to Qwen for GR, run a small honest eval (curriculum + recipe + chat in Greek). If quality is weak, flip the provider flag to Claude for the demo — the seam exists precisely for this.
+- **Greek-quality spot-check:** Qwen is reportedly decent in Greek and is the dev/demo default; a small GR eval (curriculum + recipe + chat) confirms it. The provider seam stays ready to flip to Claude Haiku if any surface disappoints.
 - **Golden-render tests** for artifacts (spec → SVG snapshot per kind).
 - **Retrieval sanity set:** a fixed Q/A set over the book (EN + GR) asserting grounded, cited answers and that fact-questions trigger `search_knowledge`.
 - **verification-before-completion:** no feature is "done" until its verification command has been run and its output confirmed.
@@ -277,8 +297,8 @@ Chris's explicit ask: meticulous, tested, verify on results, judge before moving
 
 ## 11. Provider & cost path
 
-- **Now:** local Qwen (free) drives the PoC; benchmark Greek honestly.
-- **Later:** flip to **Claude** (native tools, prompt caching, stronger bilingual). Single user → either meter Claude (likely modest) or host + flat subscription (absorb tokens) so the client pays one predictable price, not "tokens".
+- **Dev & PoC demo:** **local Qwen** (free) is the default for all development — decided. Qwen is decent in Greek.
+- **Later:** flip the seam to **Claude (Haiku tier)** — cheap, strong bilingual, native tools + prompt caching; ample for a single-user workload. *Productization note:* a deployed server needs Anthropic **API** access (billed per token) — distinct from a Claude chat subscription; Haiku's low cost makes a flat monthly price for the client easy to model.
 
 ## 12. Productization path (later, not now)
 
@@ -291,8 +311,8 @@ Chris's explicit ask: meticulous, tested, verify on results, judge before moving
 
 ## 13. Risks & open questions
 
-- **Qwen Greek quality** — unknown until benchmarked; mitigated by the provider seam (§10, §11).
-- **Tutor's own blueprints** — still to be collected; seed content is a high-quality placeholder, not his verbatim method. His real material sharpens fidelity.
+- **Qwen Greek quality** — reportedly decent (Chris); spot-checked early (§10), with the Claude-Haiku seam as backstop (§11).
+- **Tutor's own blueprints & data** — still to be collected, and expected to be **high-variability** (books, transcripts, notes; EN/GR/mixed). Seed content is a high-quality placeholder, not his verbatim method; the Brain is built to ingest messy heterogeneous text best-effort. His real material sharpens fidelity.
 - **Notation edge cases** — AlphaTab/music21 cover a lot; exotic requests may need fallback to "describe + upload image".
 - **Student data / minors** — real names & ages of children; local-only for the PoC, but privacy must be designed in before any hosting.
 - **Scope** — large; the build order + subagent parallelism + phase-gates keep it tractable. YAGNI enforced (§14).
