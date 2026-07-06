@@ -4,12 +4,15 @@ import { useTheme } from "next-themes";
 import { Button } from "@/components/ui/button";
 
 export function ThemeToggle() {
-  const { theme, setTheme } = useTheme();
+  // Use resolvedTheme (the actually-rendered "light"/"dark"), not `theme`, which stays
+  // "system" until an explicit choice — otherwise the first click is a no-op for
+  // visitors whose OS prefers dark.
+  const { resolvedTheme, setTheme } = useTheme();
   return (
     <Button
       data-testid="theme-toggle"
       variant="outline"
-      onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+      onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
     >
       🌓
     </Button>
