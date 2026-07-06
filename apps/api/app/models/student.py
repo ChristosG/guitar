@@ -1,4 +1,3 @@
-import uuid
 from datetime import date
 from sqlalchemy import String, Date
 from sqlalchemy.orm import Mapped, mapped_column
