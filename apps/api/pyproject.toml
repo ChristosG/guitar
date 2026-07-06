@@ -17,6 +17,12 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "numpy>=2.0"]
 
+# Package only `app`. Without this, the editable install's flat-layout auto-discovery
+# sees both `app/` and the `alembic/` migrations dir and errors with
+# "Multiple top-level packages discovered in a flat-layout".
+[tool.setuptools]
+packages = ["app"]
+
 [tool.pytest.ini_options]
 markers = ["integration: hits live vLLM at :6888/:8090"]
 asyncio_mode = "auto"
