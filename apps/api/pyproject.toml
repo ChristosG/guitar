@@ -1,0 +1,22 @@
+[project]
+name = "guitar-api"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.32",
+  "pydantic-settings>=2.5",
+  "sqlalchemy>=2.0",
+  "psycopg[binary]>=3.2",
+  "alembic>=1.13",
+  "pgvector>=0.3",
+  "openai>=1.54",
+  "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "numpy>=2.0"]
+
+[tool.pytest.ini_options]
+markers = ["integration: hits live vLLM at :6888/:8090"]
+asyncio_mode = "auto"
