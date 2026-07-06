@@ -1,14 +1,16 @@
 from fastapi import APIRouter
+from sqlalchemy import text
+
+from app.db import SessionLocal
+from app.llm.factory import get_provider
 
 router = APIRouter(prefix="/health", tags=["health"])
+
 
 @router.get("/live")
 def live():
     return {"status": "ok"}
 
-from sqlalchemy import text
-from app.db import SessionLocal
-from app.llm.factory import get_provider
 
 @router.get("/ready")
 def ready():

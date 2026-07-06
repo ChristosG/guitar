@@ -7,3 +7,5 @@ def test_ready_shape():
     body = r.json()
     assert set(body) == {"db", "llm", "embed"}
     assert isinstance(body["db"], bool)
+    assert isinstance(body["llm"], bool)
+    assert isinstance(body["embed"], bool)
