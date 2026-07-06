@@ -12,6 +12,9 @@ class KnowledgeSource(Base, PkMixin, TimestampMixin):
     title: Mapped[str] = mapped_column(String(400))
     status: Mapped[str] = mapped_column(String(20), default="ingesting")
     language: Mapped[str | None] = mapped_column(String(5), nullable=True)
+    domain: Mapped[str | None] = mapped_column(String(30), nullable=True)   # tone/beginner/theory
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    char_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 class Chunk(Base, PkMixin, TimestampMixin):
     __tablename__ = "chunk"
