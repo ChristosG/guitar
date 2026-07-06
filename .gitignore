@@ -30,6 +30,7 @@ build/
 
 # Model weights / large artifacts
 models/
+!apps/api/app/models/
 *.safetensors
 *.gguf
 
