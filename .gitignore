@@ -35,3 +35,6 @@ models/
 # Logs / OS
 *.log
 .DS_Store
+
+# SDD scratch (ledger, briefs, diffs)
+.superpowers/
