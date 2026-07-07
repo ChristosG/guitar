@@ -15,7 +15,21 @@ rejects a body that fails Pydantic validation before the endpoint function
 (and therefore `run_search`/`run_answer`) ever runs — so those cases need
 neither a live Postgres nor a live vLLM server. Only "a normal public host is
 allowed" needs real DNS/network, and is marked `integration` for that reason.
+
+Review pass 2 additions (still DB/network-independent, same reasoning as
+above — the guard raises before any DB write or fetch either way):
+3. Broadened DNS-resolution exception in `assert_public_url` — a resolver
+   OSError that isn't a `socket.gaierror` must still fail closed into the
+   guard's own `ValueError`, not escape as an unhandled 500.
+4. The SSRF `ValueError`'s detailed message (which host, which resolved IP)
+   must not reach the caller — `routers/knowledge.py` now logs it server-side
+   and raises a generic `HTTPException(400, detail="URL not allowed")`
+   instead. (The total-ingested-text cap, the third review-pass-2 finding,
+   is DB-dependent and lives in `test_ingest.py` alongside the rest of
+   `ingest_source`'s pipeline tests instead of here.)
 """
+import socket
+
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -59,16 +73,41 @@ def test_assert_public_url_allows_a_normal_public_host():
     assert assert_public_url("https://example.com/") is None  # does not raise
 
 
+def test_assert_public_url_wraps_non_gaierror_oserror_as_valueerror(monkeypatch):
+    """Fix 2 (review pass 2): before this fix, the resolution try/except
+    caught only `socket.gaierror`; any other resolver-raised `OSError` (e.g.
+    a sandboxed/restricted-network environment, or a transient resolver
+    failure surfaced differently) would propagate uncaught out of
+    `assert_public_url` as a raw `OSError` -> an unhandled 500 at the router,
+    instead of this guard's own fail-closed `ValueError`.
+    """
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("simulated resolver failure, not a socket.gaierror")
+
+    monkeypatch.setattr(socket, "getaddrinfo", _boom)
+
+    with pytest.raises(ValueError):
+        assert_public_url("https://example.com/")
+
+
 # ---- Fix 1: the guard is actually wired into POST /knowledge/sources ------
 
 
-def test_create_url_source_rejects_loopback_with_400_before_any_fetch():
+def test_create_url_source_rejects_loopback_with_400_and_generic_detail():
+    """Also covers Fix 3 (review pass 2): the detailed internal reason (which
+    host, which resolved IP) must NOT reach the caller — only the generic
+    "URL not allowed" detail crosses the HTTP boundary; the specific reason is
+    logged server-side instead (`routers/knowledge.py`'s `log.warning` in the
+    `except ValueError` branch around `assert_public_url`).
+    """
     r = client.post(
         "/knowledge/sources",
         json={"kind": "url", "title": "SSRF probe", "url": "http://127.0.0.1:8791"},
     )
     assert r.status_code == 400
-    assert "127.0.0.1" in r.json()["detail"]
+    assert r.json()["detail"] == "URL not allowed"
+    assert "127.0.0.1" not in r.json()["detail"]
 
 
 def test_create_url_source_rejects_cloud_metadata_with_400():

@@ -48,7 +48,11 @@ def assert_public_url(url: str) -> None:
 
     try:
         addr_infos = socket.getaddrinfo(host, None)
-    except socket.gaierror as e:
+    except (socket.gaierror, OSError) as e:
+        # Broadened beyond socket.gaierror (review pass 2): a different
+        # resolver-raised OSError (e.g. a sandboxed/restricted-network
+        # environment) must still fail closed into this guard's own
+        # ValueError, not escape uncaught as an unhandled 500.
         raise ValueError(f"host {host!r} could not be resolved: {e}") from e
     if not addr_infos:
         raise ValueError(f"host {host!r} did not resolve to any address")

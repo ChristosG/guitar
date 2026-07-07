@@ -13,6 +13,7 @@ compensating controls actually enforced here are (a) `urlsafe.assert_public_
 url` blocking SSRF on the URL-ingestion path and (b) the upload/text/`k`/query
 bounds below guarding against resource exhaustion — not identity checks.
 """
+import logging
 from typing import Annotated
 from uuid import UUID
 
@@ -38,6 +39,8 @@ from app.schemas.knowledge import (
     SourceOut,
 )
 
+log = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
 
 _CHUNK_PREVIEW_LIMIT = 5
@@ -62,7 +65,12 @@ def create_source(payload: SourceCreate, db: Session = Depends(get_db)) -> Sourc
         try:
             assert_public_url(payload.url)
         except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
+            # Log the detailed reason (which host, which resolved IP) server-side
+            # only — returning it verbatim to the caller would be a mild
+            # internal-recon oracle (review pass 2). The client gets a generic,
+            # non-revealing detail instead.
+            log.warning("rejected kind='url' source (SSRF guard): %s", e)
+            raise HTTPException(status_code=400, detail="URL not allowed") from e
     elif payload.kind == "text" and len(payload.text) > MAX_TEXT_CHARS:
         raise HTTPException(
             status_code=413,

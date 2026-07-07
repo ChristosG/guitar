@@ -195,6 +195,60 @@ def test_ingest_retry_after_failure_clears_stale_error():
 
 
 @pytest.mark.integration
+def test_ingest_caps_total_extracted_text_at_max_ingest_chars(monkeypatch):
+    """Fix 1 (review pass 2, resource exhaustion): kind="url" has no upstream
+    size cap (unlike kind="text"'s MAX_TEXT_CHARS/kind="pdf" upload's
+    MAX_UPLOAD_BYTES, both enforced in routers/knowledge.py) — a caller
+    pointing kind="url" at a huge response body would otherwise drive an
+    unbounded fetch -> chunk -> embed -> persist. ingest.py now caps *total*
+    extracted text at MAX_INGEST_CHARS right after extract_text and before
+    chunk_sections, so this one check also covers kind="pdf".
+
+    MAX_INGEST_CHARS is monkeypatched down to a tiny value (rather than
+    constructing a real ~2.1M-char payload) purely for test speed; extract_text
+    is monkeypatched to hand back controlled Sections that comfortably cross
+    that tiny cap; and the embed call is monkeypatched to zero-vectors of the
+    right dimension so this test needs a live DB but not a live embed server.
+    """
+    monkeypatch.setattr("app.brain.ingest.MAX_INGEST_CHARS", 50)
+
+    huge_sections = [
+        extract_mod.Section(heading=None, text="a" * 40, page=None),  # kept whole (40 <= 50)
+        extract_mod.Section(heading=None, text="b" * 40, page=None),  # crosses the cap -> truncated to 10
+        extract_mod.Section(heading=None, text="c" * 40, page=None),  # dropped entirely
+    ]
+    monkeypatch.setattr("app.brain.ingest.extract_text", lambda *a, **k: huge_sections)
+
+    class _ZeroVectorProvider:
+        def embed(self, texts, *, is_query=False):
+            return [[0.0] * settings.embed_dim for _ in texts]
+
+    monkeypatch.setattr("app.brain.ingest.get_provider", lambda: _ZeroVectorProvider())
+
+    db = SessionLocal()
+    try:
+        source_id = _make_source(db, "Huge URL source").id
+        ingest_source(db, source_id, IngestPayload(kind="url", url="https://example.com/huge"))
+    finally:
+        db.close()
+
+    db2 = SessionLocal()
+    try:
+        got = db2.get(KnowledgeSource, source_id)
+        assert got is not None
+        assert got.status == "ready"  # truncate-and-ingest, not a failure
+        assert got.error is None
+        assert got.char_count == 50  # capped at the monkeypatched MAX_INGEST_CHARS, not the original 120
+
+        chunks = db2.scalars(select(Chunk).where(Chunk.source_id == source_id)).all()
+        assert sum(len(c.text) for c in chunks) == got.char_count
+        assert sum(len(c.text) for c in chunks) <= 50
+        assert not any("c" in c.text for c in chunks)  # third section must not survive at all
+    finally:
+        db2.close()
+
+
+@pytest.mark.integration
 def test_ingest_db_error_after_partial_adds_rolls_back_everything(monkeypatch):
     """A later DB-level error (e.g. a value too long for a column) must discard
     ALL of this attempt's pending Chunk rows, not just the one that triggered
