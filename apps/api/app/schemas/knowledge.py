@@ -8,7 +8,15 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+# Shared resource-exhaustion bounds for the search/ask request bodies (the
+# `/sources` text-length cap and `/sources/upload` byte cap live in
+# `routers/knowledge.py` instead, since they need a non-422 status code —
+# see that module's docstring).
+_MAX_QUERY_CHARS = 2000
+_MIN_K = 1
+_MAX_K = 50
 
 
 class SourceCreate(BaseModel):
@@ -56,8 +64,8 @@ class SourceDetailOut(SourceOut):
 
 
 class SearchRequest(BaseModel):
-    query: str
-    k: int = 8
+    query: str = Field(max_length=_MAX_QUERY_CHARS)
+    k: int = Field(default=8, ge=_MIN_K, le=_MAX_K)
     domain: str | None = None
     language: str | None = None
 
@@ -79,9 +87,9 @@ class SearchResponse(BaseModel):
 
 
 class AskRequest(BaseModel):
-    query: str
+    query: str = Field(max_length=_MAX_QUERY_CHARS)
     locale: str
-    k: int = 8
+    k: int = Field(default=8, ge=_MIN_K, le=_MAX_K)
 
 
 class AskResponse(BaseModel):

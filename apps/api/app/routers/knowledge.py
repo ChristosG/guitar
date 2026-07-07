@@ -5,6 +5,13 @@ small" for this PoC) — `POST /sources`/`POST /sources/upload` create the
 `KnowledgeSource` row, then call `ingest_source` in the same request/session
 before responding, so the response already carries the final status
 ("ready"/"failed") rather than a client having to poll.
+
+No-auth PoC posture (accepted, not a gap to fix here): this router has no
+authentication/authorization — it deploys origin-locked behind Cloudflare for
+a single user. Because anyone who can reach it can trigger ingestion, the
+compensating controls actually enforced here are (a) `urlsafe.assert_public_
+url` blocking SSRF on the URL-ingestion path and (b) the upload/text/`k`/query
+bounds below guarding against resource exhaustion — not identity checks.
 """
 from typing import Annotated
 from uuid import UUID
@@ -16,6 +23,7 @@ from sqlalchemy.orm import Session
 from app.brain.ingest import IngestPayload, ingest_source
 from app.brain.retrieve import answer as run_answer
 from app.brain.retrieve import search as run_search
+from app.brain.urlsafe import assert_public_url
 from app.db import get_db
 from app.models.knowledge import Chunk, KnowledgeSource
 from app.schemas.knowledge import (
@@ -34,6 +42,13 @@ router = APIRouter(prefix="/knowledge", tags=["knowledge"])
 
 _CHUNK_PREVIEW_LIMIT = 5
 
+# Resource-exhaustion caps (Fix 2). `k`/query-length bounds live on the
+# request schemas instead (`schemas/knowledge.py`) since Pydantic gives those
+# a 422; these two need a distinct 413 ("payload too large"), so they're
+# plain in-router checks instead of Field constraints.
+MAX_UPLOAD_BYTES = 30 * 1024 * 1024  # 30 MiB cap for POST /sources/upload
+MAX_TEXT_CHARS = 1_000_000  # cap for kind="text" ingestion via POST /sources
+
 
 def _to_source_out(source: KnowledgeSource) -> SourceOut:
     return SourceOut.model_validate(source, from_attributes=True)
@@ -41,6 +56,19 @@ def _to_source_out(source: KnowledgeSource) -> SourceOut:
 
 @router.post("/sources", response_model=SourceOut)
 def create_source(payload: SourceCreate, db: Session = Depends(get_db)) -> SourceOut:
+    # Both guards run BEFORE the source row is created/ingested — no DB
+    # write and no fetch happens for a rejected payload.
+    if payload.kind == "url":
+        try:
+            assert_public_url(payload.url)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+    elif payload.kind == "text" and len(payload.text) > MAX_TEXT_CHARS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"text exceeds the {MAX_TEXT_CHARS}-character limit",
+        )
+
     source = KnowledgeSource(
         type=payload.kind,
         title=payload.title,
@@ -64,7 +92,14 @@ def upload_source(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ) -> SourceOut:
-    data = file.file.read()
+    # Bounded read: stop at one byte past the cap rather than reading an
+    # arbitrarily large upload fully into memory before checking its size.
+    data = file.file.read(MAX_UPLOAD_BYTES + 1)
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"upload exceeds the {MAX_UPLOAD_BYTES}-byte limit",
+        )
     source = KnowledgeSource(type="pdf", title=title, domain=domain, language=language)
     db.add(source)
     db.commit()
