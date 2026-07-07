@@ -9,8 +9,8 @@ later plans can reference the real interfaces earlier plans produced (not guesse
 
 | # | Plan | Status | Delivers |
 |---|------|--------|----------|
-| 1 | `2026-07-06-foundations.md` | **WRITTEN** | monorepo · Docker Compose · Postgres+pgvector · FastAPI skeleton · `LLMProvider`(Qwen) · core DB models+migrations · themed bilingual Next.js shell |
-| 2 | `2026-07-07-knowledge-brain.md` | **WRITTEN** | ingest → chunk → embed → pgvector · retrieval · grounded /ask · Sources UI |
+| 1 | `2026-07-06-foundations.md` | ✅ **DONE** | monorepo · Docker Compose · Postgres+pgvector · FastAPI skeleton · `LLMProvider`(Qwen) · core DB models+migrations · themed bilingual Next.js shell |
+| 2 | `2026-07-07-knowledge-brain.md` | ✅ **DONE** | ingest (pdf/url/text) → chunk → embed → pgvector · retrieval · grounded bilingual /ask · Knowledge UI · SSRF-guarded |
 | 3 | `curriculum-segmentation.md` | pending | Block tree · generate · auto-structure-from-doc · segmentation · card board |
 | 4 | `artifact-engine.md` | pending | spec → validate → SVG (chords/tab/staff + signal-chain/amp/pedalboard/recipe) |
 | 5 | `agent-tools-hitl.md` | pending | LangGraph loop · tools · streaming · HITL interrupt/approve · chat UI |
