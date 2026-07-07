@@ -1,3 +1,4 @@
+import json
 import logging
 
 import httpx
@@ -24,6 +25,25 @@ class QwenVLLM(LLMProvider):
             extra_body={"chat_template_kwargs": {"enable_thinking": enable_thinking}},
         )
         return resp.choices[0].message.content or ""
+
+    def guided_json(self, messages, schema, *, temperature=0.2) -> dict:
+        """One-shot structured generation: vLLM's `response_format` json_schema
+        CONSTRAINS decoding to `schema` server-side (not a post-hoc parse-and-
+        retry) — the response body is always schema-valid JSON, so a malformed
+        result is not a case this needs to handle. Verified capability against
+        this same infra in `/mnt/nvme2TB/vllm_interract` (guided_json_demo()).
+        """
+        resp = self._client.chat.completions.create(
+            model=settings.llm_model,
+            messages=messages,
+            temperature=temperature,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": "curriculum", "schema": schema},
+            },
+        )
+        return json.loads(resp.choices[0].message.content)
 
     def embed(self, texts, *, is_query=False) -> list[list[float]]:
         inputs = [query_instruct(t) for t in texts] if is_query else list(texts)
