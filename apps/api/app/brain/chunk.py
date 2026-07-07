@@ -13,6 +13,12 @@ from app.brain.extract import Section
 # semantics aren't needed since none is a prefix of another.
 _SENTENCE_ENDERS = (". ", "! ", "? ", ".\n", "!\n", "?\n")
 
+# Floor for the backward boundary-search width. Kept independent of overlap_chars
+# so that overlap_chars=0 (a legitimate "no carryover" request) doesn't also
+# disable the search for a clean sentence/whitespace boundary — see _split_point's
+# caller in _chunk_one_section.
+_MIN_BOUNDARY_LOOKBACK = 120
+
 
 @dataclass
 class ChunkDraft:
@@ -31,6 +37,11 @@ def chunk_sections(
     resulting draft's section_path/page. A Section shorter than target_chars
     yields exactly one draft; an empty/whitespace-only Section yields none.
     """
+    if target_chars <= 0:
+        raise ValueError("target_chars must be positive")
+    if overlap_chars < 0:
+        raise ValueError("overlap_chars must not be negative")
+
     drafts: list[ChunkDraft] = []
     for section in sections:
         drafts.extend(_chunk_one_section(section, target_chars, overlap_chars))
@@ -54,12 +65,12 @@ def _chunk_one_section(section: Section, target_chars: int, overlap_chars: int) 
             # exactly one unmodified-text draft, with no separate case needed.
             end = n
         else:
-            end = _split_point(text, start, ideal_end, overlap_chars)
-            if end <= start:
-                # Degenerate config guard (e.g. overlap_chars >= target_chars leaving
-                # no room to search): fall back to the plain window end so we always
-                # make forward progress.
-                end = min(ideal_end, n)
+            # The boundary-search width is deliberately independent of overlap_chars:
+            # reusing overlap_chars here would mean overlap_chars=0 (a legitimate "no
+            # carryover" request) also disables boundary preference, forcing a hard
+            # mid-word cut on every split even when clean boundaries exist nearby.
+            lookback = max(overlap_chars, target_chars // 5, _MIN_BOUNDARY_LOOKBACK)
+            end = _split_point(text, start, ideal_end, lookback)
 
         drafts.append(ChunkDraft(text=text[start:end], section_path=section.heading, page=section.page))
         if end >= n:

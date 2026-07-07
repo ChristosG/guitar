@@ -1,3 +1,5 @@
+import pytest
+
 from app.brain.chunk import ChunkDraft, chunk_sections
 from app.brain.extract import Section
 
@@ -107,3 +109,39 @@ def test_empty_or_whitespace_section_yields_no_drafts():
 
 def test_no_sections_yields_no_drafts():
     assert chunk_sections([]) == []
+
+
+def test_zero_overlap_still_prefers_sentence_boundaries():
+    """overlap_chars=0 is a legitimate "no carryover" request — it must not also
+    disable boundary preference. Regression test for a bug where the backward
+    boundary-search width reused overlap_chars, so overlap_chars=0 collapsed the
+    search window to empty and forced a raw mid-word hard cut on every split.
+    """
+    sentence = "Practice scales slowly before increasing tempo for control. "
+    text = sentence * (4000 // len(sentence) + 3)
+
+    drafts = chunk_sections(
+        [Section(heading="Practice", text=text, page=1)], target_chars=305, overlap_chars=0
+    )
+    assert len(drafts) > 1
+
+    def ends_on_boundary(t: str) -> bool:
+        return bool(t) and (t[-1].isspace() or t.rstrip().endswith("."))
+
+    boundary_count = sum(1 for d in drafts if ends_on_boundary(d.text))
+    assert boundary_count / len(drafts) >= 0.8, (
+        f"only {boundary_count}/{len(drafts)} drafts ended on a sentence/whitespace "
+        "boundary with overlap_chars=0 — boundary preference must not depend on overlap"
+    )
+
+
+def test_non_positive_target_chars_raises():
+    with pytest.raises(ValueError):
+        chunk_sections([Section(heading="h", text="text", page=1)], target_chars=0)
+    with pytest.raises(ValueError):
+        chunk_sections([Section(heading="h", text="text", page=1)], target_chars=-10)
+
+
+def test_negative_overlap_chars_raises():
+    with pytest.raises(ValueError):
+        chunk_sections([Section(heading="h", text="text", page=1)], overlap_chars=-1)
