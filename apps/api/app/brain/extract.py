@@ -66,13 +66,21 @@ def _extract_pdf(data: bytes | None) -> list[Section]:
     try:
         sections: list[Section] = []
         for page_index in range(doc.page_count):
-            page = doc[page_index]
             page_number = page_index + 1
-            page_sections = _page_sections(page, page_number)
-            if not page_sections:
-                # No text layer at all (e.g. a scanned page) — fall back to OCR.
-                page_sections = _ocr_page_section(page, page_number)
-            sections.extend(page_sections)
+            try:
+                page = doc[page_index]
+                page_sections = _page_sections(page, page_number)
+                if not page_sections:
+                    # No text layer at all (e.g. a scanned page) — fall back to OCR.
+                    page_sections = _ocr_page_section(page, page_number)
+                sections.extend(page_sections)
+            except Exception:
+                # Isolate one bad page (e.g. the unguarded plain-text fallback
+                # call below raising on unusual page content) so it degrades
+                # to skipping just that page, instead of discarding every
+                # other page's already-extracted sections too.
+                log.warning("extraction failed for page %d; skipping page", page_number, exc_info=True)
+                continue
         return sections
     finally:
         doc.close()
@@ -120,6 +128,7 @@ def _page_sections(page: "fitz.Page", page_number: int) -> list[Section]:
     sections: list[Section] = []
     heading: str | None = None
     body_lines: list[str] = []
+    in_heading_run = False
 
     def flush() -> None:
         if body_lines:
@@ -127,11 +136,22 @@ def _page_sections(page: "fitz.Page", page_number: int) -> list[Section]:
 
     for line_text, size in lines:
         if size >= heading_threshold and len(line_text) <= _HEADING_MAX_CHARS:
-            flush()
-            heading = line_text
-            body_lines = []
+            if in_heading_run:
+                # Still inside the same heading run: a multi-line title (e.g. a
+                # heading wrapped across two lines of equal font size) — append
+                # rather than overwrite, or every line but the last is silently
+                # discarded (never kept in `heading`, never routed to `text`).
+                heading = f"{heading} {line_text}"
+            else:
+                # Transitioning INTO a new heading run: flush whatever body
+                # accumulated under the previous heading, then start fresh.
+                flush()
+                heading = line_text
+                body_lines = []
+            in_heading_run = True
         else:
             body_lines.append(line_text)
+            in_heading_run = False
     flush()
 
     return sections

@@ -71,6 +71,40 @@ def test_pdf_synthetic_detects_heading_by_font_size():
     assert any(s.heading and "GEAR BASICS" in s.heading for s in secs)
 
 
+def test_pdf_synthetic_multiline_heading_is_not_collapsed():
+    """A heading that spans two consecutive lines of the same (large) font
+    size must not collapse to just the last line — both lines belong to one
+    heading, and the body text beneath it must still survive.
+
+    Regression test for a silent-data-loss bug: the heading-detection loop
+    used to flush-and-overwrite on *every* heading-classified line, so a
+    same-run second heading line discarded the first line entirely (it was
+    never appended to `heading` nor routed to `text`).
+    """
+    import fitz
+
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "GETTING GREAT", fontsize=22)
+    page.insert_text((72, 100), "GUITAR SOUNDS", fontsize=22)
+    page.insert_text(
+        (72, 200),
+        "A humbucker pickup cancels 60-cycle hum through opposed coil winding.",
+        fontsize=10,
+    )
+    data = doc.tobytes()
+    doc.close()
+
+    secs = extract_text("pdf", data=data)
+    joined = " ".join(s.text for s in secs).lower()
+    assert "60-cycle hum" in joined
+
+    matches = [s for s in secs if s.heading and "GETTING GREAT" in s.heading]
+    assert matches, f"expected a section with 'GETTING GREAT' in its heading, got: {secs}"
+    assert "GUITAR SOUNDS" in matches[0].heading
+    assert "60-cycle hum" in matches[0].text.lower()
+
+
 def test_pdf_synthetic_multi_page_tracks_page_number():
     import fitz
 
@@ -84,6 +118,39 @@ def test_pdf_synthetic_multi_page_tracks_page_number():
     by_page = {p: " ".join(s.text for s in secs if s.page == p).lower() for p in (1, 2)}
     assert "tone" in by_page[1]
     assert "pickups" in by_page[2]
+
+
+def test_pdf_page_extraction_failure_is_isolated_to_that_page(monkeypatch):
+    """One page raising during extraction (e.g. the unguarded plain-text
+    fallback call for a page with no structured text spans) must not discard
+    every other page's already-extracted sections — only that page is skipped.
+
+    Regression test: previously the page loop had no per-page try/except, so
+    an exception on any single page propagated to _extract_pdf's caller
+    (extract_text's outer catch-all), which returned [] for the *whole*
+    document, throwing away every other page's good extraction too.
+    """
+    import fitz
+
+    doc = fitz.open()
+    doc.new_page()  # page 1: blank -> hits the unguarded page.get_text() fallback
+    doc.new_page().insert_text((72, 72), "Page two survives independently.")
+    data = doc.tobytes()
+    doc.close()
+
+    real_get_text = fitz.Page.get_text
+
+    def flaky_get_text(self, *args, **kwargs):
+        if not args and not kwargs:  # the bare fallback call, only made for page 1 here
+            raise RuntimeError("simulated failure in plain-text fallback")
+        return real_get_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(fitz.Page, "get_text", flaky_get_text)
+
+    secs = extract_text("pdf", data=data)
+    joined = " ".join(s.text for s in secs).lower()
+    assert "page two survives" in joined
+    assert all(s.page != 1 for s in secs)  # page 1's failure was isolated, not fatal
 
 
 def test_pdf_ocr_fallback_invoked_when_a_page_has_no_text_layer(monkeypatch):
