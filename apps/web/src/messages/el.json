@@ -1,5 +1,65 @@
 {
   "app": {
-    "title": "Βοηθός Δασκάλου Κιθάρας"
+    "title": "Βοηθός Δασκάλου Κιθάρας",
+    "knowledgeNav": "Γνώση"
+  },
+  "knowledge": {
+    "title": "Κέντρο Γνώσης",
+    "backHome": "← Πίσω",
+    "addSource": {
+      "heading": "Προσθήκη πηγής",
+      "kindText": "Κείμενο",
+      "kindUrl": "Σύνδεσμος",
+      "kindPdf": "PDF",
+      "title": "Τίτλος",
+      "titlePlaceholder": "π.χ. Getting Great Guitar Sounds",
+      "domain": "Τομέας",
+      "domainPlaceholder": "ήχος, αρχάριοι, θεωρία…",
+      "language": "Γλώσσα",
+      "languagePlaceholder": "en, el…",
+      "textLabel": "Κείμενο",
+      "textPlaceholder": "Επικολλήστε το κείμενο της πηγής…",
+      "urlLabel": "Σύνδεσμος",
+      "urlPlaceholder": "https://example.com/article",
+      "fileLabel": "Αρχείο PDF",
+      "submit": "Προσθήκη πηγής",
+      "submitting": "Προσθήκη…",
+      "error": "Δεν ήταν δυνατή η προσθήκη της πηγής."
+    },
+    "sources": {
+      "heading": "Πηγές",
+      "empty": "Δεν υπάρχουν πηγές ακόμα.",
+      "loading": "Φόρτωση πηγών…",
+      "error": "Δεν ήταν δυνατή η φόρτωση των πηγών.",
+      "chars": "{count} χαρακτήρες",
+      "delete": "Διαγραφή",
+      "deleting": "Διαγραφή…",
+      "deleteError": "Δεν ήταν δυνατή η διαγραφή της πηγής."
+    },
+    "status": {
+      "ingesting": "Επεξεργασία",
+      "ready": "Έτοιμο",
+      "failed": "Απέτυχε"
+    },
+    "search": {
+      "heading": "Αναζήτηση",
+      "placeholder": "Αναζήτηση στη βάση γνώσης…",
+      "submit": "Αναζήτηση",
+      "searching": "Αναζήτηση…",
+      "empty": "Κανένα αποτέλεσμα ακόμα.",
+      "error": "Η αναζήτηση απέτυχε.",
+      "score": "βαθμολογία"
+    },
+    "ask": {
+      "heading": "Ερώτηση",
+      "placeholder": "Κάντε μια τεκμηριωμένη ερώτηση…",
+      "submit": "Ερώτηση",
+      "asking": "Επεξεργασία…",
+      "answerHeading": "Απάντηση",
+      "citationsHeading": "Παραπομπές",
+      "locale": "Γλώσσα απάντησης",
+      "empty": "Κάντε μια ερώτηση για μια τεκμηριωμένη απάντηση.",
+      "error": "Δεν ήταν δυνατή η λήψη απάντησης."
+    }
   }
 }

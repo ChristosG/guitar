@@ -1,5 +1,65 @@
 {
   "app": {
-    "title": "Guitar Tutor Copilot"
+    "title": "Guitar Tutor Copilot",
+    "knowledgeNav": "Knowledge"
+  },
+  "knowledge": {
+    "title": "Knowledge Cockpit",
+    "backHome": "← Back",
+    "addSource": {
+      "heading": "Add source",
+      "kindText": "Text",
+      "kindUrl": "URL",
+      "kindPdf": "PDF",
+      "title": "Title",
+      "titlePlaceholder": "e.g. Getting Great Guitar Sounds",
+      "domain": "Domain",
+      "domainPlaceholder": "tone, beginner, theory…",
+      "language": "Language",
+      "languagePlaceholder": "en, el…",
+      "textLabel": "Text",
+      "textPlaceholder": "Paste the source text…",
+      "urlLabel": "URL",
+      "urlPlaceholder": "https://example.com/article",
+      "fileLabel": "PDF file",
+      "submit": "Add source",
+      "submitting": "Adding…",
+      "error": "Could not add the source."
+    },
+    "sources": {
+      "heading": "Sources",
+      "empty": "No sources yet.",
+      "loading": "Loading sources…",
+      "error": "Could not load sources.",
+      "chars": "{count} chars",
+      "delete": "Delete",
+      "deleting": "Deleting…",
+      "deleteError": "Could not delete the source."
+    },
+    "status": {
+      "ingesting": "Ingesting",
+      "ready": "Ready",
+      "failed": "Failed"
+    },
+    "search": {
+      "heading": "Search",
+      "placeholder": "Search the knowledge base…",
+      "submit": "Search",
+      "searching": "Searching…",
+      "empty": "No results yet.",
+      "error": "Search failed.",
+      "score": "score"
+    },
+    "ask": {
+      "heading": "Ask",
+      "placeholder": "Ask a grounded question…",
+      "submit": "Ask",
+      "asking": "Thinking…",
+      "answerHeading": "Answer",
+      "citationsHeading": "Citations",
+      "locale": "Answer language",
+      "empty": "Ask a question to get a grounded answer.",
+      "error": "Could not get an answer."
+    }
   }
 }
