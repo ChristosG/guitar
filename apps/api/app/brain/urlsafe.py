@@ -52,6 +52,18 @@ _DEFAULT_MAX_BYTES = 5_000_000
 _DEFAULT_MAX_REDIRECTS = 5
 _DEFAULT_TIMEOUT = 10.0
 
+# Many real sites (e.g. Wikipedia) 403 a bare httpx client with no User-Agent.
+# A browser-like UA with an honest tool suffix maximizes compatibility for
+# ingesting the tutor's real course pages while still identifying ourselves.
+_DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/122.0 Safari/537.36 GuitarTutorCopilot/0.1"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en,el;q=0.8",
+}
+
 
 def assert_public_url(url: str) -> None:
     """Raise ValueError unless `url` is http(s) and every IP its hostname
@@ -130,7 +142,9 @@ def safe_fetch_html(
     for _hop in range(max_redirects + 1):
         assert_public_url(current)
         try:
-            with httpx.stream("GET", current, follow_redirects=False, timeout=timeout) as resp:
+            with httpx.stream(
+                "GET", current, follow_redirects=False, timeout=timeout, headers=_DEFAULT_HEADERS
+            ) as resp:
                 if resp.is_redirect:
                     location = resp.headers.get("location")
                     if not location:
