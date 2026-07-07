@@ -143,8 +143,25 @@ def ingest_source(db, source_id, payload: IngestPayload) -> None:
         db.commit()
     except Exception as e:
         log.exception("ingest_source failed for source_id=%s", source_id)
-        db.rollback()  # discard any not-yet-committed Chunk adds from this attempt
-        source = db.get(KnowledgeSource, source_id)
-        source.status = "failed"
-        source.error = str(e)
-        db.commit()
+        try:
+            db.rollback()  # discard any not-yet-committed Chunk adds from this attempt
+            source = db.get(KnowledgeSource, source_id)
+            source.status = "failed"
+            source.error = str(e)
+            db.commit()
+        except Exception:
+            # Best-effort recovery (final review, Fix 3): this recovery block
+            # itself talks to the DB (rollback/get/commit) — if THAT also
+            # fails (e.g. the connection that just errored is now unusable),
+            # it must not propagate either, or ingest_source would break its
+            # one hard contract ("never raises") for what is ultimately still
+            # an infra-level failure, not a caller/programming error. Swallow
+            # it: the row may be left stranded at "ingesting" in this rare
+            # double-failure case — worse than losing the human-readable
+            # error message, but still strictly better than crashing the
+            # caller (routers/knowledge.py's request handler).
+            log.warning(
+                "ingest_source: failed to record failure status for source_id=%s",
+                source_id,
+                exc_info=True,
+            )

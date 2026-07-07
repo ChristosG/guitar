@@ -283,3 +283,54 @@ def test_ingest_db_error_after_partial_adds_rolls_back_everything(monkeypatch):
         assert len(chunks) == 0  # the FIRST (valid) chunk must not survive either
     finally:
         db2.close()
+
+
+@pytest.mark.integration
+def test_ingest_failure_recovery_itself_failing_does_not_propagate(monkeypatch):
+    """Fix 3 (final review): the failure-recovery `except` block itself talks
+    to the DB (rollback/get/commit) — if THAT also fails (e.g. the connection
+    that just errored is now unusable, or an unrelated second DB hiccup),
+    ingest_source must still not propagate anything to its caller (its one
+    hard contract, like extract_text's, is "never raises"). Best-effort: the
+    row may be left stranded at "ingesting" in this rare double-failure case
+    (proven below) — worse than losing the human-readable error message, but
+    still strictly better than crashing the caller (routers/knowledge.py's
+    request handler).
+    """
+    db = SessionLocal()
+    try:
+        source_id = _make_source(db, "Recovery-failure source").id
+
+        def _boom_extract(*_a, **_k):
+            raise RuntimeError("synthetic primary failure")
+
+        monkeypatch.setattr("app.brain.ingest.extract_text", _boom_extract)
+
+        real_commit = db.commit
+        state = {"calls": 0}
+
+        def _flaky_commit():
+            state["calls"] += 1
+            if state["calls"] == 2:  # 1st commit = "ingesting"; 2nd = the recovery write
+                raise RuntimeError("synthetic secondary failure during recovery")
+            return real_commit()
+
+        monkeypatch.setattr(db, "commit", _flaky_commit)
+
+        # Must NOT raise, despite BOTH the primary pipeline AND the recovery
+        # path failing.
+        ingest_source(db, source_id, IngestPayload(kind="text", text="irrelevant"))
+    finally:
+        db.close()
+
+    # The recovery commit never landed, so the row is stranded at the last
+    # value that WAS durably committed ("ingesting", from commit #1) — an
+    # accepted, documented tradeoff for this double-failure edge case, not a
+    # silent "ready"/success.
+    db2 = SessionLocal()
+    try:
+        got = db2.get(KnowledgeSource, source_id)
+        assert got is not None
+        assert got.status == "ingesting"
+    finally:
+        db2.close()

@@ -9,8 +9,9 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 
 import fitz  # pymupdf
-import httpx
 import trafilatura
+
+from app.brain.urlsafe import safe_fetch_html
 
 log = logging.getLogger(__name__)
 
@@ -182,37 +183,44 @@ def _ocr_page_section(page: "fitz.Page", page_number: int) -> list[Section]:
     return [Section(heading=None, text=plain, page=page_number)] if plain else []
 
 
-# ---- URL (trafilatura, with an httpx+html.parser fallback) -----------------
+# ---- URL (one redirect-safe fetch, then trafilatura with an html.parser
+#      tag-stripping fallback on the SAME already-fetched HTML) -------------
 
 
 def _extract_url(url: str | None) -> list[Section]:
     if not url:
         return []
-    body = _trafilatura_extract(url) or _httpx_fallback_extract(url)
+    try:
+        html = safe_fetch_html(url)
+    except ValueError:
+        # Disallowed host — at the original URL or at any redirect hop the
+        # fetch followed (SSRF guard, see urlsafe.safe_fetch_html) — too many
+        # redirects, a non-2xx response, or a transport error: all collapse
+        # to "could not fetch", per this module's never-raises contract.
+        log.warning("could not fetch url for extraction: %s", url, exc_info=True)
+        return []
+
+    # Both extraction attempts run on the SAME in-memory `html` string: only
+    # one network fetch happens per URL (safe_fetch_html, above), never two.
+    body = _trafilatura_extract(html, url) or _strip_html(html)
     if not body or not body.strip():
         return []
     return [Section(heading=None, text=body.strip(), page=None)]
 
 
-def _trafilatura_extract(url: str) -> str | None:
+def _trafilatura_extract(html: str, url: str) -> str | None:
+    """Run trafilatura's content-extraction heuristics on already-fetched HTML.
+
+    Takes the HTML `safe_fetch_html` already downloaded rather than fetching
+    itself: `trafilatura.fetch_url` follows redirects on its own, bypassing
+    the SSRF guard entirely, and calling it here would also fetch the same
+    page a second time for no reason.
+    """
     try:
-        downloaded = trafilatura.fetch_url(url)
-        if not downloaded:
-            return None
-        return trafilatura.extract(downloaded, url=url, favor_recall=True)
+        return trafilatura.extract(html, url=url, favor_recall=True)
     except Exception:
         log.warning("trafilatura extraction failed for %s", url, exc_info=True)
         return None
-
-
-def _httpx_fallback_extract(url: str) -> str | None:
-    try:
-        resp = httpx.get(url, timeout=10, follow_redirects=True)
-        resp.raise_for_status()
-    except Exception:
-        log.warning("httpx fallback fetch failed for %s", url, exc_info=True)
-        return None
-    return _strip_html(resp.text)
 
 
 class _PlainTextHTMLParser(HTMLParser):
