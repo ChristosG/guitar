@@ -32,11 +32,17 @@ class CurriculumListItem(BaseModel):
 
 
 class BlockUpdate(BaseModel):
-    """All fields optional — PATCH semantics, same `exclude_unset` convention
-    as `schemas.students.StudentUpdate`: an omitted field leaves the stored
-    value untouched, an explicit `null` clears a nullable one (`body`/
-    `est_minutes`). `kind` is intentionally unconstrained (any string) —
-    `Block.kind` is documented on the model itself as "soft, relabelable".
+    """All fields optional — PATCH semantics. An omitted field leaves the
+    stored value untouched; an explicit `null` is ALSO a no-op (review fix —
+    `routers.curriculum.update_block` applies updates via `model_dump(
+    exclude_unset=True, exclude_none=True)`), not a clear, even for a
+    nullable column (`body`/`est_minutes`): `Block.title` is NOT NULL, so
+    treating `null` as "clear this field" uniformly across every field would
+    crash on `title` specifically; dropping nulls uniformly instead avoids a
+    per-column special case. `title` is further rejected with a 422 if given
+    as an empty string (satisfies NOT NULL but is still a useless title).
+    `kind` is intentionally unconstrained (any string) — `Block.kind` is
+    documented on the model itself as "soft, relabelable".
     """
     title: str | None = None
     body: str | None = None

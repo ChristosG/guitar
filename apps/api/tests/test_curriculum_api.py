@@ -206,6 +206,52 @@ def test_patch_block_404_for_unknown_id():
     assert r.status_code == 404
 
 
+def test_patch_block_null_title_is_ignored_not_500():
+    """`Block.title` is a NOT NULL column but `BlockUpdate.title` accepts
+    `null` at the HTTP boundary - an explicit `{"title": null}` used to
+    reach `setattr(block, "title", None)` -> `db.commit()` -> a NOT NULL
+    IntegrityError surfacing as a raw 500. Fixed: null fields are dropped
+    from the update entirely (a NOT NULL column can't be cleared), so this
+    is a 200 no-op on `title`, not a crash.
+    """
+    db = SessionLocal()
+    try:
+        course = _build_template_course(db)
+        module1 = _children(db, course.id)[0]
+        lesson = _children(db, module1.id)[0]
+        lesson_id = lesson.id
+        original_title = lesson.title
+    finally:
+        db.close()
+
+    r = client.patch(f"/blocks/{lesson_id}", json={"title": None})
+    assert r.status_code == 200, r.text
+    assert r.json()["title"] == original_title
+
+    # Round-trip via a separate request - genuinely unchanged, not just echoed.
+    r2 = client.get(f"/blocks/{lesson_id}")
+    assert r2.json()["title"] == original_title
+
+
+def test_patch_block_empty_string_title_rejected_422():
+    db = SessionLocal()
+    try:
+        course = _build_template_course(db)
+        module1 = _children(db, course.id)[0]
+        lesson = _children(db, module1.id)[0]
+        lesson_id = lesson.id
+        original_title = lesson.title
+    finally:
+        db.close()
+
+    r = client.patch(f"/blocks/{lesson_id}", json={"title": ""})
+    assert r.status_code == 422, r.text
+
+    # Rejected before any mutation - title is still whatever it was before.
+    r2 = client.get(f"/blocks/{lesson_id}")
+    assert r2.json()["title"] == original_title
+
+
 # --- DELETE /blocks/{id} ----------------------------------------------------
 
 def test_delete_block_cascades_children_and_leaves_siblings():

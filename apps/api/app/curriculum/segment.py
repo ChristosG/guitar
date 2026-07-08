@@ -36,9 +36,14 @@ _TITLE_MAX_LEN = 300
 
 @dataclass
 class Leaf:
-    """One partitionable unit of content: a lesson (no segment children) or
-    a segment (always childless in the generated tree) - i.e. any content
-    Block with no children of its own and a positive est_minutes.
+    """One partitionable unit of content: usually a childless Block with a
+    positive est_minutes (a lesson with no segments, or a segment - always
+    childless in the generated tree). Also, as a fallback (review fix, see
+    `_collect_leaves`'s `walk`), a Block WITH children whose own subtree
+    contributes zero leaf-minutes (e.g. a lesson whose segments are all
+    zero/None-minute) - its own est_minutes stands in so the node isn't
+    silently dropped from pacing. Either way: exactly one Leaf per
+    minute-bearing unit, never both a container and its own descendants.
     `module_title` is its nearest module-kind ancestor's title, or None.
     """
     block_id: uuid.UUID
@@ -138,7 +143,22 @@ def _collect_leaves(db, root: Block) -> list[Leaf]:
 
     leaves: list[Leaf] = []
 
-    def walk(node: Block, module_title: str | None) -> None:
+    def walk(node: Block, module_title: str | None) -> int:
+        """Emit leaves for `node`'s subtree in document order; returns the
+        total leaf-minutes actually emitted for it, so a parent call can
+        tell whether `node`'s subtree contributed anything.
+
+        A childless node is always a leaf (its own est_minutes, when
+        positive) — unchanged from before. A node WITH children is normally
+        a pure container (its leaves come entirely from its descendants) —
+        UNLESS none of those descendants contributed any minutes at all
+        (review fix: e.g. a lesson whose segments are all zero/None-minute),
+        in which case `node` ITSELF becomes the pacing-leaf via its own
+        est_minutes rather than silently contributing nothing. A node with
+        at least one minute-bearing descendant always returns that nonzero
+        total instead, so it is never also emitted as a leaf — no double
+        counting.
+        """
         kids = children_by_parent.get(node.id, [])
         if not kids:
             if node.est_minutes:
@@ -146,9 +166,20 @@ def _collect_leaves(db, root: Block) -> list[Leaf]:
                     block_id=node.id, minutes=node.est_minutes,
                     title=node.title, module_title=module_title,
                 ))
-            return
+                return node.est_minutes
+            return 0
+
+        subtree_minutes = 0
         for kid in kids:
-            walk(kid, kid.title if kid.kind == "module" else module_title)
+            subtree_minutes += walk(kid, kid.title if kid.kind == "module" else module_title)
+
+        if subtree_minutes == 0 and node.est_minutes:
+            leaves.append(Leaf(
+                block_id=node.id, minutes=node.est_minutes,
+                title=node.title, module_title=module_title,
+            ))
+            return node.est_minutes
+        return subtree_minutes
 
     walk(root, root.title if root.kind == "module" else None)
     return leaves

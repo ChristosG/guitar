@@ -7,6 +7,7 @@ from openai import OpenAI
 from app.config import settings
 from app.llm.base import LLMProvider
 from app.llm.embeddings import l2_normalize, query_instruct
+from app.llm.errors import GuidedJSONError
 
 log = logging.getLogger(__name__)
 
@@ -29,8 +30,8 @@ class QwenVLLM(LLMProvider):
     def guided_json(self, messages, schema, *, temperature=0.2) -> dict:
         """One-shot structured generation: vLLM's `response_format` json_schema
         CONSTRAINS decoding to `schema` server-side (not a post-hoc parse-and-
-        retry) — the response body is always schema-valid JSON, so a malformed
-        result is not a case this needs to handle. Verified capability against
+        retry) — the response body is always schema-valid JSON *provided the
+        model actually finished generating it*. Verified capability against
         this same infra in `/mnt/nvme2TB/vllm_interract` (guided_json_demo()).
 
         `timeout=300` (overriding the client's own `timeout=60` default,
@@ -38,6 +39,16 @@ class QwenVLLM(LLMProvider):
         at 49-179s/call (Plan 3 Task 2's report) — comfortably past the
         60s default, so this call needs its own generous ceiling rather than
         inheriting the client-wide default sized for ordinary chat/embed calls.
+
+        `max_tokens=8000` (review fix): guided decoding constrains *shape*,
+        not *length* — a large tree (many modules/lessons/segments) can still
+        run out of the server's own default token budget mid-object and get
+        cut off (`finish_reason == "length"`), which is not schema-valid JSON
+        despite the "always schema-valid" guarantee above. A generous ceiling
+        makes that a rare edge case rather than a routine one; `GuidedJSONError`
+        below is the backstop for when it happens anyway (or the model
+        refuses outright, `message.content is None`) instead of letting a
+        `TypeError`/`JSONDecodeError` surface as a raw 500 at the router.
         """
         resp = self._client.chat.completions.create(
             model=settings.llm_model,
@@ -49,8 +60,20 @@ class QwenVLLM(LLMProvider):
                 "json_schema": {"name": "curriculum", "schema": schema},
             },
             timeout=300,
+            max_tokens=8000,
         )
-        return json.loads(resp.choices[0].message.content)
+        choice = resp.choices[0]
+        if choice.message.content is None or choice.finish_reason == "length":
+            raise GuidedJSONError(
+                f"guided_json: unusable response (finish_reason={choice.finish_reason!r}, "
+                f"content={'present' if choice.message.content is not None else 'None'})"
+            )
+        try:
+            return json.loads(choice.message.content)
+        except json.JSONDecodeError as e:
+            raise GuidedJSONError(
+                f"guided_json: invalid JSON (finish_reason={choice.finish_reason!r}): {e}"
+            ) from e
 
     def embed(self, texts, *, is_query=False) -> list[list[float]]:
         inputs = [query_instruct(t) for t in texts] if is_query else list(texts)

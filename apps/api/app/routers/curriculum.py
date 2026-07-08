@@ -13,6 +13,8 @@ Cloudflare for a single user.
 """
 from uuid import UUID
 
+import httpx
+import openai
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -20,6 +22,7 @@ from sqlalchemy.orm import Session
 from app.curriculum.generate import generate_curriculum
 from app.curriculum.segment import segment_block
 from app.db import get_db
+from app.llm.errors import GuidedJSONError
 from app.models.block import Block
 from app.models.curriculum import Assignment
 from app.models.student import Student
@@ -151,15 +154,40 @@ def generate_curriculum_endpoint(
     in this module and in `routers/knowledge.py` is already plain `def` —
     this endpoint is just the one where that choice is load-bearing rather
     than incidental.)
+
+    Two known failure modes get a typed HTTP mapping instead of surfacing as
+    a raw 500 (review fix): `GuidedJSONError` (the model returned unusable
+    JSON — refused, truncated, or malformed; see `QwenVLLM.guided_json`) maps
+    to 502 ("bad upstream response, retry"); a transport-level timeout or
+    connection failure (`openai.APIConnectionError` from the guided_json call
+    itself — `APITimeoutError` is a subclass, so this also catches a plain
+    timeout — or `httpx.TransportError` from the embed call `search()` makes
+    on the way to grounding the prompt) maps to 504 ("no response in time,
+    retry"). `httpx.TransportError` deliberately excludes `HTTPStatusError`
+    (a real, non-2xx response from the embed server is a different failure
+    mode, not a timeout/connection issue) — anything else still propagates
+    unmapped, per this codebase's no-auth PoC posture of not blanket-catching
+    `Exception`.
     """
-    root_id = generate_curriculum(
-        db,
-        title=payload.title,
-        language=payload.language,
-        profile=payload.profile,
-        domain=payload.domain,
-        target_minutes_total=payload.target_minutes_total,
-    )
+    try:
+        root_id = generate_curriculum(
+            db,
+            title=payload.title,
+            language=payload.language,
+            profile=payload.profile,
+            domain=payload.domain,
+            target_minutes_total=payload.target_minutes_total,
+        )
+    except GuidedJSONError as e:
+        raise HTTPException(
+            status_code=502,
+            detail="Curriculum generation failed (model returned invalid/truncated output). Try again.",
+        ) from e
+    except (openai.APIConnectionError, httpx.TransportError) as e:
+        raise HTTPException(
+            status_code=504,
+            detail="Curriculum generation timed out. Try again.",
+        ) from e
     root = _get_block_or_404(db, root_id)
     return block_to_tree(root)
 
@@ -176,8 +204,27 @@ def get_block(block_id: UUID, db: Session = Depends(get_db)) -> dict:
 
 @router.patch("/blocks/{block_id}", response_model=BlockTreeOut)
 def update_block(block_id: UUID, payload: BlockUpdate, db: Session = Depends(get_db)) -> dict:
+    """`exclude_none=True` (review fix, alongside `exclude_unset=True`): every
+    `BlockUpdate` field is nullable at the HTTP boundary, but `Block.title`
+    is a NOT NULL column — an explicit `{"title": null}` used to reach
+    `setattr(block, "title", None)` -> `db.commit()` -> an unhandled
+    IntegrityError (raw 500). Dropping null-valued fields from the update
+    entirely (not just `title`) is a uniform, simple fix: a NOT NULL column
+    can never be legally cleared anyway, and it means `{"field": null}` is
+    now always a no-op rather than being valid for some fields (`body`,
+    `est_minutes`) and crashing for others (`title`) depending on the
+    column's own nullability — one rule for every field, applied here in the
+    router rather than differently per column.
+
+    `title == ""` is rejected outright (422) rather than silently accepted:
+    an empty string satisfies the NOT NULL constraint (it isn't NULL) so it
+    would otherwise sail through and leave a block with a blank title.
+    """
     block = _get_block_or_404(db, block_id)
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    updates = payload.model_dump(exclude_unset=True, exclude_none=True)
+    if updates.get("title") == "":
+        raise HTTPException(status_code=422, detail="title cannot be empty")
+    for field, value in updates.items():
         setattr(block, field, value)
     db.commit()
     return block_to_tree(block)

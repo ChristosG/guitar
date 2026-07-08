@@ -14,7 +14,7 @@ test_curriculum_schema.py).
 import pytest
 from sqlalchemy import select, text
 
-from app.curriculum.segment import segment_block
+from app.curriculum.segment import _collect_leaves, segment_block
 from app.db import Base, SessionLocal, engine
 from app.models.block import Block
 from app.models.student import Student
@@ -222,3 +222,86 @@ def test_segment_block_never_treats_prior_delivery_sessions_as_new_content_leave
         assert total == _TOTAL_MINUTES
     finally:
         db2.close()
+
+
+def test_collect_leaves_falls_back_to_own_minutes_when_children_contribute_zero():
+    """Regression test for the leaf-minute fallback (review fix): a lesson
+    that HAS children (segments) whose own est_minutes are all zero/None
+    used to contribute nothing anywhere - only a genuinely *childless* node
+    was ever treated as a leaf, so a lesson like this (real content, a real
+    est_minutes=50) silently vanished from pacing. The fix: a node with
+    children is a pacing-leaf (using its OWN est_minutes) whenever its
+    subtree contributes zero leaf-minutes; a node with at least one
+    minute-bearing descendant still stays a pure container (no double
+    counting - proved here by "Normal Lesson" contributing its 20 minutes
+    exactly once, not 20 plus some container fallback on top).
+    """
+    db = SessionLocal()
+    try:
+        course = Block(
+            kind="course", title="Fallback Course", order=0, language="en", is_template=True,
+        )
+        db.add(course)
+        db.flush()
+
+        module = Block(
+            kind="module", title="Fallback Module", order=0, parent_id=course.id, language="en",
+        )
+        db.add(module)
+        db.flush()
+
+        # HAS children (two segments), but neither carries any minutes: one
+        # explicit 0, one omitted (NULL) - the exact shape the bug dropped.
+        lesson = Block(
+            kind="lesson", title="Zero-Segment Lesson", order=0, parent_id=module.id,
+            language="en", est_minutes=50,
+        )
+        db.add(lesson)
+        db.flush()
+        db.add(Block(
+            kind="segment", title="Empty Segment A", order=0, parent_id=lesson.id,
+            language="en", est_minutes=0,
+        ))
+        db.add(Block(
+            kind="segment", title="Empty Segment B", order=1, parent_id=lesson.id, language="en",
+        ))
+
+        # A normal sibling lesson with no children at all - untouched
+        # control, proving the ordinary childless-leaf case (and the
+        # no-double-counting invariant) is unaffected by the fix.
+        db.add(Block(
+            kind="lesson", title="Normal Lesson", order=1, parent_id=module.id,
+            language="en", est_minutes=20,
+        ))
+        db.commit()
+        course_id = course.id
+    finally:
+        db.close()
+
+    db2 = SessionLocal()
+    try:
+        root = db2.get(Block, course_id)
+        leaves = _collect_leaves(db2, root)
+    finally:
+        db2.close()
+
+    assert {leaf.title: leaf.minutes for leaf in leaves} == {
+        "Zero-Segment Lesson": 50,
+        "Normal Lesson": 20,
+    }
+    assert sum(leaf.minutes for leaf in leaves) == 70  # 50 recovered + 20 normal, nothing double-counted
+
+    # End-to-end through the real partitioner/segment_block: the fallback
+    # lesson's 50 minutes must show up in the persisted sessions' total.
+    db3 = SessionLocal()
+    try:
+        session_ids = segment_block(db3, course_id, session_minutes=50)
+    finally:
+        db3.close()
+
+    db4 = SessionLocal()
+    try:
+        total = sum(db4.get(Block, sid).est_minutes for sid in session_ids)
+        assert total == 70
+    finally:
+        db4.close()
