@@ -1,19 +1,17 @@
-import { useLocale, useTranslations } from "next-intl";
-import Link from "next/link";
-import { ThemeToggle } from "@/components/theme-toggle";
+import { redirect } from "next/navigation";
 
-export default function Home() {
-  const t = useTranslations("app");
-  const locale = useLocale();
-  return (
-    <main className="min-h-screen flex flex-col items-center justify-center gap-6">
-      <h1 data-testid="app-title" className="text-3xl font-semibold">
-        {t("title")} 🎸
-      </h1>
-      <Link href={`/${locale}/knowledge`} data-testid="knowledge-nav-link" className="text-sm underline">
-        {t("knowledgeNav")}
-      </Link>
-      <ThemeToggle />
-    </main>
-  );
+/** The cockpit has no real "home" — `/[locale]` just lands you on Today,
+ * the daily-agenda page. In normal operation `proxy.ts`'s own
+ * `localeRootRedirect` intercepts this exact path first (see its docstring
+ * for why: a `no-store`-correctness fix, not a style choice) and this
+ * component never actually runs — it's kept anyway as the literal route
+ * Next.js expects here and as a correctness fallback for any request that
+ * ever reaches this segment without going through that middleware step. */
+export default async function RootLocalePage({
+  params,
+}: {
+  params: Promise<{ locale: string }>;
+}) {
+  const { locale } = await params;
+  redirect(`/${locale}/today`);
 }

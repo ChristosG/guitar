@@ -1,11 +1,136 @@
 {
   "app": {
-    "title": "Guitar Tutor Copilot",
-    "knowledgeNav": "Knowledge"
+    "title": "Guitar Tutor Copilot"
+  },
+  "nav": {
+    "today": "Today",
+    "students": "Students",
+    "curricula": "Curricula",
+    "knowledge": "Knowledge",
+    "notes": "Notes",
+    "searchPlaceholder": "Search… (coming soon)",
+    "openMenu": "Open menu",
+    "closeMenu": "Close menu"
+  },
+  "locale": {
+    "en": "EN",
+    "el": "EL",
+    "switchTo": "Switch language"
+  },
+  "today": {
+    "heading": "Today",
+    "subheading": "Your lessons at a glance.",
+    "previewBadge": "Preview",
+    "card1Title": "Next lesson",
+    "card2Title": "Following lesson",
+    "placeholderStudent": "Student — to be scheduled",
+    "placeholderTime": "Time — to be scheduled",
+    "placeholderNote": "Lesson prep will appear here once scheduling is live."
+  },
+  "notes": {
+    "heading": "Notes",
+    "subheading": "Session notes and practice logs.",
+    "emptyTitle": "No notes yet",
+    "emptyBody": "Notes you take during and between lessons will show up here."
+  },
+  "students": {
+    "heading": "Students",
+    "subheading": "Your roster.",
+    "addButton": "Add student",
+    "empty": "No students yet — add your first one to get started.",
+    "loading": "Loading students…",
+    "error": "Could not load students.",
+    "level": "Level",
+    "instrument": "Instrument",
+    "language": "Language",
+    "unset": "—",
+    "delete": "Delete",
+    "deleting": "Deleting…",
+    "deleteError": "Could not delete the student.",
+    "addDialog": {
+      "trigger": "Add student",
+      "heading": "Add student",
+      "description": "Add a student to your roster.",
+      "name": "Name",
+      "namePlaceholder": "e.g. Nikos Papadopoulos",
+      "level": "Level",
+      "levelPlaceholder": "beginner, intermediate, advanced…",
+      "instrument": "Instrument",
+      "instrumentPlaceholder": "guitar, bass, ukulele…",
+      "language": "Language",
+      "languagePlaceholder": "en, el…",
+      "cancel": "Cancel",
+      "submit": "Add student",
+      "submitting": "Adding…",
+      "error": "Could not add the student."
+    }
+  },
+  "curricula": {
+    "heading": "Curricula",
+    "subheading": "Generate and manage curriculum templates.",
+    "generateButton": "Generate curriculum",
+    "templatesHeading": "Templates",
+    "templatesEmpty": "No curricula yet — generate one to get started.",
+    "templatesLoading": "Loading curricula…",
+    "templatesError": "Could not load curricula.",
+    "boardEmpty": "Generate a curriculum or select a template to see its tree.",
+    "boardLoading": "Loading curriculum…",
+    "boardError": "Could not load this curriculum.",
+    "generateDialog": {
+      "trigger": "Generate curriculum",
+      "heading": "Generate a curriculum",
+      "description": "The tutor drafts a grounded course tree from your Knowledge base. This calls the model and can take a minute or two.",
+      "title": "Title",
+      "titlePlaceholder": "e.g. Tone Shaping Fundamentals",
+      "domain": "Domain",
+      "domainPlaceholder": "tone, technique, theory…",
+      "level": "Level",
+      "levelPlaceholder": "beginner, intermediate, advanced",
+      "language": "Language",
+      "targetHours": "Target hours",
+      "targetHoursPlaceholder": "e.g. 10",
+      "cancel": "Cancel",
+      "submit": "Generate",
+      "generating": "Generating your curriculum — this can take a minute…",
+      "error": "Could not generate the curriculum."
+    },
+    "tree": {
+      "estMinutes": "{count} min",
+      "editTitlePlaceholder": "Block title",
+      "save": "Save",
+      "cancel": "Cancel",
+      "delete": "Delete",
+      "deleting": "Deleting…",
+      "deleteError": "Could not delete this block.",
+      "updateError": "Could not save this title.",
+      "segmentAction": "Segment into sessions",
+      "noChildren": "Nothing here yet.",
+      "collapse": "Collapse",
+      "expand": "Expand",
+      "deliveryHeading": "Delivery sessions",
+      "kinds": {
+        "course": "Course",
+        "module": "Module",
+        "lesson": "Lesson",
+        "segment": "Segment",
+        "delivery_root": "Delivery plan",
+        "session": "Session"
+      }
+    },
+    "segmentDialog": {
+      "heading": "Segment into sessions",
+      "description": "Split \"{title}\" into fixed-length delivery sessions.",
+      "sessionMinutes": "Session length (minutes)",
+      "cadence": "Sessions per week",
+      "cancel": "Cancel",
+      "submit": "Segment",
+      "segmenting": "Segmenting…",
+      "error": "Could not segment this block.",
+      "resultHeading": "Delivery sessions created"
+    }
   },
   "knowledge": {
     "title": "Knowledge Cockpit",
-    "backHome": "← Back",
     "addSource": {
       "heading": "Add source",
       "kindText": "Text",

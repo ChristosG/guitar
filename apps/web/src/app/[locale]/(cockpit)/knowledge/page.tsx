@@ -1,8 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { useLocale, useTranslations } from "next-intl";
-import Link from "next/link";
+import { useTranslations } from "next-intl";
 import { AddSourceForm } from "@/components/knowledge/add-source";
 import { AskBox } from "@/components/knowledge/ask-box";
 import { SearchBox } from "@/components/knowledge/search-box";
@@ -17,7 +16,6 @@ import { ApiError, deleteSource, listSources, type SourceOut } from "@/lib/api";
 // page network request), which is why this stays client-rendered.
 export default function KnowledgePage() {
   const t = useTranslations("knowledge");
-  const locale = useLocale();
 
   const [sources, setSources] = useState<SourceOut[]>([]);
   const [loading, setLoading] = useState(true);
@@ -65,15 +63,10 @@ export default function KnowledgePage() {
   }
 
   return (
-    <main className="mx-auto flex max-w-3xl flex-col gap-6 p-6">
-      <div className="flex items-center justify-between">
-        <h1 data-testid="knowledge-title" className="text-2xl font-semibold">
-          {t("title")}
-        </h1>
-        <Link href={`/${locale}`} className="text-sm underline" data-testid="knowledge-back-link">
-          {t("backHome")}
-        </Link>
-      </div>
+    <div className="mx-auto flex max-w-3xl flex-col gap-6">
+      <h1 data-testid="knowledge-title" className="text-2xl font-semibold">
+        {t("title")}
+      </h1>
 
       <AddSourceForm onCreated={refresh} />
       <SourceList
@@ -85,6 +78,6 @@ export default function KnowledgePage() {
       />
       <SearchBox />
       <AskBox />
-    </main>
+    </div>
   );
 }

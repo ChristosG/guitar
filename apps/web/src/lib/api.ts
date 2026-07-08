@@ -171,3 +171,159 @@ export function askKnowledge(input: AskInput): Promise<AskResponse> {
     body: JSON.stringify(input),
   });
 }
+
+/**
+ * Typed fetch helpers for the Students + Curriculum APIs (`/students`,
+ * `/curricula`, `/blocks`). Same direct-from-browser convention as the
+ * Knowledge helpers above (see this file's top docstring) — the cockpit
+ * pages call these straight from client components so Playwright's
+ * `page.route` interception sees every request.
+ */
+
+export interface StudentOut {
+  id: string;
+  name: string;
+  birthdate: string | null;
+  level: string | null;
+  instrument: string | null;
+  preferred_language: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateStudentInput {
+  name: string;
+  birthdate?: string | null;
+  level?: string | null;
+  instrument?: string | null;
+  preferred_language?: string;
+}
+
+export interface UpdateStudentInput {
+  name?: string;
+  birthdate?: string | null;
+  level?: string | null;
+  instrument?: string | null;
+  preferred_language?: string;
+}
+
+export function listStudents(): Promise<StudentOut[]> {
+  return request<StudentOut[]>("/students");
+}
+
+export function createStudent(input: CreateStudentInput): Promise<StudentOut> {
+  return request<StudentOut>("/students", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateStudent(id: string, input: UpdateStudentInput): Promise<StudentOut> {
+  return request<StudentOut>(`/students/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export function deleteStudent(id: string): Promise<void> {
+  return request<void>(`/students/${id}`, { method: "DELETE" });
+}
+
+/** Recursive Block tree shape returned by every `/curricula/*` and
+ * `/blocks/*` route (`routers.curriculum.block_to_tree` on the API side):
+ * course -> module -> lesson -> segment for curriculum content, or
+ * delivery_root -> session for a segmented delivery plan. `kind` is a soft,
+ * relabelable string on the API — deliberately typed as `string` here, not
+ * a union, so an unrecognized future kind still renders instead of failing
+ * a type check. */
+export interface BlockNode {
+  id: string;
+  kind: string;
+  title: string;
+  body: string | null;
+  est_minutes: number | null;
+  order: number;
+  language: string;
+  plane: string;
+  student_id: string | null;
+  children: BlockNode[];
+}
+
+/** `GET /curricula` row shape — template roots only (no `children`). */
+export interface CurriculumListItem {
+  id: string;
+  title: string;
+  language: string;
+  target_profile: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface GenerateCurriculumInput {
+  title: string;
+  language: string;
+  profile: Record<string, unknown>;
+  domain?: string | null;
+  target_minutes_total?: number | null;
+}
+
+export interface BlockUpdateInput {
+  title?: string;
+  body?: string | null;
+  est_minutes?: number | null;
+  order?: number;
+  kind?: string;
+}
+
+export interface SegmentBlockInput {
+  session_minutes: number;
+  cadence_per_week?: number;
+  student_id?: string | null;
+}
+
+export function listCurricula(): Promise<CurriculumListItem[]> {
+  return request<CurriculumListItem[]>("/curricula");
+}
+
+/** SLOW: the API measured this at 49-179s/call (guided-JSON generation
+ * against the local LLM) — callers MUST show a clear, non-frozen loading
+ * state while this is in flight (see `components/curriculum/generate-dialog.tsx`). */
+export function generateCurriculum(input: GenerateCurriculumInput): Promise<BlockNode> {
+  return request<BlockNode>("/curricula/generate", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function getCurriculum(rootId: string): Promise<BlockNode> {
+  return request<BlockNode>(`/curricula/${rootId}`);
+}
+
+export function getBlock(id: string): Promise<BlockNode> {
+  return request<BlockNode>(`/blocks/${id}`);
+}
+
+export function updateBlock(id: string, input: BlockUpdateInput): Promise<BlockNode> {
+  return request<BlockNode>(`/blocks/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export function deleteBlock(id: string): Promise<void> {
+  return request<void>(`/blocks/${id}`, { method: "DELETE" });
+}
+
+export function segmentBlock(id: string, input: SegmentBlockInput): Promise<BlockNode> {
+  return request<BlockNode>(`/blocks/${id}/segment`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function assignCurriculum(rootId: string, studentId: string): Promise<BlockNode> {
+  return request<BlockNode>(`/curricula/${rootId}/assign`, {
+    method: "POST",
+    body: JSON.stringify({ student_id: studentId }),
+  });
+}
