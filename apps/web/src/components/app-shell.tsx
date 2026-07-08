@@ -8,6 +8,7 @@ import {
   Calendar,
   GraduationCap,
   Guitar,
+  LayoutGrid,
   Library,
   Menu,
   Search,
@@ -26,6 +27,7 @@ const NAV_ITEMS = [
   { segment: "curricula", icon: GraduationCap },
   { segment: "knowledge", icon: Library },
   { segment: "notes", icon: StickyNote },
+  { segment: "artifacts", icon: LayoutGrid },
 ] as const;
 
 /** The cockpit's persistent chrome: a left nav rail (studio logo, the 5

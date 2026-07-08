@@ -8,6 +8,7 @@
     "curricula": "Curricula",
     "knowledge": "Knowledge",
     "notes": "Notes",
+    "artifacts": "Artifacts",
     "searchPlaceholder": "Search… (coming soon)",
     "openMenu": "Open menu",
     "closeMenu": "Close menu"
@@ -185,6 +186,33 @@
       "locale": "Answer language",
       "empty": "Ask a question to get a grounded answer.",
       "error": "Could not get an answer."
+    }
+  },
+  "artifacts": {
+    "heading": "Artifacts",
+    "subheading": "Deterministic renderers for validated specs — chord diagrams, scale patterns, tone recipes, signal chains and amp dials, drawn client-side.",
+    "sections": {
+      "chordDiagram": "Chord Diagram",
+      "scaleDiagram": "Scale Diagram",
+      "toneRecipe": "Tone Recipe",
+      "signalChain": "Signal Chain",
+      "ampDials": "Amp Dials"
+    },
+    "scaleDiagram": {
+      "root": "Root"
+    },
+    "toneRecipe": {
+      "guitar": "Guitar",
+      "amp": "Amp",
+      "drive": "Drive",
+      "chain": "Chain",
+      "hands": "Hands",
+      "listen": "Listen",
+      "fallbackTitle": "Tone Recipe"
+    },
+    "unsupported": {
+      "title": "Unsupported artifact",
+      "body": "No renderer yet for kind \"{kind}\"."
     }
   }
 }
