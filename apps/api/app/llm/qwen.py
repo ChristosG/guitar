@@ -32,6 +32,12 @@ class QwenVLLM(LLMProvider):
         retry) — the response body is always schema-valid JSON, so a malformed
         result is not a case this needs to handle. Verified capability against
         this same infra in `/mnt/nvme2TB/vllm_interract` (guided_json_demo()).
+
+        `timeout=300` (overriding the client's own `timeout=60` default,
+        per-call): curriculum-tree guided-JSON generation was live-measured
+        at 49-179s/call (Plan 3 Task 2's report) — comfortably past the
+        60s default, so this call needs its own generous ceiling rather than
+        inheriting the client-wide default sized for ordinary chat/embed calls.
         """
         resp = self._client.chat.completions.create(
             model=settings.llm_model,
@@ -42,6 +48,7 @@ class QwenVLLM(LLMProvider):
                 "type": "json_schema",
                 "json_schema": {"name": "curriculum", "schema": schema},
             },
+            timeout=300,
         )
         return json.loads(resp.choices[0].message.content)
 
