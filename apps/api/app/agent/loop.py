@@ -116,6 +116,13 @@ def run_agent_turn(db, messages: list[dict], *, max_steps: int = 6) -> AgentResu
             repair_attempts += 1
             if repair_attempts >= _MAX_REPAIR_ATTEMPTS:
                 log.warning("chat_tools: giving up after %d consecutive ToolArgsErrors", repair_attempts)
+                # Append the giveup reply to history too, not just return it as
+                # `content`: `AgentResult.messages` is documented as the full
+                # transcript, and Task 4's router persists `messages` while
+                # showing `content` to the user — without this append the
+                # "couldn't complete" reply silently drops out of history and
+                # the model has no memory of it next turn.
+                messages.append({"role": "assistant", "content": _GIVEUP_MESSAGE})
                 return AgentResult(status="answer", content=_GIVEUP_MESSAGE, messages=messages)
             # The broken turn is NOT added to history (no assistant message,
             # no dangling tool_call) — just a corrective user turn, so the
@@ -161,4 +168,15 @@ def run_agent_turn(db, messages: list[dict], *, max_steps: int = 6) -> AgentResu
             })
 
     log.warning("run_agent_turn: max_steps=%d exhausted without a final answer", max_steps)
-    return AgentResult(status="answer", content=last_content or _MAX_STEPS_MESSAGE, messages=messages)
+    # `last_content is None` (an explicit identity check, not a falsy-check:
+    # `AssistantTurn.content` is documented None-not-"" when absent) means every
+    # step was a tool call with no final text, so the fallback note is genuinely
+    # being substituted and must be appended to history to keep `messages`
+    # consistent with `content` (Task 4's router persists `messages`, shows
+    # `content`). A truthy `last_content` is ALREADY in `messages` from the last
+    # iteration's assistant-turn append above — returning it as `content`
+    # without re-appending avoids a duplicate assistant message.
+    if last_content is None:
+        messages.append({"role": "assistant", "content": _MAX_STEPS_MESSAGE})
+        return AgentResult(status="answer", content=_MAX_STEPS_MESSAGE, messages=messages)
+    return AgentResult(status="answer", content=last_content, messages=messages)

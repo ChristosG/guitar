@@ -120,6 +120,58 @@ def test_run_agent_turn_does_not_duplicate_an_existing_system_prompt(monkeypatch
     assert len(system_msgs) == 1
 
 
+def test_run_agent_turn_dispatches_all_calls_in_a_parallel_tool_turn(monkeypatch):
+    """A single assistant turn can carry 2+ tool_calls at once (real parallel
+    tool-calling). BOTH must be dispatched and BOTH must get a paired
+    `{"role":"tool", tool_call_id}` result (matching ids) BEFORE the next
+    `chat_tools` call, and the reconstructed assistant message must carry both
+    in wire shape. (The impl already iterates the full list in both the
+    wire-shape comprehension and the dispatch loop; this pins that.)
+    """
+    calls_seen = []
+
+    def _fake_list_students(db, **kwargs):
+        calls_seen.append("list_students")
+        return [{"id": "s1", "name": "Alex"}]
+
+    def _fake_list_curricula(db, **kwargs):
+        calls_seen.append("list_curricula")
+        return [{"id": "c1", "title": "Rhythm"}]
+
+    _stub_tool(monkeypatch, "list_students", _fake_list_students)
+    _stub_tool(monkeypatch, "list_curricula", _fake_list_curricula)
+
+    parallel = AssistantTurn(content=None, tool_calls=[
+        ToolCall(id="call_a", name="list_students", arguments={}),
+        ToolCall(id="call_b", name="list_curricula", arguments={}),
+    ])
+    turn2 = AssistantTurn(content="Here they are.", tool_calls=[])
+    fake_provider = _FakeProvider([parallel, turn2])
+    monkeypatch.setattr(agent_loop, "get_provider", lambda: fake_provider)
+
+    result = run_agent_turn(None, [{"role": "user", "content": "list students and curricula"}])
+
+    assert result.content == "Here they are."
+    assert calls_seen == ["list_students", "list_curricula"]  # both dispatched, in order
+
+    # The reconstructed assistant message carries BOTH calls in wire shape.
+    assistant_tool_msgs = [m for m in result.messages if m["role"] == "assistant" and m.get("tool_calls")]
+    assert len(assistant_tool_msgs) == 1
+    assert [tc["id"] for tc in assistant_tool_msgs[0]["tool_calls"]] == ["call_a", "call_b"]
+    assert [tc["function"]["name"] for tc in assistant_tool_msgs[0]["tool_calls"]] == [
+        "list_students", "list_curricula",
+    ]
+
+    # BOTH get a paired tool result with matching ids.
+    tool_msgs = [m for m in result.messages if m["role"] == "tool"]
+    assert [m["tool_call_id"] for m in tool_msgs] == ["call_a", "call_b"]
+
+    # ...and both results were already in the transcript the 2nd chat_tools saw
+    # (i.e. dispatched BEFORE the next call, not after).
+    second_call_tool_ids = [m["tool_call_id"] for m in fake_provider.calls[1] if m["role"] == "tool"]
+    assert second_call_tool_ids == ["call_a", "call_b"]
+
+
 # ---------------------------------------------------------------------------
 # (b) guards: unknown tool name, and a tool that raises during dispatch
 # ---------------------------------------------------------------------------
@@ -194,6 +246,40 @@ def test_run_agent_turn_stops_gracefully_at_max_steps(monkeypatch):
     assert result.content  # some graceful, non-empty note — never None/a crash
     assert len(fake_provider.calls) == 3  # exactly max_steps, not more
 
+    # The substituted fallback reply is in the transcript too, not just returned
+    # as `content` — `AgentResult.messages` is documented as the full transcript
+    # Task 4's router persists (while showing `content`), so a fallback reply
+    # that never lands in history would silently vanish next turn (review fix).
+    assert result.messages[-1] == {"role": "assistant", "content": result.content}
+
+
+def test_run_agent_turn_max_steps_returns_present_last_content_without_doubling(monkeypatch):
+    """Companion to the fallback test above: when the capped-out final turn
+    carried BOTH content and a tool_call, that content is ALREADY in `messages`
+    (appended in-loop each step). The max_steps fallthrough must return it as
+    `content` WITHOUT re-appending it (no duplicate assistant message) and must
+    NOT substitute the fallback note — the `last_content is None` guard's other
+    arm (review fix).
+    """
+    def _fake_search_knowledge(db, *, query, **kwargs):
+        return [{"source": "x", "text": "y", "score": 0.5}]
+
+    _stub_tool(monkeypatch, "search_knowledge", _fake_search_knowledge)
+
+    call = ToolCall(id="call_1", name="search_knowledge", arguments={"query": "q"})
+    # Every turn carries content AND a tool_call — never a plain-content stop.
+    turn = AssistantTurn(content="still working on it", tool_calls=[call])
+    fake_provider = _FakeProvider([turn])
+    monkeypatch.setattr(agent_loop, "get_provider", lambda: fake_provider)
+
+    result = run_agent_turn(None, [{"role": "user", "content": "hi"}], max_steps=2)
+
+    assert result.content == "still working on it"  # the real last content, not the fallback
+    # Exactly one assistant message per step (both appended in-loop), and the
+    # fallthrough added NO extra one — proves it didn't double a present content.
+    assistant_msgs = [m for m in result.messages if m["role"] == "assistant"]
+    assert len(assistant_msgs) == 2
+
 
 # ---------------------------------------------------------------------------
 # (d) ToolArgsError -> bounded repair -> graceful giveup, no dangling tool_call
@@ -221,6 +307,9 @@ def test_run_agent_turn_gives_up_gracefully_after_repeated_tool_args_errors(monk
         if m["role"] == "user" and "invalid JSON arguments" in m.get("content", "")
     ]
     assert len(corrective_msgs) == 1
+    # The giveup reply landed in history too, not just returned as `content`
+    # (review fix — same "messages is the full persisted transcript" contract).
+    assert result.messages[-1] == {"role": "assistant", "content": result.content}
 
 
 def test_run_agent_turn_repair_counter_resets_after_a_successful_call(monkeypatch):
