@@ -16,7 +16,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ApiError, generateCurriculum, type BlockNode } from "@/lib/api";
+import { ApiError, getCurriculum, getJob, startCurriculumGeneration, type BlockNode } from "@/lib/api";
 
 interface GenerateDialogProps {
   /** Current UI locale, used only to pre-fill the "language" field — the
@@ -26,13 +26,27 @@ interface GenerateDialogProps {
   onGenerated: (tree: BlockNode) => void;
 }
 
+/** Poll cadence + cap while a curriculum generation job is in flight (Plan 8
+ * Task 4). 150 * 2s ≈ 5 minutes — comfortably above the 49-179s/call the API
+ * measured for the underlying generation. Exceeding the cap doesn't cancel
+ * the job (it keeps running server-side — see
+ * `app.jobs.runner.run_curriculum_job`); it just stops this dialog's own
+ * wait and tells the tutor to check back later (see `stillGenerating`
+ * below). */
+const POLL_INTERVAL_MS = 2000;
+const MAX_POLLS = 150;
+
 /** The "Generate curriculum" trigger + dialog. `POST /curricula/generate`
- * is SLOW — measured at 49-179s/call (guided-JSON against the local LLM,
- * see `lib/api.ts`'s docstring on `generateCurriculum`) — so this is the
- * one dialog in the app that deliberately:
+ * now enqueues a background job and returns a 202 almost immediately (Plan 8
+ * Task 3) — the underlying generation is still the same SLOW guided-JSON
+ * LLM call measured at 49-179s/call (see `lib/api.ts`'s docstring on
+ * `startCurriculumGeneration`), it just runs off the request path now. This
+ * dialog polls `GET /jobs/{job_id}` every ~2s until the job reaches a
+ * terminal status, then fetches the tree via `getCurriculum` — so, same as
+ * before this task, it's still the one dialog in the app that deliberately:
  *  - blocks its own dismissal (`onOpenChange` ignores close attempts) while
- *    the request is in flight, so the pending call is never orphaned by a
- *    stray Escape/backdrop click,
+ *    a submission is in flight (now: enqueue + the whole poll loop), so it's
+ *    never orphaned by a stray Escape/backdrop click,
  *  - disables every field (a `<fieldset disabled>`, which natively cascades
  *    to every input/button inside it) instead of just the submit button,
  *  - shows a persistent `role="status"` banner with the exact
@@ -66,16 +80,36 @@ export function GenerateDialog({ locale, onGenerated }: GenerateDialogProps) {
     setError(null);
     try {
       const hours = Number(targetHours);
-      const tree = await generateCurriculum({
+      const { job_id } = await startCurriculumGeneration({
         title,
         language,
         profile: level ? { level } : {},
         domain: domain || undefined,
         target_minutes_total: targetHours && hours > 0 ? Math.round(hours * 60) : undefined,
       });
-      onGenerated(tree);
-      reset();
-      setOpen(false);
+
+      // Poll until the job reaches a terminal status or we hit the cap —
+      // see the `POLL_INTERVAL_MS`/`MAX_POLLS` docstring above.
+      let job = await getJob(job_id);
+      let polls = 1;
+      while (job.status !== "succeeded" && job.status !== "failed" && polls < MAX_POLLS) {
+        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+        job = await getJob(job_id);
+        polls++;
+      }
+
+      if (job.status === "succeeded") {
+        const tree = await getCurriculum(job.result_root_id!);
+        onGenerated(tree);
+        reset();
+        setOpen(false);
+      } else if (job.status === "failed") {
+        setError(job.error ?? t("error"));
+      } else {
+        // Cap exceeded — the job keeps running server-side; give up waiting
+        // and tell the tutor to check back rather than polling forever.
+        setError(t("stillGenerating"));
+      }
     } catch (err) {
       setError(err instanceof ApiError ? err.detail : t("error"));
     } finally {

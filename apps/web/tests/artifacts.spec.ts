@@ -335,12 +335,18 @@ function makeTreeWithSegment(segmentId: string, title: string, language: string)
   };
 }
 
-/** A trimmed `/curricula` + `/curricula/generate` mock — just enough to get
- * a fixed tree (with a known segment id) onto the board, for the segment-
- * artifact test below. Same predicate-route reasoning as `mockArtifactsApi`
- * above (kept local to this file rather than imported from
- * `cockpit.spec.ts`, matching this test suite's existing per-file
- * self-containment convention). */
+/** A trimmed `/curricula` + `/curricula/generate` + `/jobs/{id}` mock — just
+ * enough to get a fixed tree (with a known segment id) onto the board, for
+ * the segment-artifact test below. Mirrors the async generate-then-poll
+ * contract `cockpit.spec.ts`'s own `mockCurriculaApi` covers in full (Plan 8
+ * Task 4) — `POST /curricula/generate` returns a 202 `{job_id, status:
+ * "pending"}`, `GET /jobs/{id}` resolves "succeeded" on its very first poll
+ * (this test isn't exercising the loading state, so there's no need to make
+ * it wait through a real pending-then-succeeded cycle) with `result_root_id`
+ * set to the fixed tree's own id, and `GET /curricula/{id}` then serves that
+ * tree. Same predicate-route reasoning as `mockArtifactsApi` above (kept
+ * local to this file rather than imported from `cockpit.spec.ts`, matching
+ * this test suite's existing per-file self-containment convention). */
 async function mockCurriculaForSegmentTest(page: Page, tree: FixtureBlockNode) {
   async function handler(route: Route) {
     const req = route.request();
@@ -362,10 +368,41 @@ async function mockCurriculaForSegmentTest(page: Page, tree: FixtureBlockNode) {
     }
     if (pathname === "/curricula/generate" && method === "POST") {
       await route.fulfill({
+        status: 202,
+        contentType: "application/json",
+        headers: CORS_HEADERS,
+        body: JSON.stringify({ job_id: randomUUID(), status: "pending" }),
+      });
+      return;
+    }
+    const jobMatch = pathname.match(/^\/jobs\/([^/]+)$/);
+    if (jobMatch && method === "GET") {
+      const now = new Date().toISOString();
+      await route.fulfill({
         status: 200,
         contentType: "application/json",
         headers: CORS_HEADERS,
-        body: JSON.stringify(tree),
+        body: JSON.stringify({
+          id: jobMatch[1],
+          kind: "curriculum",
+          status: "succeeded",
+          result_root_id: tree.id,
+          error: null,
+          error_kind: null,
+          created_at: now,
+          updated_at: now,
+        }),
+      });
+      return;
+    }
+    const getMatch = pathname.match(/^\/curricula\/([^/]+)$/);
+    if (getMatch && method === "GET") {
+      const found = getMatch[1] === tree.id ? tree : null;
+      await route.fulfill({
+        status: found ? 200 : 404,
+        contentType: "application/json",
+        headers: CORS_HEADERS,
+        body: JSON.stringify(found ?? { detail: "not found" }),
       });
       return;
     }
@@ -378,7 +415,9 @@ async function mockCurriculaForSegmentTest(page: Page, tree: FixtureBlockNode) {
   }
 
   await page.route(
-    (url) => url.origin === API_ORIGIN && (url.pathname === "/curricula" || url.pathname.startsWith("/curricula/")),
+    (url) =>
+      url.origin === API_ORIGIN &&
+      (url.pathname === "/curricula" || url.pathname.startsWith("/curricula/") || url.pathname.startsWith("/jobs/")),
     handler,
   );
 }

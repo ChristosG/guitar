@@ -201,16 +201,42 @@ interface CurriculumListItemFixture {
   created_at: string;
 }
 
-/** Mocks `/curricula`, `/curricula/generate`, `/curricula/{id}` and
- * `/blocks/{id}` (PATCH). `generateDelayMs` deliberately delays the
- * generate response so the loading-state assertions in the test below are
- * exercised for real, not raced past. */
+/** Real backend copy (`app.jobs.runner.run_curriculum_job`'s
+ * `GuidedJSONError` branch) reused as the fixture's failure message, so the
+ * failed-job test below is directly comparable to a real error. */
+const JOB_FAILURE_MESSAGE =
+  "Curriculum generation failed (model returned invalid/truncated output). Try again.";
+
+/** Mocks `/curricula`, `/curricula/generate`, `/jobs/{id}` and
+ * `/curricula/{id}`/`/blocks/{id}` (PATCH) — the full async
+ * generate-then-poll contract (Plan 8 Task 4): `POST /curricula/generate`
+ * returns a 202 `{job_id, status: "pending"}` immediately (no tree body any
+ * more — see `lib/api.ts`'s `startCurriculumGeneration`); `GET /jobs/{id}`
+ * answers "pending" for `pendingPolls` calls, then a terminal status. This
+ * is what makes the "non-frozen loading state" assertions below genuine
+ * rather than raced past: the dialog's own poll loop waits ~2s between
+ * calls (`generate-dialog.tsx`), so with the default `pendingPolls: 1` the
+ * loading state is provably visible across a real wait, not just a
+ * synchronous tick.
+ *
+ * `jobOutcome: "succeeded"` (default) resolves with `result_root_id` set to
+ * the generated tree's root id, fetchable via the `GET /curricula/{id}`
+ * handler below — and only THEN is the new template added to the
+ * `/curricula` list, mirroring `run_curriculum_job`'s real behavior (the row
+ * is persisted inside the background job, not at enqueue time).
+ * `jobOutcome: "failed"` resolves with `error`/`error_kind` set and no
+ * `result_root_id` — nothing is added to `templates`. */
 async function mockCurriculaApi(
   page: Page,
-  { templates = [] as CurriculumListItemFixture[], generateDelayMs = 800 } = {},
+  {
+    templates = [] as CurriculumListItemFixture[],
+    pendingPolls = 1,
+    jobOutcome = "succeeded" as "succeeded" | "failed",
+  } = {},
 ) {
   let currentTree: FixtureBlock | null = null;
-  const calls = { list: 0, generate: 0, get: 0, patch: 0 };
+  let jobPolls = 0;
+  const calls = { list: 0, generate: 0, job: 0, get: 0, patch: 0 };
   const lastBody: { generate?: unknown; patch?: unknown } = {};
   const unexpected: string[] = [];
 
@@ -237,23 +263,78 @@ async function mockCurriculaApi(
       calls.generate++;
       const payload = req.postDataJSON() as { title: string; language: string };
       lastBody.generate = payload;
-      const tree = makeGeneratedTree(payload.title, payload.language);
-      currentTree = tree;
-      templates.unshift({
-        id: tree.id,
-        title: tree.title,
-        language: tree.language,
-        target_profile: null,
-        created_at: new Date().toISOString(),
+      currentTree = makeGeneratedTree(payload.title, payload.language);
+      jobPolls = 0;
+      await route.fulfill({
+        status: 202,
+        contentType: "application/json",
+        headers: CORS_HEADERS,
+        body: JSON.stringify({ job_id: randomUUID(), status: "pending" }),
       });
-      if (generateDelayMs > 0) {
-        await new Promise((resolve) => setTimeout(resolve, generateDelayMs));
+      return;
+    }
+    const jobMatch = pathname.match(/^\/jobs\/([^/]+)$/);
+    if (jobMatch && method === "GET") {
+      calls.job++;
+      jobPolls++;
+      const base = { id: jobMatch[1], kind: "curriculum", created_at: new Date().toISOString() };
+      const updated_at = new Date().toISOString();
+      if (jobPolls <= pendingPolls) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          headers: CORS_HEADERS,
+          body: JSON.stringify({
+            ...base,
+            updated_at,
+            status: "pending",
+            result_root_id: null,
+            error: null,
+            error_kind: null,
+          }),
+        });
+        return;
+      }
+      if (jobOutcome === "failed") {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          headers: CORS_HEADERS,
+          body: JSON.stringify({
+            ...base,
+            updated_at,
+            status: "failed",
+            result_root_id: null,
+            error: JOB_FAILURE_MESSAGE,
+            error_kind: "upstream",
+          }),
+        });
+        return;
+      }
+      // succeeded — only now does the generated curriculum "exist" for the
+      // template list, mirroring the real background job's timing (see this
+      // function's docstring above).
+      if (currentTree) {
+        templates.unshift({
+          id: currentTree.id,
+          title: currentTree.title,
+          language: currentTree.language,
+          target_profile: null,
+          created_at: updated_at,
+        });
       }
       await route.fulfill({
         status: 200,
         contentType: "application/json",
         headers: CORS_HEADERS,
-        body: JSON.stringify(tree),
+        body: JSON.stringify({
+          ...base,
+          updated_at,
+          status: "succeeded",
+          result_root_id: currentTree?.id ?? null,
+          error: null,
+          error_kind: null,
+        }),
       });
       return;
     }
@@ -309,6 +390,7 @@ async function mockCurriculaApi(
   await page.route(`${API_ORIGIN}/curricula`, handler);
   await page.route(`${API_ORIGIN}/curricula/**`, handler);
   await page.route(`${API_ORIGIN}/blocks/**`, handler);
+  await page.route(`${API_ORIGIN}/jobs/**`, handler);
 
   return { calls, lastBody, unexpected };
 }
@@ -395,8 +477,9 @@ test.describe("curricula (mocked API)", () => {
     await page.getByTestId("generate-hours").fill("6");
     await page.getByTestId("generate-submit").click();
 
-    // Clear, non-frozen loading state while the (deliberately delayed) mock
-    // request is in flight — this is the brief's core requirement.
+    // Clear, non-frozen loading state while the job is enqueued and polled
+    // (the mock answers "pending" once, then "succeeded" — see
+    // `mockCurriculaApi`'s docstring) — this is the brief's core requirement.
     await expect(page.getByTestId("generate-loading")).toBeVisible();
     await expect(page.getByTestId("generate-submit")).toBeDisabled();
     await expect(page.getByTestId("generate-title")).toBeDisabled();
@@ -421,6 +504,10 @@ test.describe("curricula (mocked API)", () => {
     await expect(page.getByTestId("block-card-title").filter({ hasText: "Cables and Signal Integrity" })).toBeVisible();
 
     expect(mock.calls.generate).toBe(1);
+    // Exactly 2 polls: the mock's default `pendingPolls: 1` answers "pending"
+    // once, then "succeeded" — proving the dialog actually polled `GET
+    // /jobs/{id}` rather than trusting the enqueue response alone.
+    expect(mock.calls.job).toBe(2);
     const genBody = mock.lastBody.generate as {
       title: string;
       language: string;
@@ -445,6 +532,34 @@ test.describe("curricula (mocked API)", () => {
     ).toBeVisible();
     expect(mock.calls.patch).toBe(1);
     expect(mock.lastBody.patch).toEqual({ title: "Tone Shaping Fundamentals (Revised)" });
+
+    expect(mock.unexpected).toEqual([]);
+  });
+
+  test("shows the job's error and keeps the dialog open when generation fails", async ({ page }) => {
+    const mock = await mockCurriculaApi(page, { templates: [], jobOutcome: "failed" });
+
+    await page.goto("/en/today");
+    await page.getByTestId("nav-curricula").click();
+    await expect(page).toHaveURL(/\/en\/curricula$/);
+
+    await page.getByTestId("curricula-generate-button").click();
+    await page.getByTestId("generate-title").fill("Broken Curriculum");
+    await page.getByTestId("generate-language").fill("en");
+    await page.getByTestId("generate-submit").click();
+
+    await expect(page.getByTestId("generate-loading")).toBeVisible();
+    await expect(page.getByTestId("generate-error")).toHaveText(JOB_FAILURE_MESSAGE, { timeout: 10_000 });
+
+    // NOT the success handoff: the dialog stays open and re-submittable.
+    await expect(page.getByTestId("generate-dialog")).toBeVisible();
+    await expect(page.getByTestId("generate-submit")).toBeEnabled();
+    expect(mock.calls.generate).toBe(1);
+    expect(mock.calls.job).toBe(2); // pending, then failed
+
+    // Nothing was generated: board and template list are untouched.
+    await expect(page.getByTestId("board-empty")).toBeVisible();
+    await expect(page.getByTestId("templates-empty")).toBeVisible();
 
     expect(mock.unexpected).toEqual([]);
   });

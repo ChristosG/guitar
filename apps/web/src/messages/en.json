@@ -93,6 +93,7 @@
       "cancel": "Cancel",
       "submit": "Generate",
       "generating": "Generating your curriculum — this can take a minute…",
+      "stillGenerating": "Still generating — reopen this dialog later to check on it.",
       "error": "Could not generate the curriculum."
     },
     "tree": {

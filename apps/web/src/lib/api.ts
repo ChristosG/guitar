@@ -267,6 +267,31 @@ export interface GenerateCurriculumInput {
   target_minutes_total?: number | null;
 }
 
+/** `GET /jobs/{id}` response shape — mirrors the API's `schemas/jobs.py`'s
+ * `JobOut` exactly. The poll target for async generation jobs (curriculum
+ * generation today — see `startCurriculumGeneration` below). `status` is
+ * `pending | running | succeeded | failed` on the API, but kept as a plain
+ * `string` here for the same reason `BlockNode.kind`/`ArtifactOut.kind` are:
+ * an unrecognized future status should still round-trip instead of failing
+ * a type check. */
+export interface JobOut {
+  id: string;
+  kind: string;
+  status: string;
+  result_root_id: string | null;
+  error: string | null;
+  error_kind: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** `POST /curricula/generate`'s 202 response — mirrors `schemas/jobs.py`'s
+ * `JobAccepted`, just enough for the caller to start polling `getJob`. */
+export interface JobAccepted {
+  job_id: string;
+  status: string;
+}
+
 export interface BlockUpdateInput {
   title?: string;
   body?: string | null;
@@ -285,14 +310,25 @@ export function listCurricula(): Promise<CurriculumListItem[]> {
   return request<CurriculumListItem[]>("/curricula");
 }
 
-/** SLOW: the API measured this at 49-179s/call (guided-JSON generation
- * against the local LLM) — callers MUST show a clear, non-frozen loading
- * state while this is in flight (see `components/curriculum/generate-dialog.tsx`). */
-export function generateCurriculum(input: GenerateCurriculumInput): Promise<BlockNode> {
-  return request<BlockNode>("/curricula/generate", {
+/** Enqueues curriculum generation (Plan 8 Task 3/4): `generate_curriculum`
+ * itself is still the same SLOW guided-JSON LLM call measured at
+ * 49-179s/call, but that work now runs off the request path — this call
+ * returns a 202 `JobAccepted` almost immediately. Callers MUST poll
+ * `getJob(job_id)` until `status` is `"succeeded"` (then fetch the tree via
+ * `getCurriculum(result_root_id)`) or `"failed"`, and MUST show a clear,
+ * non-frozen loading state for the whole wait (see
+ * `components/curriculum/generate-dialog.tsx`'s poll loop). */
+export function startCurriculumGeneration(input: GenerateCurriculumInput): Promise<JobAccepted> {
+  return request<JobAccepted>("/curricula/generate", {
     method: "POST",
     body: JSON.stringify(input),
   });
+}
+
+/** Poll target for `startCurriculumGeneration` (and any future async job
+ * kind — `JobOut.kind` distinguishes them). */
+export function getJob(jobId: string): Promise<JobOut> {
+  return request<JobOut>(`/jobs/${jobId}`);
 }
 
 export function getCurriculum(rootId: string): Promise<BlockNode> {
@@ -413,11 +449,12 @@ export function createArtifact(input: CreateArtifactInput): Promise<ArtifactOut>
   });
 }
 
-/** Fast relative to `generateCurriculum` above — one spec, not a nested tree
- * (a chord diagram or tone recipe is a single small `guided_json` call,
- * seconds not minutes — see deploy-recon notes) — but still genuinely async,
- * so callers still need *a* loading state, just not `generateCurriculum`'s
- * blocking-dialog treatment (see `components/artifacts/generate-form.tsx`). */
+/** Fast relative to `startCurriculumGeneration` above — one spec, not a
+ * nested tree (a chord diagram or tone recipe is a single small
+ * `guided_json` call, seconds not minutes — see deploy-recon notes) — but
+ * still genuinely async, so callers still need *a* loading state, just not
+ * the curriculum dialog's poll-loop/blocking-dialog treatment (see
+ * `components/artifacts/generate-form.tsx`). */
 export function generateArtifact(input: GenerateArtifactInput): Promise<ArtifactOut> {
   return request<ArtifactOut>("/artifacts/generate", {
     method: "POST",
