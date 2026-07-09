@@ -23,16 +23,17 @@ detail would have:
     `(openai.APIConnectionError, httpx.TransportError)` -> "timeout"
     anything else                                       -> "internal"
 
-That last `except Exception` is deliberately broad — the ONE place in this
-codebase that catches wholesale (every other handler here, and in the
-endpoints this mirrors, catches specific exception types only, per this
-codebase's no-auth-PoC posture of not blanket-catching `Exception`). A
-background task has no HTTP caller to surface an unhandled error to: if
-anything escapes uncaught here, the job is silently stranded in "running"
-forever with nothing left to ever flip it to "failed". The real exception is
-logged (`log.exception`) for diagnosis; only a generic message is stored on
-the row, mirroring `app.brain.ingest.ingest_source`'s swallow-and-record
-pattern for the same status-lifecycle-must-never-hang reason.
+That last `except Exception` is deliberately broad — it's the job layer's
+swallow-and-record boundary (the same role `app.brain.ingest.ingest_source`
+plays for its own status lifecycle), not the specific-exception-only style
+the synchronous endpoints this mirrors use. A background task has no HTTP
+caller to surface an unhandled error to: if anything escapes uncaught here,
+the job is silently stranded in "running" forever with nothing left to ever
+flip it to "failed". The real exception is logged (`log.exception`) for
+diagnosis; only a generic message is stored on the row — and the
+failure-recording itself is wrapped in a best-effort guard (see the nested
+try/except below), so a DB that has gone unreachable at exactly that moment
+can't re-strand the job by making the recovery throw.
 """
 import logging
 import uuid
@@ -86,16 +87,41 @@ def run_curriculum_job(job_id: uuid.UUID) -> None:
             # A failure inside generate_curriculum's own DB writes (e.g. mid
             # _persist_tree) can leave this Session's transaction needing a
             # rollback before it's usable again (SQLAlchemy invalidates the
-            # Session on a flush-time error) — rollback, then re-fetch `job`
-            # (rollback expires everything in the identity map) before
-            # recording failure. Mirrors ingest_source's identical recovery
-            # step, same reason.
-            db.rollback()
-            job = db.get(GenerationJob, job_id)
-            job.status = "failed"
-            job.error_kind = "internal"
-            job.error = "Curriculum generation failed unexpectedly. Try again."
-            db.commit()
+            # Session on a flush-time error), and any partial writes it did
+            # commit-less-ly flush must be discarded rather than swept into
+            # this failure-record's commit — so rollback first, then re-fetch
+            # `job` (rollback expires everything in the identity map) before
+            # recording failure. Mirrors ingest_source's identical recovery.
+            try:
+                db.rollback()
+                job = db.get(GenerationJob, job_id)
+                if job is None:
+                    # Row vanished between the initial load and here (e.g. a
+                    # concurrent delete) — nothing left to record the failure
+                    # on; same reasoning as the initial-load guard above.
+                    log.warning(
+                        "run_curriculum_job: job_id=%s gone during failure recovery", job_id)
+                    return
+                job.status = "failed"
+                job.error_kind = "internal"
+                job.error = "Curriculum generation failed unexpectedly. Try again."
+                db.commit()
+            except Exception:
+                # Best-effort recovery, mirroring ingest_source's own final
+                # guard: this recovery block itself talks to the DB
+                # (rollback/get/commit) — if THAT also fails (e.g. the
+                # connection that just errored is now unusable), it must not
+                # propagate either, or an uncaught exception here would strand
+                # the job in "running" forever, the exact outcome this whole
+                # broad catch exists to prevent. Swallow + log: the row may be
+                # left at "running" in this rare double-failure case — Task 3's
+                # startup sweep is the backstop for that residual strand — but
+                # that is strictly better than crashing the background task.
+                log.warning(
+                    "run_curriculum_job: failed to record failure status for job_id=%s",
+                    job_id,
+                    exc_info=True,
+                )
         else:
             job.status = "succeeded"
             job.result_root_id = root_id

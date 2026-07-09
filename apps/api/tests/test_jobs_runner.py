@@ -41,6 +41,7 @@ except Exception:
 import app.jobs.runner as runner
 import app.models  # noqa: F401  register every model's table on Base.metadata
 from app.llm.errors import GuidedJSONError
+from app.models.block import Block
 from app.models.generation_job import GenerationJob
 
 
@@ -135,6 +136,7 @@ def test_run_curriculum_job_transport_error_sets_failed_timeout(monkeypatch, exc
     assert got.status == "failed"
     assert got.error_kind == "timeout"
     assert got.error and "timed out" in got.error.lower()
+    assert got.result_root_id is None  # a failed job never carries a result
 
 
 def test_run_curriculum_job_generic_exception_sets_failed_internal(monkeypatch):
@@ -152,6 +154,7 @@ def test_run_curriculum_job_generic_exception_sets_failed_internal(monkeypatch):
     assert got.error_kind == "internal"
     assert got.error
     assert "boom" not in got.error  # real detail is logged, not stored on the row
+    assert got.result_root_id is None  # a failed job never carries a result
 
 
 def test_run_curriculum_job_unknown_job_id_is_a_defensive_noop():
@@ -160,3 +163,85 @@ def test_run_curriculum_job_unknown_job_id_is_a_defensive_noop():
     runner must not raise if it somehow happens (see its docstring).
     """
     runner.run_curriculum_job(uuid.uuid4())  # must not raise
+
+
+def test_run_curriculum_job_rolls_back_partial_writes_before_recording_internal_failure(monkeypatch):
+    """The `db.rollback()` in the internal-failure branch earns its place.
+
+    Unlike the other failure tests (which monkeypatch generate_curriculum to
+    raise BEFORE touching the DB, so the rollback is a no-op), this one makes
+    the generation dirty the runner's OWN session with a real INSERT — as the
+    live `_persist_tree` does mid-tree — and THEN raise. Without the rollback,
+    the failure-recording `db.commit()` would sweep that orphaned partial
+    write into the DB alongside the failed status; with it, the write is
+    discarded. Asserts both the failed/internal outcome AND that the stray
+    Block was NOT persisted.
+    """
+    job = _create_job()
+    stray_block_id = uuid.uuid4()
+
+    def _dirty_then_raise(db, **kwargs):
+        db.add(Block(id=stray_block_id, kind="course", title="partial", order=0, language="en"))
+        db.flush()  # emit the INSERT into the transaction (mirrors _persist_tree's own flush)
+        raise RuntimeError("blew up after a partial write")
+
+    monkeypatch.setattr(runner, "generate_curriculum", _dirty_then_raise)
+
+    runner.run_curriculum_job(job.id)
+
+    got = _reread(job.id)
+    assert got.status == "failed"
+    assert got.error_kind == "internal"
+
+    # The orphaned partial write was rolled back, not committed alongside the
+    # failure record — proven via a fresh session.
+    db = SessionLocal()
+    try:
+        assert db.get(Block, stray_block_id) is None
+    finally:
+        db.close()
+
+
+def test_run_curriculum_job_swallows_db_failure_during_recovery(monkeypatch):
+    """The recovery block is itself best-effort guarded.
+
+    If the DB is unreachable at the exact moment the runner tries to RECORD
+    the failure (the recovery rollback/re-fetch/commit), run_curriculum_job
+    must still NOT propagate — otherwise the job is re-stranded in "running",
+    the precise outcome this whole layer exists to prevent. Simulated by
+    letting the first commit (status="running") succeed but making the second
+    (the recovery commit) raise; the nested guard must swallow it.
+    """
+    job = _create_job()
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("generation blew up")
+
+    monkeypatch.setattr(runner, "generate_curriculum", _raise)
+
+    real_session_factory = runner.SessionLocal
+
+    def _session_that_fails_on_recovery_commit():
+        db = real_session_factory()
+        real_commit = db.commit
+        calls = {"n": 0}
+
+        def _commit():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return real_commit()  # the status="running" commit must succeed
+            raise RuntimeError("db gone during recovery commit")
+
+        db.commit = _commit
+        return db
+
+    monkeypatch.setattr(runner, "SessionLocal", _session_that_fails_on_recovery_commit)
+
+    runner.run_curriculum_job(job.id)  # must NOT raise — the guard swallows the recovery failure
+
+    # The recovery commit never landed, so the row is left at "running" (the
+    # residual strand Task 3's startup sweep is the backstop for) — not
+    # crashed, not silently "succeeded". `_reread` uses app.db.SessionLocal
+    # (unpatched), so it sees the real committed state.
+    got = _reread(job.id)
+    assert got.status == "running"
