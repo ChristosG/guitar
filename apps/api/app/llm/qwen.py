@@ -7,7 +7,8 @@ from openai import OpenAI
 from app.config import settings
 from app.llm.base import LLMProvider
 from app.llm.embeddings import l2_normalize, query_instruct
-from app.llm.errors import GuidedJSONError
+from app.llm.errors import GuidedJSONError, ToolArgsError
+from app.llm.tools_types import AssistantTurn, ToolCall
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +75,47 @@ class QwenVLLM(LLMProvider):
             raise GuidedJSONError(
                 f"guided_json: invalid JSON (finish_reason={choice.finish_reason!r}): {e}"
             ) from e
+
+    def chat_tools(self, messages, tools, *, tool_choice="auto", temperature=0.3) -> AssistantTurn:
+        """Tool-calling (function-calling) turn for Task 2's ReAct loop: plain
+        OpenAI-protocol `tools=`/`tool_choice=` — vLLM parses the model's tool
+        calls server-side (launched with `--enable-auto-tool-choice
+        --tool-call-parser qwen3_coder`; live-probed working against this
+        exact server, see `/mnt/nvme2TB/vllm_interract/reference/
+        agentic-gotchas.md` §9 and `examples/tool_calling_minimal.py`). The
+        loop drives this in a call -> run tools -> feed results back -> repeat
+        cycle; this method only makes the one call and returns a parsed
+        `AssistantTurn` — the loop owns dispatch and history-building.
+
+        `enable_thinking: False` (same as `chat`/`guided_json`) coexists with
+        `tools=` on this infra (agentic-gotchas.md §7) — no `<think>` noise to
+        strip out of tool-call turns.
+
+        A tool call's `function.arguments` is a JSON *string* per the OpenAI
+        SDK shape; this parses it eagerly so every caller gets a dict, never
+        a string to re-parse. The 9B does occasionally emit malformed
+        arguments JSON (agentic-gotchas.md §5) — that raises `ToolArgsError`
+        (carrying the tool name + raw string) instead of letting a raw
+        `JSONDecodeError` surface, so the loop can do bounded repair instead
+        of crashing.
+        """
+        resp = self._client.chat.completions.create(
+            model=settings.llm_model,
+            messages=messages,
+            tools=tools,
+            tool_choice=tool_choice,
+            temperature=temperature,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        msg = resp.choices[0].message
+        tool_calls = []
+        for tc in msg.tool_calls or []:
+            try:
+                arguments = json.loads(tc.function.arguments)
+            except json.JSONDecodeError as e:
+                raise ToolArgsError(tool_name=tc.function.name, raw=tc.function.arguments) from e
+            tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=arguments))
+        return AssistantTurn(content=msg.content, tool_calls=tool_calls)
 
     def embed(self, texts, *, is_query=False) -> list[list[float]]:
         inputs = [query_instruct(t) for t in texts] if is_query else list(texts)

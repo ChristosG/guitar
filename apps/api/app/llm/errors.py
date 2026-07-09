@@ -20,3 +20,26 @@ class GuidedJSONError(Exception):
     ("we/the network didn't get a response in time, retry") — both distinct
     from an actual unhandled 500.
     """
+
+
+class ToolArgsError(Exception):
+    """Raised by `LLMProvider.chat_tools` when a tool call's `arguments`
+    string fails to parse as JSON. The 9B model occasionally emits malformed
+    arguments JSON (empirically observed — see
+    `/mnt/nvme2TB/vllm_interract/reference/agentic-gotchas.md` §5); this is
+    NOT a crash-worthy condition, so `chat_tools` raises this typed error
+    instead of letting a raw `json.JSONDecodeError` surface. Task 2's ReAct
+    loop catches it and does *bounded* repair — feeds an "ERROR: invalid
+    arguments" tool result back so the model can self-correct on the next
+    step, capping consecutive failures rather than burning the whole loop
+    budget on one stuck call.
+
+    Carries the offending `tool_name` and the raw (unparsed) `arguments`
+    string so the loop can build that repair message without re-deriving
+    them from the original response.
+    """
+
+    def __init__(self, tool_name: str, raw: str) -> None:
+        self.tool_name = tool_name
+        self.raw = raw
+        super().__init__(f"chat_tools: malformed arguments JSON for tool {tool_name!r}: {raw!r}")
