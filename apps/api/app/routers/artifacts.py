@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.artifacts.generate import derive_title, generate_artifact
+from app.artifacts.generate import TITLE_MAX_LEN, derive_title, generate_artifact
 from app.artifacts.specs import validate_spec
 from app.db import get_db
 from app.llm.errors import GuidedJSONError
@@ -68,7 +68,12 @@ def create_artifact(payload: ArtifactCreate, db: Session = Depends(get_db)) -> A
         # mirrors routers.curriculum.update_block's identical empty-title guard.
         raise HTTPException(status_code=422, detail="title cannot be empty")
     else:
-        title = payload.title
+        # Clamp the same way derive_title clamps a generated title — a
+        # client-supplied title can exceed Artifact.title's column cap
+        # (String(300)) just as easily as an LLM-emitted spec name can, and
+        # would otherwise reach Postgres uncaught (StringDataRightTruncation,
+        # not a ValueError, so the except ValueError above never sees it).
+        title = payload.title[:TITLE_MAX_LEN]
 
     artifact = Artifact(
         kind=payload.kind, spec=spec, title=title, tags=payload.tags, block_id=payload.block_id,

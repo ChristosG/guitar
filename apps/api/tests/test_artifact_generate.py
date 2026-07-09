@@ -16,7 +16,7 @@ from pydantic import ValidationError
 from sqlalchemy import text
 
 import app.artifacts.generate as artifact_generate
-from app.artifacts.generate import _build_messages, derive_title, generate_artifact
+from app.artifacts.generate import TITLE_MAX_LEN, _build_messages, derive_title, generate_artifact
 from app.brain.retrieve import Hit
 from app.db import Base, SessionLocal, engine
 from app.models.artifact import Artifact
@@ -109,6 +109,26 @@ def test_derive_title_falls_back_to_prompt_when_no_name_like_field():
 
 def test_derive_title_falls_back_to_generic_label_when_nothing_available():
     assert derive_title("signal_chain", {"nodes": []}, None) == "signal_chain artifact"
+
+
+def test_derive_title_truncates_overlong_spec_name_field():
+    """Fix 1 (Plan 4 final review): an LLM-emitted spec `name`/`title` can
+    exceed `Artifact.title`'s column cap just as easily as a long prompt
+    can — previously only the prompt fallback below was truncated, so a
+    long `name` reached Postgres uncaught (StringDataRightTruncation, not a
+    ValueError, so callers' `except ValueError` never sees it).
+    """
+    long_name = "G major " * 60  # 480 chars, well past TITLE_MAX_LEN
+    assert len(long_name) > TITLE_MAX_LEN
+    title = derive_title("chord_diagram", {"name": long_name}, None)
+    assert title == long_name[:TITLE_MAX_LEN]
+    assert len(title) == TITLE_MAX_LEN
+
+
+def test_derive_title_truncates_overlong_tone_recipe_artist_song_join():
+    spec = {"artist": "Stevie Ray Vaughan " * 10, "song": "Texas Flood " * 10}
+    title = derive_title("tone_recipe", spec, None)
+    assert len(title) == TITLE_MAX_LEN
 
 
 # ---------------------------------------------------------------------------
@@ -259,5 +279,39 @@ def test_generate_artifact_persists_block_id_and_derived_title(monkeypatch):
         assert got is not None
         assert got.spec["name"] == "G"
         assert got.source == "ai"
+    finally:
+        db2.close()
+
+
+def test_generate_artifact_truncates_overlong_spec_name_title(monkeypatch):
+    """Fix 1 (Plan 4 final review): `guided_json` only constrains output
+    *shape*, not length (same "critical design point" as the repair-retry
+    tests above) — a real chord `name` longer than `Artifact.title`'s
+    column cap (String(300)) must be truncated before `db.commit()`, or the
+    commit itself raises StringDataRightTruncation/DataError uncaught (not
+    a ValueError, so this never reached the repair-retry or router error
+    handling at all).
+    """
+    long_name = "G major " * 60  # 480 chars, well past TITLE_MAX_LEN
+    overlong_spec = {**_VALID_G, "name": long_name}
+    fake = _FakeProvider([overlong_spec])
+    monkeypatch.setattr(artifact_generate, "get_provider", lambda: fake)
+
+    db = SessionLocal()
+    try:
+        artifact = generate_artifact(db, kind="chord_diagram", prompt="G major open chord")
+        assert artifact.title == long_name[:TITLE_MAX_LEN]
+        assert len(artifact.title) == TITLE_MAX_LEN
+        artifact_id = artifact.id
+    finally:
+        db.close()
+
+    # Fresh session — confirms it's genuinely persisted at the clamped
+    # length, not just an in-memory attribute the commit never actually wrote.
+    db2 = SessionLocal()
+    try:
+        got = db2.get(Artifact, artifact_id)
+        assert got is not None
+        assert len(got.title) == TITLE_MAX_LEN
     finally:
         db2.close()

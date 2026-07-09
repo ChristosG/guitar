@@ -13,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
+from app.artifacts.generate import TITLE_MAX_LEN
 from app.brain.ingest import IngestPayload, ingest_source
 from app.db import Base, SessionLocal, engine
 from app.main import app
@@ -97,6 +98,30 @@ def test_create_artifact_rejects_empty_string_title():
         "kind": "chord_diagram", "spec": _VALID_CHORD_SPEC, "title": "",
     })
     assert r.status_code == 422, r.text
+
+
+def test_create_artifact_truncates_title_over_column_limit():
+    """Fix 1 (Plan 4 final review): a client-supplied `title` longer than
+    `Artifact.title`'s column cap (String(300)) must be clamped the same
+    way `derive_title` clamps a generated one — otherwise it reaches
+    Postgres uncaught (StringDataRightTruncation, not a ValueError, so
+    create_artifact's own `except ValueError` never sees it) and the
+    request 500s instead of succeeding.
+    """
+    long_title = "T" * (TITLE_MAX_LEN + 100)
+    r = client.post("/artifacts", json={
+        "kind": "chord_diagram", "spec": _VALID_CHORD_SPEC, "title": long_title,
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["title"] == long_title[:TITLE_MAX_LEN]
+    assert len(body["title"]) == TITLE_MAX_LEN
+
+    # Round-trip via a separate GET — genuinely persisted at the clamped
+    # length, not just echoed back by the create response.
+    r2 = client.get(f"/artifacts/{body['id']}")
+    assert r2.status_code == 200, r2.text
+    assert len(r2.json()["title"]) == TITLE_MAX_LEN
 
 
 def test_create_artifact_with_valid_block_id_persists_link():

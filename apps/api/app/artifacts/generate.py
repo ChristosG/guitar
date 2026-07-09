@@ -22,7 +22,13 @@ from app.models.artifact import Artifact
 
 log = logging.getLogger(__name__)
 
-_TITLE_MAX_LEN = 300  # Artifact.title column cap (String(300))
+# Artifact.title column cap (String(300)). Not `_`-prefixed — unlike this
+# module's other internals — because routers.artifacts.create_artifact
+# imports it too, to clamp a client-supplied title the same way derive_title
+# below clamps every title it derives (see that function's own docstring
+# for the analogous public/private reasoning already applied to derive_title
+# itself).
+TITLE_MAX_LEN = 300
 
 
 def _build_messages(
@@ -77,27 +83,32 @@ def derive_title(kind: str, spec: dict, prompt: str | None) -> str:
     *module-private* `_get_or_create_delivery_root` — this is the opposite
     call: non-trivial, multi-branch logic that would drift if duplicated).
 
-    `Artifact.title` is a NOT NULL column with no default, but not every
-    kind carries an obvious name-like field (`signal_chain` has none at all;
-    `amp_settings.amp` and both `tone_recipe.artist`/`song` are optional and
-    may be absent) — so this tries, in order: a `name` or `title` field on
-    the spec itself (covers chord/scale/gear_card's `name`, tab's `title`),
-    then `tone_recipe`'s artist/song combo, then falls back to the request
-    `prompt` itself (truncated to the column's cap), and only as an absolute
-    last resort a generic label — reachable only for a spec-less kind given
-    neither a title nor a prompt (a `POST /artifacts` call with no `title`
-    for a name-less kind like `signal_chain`).
+    `Artifact.title` is a NOT NULL, `String(300)` column with no default,
+    but not every kind carries an obvious name-like field (`signal_chain`
+    has none at all; `amp_settings.amp` and both `tone_recipe.artist`/`song`
+    are optional and may be absent) — so this tries, in order: a `name` or
+    `title` field on the spec itself (covers chord/scale/gear_card's `name`,
+    tab's `title`), then `tone_recipe`'s artist/song combo, then falls back
+    to the request `prompt` itself, and only as an absolute last resort a
+    generic label — reachable only for a spec-less kind given neither a
+    title nor a prompt (a `POST /artifacts` call with no `title` for a
+    name-less kind like `signal_chain`). EVERY one of those non-generic
+    candidates is truncated to `TITLE_MAX_LEN` before being returned — not
+    just the prompt fallback — since an LLM-emitted spec `name`/`title` (or
+    a long `artist — song` join) can just as easily blow past the column's
+    cap and raise `StringDataRightTruncation` on commit instead of the
+    `ValueError` callers already handle.
     """
     for field in ("name", "title"):
         value = spec.get(field)
         if value:
-            return str(value)
+            return str(value)[:TITLE_MAX_LEN]
     if kind == "tone_recipe":
         label = " — ".join(v for v in (spec.get("artist"), spec.get("song")) if v)
         if label:
-            return label
+            return label[:TITLE_MAX_LEN]
     if prompt and prompt.strip():
-        return prompt.strip()[:_TITLE_MAX_LEN]
+        return prompt.strip()[:TITLE_MAX_LEN]
     return f"{kind} artifact"
 
 

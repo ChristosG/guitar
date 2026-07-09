@@ -57,6 +57,22 @@ def test_validate_chord_diagram_finger_out_of_range_raises():
         validate_spec("chord_diagram", spec)
 
 
+def test_validate_chord_diagram_base_fret_zero_raises():
+    """Regression guard for `ChordDiagramSpec.baseFret`'s `ge=1` constraint:
+    `baseFret: 0` is schema-shaped (a plain int) but not renderable — Task
+    5's real end-to-end LLM generation produced exactly this value, and the
+    client svguitar renderer throws ("Position cannot be less than 1") for
+    anything under 1. Without this constraint (and this test guarding it)
+    such a spec would validate fine and only fail much later, client-side.
+    """
+    spec = {
+        "name": "G", "frets": [3, 2, 0, 0, 0, 3], "fingers": [3, 2, 0, 0, 0, 4],
+        "baseFret": 0,
+    }
+    with pytest.raises(ValidationError):
+        validate_spec("chord_diagram", spec)
+
+
 def test_validate_amp_settings_dial_over_10_raises():
     spec = {"amp": "Fender Twin", "dials": [{"label": "Gain", "value": 11}]}
     with pytest.raises(ValidationError):
