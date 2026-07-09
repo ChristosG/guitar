@@ -25,3 +25,17 @@ class JobOut(BaseModel):
     error_kind: str | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class JobAccepted(BaseModel):
+    """`POST /curricula/generate`'s 202 response body (Plan 8 Task 3) — just
+    enough for the caller to start polling `GET /jobs/{job_id}` (`JobOut`).
+    Kept separate from `JobOut` rather than reusing/subsetting it: at the
+    moment of the 202 nothing else on the row is meaningful yet (no
+    `kind`/timestamps/result/error — `kind` is the one exception, but this
+    endpoint is the only writer of `GenerationJob` rows today so it isn't
+    worth exposing), and a distinct model keeps this response shape stable
+    even if `JobOut` grows fields later.
+    """
+    job_id: UUID
+    status: str

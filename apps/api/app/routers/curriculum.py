@@ -13,18 +13,16 @@ Cloudflare for a single user.
 """
 from uuid import UUID
 
-import httpx
-import openai
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.curriculum.generate import generate_curriculum
 from app.curriculum.segment import segment_block
 from app.db import get_db
-from app.llm.errors import GuidedJSONError
+from app.jobs.runner import run_curriculum_job
 from app.models.block import Block
 from app.models.curriculum import Assignment
+from app.models.generation_job import GenerationJob
 from app.models.student import Student
 from app.schemas.curriculum import (
     AssignRequest,
@@ -34,6 +32,7 @@ from app.schemas.curriculum import (
     CurriculumListItem,
     SegmentRequest,
 )
+from app.schemas.jobs import JobAccepted
 
 router = APIRouter(tags=["curriculum"])
 
@@ -141,55 +140,50 @@ def list_curricula(db: Session = Depends(get_db)) -> list[CurriculumListItem]:
     return [CurriculumListItem.model_validate(b, from_attributes=True) for b in roots]
 
 
-@router.post("/curricula/generate", response_model=BlockTreeOut)
+@router.post("/curricula/generate", response_model=JobAccepted, status_code=202)
 def generate_curriculum_endpoint(
-    payload: CurriculumGenerateRequest, db: Session = Depends(get_db)
-) -> dict:
-    """Plain `def` (sync), not `async def` — deliberately. `generate_
-    curriculum` makes a blocking guided-JSON LLM call measured at
-    49-179s/call (Plan 3 Task 2's report), well past typical request
-    latency. FastAPI runs a `def` path operation in an external threadpool
-    (Starlette's `run_in_threadpool`), so this request's long blocking wait
-    does not block the event loop / other concurrent requests. (Every route
-    in this module and in `routers/knowledge.py` is already plain `def` —
-    this endpoint is just the one where that choice is load-bearing rather
-    than incidental.)
+    payload: CurriculumGenerateRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> JobAccepted:
+    """Enqueue curriculum generation and return immediately (Plan 8 Task 3)
+    — this endpoint no longer runs `generate_curriculum` itself.
+    `generate_curriculum` is a blocking guided-JSON LLM call measured at
+    49-179s/call (Plan 3 Task 2's report), too slow for a synchronous
+    request/response cycle and past Cloudflare's ~100s edge timeout under
+    orange-cloud. Instead, this creates a `GenerationJob(status="pending")`
+    row and schedules `run_curriculum_job` (`app.jobs.runner`, T2 — its own
+    `SessionLocal()`) via `BackgroundTasks`; the actual generation, and its
+    error handling (`GuidedJSONError`/`APIConnectionError`/`TransportError`/
+    anything else -> `error_kind` "upstream"/"timeout"/"internal" on the
+    row), now happens entirely off this request. Poll `GET /jobs/{job_id}`
+    (`routers/jobs.py`) for the outcome; once `status == "succeeded"`,
+    `result_root_id` is the same root id `GET /curricula/{root_id}` used to
+    return here directly.
 
-    Two known failure modes get a typed HTTP mapping instead of surfacing as
-    a raw 500 (review fix): `GuidedJSONError` (the model returned unusable
-    JSON — refused, truncated, or malformed; see `QwenVLLM.guided_json`) maps
-    to 502 ("bad upstream response, retry"); a transport-level timeout or
-    connection failure (`openai.APIConnectionError` from the guided_json call
-    itself — `APITimeoutError` is a subclass, so this also catches a plain
-    timeout — or `httpx.TransportError` from the embed call `search()` makes
-    on the way to grounding the prompt) maps to 504 ("no response in time,
-    retry"). `httpx.TransportError` deliberately excludes `HTTPStatusError`
-    (a real, non-2xx response from the embed server is a different failure
-    mode, not a timeout/connection issue) — anything else still propagates
-    unmapped, per this codebase's no-auth PoC posture of not blanket-catching
-    `Exception`.
+    `db.commit()` happens BEFORE this returns — NOT left for the background
+    task, which Starlette/FastAPI run AFTER the response is sent — so an
+    immediate `GET /jobs/{job_id}` poll is guaranteed to see the row.
+    `run_curriculum_job` is imported at module level specifically so tests
+    can `monkeypatch.setattr("app.routers.curriculum.run_curriculum_job",
+    ...)`: Starlette's `TestClient` runs `BackgroundTasks` in-process, after
+    the response — an unpatched test would trigger a real 49-179s LLM call.
     """
-    try:
-        root_id = generate_curriculum(
-            db,
-            title=payload.title,
-            language=payload.language,
-            profile=payload.profile,
-            domain=payload.domain,
-            target_minutes_total=payload.target_minutes_total,
-        )
-    except GuidedJSONError as e:
-        raise HTTPException(
-            status_code=502,
-            detail="Curriculum generation failed (model returned invalid/truncated output). Try again.",
-        ) from e
-    except (openai.APIConnectionError, httpx.TransportError) as e:
-        raise HTTPException(
-            status_code=504,
-            detail="Curriculum generation timed out. Try again.",
-        ) from e
-    root = _get_block_or_404(db, root_id)
-    return block_to_tree(root)
+    params = {
+        "title": payload.title,
+        "language": payload.language,
+        "profile": payload.profile,
+        "domain": payload.domain,
+        "target_minutes_total": payload.target_minutes_total,
+    }
+    job = GenerationJob(kind="curriculum", status="pending", params=params)
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    background_tasks.add_task(run_curriculum_job, job.id)
+
+    return JobAccepted(job_id=job.id, status=job.status)
 
 
 @router.get("/curricula/{root_id}", response_model=BlockTreeOut)

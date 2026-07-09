@@ -9,8 +9,12 @@ generation is 49-179s/call, see Plan 3 Task 2's report) and is not marked
 marker means 'hits live vLLM' per pyproject.toml — this module only hits the
 DB"). Exactly one test in this module (`test_generate_curriculum_endpoint_
 returns_real_tree`) drives `POST /curricula/generate` against the real
-LLM+embed stack and IS marked `@pytest.mark.integration`.
+LLM+embed stack and IS marked `@pytest.mark.integration` — since Plan 8 Task
+3, that endpoint only enqueues (202 + job_id), so this test polls
+`GET /jobs/{job_id}` until the background runner finishes before asserting
+on the generated tree.
 """
+import time
 import uuid
 
 import pytest
@@ -446,13 +450,34 @@ def test_assign_unknown_student_404s():
 
 # --- POST /curricula/generate (live) ----------------------------------------
 
+def _poll_job_until_terminal(job_id: str, *, timeout_s: float = 240, interval_s: float = 2) -> dict:
+    """Poll `GET /jobs/{job_id}` until it reaches a terminal status
+    (`succeeded`/`failed`) or `timeout_s` elapses. 240s is a generous margin
+    over the 49-179s/call guided-JSON generation measured in Plan 3 Task 2's
+    report — real LLM, so this test is patient rather than flaky.
+    """
+    deadline = time.monotonic() + timeout_s
+    job = None
+    while time.monotonic() < deadline:
+        r = client.get(f"/jobs/{job_id}")
+        assert r.status_code == 200, r.text
+        job = r.json()
+        if job["status"] in ("succeeded", "failed"):
+            return job
+        time.sleep(interval_s)
+    raise AssertionError(f"job {job_id} did not reach a terminal status within {timeout_s}s: {job}")
+
+
 @pytest.mark.integration
 def test_generate_curriculum_endpoint_returns_real_tree():
     """Hits the live LLM+embed stack via POST /curricula/generate — allow it
     to be slow (guided-JSON generation measured at 49-179s/call, see Plan 3
-    Task 2's report). Domain is uuid-tagged per run (not a fixed literal) —
-    this codebase's own documented lesson (progress.md) for avoiding
-    cross-run pollution on this shared, never-torn-down-mid-suite DB.
+    Task 2's report). Since Plan 8 Task 3, the endpoint itself only enqueues
+    and returns 202 immediately, so this polls `GET /jobs/{job_id}` until the
+    background runner finishes before fetching + asserting on the tree.
+    Domain is uuid-tagged per run (not a fixed literal) — this codebase's own
+    documented lesson (progress.md) for avoiding cross-run pollution on this
+    shared, never-torn-down-mid-suite DB.
     """
     domain = f"tone-api-{uuid.uuid4().hex[:8]}"
 
@@ -477,8 +502,21 @@ def test_generate_curriculum_endpoint_returns_real_tree():
             "target_minutes_total": 600,
         },
     )
-    assert r.status_code == 200, r.text
-    tree = r.json()
+    assert r.status_code == 202, r.text
+    body = r.json()
+    assert body["status"] == "pending"
+    job_id = body["job_id"]
+
+    job = _poll_job_until_terminal(job_id)
+    assert job["status"] == "succeeded", (
+        f"generation job failed: error_kind={job.get('error_kind')!r} error={job.get('error')!r}"
+    )
+    root_id = job["result_root_id"]
+    assert root_id
+
+    r2 = client.get(f"/curricula/{root_id}")
+    assert r2.status_code == 200, r2.text
+    tree = r2.json()
 
     assert tree["kind"] == "course"
     assert tree["plane"] == "content"
@@ -500,20 +538,15 @@ def test_generate_curriculum_endpoint_returns_real_tree():
     # The persisted root is a genuine template — checked directly against the DB.
     db2 = SessionLocal()
     try:
-        root = db2.get(Block, uuid.UUID(tree["id"]))
+        root = db2.get(Block, uuid.UUID(root_id))
         assert root.is_template is True
     finally:
         db2.close()
 
-    # GET /curricula/{root} round-trips the same tree via a separate request.
-    r2 = client.get(f"/curricula/{tree['id']}")
-    assert r2.status_code == 200
-    assert r2.json()["id"] == tree["id"]
-
     # And it shows up in the templates list.
     r3 = client.get("/curricula")
     ids = {item["id"] for item in r3.json()}
-    assert tree["id"] in ids
+    assert root_id in ids
 
     print("\nGenerated module titles:", [m["title"] for m in tree["children"]])
     print("Generated lesson titles:", [l["title"] for l in all_lessons])
