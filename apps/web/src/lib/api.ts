@@ -327,3 +327,109 @@ export function assignCurriculum(rootId: string, studentId: string): Promise<Blo
     body: JSON.stringify({ student_id: studentId }),
   });
 }
+
+/**
+ * Typed fetch helpers for the Artifacts API (`/artifacts/*`). Same direct-
+ * from-browser convention as the Knowledge/Curriculum helpers above (see this
+ * file's top docstring) — the Artifacts gallery page and the curriculum
+ * board's per-segment "attach artifact" dialog both call these straight from
+ * client components, so `page.route` sees every request.
+ *
+ * `kind` is deliberately typed as a plain `string` here, not the 7-member
+ * `ArtifactKind` union `components/artifacts/types.ts` defines — same
+ * reasoning as `BlockNode.kind` above: a kind this layer doesn't recognize
+ * should still round-trip instead of failing a type check. Callers that need
+ * the fixed 7-kind picker list import `ArtifactKind`/`ARTIFACT_KINDS` from
+ * `components/artifacts/kinds.ts` instead.
+ *
+ * `blockId` (on `ListArtifactsInput`/`CreateArtifactInput`/
+ * `GenerateArtifactInput`) is camelCase at the call site — unlike e.g.
+ * `SegmentBlockInput.session_minutes`/`GenerateCurriculumInput.
+ * target_minutes_total` above, which mirror their POST body's snake_case
+ * field names 1:1 and are passed straight through via `JSON.stringify
+ * (input)`. Here each function below builds the snake_case `block_id` wire
+ * field itself instead, since callers (the gallery form, the block-card
+ * attach dialog) read far more naturally passing/destructuring `blockId`.
+ * `ArtifactOut` is unaffected by this — it mirrors the response body
+ * verbatim (snake_case `block_id`/`created_at`/...), consistent with every
+ * other `*Out` interface in this file; only these *input* shapes get the
+ * camelCase treatment.
+ */
+
+export interface ArtifactOut {
+  id: string;
+  kind: string;
+  spec: Record<string, unknown>;
+  title: string;
+  tags: string[];
+  source: string;
+  block_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateArtifactInput {
+  kind: string;
+  spec: Record<string, unknown>;
+  title?: string | null;
+  tags?: string[];
+  blockId?: string | null;
+}
+
+export interface GenerateArtifactInput {
+  kind: string;
+  prompt: string;
+  blockId?: string | null;
+  ground?: boolean;
+}
+
+export interface ListArtifactsInput {
+  blockId?: string | null;
+  kind?: string | null;
+}
+
+export function listArtifacts({ blockId, kind }: ListArtifactsInput = {}): Promise<ArtifactOut[]> {
+  const params = new URLSearchParams();
+  if (blockId) params.set("block_id", blockId);
+  if (kind) params.set("kind", kind);
+  const qs = params.toString();
+  return request<ArtifactOut[]>(`/artifacts${qs ? `?${qs}` : ""}`);
+}
+
+export function getArtifact(id: string): Promise<ArtifactOut> {
+  return request<ArtifactOut>(`/artifacts/${id}`);
+}
+
+export function createArtifact(input: CreateArtifactInput): Promise<ArtifactOut> {
+  return request<ArtifactOut>("/artifacts", {
+    method: "POST",
+    body: JSON.stringify({
+      kind: input.kind,
+      spec: input.spec,
+      title: input.title ?? null,
+      tags: input.tags ?? [],
+      block_id: input.blockId ?? null,
+    }),
+  });
+}
+
+/** Fast relative to `generateCurriculum` above — one spec, not a nested tree
+ * (a chord diagram or tone recipe is a single small `guided_json` call,
+ * seconds not minutes — see deploy-recon notes) — but still genuinely async,
+ * so callers still need *a* loading state, just not `generateCurriculum`'s
+ * blocking-dialog treatment (see `components/artifacts/generate-form.tsx`). */
+export function generateArtifact(input: GenerateArtifactInput): Promise<ArtifactOut> {
+  return request<ArtifactOut>("/artifacts/generate", {
+    method: "POST",
+    body: JSON.stringify({
+      kind: input.kind,
+      prompt: input.prompt,
+      block_id: input.blockId ?? null,
+      ground: input.ground ?? false,
+    }),
+  });
+}
+
+export function deleteArtifact(id: string): Promise<void> {
+  return request<void>(`/artifacts/${id}`, { method: "DELETE" });
+}

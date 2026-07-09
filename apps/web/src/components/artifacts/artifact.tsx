@@ -2,9 +2,9 @@ import { useTranslations } from "next-intl";
 import { Card, CardContent } from "@/components/ui/card";
 import { AmpDials } from "./amp-dials";
 import { ChordDiagram } from "./chord-diagram";
+import { LazyTabView } from "./lazy-tab-view";
 import { ScaleDiagram } from "./scale-diagram";
 import { SignalChain } from "./signal-chain";
-import { TabView } from "./tab-view";
 import { ToneRecipeCard } from "./tone-recipe-card";
 import type { AmpSettingsSpec, ChordDiagramSpec, ScaleDiagramSpec, SignalChainSpec, TabSpec, ToneRecipeSpec } from "./types";
 
@@ -32,6 +32,11 @@ function UnsupportedArtifact({ kind }: { kind: string }) {
  * "gear_card", not yet rendered — see types.ts) falls through to a graceful
  * placeholder instead of throwing, since new kinds are expected to reach the
  * client before their renderer lands.
+ *
+ * `"tab"` renders via `LazyTabView`, not `TabView` directly — see that
+ * module's docstring (Task 5's carry-forward on Task 3's per-instance synth-
+ * worker cost). Every other case renders its plain SVG/CSS component
+ * immediately; nothing else about this switch changed.
  */
 export function Artifact({ kind, spec }: { kind: string; spec: unknown }) {
   switch (kind) {
@@ -40,7 +45,7 @@ export function Artifact({ kind, spec }: { kind: string; spec: unknown }) {
     case "scale_diagram":
       return <ScaleDiagram spec={spec as ScaleDiagramSpec} />;
     case "tab":
-      return <TabView spec={spec as TabSpec} />;
+      return <LazyTabView spec={spec as TabSpec} />;
     case "tone_recipe":
       return <ToneRecipeCard spec={spec as ToneRecipeSpec} />;
     case "signal_chain":

@@ -1,15 +1,17 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
 import { ChevronDown, ChevronRight, Loader2, Trash2 } from "lucide-react";
+import { Artifact } from "@/components/artifacts/artifact";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
+import { AttachArtifactDialog } from "@/components/curriculum/attach-artifact-dialog";
 import { SegmentDialog } from "@/components/curriculum/segment-dialog";
-import { ApiError, deleteBlock, updateBlock, type BlockNode } from "@/lib/api";
+import { ApiError, deleteBlock, listArtifacts, updateBlock, type ArtifactOut, type BlockNode } from "@/lib/api";
 
 type BadgeVariant = "default" | "secondary" | "outline";
 
@@ -54,6 +56,13 @@ interface BlockCardProps {
  *    `children` is partitioned by `plane` for that, which also covers the
  *    case where a delivery_root arrived via a normal tree fetch instead of
  *    a live segment call (`block_to_tree` doesn't filter by plane either).
+ *  - for a "segment" node only (Plan 4 Task 5), generating/attaching a
+ *    teaching artifact (via `AttachArtifactDialog` -> `generateArtifact
+ *    ({..., blockId: node.id})`) and fetching+rendering any already-attached
+ *    ones inline (`listArtifacts({blockId: node.id})`) — the same "dialog
+ *    triggers the action, inline area shows the result" split segmenting
+ *    already uses above, just scoped to the leaf "segment" kind instead of
+ *    "course".
  */
 export function BlockCard({ node, onRemoved }: BlockCardProps) {
   const t = useTranslations("curricula.tree");
@@ -69,6 +78,11 @@ export function BlockCard({ node, onRemoved }: BlockCardProps) {
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
+  const isSegment = node.kind === "segment";
+  const [artifacts, setArtifacts] = useState<ArtifactOut[]>([]);
+  const [artifactsLoading, setArtifactsLoading] = useState(isSegment);
+  const [artifactsError, setArtifactsError] = useState<string | null>(null);
+
   const contentChildren = children.filter((c) => c.plane === "content");
   const deliveryChildren = children.filter((c) => c.plane !== "content");
   const hasChildren = children.length > 0;
@@ -77,6 +91,31 @@ export function BlockCard({ node, onRemoved }: BlockCardProps) {
   const kindLabel = t.has(kindKey) ? t(kindKey) : node.kind;
   const badgeVariant = KIND_BADGE_VARIANT[node.kind] ?? "outline";
   const accent = KIND_ACCENT[node.kind] ?? "var(--border)";
+
+  // Same fetch-on-mount shape as e.g. `students/page.tsx`'s `fetchStudents`
+  // (a `useCallback` .then/.catch/.finally, driven by a `useEffect`), scoped
+  // to "segment" nodes only — every OTHER kind (course/module/lesson/
+  // delivery_root/session) never had artifacts attached to it by this UI, so
+  // there's no reason to fire a `GET /artifacts?block_id=` for those. A big
+  // curriculum tree can render many segment leaves at once, each running
+  // this effect independently (one request per segment, not batched — the
+  // API has no bulk "artifacts for these N block ids" route) — acceptable
+  // for this PoC's tree sizes; a real bulk endpoint would be the fix if this
+  // ever shows up as a real bottleneck.
+  const fetchArtifacts = useCallback(() => {
+    return listArtifacts({ blockId: node.id })
+      .then((data) => setArtifacts(data))
+      .catch((err) => setArtifactsError(err instanceof ApiError ? err.detail : t("artifactsError")))
+      .finally(() => setArtifactsLoading(false));
+  }, [node.id, t]);
+
+  useEffect(() => {
+    if (isSegment) fetchArtifacts();
+  }, [isSegment, fetchArtifacts]);
+
+  function handleArtifactAttached(artifact: ArtifactOut) {
+    setArtifacts((prev) => [artifact, ...prev]);
+  }
 
   async function commitTitle() {
     const next = draftTitle.trim();
@@ -179,6 +218,9 @@ export function BlockCard({ node, onRemoved }: BlockCardProps) {
         {node.kind === "course" && (
           <SegmentDialog blockId={node.id} blockTitle={title} onSegmented={handleSegmented} />
         )}
+        {isSegment && (
+          <AttachArtifactDialog blockId={node.id} blockTitle={title} onAttached={handleArtifactAttached} />
+        )}
         <Button
           type="button"
           variant="ghost"
@@ -211,6 +253,35 @@ export function BlockCard({ node, onRemoved }: BlockCardProps) {
 
   const body = node.body && <p className="text-xs whitespace-pre-wrap text-muted-foreground">{node.body}</p>;
 
+  // Only rendered for a "segment" node, and only once there's something to
+  // show (a load in flight, an error, or at least one attached artifact) —
+  // most segments have none, and a permanent "no artifacts" empty state on
+  // every leaf of a curriculum tree would be pure visual noise. `Artifact`
+  // itself already lazy-mounts a heavy `tab` kind (see `lazy-tab-view.tsx`),
+  // so nothing extra is needed here to keep a tree full of attached tabs cheap.
+  const artifactsSection = isSegment && (artifactsLoading || artifactsError || artifacts.length > 0) && (
+    <div className="flex flex-col gap-1.5" data-testid="segment-artifacts">
+      {artifactsLoading && <p className="text-xs text-muted-foreground">{t("artifactsLoading")}</p>}
+      {artifactsError && (
+        <p role="alert" data-testid="segment-artifacts-error" className="text-xs text-destructive">
+          {artifactsError}
+        </p>
+      )}
+      {artifacts.length > 0 && (
+        <>
+          <span className="text-xs font-medium text-muted-foreground">{t("attachedArtifactsHeading")}</span>
+          <div className="flex flex-wrap gap-3" data-testid="segment-artifact-list">
+            {artifacts.map((artifact) => (
+              <div key={artifact.id} data-testid="segment-artifact-item">
+                <Artifact kind={artifact.kind} spec={artifact.spec} />
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+
   if (!hasChildren) {
     return (
       <Card size="sm" data-testid="block-card" data-kind={node.kind} className="border-l-4" style={{ borderLeftColor: accent }}>
@@ -218,7 +289,12 @@ export function BlockCard({ node, onRemoved }: BlockCardProps) {
           {headerRow}
           {errors}
         </CardHeader>
-        {body && <CardContent>{body}</CardContent>}
+        {(body || artifactsSection) && (
+          <CardContent className="flex flex-col gap-3">
+            {body}
+            {artifactsSection}
+          </CardContent>
+        )}
       </Card>
     );
   }
@@ -233,6 +309,7 @@ export function BlockCard({ node, onRemoved }: BlockCardProps) {
         <CollapsibleContent className="overflow-hidden transition-[height] duration-200 ease-out">
           <CardContent className="flex flex-col gap-3">
             {body}
+            {artifactsSection}
             {contentChildren.length > 0 && (
               <div className="flex flex-col gap-2 border-l border-border pl-4" data-testid="block-card-children">
                 {contentChildren.map((child) => (

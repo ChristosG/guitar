@@ -109,6 +109,10 @@
       "collapse": "Collapse",
       "expand": "Expand",
       "deliveryHeading": "Delivery sessions",
+      "attachArtifactAction": "Add artifact",
+      "attachedArtifactsHeading": "Attached artifacts",
+      "artifactsLoading": "Loading artifacts…",
+      "artifactsError": "Could not load attached artifacts.",
       "kinds": {
         "course": "Course",
         "module": "Module",
@@ -128,6 +132,18 @@
       "segmenting": "Segmenting…",
       "error": "Could not segment this block.",
       "resultHeading": "Delivery sessions created"
+    },
+    "attachArtifactDialog": {
+      "heading": "Attach an artifact",
+      "description": "Generate and attach a teaching artifact to \"{title}\".",
+      "kindLabel": "Kind",
+      "promptLabel": "Prompt",
+      "promptPlaceholder": "e.g. G major open chord",
+      "groundToggle": "Ground in Brain",
+      "cancel": "Cancel",
+      "submit": "Attach",
+      "generating": "Generating…",
+      "error": "Could not generate the artifact."
     }
   },
   "knowledge": {
@@ -190,14 +206,31 @@
   },
   "artifacts": {
     "heading": "Artifacts",
-    "subheading": "Deterministic renderers for validated specs — chord diagrams, scale patterns, tone recipes, signal chains, amp dials and tab/notation, drawn client-side.",
+    "subheading": "Generate teaching artifacts from a prompt — chord diagrams, scale patterns, tone recipes, signal chains, amp dials, tab/notation and gear cards — validated server-side and rendered deterministically here.",
+    "galleryHeading": "Your artifacts",
+    "loading": "Loading artifacts…",
+    "empty": "No artifacts yet — generate one above to get started.",
+    "error": "Could not load artifacts.",
+    "delete": "Delete",
+    "deleteError": "Could not delete the artifact.",
+    "generateForm": {
+      "heading": "Generate an artifact",
+      "kindLabel": "Kind",
+      "promptLabel": "Prompt",
+      "promptPlaceholder": "e.g. G major open chord",
+      "groundToggle": "Ground in Brain",
+      "generating": "Generating…",
+      "submit": "Generate",
+      "error": "Could not generate the artifact."
+    },
     "sections": {
       "chordDiagram": "Chord Diagram",
       "scaleDiagram": "Scale Diagram",
       "toneRecipe": "Tone Recipe",
       "signalChain": "Signal Chain",
       "ampDials": "Amp Dials",
-      "tab": "Tab / Notation"
+      "tab": "Tab / Notation",
+      "gearCard": "Gear Card"
     },
     "scaleDiagram": {
       "root": "Root"
@@ -216,7 +249,8 @@
       "play": "Play",
       "pause": "Pause",
       "playbackLoading": "Preparing playback…",
-      "playbackUnavailable": "Playback unavailable — notation only"
+      "playbackUnavailable": "Playback unavailable — notation only",
+      "pending": "Renders once this card scrolls into view…"
     },
     "unsupported": {
       "title": "Unsupported artifact",

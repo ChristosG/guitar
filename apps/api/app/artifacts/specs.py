@@ -36,7 +36,15 @@ class ChordDiagramSpec(BaseModel):
     # One entry per string; 0 = open/no fretting finger, 1-4 = fret-hand finger.
     fingers: list[Annotated[int, Field(ge=0, le=4)]] = Field(min_length=6, max_length=6)
     barres: list[BarreSpec] = []
-    baseFret: int = 1
+    # >=1: a real fretboard position (1 = nut/open position). 0 or negative
+    # is schema-shaped but not renderable — found via Task 5's real
+    # end-to-end LLM generation, which produced `baseFret: 0`; the client
+    # svguitar renderer throws ("Position cannot be less than 1") for
+    # anything under 1. Constraining it here means a future out-of-range
+    # generation fails `validate_spec` and gets `generate_artifact`'s
+    # existing one-shot repair retry instead of silently persisting an
+    # artifact the client can't render.
+    baseFret: int = Field(default=1, ge=1)
 
 
 class PositionSpec(BaseModel):

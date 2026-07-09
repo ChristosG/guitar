@@ -121,7 +121,37 @@ export function ChordDiagram({ spec }: { spec: ChordDiagramSpec }) {
     // fully imperative (svguitar itself never renders anything server-side).
     el.style.color = palette.fingerColor;
 
-    const relFrets = spec.frets.filter((f) => f > 0).map((f) => relativeFret(f, spec.baseFret));
+    // Defensive normalization (Task 5, found via two real end-to-end LLM
+    // generations in the same verification session): a validated spec can
+    // still carry a `baseFret` inconsistent with its own fret/barre data, in
+    // two different ways. (1) `baseFret: 0` — schema-valid (the Pydantic
+    // model had no `ge=1` at the time this was found) but not a real
+    // fretboard position; svguitar's own `position` setting throws
+    // ("Position cannot be less than 1") for anything under 1, crashing this
+    // whole component. (2) `baseFret` *higher* than the lowest actually-
+    // fretted note/barre doesn't crash, but pushes that note's *relative*
+    // fret below 1 — off the top of svguitar's drawable grid, so it's
+    // silently never drawn (observed live: `baseFret: 6` alongside frets
+    // `[3,2,0,0,0,3]` rendered an apparently-empty grid, since
+    // `relativeFret(3, 6) = -2`). Both are the same underlying problem — an
+    // untrustworthy `baseFret` — so both are guarded here in one place:
+    // clamp to `[1, the lowest fretted/barred position]`, which guarantees
+    // every relative fret computed below lands at 1 or higher. A
+    // *well-formed* spec is unaffected: clamping only ever pulls `baseFret`
+    // DOWN to the lowest fretted/barred position, and a correct spec's
+    // `baseFret` is already at or below that (by definition — otherwise its
+    // own lowest note wouldn't render either), so `Math.min` is a no-op for
+    // it. Every use below reads `normalizedSpec`, never `spec`, so the
+    // diagram's position and its
+    // relative-fret math always agree.
+    const frettedPositions = [...spec.frets.filter((f) => f > 0), ...spec.barres.map((b) => b.fret)];
+    const lowestFrettedPosition = frettedPositions.length ? Math.min(...frettedPositions) : spec.baseFret;
+    const safeBaseFret = Math.min(Math.max(1, spec.baseFret), Math.max(1, lowestFrettedPosition));
+    const normalizedSpec: ChordDiagramSpec = { ...spec, baseFret: safeBaseFret };
+
+    const relFrets = normalizedSpec.frets
+      .filter((f) => f > 0)
+      .map((f) => relativeFret(f, normalizedSpec.baseFret));
     const fretsToShow = Math.min(Math.max(4, ...relFrets), 12);
 
     const chart = new SVGuitarChord(el);
@@ -129,12 +159,12 @@ export function ChordDiagram({ spec }: { spec: ChordDiagramSpec }) {
       .configure({
         ...palette,
         frets: fretsToShow,
-        position: spec.baseFret,
+        position: normalizedSpec.baseFret,
       })
       .chord({
-        fingers: toFingers(spec),
-        barres: toBarres(spec, palette.fingerColor),
-        title: spec.name,
+        fingers: toFingers(normalizedSpec),
+        barres: toBarres(normalizedSpec, palette.fingerColor),
+        title: normalizedSpec.name,
       })
       .draw();
 
