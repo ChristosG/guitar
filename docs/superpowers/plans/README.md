@@ -16,4 +16,4 @@ later plans can reference the real interfaces earlier plans produced (not guesse
 | 5 | `agent-tools-hitl.md` | pending | LangGraph loop · tools · streaming · HITL interrupt/approve · chat UI |
 | 6 | `cockpit-integration.md` | pending | Today/Students/Curricula/Knowledge/Notes wired · Prep path · glanceability |
 | 7 | `seed-content.md` | pending | Zero-to-Hero + Guitar Tone curricula · iconic-tone recipes · ingest book+links |
-| 8 | `deploy.md` | pending | host nginx vhosts · DNS · certs · public compose · smoke on `guitar.cgrigoriadis.online` |
+| 8 | `2026-07-09-async-generation-and-deploy.md` | 🔄 **T1–T5 DONE, e2e-verified** (deploy T6–T7 pending) | async `generation_job` + `BackgroundTasks` runner · `POST /curricula/generate`→202 · `GET /jobs/{id}` poll · FE poll+render — verified live (real LLM, UI+curl); remaining: nginx orange-cloud vhosts · DNS · certs · live verify on `guitar.cgrigoriadis.online` |
