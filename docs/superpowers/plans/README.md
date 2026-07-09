@@ -12,7 +12,7 @@ later plans can reference the real interfaces earlier plans produced (not guesse
 | 1 | `2026-07-06-foundations.md` | ✅ **DONE** | monorepo · Docker Compose · Postgres+pgvector · FastAPI skeleton · `LLMProvider`(Qwen) · core DB models+migrations · themed bilingual Next.js shell |
 | 2 | `2026-07-07-knowledge-brain.md` | ✅ **DONE** | ingest (pdf/url/text) → chunk → embed → pgvector · retrieval · grounded bilingual /ask · Knowledge UI · SSRF-guarded |
 | 3 | `2026-07-08-curriculum-segmentation.md` | ✅ **DONE** | guided-JSON generate (Brain-grounded) · deterministic segmentation · deep-clone assign · **cockpit shell** + Students + Curricula card board |
-| 4 | `2026-07-08-artifact-engine.md` | **WRITTEN** | spec → validate → SVG: chord diagrams · tab/staff (AlphaTab) · tone-recipe/signal-chain/amp-dial cards · LLM spec-gen |
+| 4 | `2026-07-08-artifact-engine.md` | ✅ **DONE** | spec → validate → SVG: chord diagrams · tab/staff (AlphaTab) · tone-recipe/signal-chain/amp-dial cards · LLM spec-gen · Artifacts gallery + attach-to-segment |
 | 5 | `agent-tools-hitl.md` | pending | LangGraph loop · tools · streaming · HITL interrupt/approve · chat UI |
 | 6 | `cockpit-integration.md` | pending | Today/Students/Curricula/Knowledge/Notes wired · Prep path · glanceability |
 | 7 | `seed-content.md` | pending | Zero-to-Hero + Guitar Tone curricula · iconic-tone recipes · ingest book+links |
