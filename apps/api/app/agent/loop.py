@@ -1,10 +1,10 @@
-"""The ReAct tool-calling loop (Plan 5 Task 2): call `chat_tools` -> dispatch
-any tool_calls -> feed results back -> repeat. Mirrors
-`/mnt/nvme2TB/vllm_interract/examples/tool_calling_minimal.py` exactly (the
-brief's own named reference shape: call -> append the assistant turn WITH
-tool_calls -> if none, done, else dispatch each + append a `{"role":"tool",
-"tool_call_id",...}` per call -> repeat under a step cap), plus the guards
-from `/mnt/nvme2TB/vllm_interract/reference/agentic-gotchas.md`:
+"""The ReAct tool-calling loop: call `chat_tools` -> dispatch any tool_calls
+-> feed results back -> repeat. Mirrors `/mnt/nvme2TB/vllm_interract/
+examples/tool_calling_minimal.py` exactly (the brief's own named reference
+shape: call -> append the assistant turn WITH tool_calls -> if none, done,
+else dispatch each + append a `{"role":"tool", "tool_call_id",...}` per call
+-> repeat under a step cap), plus the guards from `/mnt/nvme2TB/
+vllm_interract/reference/agentic-gotchas.md`:
   - #4 hallucinated/unknown tool names never crash the loop — guarded into
     an `"ERROR: unknown tool"` tool-result instead.
   - #5 malformed tool-call JSON (`ToolArgsError`) gets a BOUNDED repair
@@ -14,9 +14,26 @@ from `/mnt/nvme2TB/vllm_interract/reference/agentic-gotchas.md`:
     top-level constant in `prompts.py`) and `_tool_schemas()` (deterministic,
     same list every call within a process) never interpolate per-request data.
 
-This task dispatches ONLY "read" tools inline — the whole `TOOLS` registry is
-reads-only for now (`app/agent/tools.py`). Task 3 adds "mutation" entries and
-teaches this loop to suspend instead of executing them; not built here.
+Plan 5 Task 2 built this loop dispatching ONLY "read" tools inline (the
+`TOOLS` registry was reads-only). THIS task (3) adds "mutation" entries into
+that same registry (`app/agent/tools.py`) and teaches this loop to SUSPEND
+instead of executing them:
+
+  - `_tool_schemas()` now exposes BOTH kinds to the model (it needs to see
+    mutation tools to ever propose one).
+  - READ `ToolCall`s still dispatch inline, unchanged, same turn.
+  - The FIRST `ToolCall` in a turn whose registry `kind == "mutation"` is
+    NEVER dispatched — `run_agent_turn` returns `AgentResult(status=
+    "awaiting_approval", pending_tool={tool_call_id, name, arguments})`
+    instead, stopping the loop right there.
+  - This loop stays SESSION-AGNOSTIC: it does not persist an
+    `ApprovalRequest` or a `Message` itself (Task 4's chat router owns that —
+    it persists the suspend info this returns, and later resumes this same
+    loop after a human decision). See `_dispatch_read_call`/
+    `_first_mutation_index`/the dispatch loop below for exactly how a
+    per-turn mix of reads and (at most one visible) mutation is handled
+    without ever leaving more than one tool_call unanswered in `messages`
+    (protocol integrity — see the dispatch loop's own comment).
 """
 import json
 import logging
@@ -43,21 +60,35 @@ _MAX_STEPS_MESSAGE = "I couldn't finish that within the allotted steps. Could yo
 
 @dataclass
 class AgentResult:
-    """One agent turn's outcome. `status` is always "answer" out of this
-    task (Task 3 adds "awaiting_approval" once mutation tools exist to
-    suspend on). `messages` is the FULL updated transcript — the caller's
-    input plus every new turn this call appended — ready to persist and pass
-    back in as-is on the next turn (mirrors `AssistantTurn`'s own "container,
-    not a compared value" rationale for staying a plain, non-frozen dataclass).
+    """One agent turn's outcome. `status` is "answer" (a final reply — the
+    only status Task 2 ever produced) or "awaiting_approval" (Task 3: the
+    loop suspended on a proposed MUTATION tool call — see `pending_tool`).
+    `messages` is the FULL updated transcript — the caller's input plus
+    every new turn this call appended — ready to persist and pass back in
+    as-is on the next turn (mirrors `AssistantTurn`'s own "container, not a
+    compared value" rationale for staying a plain, non-frozen dataclass).
+
+    `pending_tool` (Task 3) is None for "answer", and otherwise
+    `{tool_call_id, name, arguments}` for the ONE suspended mutation call —
+    Task 4's chat router persists an `ApprovalRequest(tool_name=pending_tool
+    ["name"], tool_args=pending_tool["arguments"])` keyed off this, and, on
+    resolve, answers `pending_tool["tool_call_id"]` with a `{"role":"tool",
+    ...}` result before resuming `run_agent_turn` — this loop itself never
+    persists anything (session-agnostic; Task 4 owns persistence).
     """
 
     status: str
     content: str | None
     messages: list[dict]
+    pending_tool: dict | None = None
 
 
 def _tool_schemas() -> list[dict]:
-    return [entry.schema for entry in TOOLS.values() if entry.kind == "read"]
+    # Both kinds are exposed to the model (Task 3) — it must be able to SEE
+    # a mutation tool to ever propose one for this loop to suspend on. Kept
+    # as an explicit kind-check (not just "every entry unconditionally") so
+    # a future non-model-facing registry `kind` wouldn't silently leak in.
+    return [entry.schema for entry in TOOLS.values() if entry.kind in ("read", "mutation")]
 
 
 def _ensure_system_prompt(messages: list[dict]) -> list[dict]:
@@ -102,6 +133,64 @@ def _stringify(result) -> str:
     return json.dumps(result, default=str)
 
 
+def _dispatch_read_call(db, call: ToolCall, messages: list[dict]) -> None:
+    """Execute one READ tool call inline and append its `{"role":"tool",
+    ...}` result to `messages` in place — the exact guarded dispatch
+    (unknown-tool name -> "ERROR: unknown tool"; a tool raising mid-call ->
+    "ERROR: tool ... failed") Task 2 established. Factored out of
+    `run_agent_turn`'s main loop so BOTH call sites that dispatch calls
+    inline — a plain all-reads turn, and the reads that precede a suspending
+    mutation in the same turn — share one implementation instead of two
+    copies that could drift apart.
+
+    Never called for a mutation `ToolCall`: `run_agent_turn` always
+    intercepts those (via `_first_mutation_index`) before reaching here, so
+    this function has no mutation-vs-read branch of its own to get wrong.
+    """
+    entry = TOOLS.get(call.name)
+    if entry is None:
+        messages.append({
+            "role": "tool",
+            "tool_call_id": call.id,
+            "content": f"ERROR: unknown tool '{call.name}'",
+        })
+        return
+    try:
+        result = entry.fn(db, **call.arguments)
+    except Exception as exc:
+        # A KNOWN tool can still raise mid-dispatch (e.g. valid JSON but a
+        # shape the fn doesn't accept) — chat_tools already returned
+        # successfully so this never raises ToolArgsError; same "guard,
+        # don't crash the whole turn" spirit as the unknown-tool-name guard
+        # above, just one layer deeper.
+        log.warning("tool %r raised during dispatch", call.name, exc_info=True)
+        messages.append({
+            "role": "tool",
+            "tool_call_id": call.id,
+            "content": f"ERROR: tool '{call.name}' failed: {exc}",
+        })
+        return
+    messages.append({
+        "role": "tool",
+        "tool_call_id": call.id,
+        "content": _stringify(result),
+    })
+
+
+def _first_mutation_index(tool_calls: list[ToolCall]) -> int | None:
+    """Index of the FIRST call in this turn whose registry entry is a
+    `kind == "mutation"`, or None if every call this turn is a read (an
+    unknown/unregistered name is never a mutation, so it's treated the same
+    as a read here — dispatched inline by `_dispatch_read_call`, which is
+    where the actual "unknown tool" guard lives, not here).
+    """
+    for i, call in enumerate(tool_calls):
+        entry = TOOLS.get(call.name)
+        if entry is not None and entry.kind == "mutation":
+            return i
+    return None
+
+
 def run_agent_turn(db, messages: list[dict], *, max_steps: int = 6) -> AgentResult:
     messages = _ensure_system_prompt(list(messages))
     tools = _tool_schemas()
@@ -132,40 +221,65 @@ def run_agent_turn(db, messages: list[dict], *, max_steps: int = 6) -> AgentResu
 
         repair_attempts = 0  # a successful call resets the CONSECUTIVE-failure streak
         last_content = turn.content
-        messages.append(_wire_assistant_message(turn.content, turn.tool_calls))
 
         if not turn.tool_calls:
+            messages.append(_wire_assistant_message(turn.content, turn.tool_calls))
             return AgentResult(status="answer", content=turn.content, messages=messages)
 
-        for call in turn.tool_calls:
-            entry = TOOLS.get(call.name)
-            if entry is None:
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "content": f"ERROR: unknown tool '{call.name}'",
-                })
-                continue
-            try:
-                result = entry.fn(db, **call.arguments)
-            except Exception as exc:
-                # A KNOWN tool can still raise mid-dispatch (e.g. valid JSON
-                # but a shape the fn doesn't accept) — chat_tools already
-                # returned successfully so this never raises ToolArgsError;
-                # same "guard, don't crash the whole turn" spirit as the
-                # unknown-tool-name guard above, just one layer deeper.
-                log.warning("tool %r raised during dispatch", call.name, exc_info=True)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "content": f"ERROR: tool '{call.name}' failed: {exc}",
-                })
-                continue
-            messages.append({
-                "role": "tool",
-                "tool_call_id": call.id,
-                "content": _stringify(result),
-            })
+        pending_index = _first_mutation_index(turn.tool_calls)
+
+        if pending_index is None:
+            # No mutation anywhere in this turn — unchanged from Task 2:
+            # every call is dispatched inline, in order.
+            messages.append(_wire_assistant_message(turn.content, turn.tool_calls))
+            for call in turn.tool_calls:
+                _dispatch_read_call(db, call, messages)
+            continue
+
+        # --- SUSPEND: a mutation was proposed --------------------------------
+        # PROTOCOL INTEGRITY (this task's brief flags this as the part a
+        # reviewer will scrutinize): at most ONE tool_call may be left
+        # unanswered in `messages` when this function returns, because Task
+        # 4 answers exactly that one call at resolve time and then calls
+        # chat_tools again to resume — a second, still-dangling unanswered
+        # call would desync that resume (the wire protocol requires every
+        # tool_call in an assistant turn to get a paired tool result before
+        # the next assistant turn).
+        #
+        # So the reconstructed assistant message includes ONLY the calls up
+        # to and including the pending mutation:
+        #   - calls BEFORE it (`handled_calls`) are genuine reads (by
+        #     construction of `_first_mutation_index`'s "first" scan) and
+        #     are dispatched + answered right here, same as the no-mutation
+        #     branch above.
+        #   - the pending mutation itself is included in the wire message
+        #     but deliberately left UNANSWERED — that's what "suspend" means.
+        #   - any calls AFTER it are DROPPED from the reconstructed message
+        #     entirely, not merely left unanswered: they were never
+        #     dispatched (the model proposed them before a human ever got a
+        #     chance to gate the mutation ahead of them), so they must not
+        #     appear to have been asked either — including them unanswered
+        #     would be a SECOND dangling call, and dispatching them out of
+        #     the model's intended order would run a call the human never
+        #     gated. If still relevant, the model can re-propose them once
+        #     the loop resumes after this mutation is resolved.
+        handled_calls = turn.tool_calls[:pending_index]
+        pending_call = turn.tool_calls[pending_index]
+
+        messages.append(_wire_assistant_message(turn.content, handled_calls + [pending_call]))
+        for call in handled_calls:
+            _dispatch_read_call(db, call, messages)
+
+        return AgentResult(
+            status="awaiting_approval",
+            content=turn.content,
+            messages=messages,
+            pending_tool={
+                "tool_call_id": pending_call.id,
+                "name": pending_call.name,
+                "arguments": pending_call.arguments,
+            },
+        )
 
     log.warning("run_agent_turn: max_steps=%d exhausted without a final answer", max_steps)
     # `last_content is None` (an explicit identity check, not a falsy-check:

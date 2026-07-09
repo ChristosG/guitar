@@ -1,0 +1,362 @@
+"""Unit tests for the HITL suspend-on-mutation behavior (Plan 5 Task 3):
+`app.agent.tools.TOOLS`'s new mutation entries, and `app.agent.loop.
+run_agent_turn`'s change to SUSPEND (never execute) the first dispatched
+MUTATION `ToolCall` in a turn, returning `AgentResult(status=
+"awaiting_approval", pending_tool=...)`.
+
+Pure unit tests, NO live LLM and NO DB (every dispatched tool in these tests
+is a stubbed registry entry that ignores `db` entirely — `db` is passed
+through as `None`) — same "scripted fake provider" pattern as
+`test_agent_loop.py` (Task 2). That module's `_FakeProvider`/`_stub_tool`
+helpers are file-private there (no `__all__`, `_`-prefixed), so they're
+duplicated here rather than cross-imported — mirrors this codebase's own
+established "small deliberate duplication over reaching into another
+module's `_`-prefixed helper" precedent (e.g. `routers/artifacts.py`'s own
+`_get_block_or_404` docstring).
+
+PROTOCOL INTEGRITY is the crux of this file's later tests: the pending
+mutation's tool_call must be the ONLY unanswered tool_call in the returned
+`messages` transcript, because Task 4 answers exactly that one call at
+resolve time and then resumes the loop — a second, still-dangling unanswered
+call would desync that resume.
+"""
+import app.agent.loop as agent_loop
+from app.agent.loop import AgentResult, run_agent_turn
+from app.agent.tools import TOOLS, ToolEntry
+from app.llm.tools_types import AssistantTurn, ToolCall
+
+
+class _FakeProvider:
+    """Mirrors `test_agent_loop.py`'s `_FakeProvider` exactly (see that
+    module's own docstring for the full rationale): `chat_tools` returns the
+    next scripted `turns` entry each call, repeating the last one once
+    exhausted; records a snapshot of every call's `messages`.
+    """
+
+    def __init__(self, turns):
+        self._turns = list(turns)
+        self.calls: list[list[dict]] = []
+
+    def chat_tools(self, messages, tools, *, tool_choice="auto", temperature=0.3):
+        self.calls.append([dict(m) for m in messages])
+        turn = self._turns[min(len(self.calls) - 1, len(self._turns) - 1)]
+        if isinstance(turn, Exception):
+            raise turn
+        return turn
+
+
+def _stub_tool(monkeypatch, name: str, fn):
+    """Mirrors `test_agent_loop.py`'s `_stub_tool`: `ToolEntry` is frozen (a
+    registered entry is a value), so this swaps the whole dict entry via
+    `monkeypatch.setitem` — `monkeypatch` restores the original after the
+    test. Carries `async_job` through too (Task 3's new field) so stubbing a
+    tool never accidentally resets it to the dataclass default.
+    """
+    original = TOOLS[name]
+    monkeypatch.setitem(
+        TOOLS, name,
+        ToolEntry(schema=original.schema, fn=fn, kind=original.kind, async_job=original.async_job),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Registry shape: the 7 mutation tools this task registers
+# ---------------------------------------------------------------------------
+
+def test_registry_has_exactly_the_seven_mutation_tools_this_task_registers():
+    mutation_names = {name for name, entry in TOOLS.items() if entry.kind == "mutation"}
+    assert mutation_names == {
+        "create_student", "update_student", "segment_block", "update_block",
+        "assign_curriculum", "generate_artifact", "generate_curriculum",
+    }
+    for name in mutation_names:
+        entry = TOOLS[name]
+        assert entry.schema["type"] == "function"
+        fn_schema = entry.schema["function"]
+        assert fn_schema["name"] == name
+        assert fn_schema["description"]  # non-empty — the model reads this
+        assert fn_schema["parameters"]["type"] == "object"
+
+
+def test_generate_curriculum_is_the_only_tool_marked_async_job():
+    assert TOOLS["generate_curriculum"].async_job is True
+    for name, entry in TOOLS.items():
+        if name != "generate_curriculum":
+            assert entry.async_job is False, f"{name} should default async_job=False"
+
+
+def test_tool_schemas_now_exposes_both_read_and_mutation_tools_to_the_model():
+    """`_tool_schemas()` (fed to `chat_tools` as the model's tool list) must
+    now include mutation tools too — Task 2 filtered to `kind == "read"`
+    only; this task lifts that so the model can actually propose a mutation
+    for the loop to suspend on.
+    """
+    schemas = agent_loop._tool_schemas()
+    names = {s["function"]["name"] for s in schemas}
+    assert names == set(TOOLS.keys())
+    assert len(schemas) == 13  # 6 read (Task 2) + 7 mutation (this task)
+
+
+# ---------------------------------------------------------------------------
+# (a) a lone mutation call suspends the turn; the fn is never invoked
+# ---------------------------------------------------------------------------
+
+def test_mutation_tool_call_suspends_and_never_invokes_the_fn(monkeypatch):
+    calls_made = []
+
+    def _spy(db, **kwargs):
+        calls_made.append(kwargs)
+        raise AssertionError("mutation fn must never be called by run_agent_turn")
+
+    _stub_tool(monkeypatch, "generate_artifact", _spy)
+
+    call = ToolCall(
+        id="call_1", name="generate_artifact",
+        arguments={"kind": "chord_diagram", "prompt": "G major open chord"},
+    )
+    turn1 = AssistantTurn(content="Sure, I'll draft that chord diagram.", tool_calls=[call])
+    fake_provider = _FakeProvider([turn1])
+    monkeypatch.setattr(agent_loop, "get_provider", lambda: fake_provider)
+
+    result = run_agent_turn(None, [{"role": "user", "content": "make me a G chord diagram"}])
+
+    assert isinstance(result, AgentResult)
+    assert result.status == "awaiting_approval"
+    assert calls_made == []  # never invoked — the spy would have raised otherwise
+    assert result.content == "Sure, I'll draft that chord diagram."
+    assert result.pending_tool == {
+        "tool_call_id": "call_1",
+        "name": "generate_artifact",
+        "arguments": {"kind": "chord_diagram", "prompt": "G major open chord"},
+    }
+    assert len(fake_provider.calls) == 1  # suspended on the FIRST turn — no round-trip
+
+    # The assistant's own turn (narration + the proposed call) is in history,
+    # in OpenAI wire shape.
+    assistant_msgs = [m for m in result.messages if m["role"] == "assistant"]
+    assert len(assistant_msgs) == 1
+    assert assistant_msgs[0]["content"] == "Sure, I'll draft that chord diagram."
+    assert [tc["id"] for tc in assistant_msgs[0]["tool_calls"]] == ["call_1"]
+
+    # ...but there is NO paired tool-result message: the whole point of
+    # suspending is that this call is NOT answered yet (Task 4 answers it at
+    # resolve time, then resumes the loop).
+    assert not any(m["role"] == "tool" for m in result.messages)
+
+
+def test_awaiting_approval_result_content_is_none_when_the_model_gave_no_narration(monkeypatch):
+    """A tool-calls-only turn commonly has `content=None` (mirrors
+    `AssistantTurn.content`'s own documented contract) — the suspend path
+    must preserve that faithfully rather than substituting a placeholder.
+    """
+    def _spy(db, **kwargs):
+        raise AssertionError("must never be called")
+
+    _stub_tool(monkeypatch, "create_student", _spy)
+
+    call = ToolCall(id="call_1", name="create_student", arguments={"name": "New Kid"})
+    turn1 = AssistantTurn(content=None, tool_calls=[call])
+    fake_provider = _FakeProvider([turn1])
+    monkeypatch.setattr(agent_loop, "get_provider", lambda: fake_provider)
+
+    result = run_agent_turn(None, [{"role": "user", "content": "add a student named New Kid"}])
+
+    assert result.status == "awaiting_approval"
+    assert result.content is None
+
+
+# ---------------------------------------------------------------------------
+# (b) a read, THEN (next turn) a mutation — across two separate turns
+# ---------------------------------------------------------------------------
+
+def test_read_then_mutation_across_two_turns_read_executes_mutation_suspends(monkeypatch):
+    search_calls = []
+
+    def _fake_search_knowledge(db, *, query, **kwargs):
+        assert db is None  # the loop must never dereference db itself
+        search_calls.append(query)
+        return [{"source": "x", "text": "a humbucker cancels hum", "score": 0.9}]
+
+    mutation_calls = []
+
+    def _spy_create_student(db, **kwargs):
+        mutation_calls.append(kwargs)
+        raise AssertionError("must never be called")
+
+    _stub_tool(monkeypatch, "search_knowledge", _fake_search_knowledge)
+    _stub_tool(monkeypatch, "create_student", _spy_create_student)
+
+    read_call = ToolCall(id="call_1", name="search_knowledge", arguments={"query": "hum cancelling"})
+    mutation_call = ToolCall(id="call_2", name="create_student", arguments={"name": "New Kid"})
+    turn1 = AssistantTurn(content=None, tool_calls=[read_call])
+    turn2 = AssistantTurn(content="I'll add that student.", tool_calls=[mutation_call])
+    fake_provider = _FakeProvider([turn1, turn2])
+    monkeypatch.setattr(agent_loop, "get_provider", lambda: fake_provider)
+
+    result = run_agent_turn(None, [{"role": "user", "content": "look something up then add a student"}])
+
+    assert search_calls == ["hum cancelling"]  # the read genuinely executed
+    assert mutation_calls == []  # the mutation did not
+    assert result.status == "awaiting_approval"
+    assert result.pending_tool["name"] == "create_student"
+    assert result.pending_tool["tool_call_id"] == "call_2"
+    assert len(fake_provider.calls) == 2  # one full read round-trip, then the suspending turn
+
+    tool_msgs = [m for m in result.messages if m["role"] == "tool"]
+    assert len(tool_msgs) == 1
+    assert tool_msgs[0]["tool_call_id"] == "call_1"  # only the READ got answered
+    assert "humbucker" in tool_msgs[0]["content"]
+
+
+# ---------------------------------------------------------------------------
+# (c) a read AND a mutation together, in the SAME turn
+# ---------------------------------------------------------------------------
+
+def test_read_and_mutation_in_the_same_turn_read_answered_mutation_suspends(monkeypatch):
+    list_calls = []
+
+    def _fake_list_students(db, **kwargs):
+        list_calls.append("list_students")
+        return [{"id": "s1", "name": "Alex"}]
+
+    def _spy_generate_artifact(db, **kwargs):
+        raise AssertionError("must never be called")
+
+    _stub_tool(monkeypatch, "list_students", _fake_list_students)
+    _stub_tool(monkeypatch, "generate_artifact", _spy_generate_artifact)
+
+    read_call = ToolCall(id="call_a", name="list_students", arguments={})
+    mutation_call = ToolCall(
+        id="call_b", name="generate_artifact", arguments={"kind": "tab", "prompt": "riff"},
+    )
+    turn1 = AssistantTurn(content=None, tool_calls=[read_call, mutation_call])
+    fake_provider = _FakeProvider([turn1])
+    monkeypatch.setattr(agent_loop, "get_provider", lambda: fake_provider)
+
+    result = run_agent_turn(None, [{"role": "user", "content": "list students and make a tab"}])
+
+    assert list_calls == ["list_students"]
+    assert result.status == "awaiting_approval"
+    assert result.pending_tool["tool_call_id"] == "call_b"
+    assert result.pending_tool["name"] == "generate_artifact"
+    assert len(fake_provider.calls) == 1  # suspended on the first turn
+
+    # Exactly one tool result (the read) — the mutation is deliberately
+    # UNANSWERED (that IS what "suspend" means).
+    tool_msgs = [m for m in result.messages if m["role"] == "tool"]
+    assert [m["tool_call_id"] for m in tool_msgs] == ["call_a"]
+
+    # The assistant message's own tool_calls carries BOTH ids...
+    assistant_msgs = [m for m in result.messages if m["role"] == "assistant" and m.get("tool_calls")]
+    assert len(assistant_msgs) == 1
+    assert [tc["id"] for tc in assistant_msgs[0]["tool_calls"]] == ["call_a", "call_b"]
+
+    # ...and the ONE unanswered tool_call across the whole transcript is
+    # exactly the pending mutation (protocol integrity: Task 4 must find
+    # exactly one call left to answer at resolve time).
+    all_call_ids = {
+        tc["id"] for m in result.messages if m["role"] == "assistant" for tc in m.get("tool_calls", [])
+    }
+    answered_ids = {m["tool_call_id"] for m in result.messages if m["role"] == "tool"}
+    assert all_call_ids - answered_ids == {"call_b"}
+
+
+def test_a_call_after_the_pending_mutation_in_the_same_turn_is_dropped_entirely(monkeypatch):
+    """3 calls in one turn: [read, mutation, read2]. The mutation suspends at
+    index 1; `read2` (index 2, AFTER the pending mutation) must not be
+    dispatched (it comes after the human hasn't yet gated the mutation) AND
+    must not appear anywhere in the transcript either — not as a tool_call,
+    not as a tool result. Leaving it in as an unanswered tool_call would be a
+    SECOND dangling call (breaking protocol integrity); dispatching it out of
+    turn would run a call the human never got a chance to gate.
+    """
+    def _fake_list_students(db, **kwargs):
+        return [{"id": "s1"}]
+
+    def _must_not_run(db, **kwargs):
+        raise AssertionError("must not be dispatched — it comes AFTER the pending mutation")
+
+    def _spy_segment_block(db, **kwargs):
+        raise AssertionError("must never be called")
+
+    _stub_tool(monkeypatch, "list_students", _fake_list_students)
+    _stub_tool(monkeypatch, "list_curricula", _must_not_run)
+    _stub_tool(monkeypatch, "segment_block", _spy_segment_block)
+
+    read_call = ToolCall(id="call_a", name="list_students", arguments={})
+    mutation_call = ToolCall(
+        id="call_b", name="segment_block", arguments={"block_id": "x", "session_minutes": 30},
+    )
+    read2_call = ToolCall(id="call_c", name="list_curricula", arguments={})
+    turn1 = AssistantTurn(content=None, tool_calls=[read_call, mutation_call, read2_call])
+    fake_provider = _FakeProvider([turn1])
+    monkeypatch.setattr(agent_loop, "get_provider", lambda: fake_provider)
+
+    result = run_agent_turn(None, [{"role": "user", "content": "do three things"}])
+
+    assert result.status == "awaiting_approval"
+    assert result.pending_tool["tool_call_id"] == "call_b"
+
+    all_call_ids = [
+        tc["id"] for m in result.messages if m["role"] == "assistant" for tc in m.get("tool_calls", [])
+    ]
+    assert all_call_ids == ["call_a", "call_b"]  # call_c never appears at all
+
+    tool_msgs = [m for m in result.messages if m["role"] == "tool"]
+    assert [m["tool_call_id"] for m in tool_msgs] == ["call_a"]
+
+
+def test_two_mutations_in_the_same_turn_suspends_on_the_first_only(monkeypatch):
+    def _spy_create_student(db, **kwargs):
+        raise AssertionError("must never be called")
+
+    def _spy_update_student(db, **kwargs):
+        raise AssertionError("must never be called")
+
+    _stub_tool(monkeypatch, "create_student", _spy_create_student)
+    _stub_tool(monkeypatch, "update_student", _spy_update_student)
+
+    mutation1 = ToolCall(id="call_1", name="create_student", arguments={"name": "A"})
+    mutation2 = ToolCall(id="call_2", name="update_student", arguments={"student_id": "x"})
+    turn1 = AssistantTurn(content=None, tool_calls=[mutation1, mutation2])
+    fake_provider = _FakeProvider([turn1])
+    monkeypatch.setattr(agent_loop, "get_provider", lambda: fake_provider)
+
+    result = run_agent_turn(None, [{"role": "user", "content": "add a student then update one"}])
+
+    assert result.status == "awaiting_approval"
+    assert result.pending_tool["tool_call_id"] == "call_1"
+    assert result.pending_tool["name"] == "create_student"
+
+    all_call_ids = [
+        tc["id"] for m in result.messages if m["role"] == "assistant" for tc in m.get("tool_calls", [])
+    ]
+    assert all_call_ids == ["call_1"]  # call_2 dropped entirely, same as any post-mutation call
+    assert not any(m["role"] == "tool" for m in result.messages)
+
+
+# ---------------------------------------------------------------------------
+# (d) unknown tool BEFORE a mutation in the same turn is still guarded
+# ---------------------------------------------------------------------------
+
+def test_unknown_tool_before_a_mutation_is_guarded_then_the_mutation_suspends(monkeypatch):
+    def _spy_generate_artifact(db, **kwargs):
+        raise AssertionError("must never be called")
+
+    _stub_tool(monkeypatch, "generate_artifact", _spy_generate_artifact)
+
+    unknown_call = ToolCall(id="call_a", name="delete_everything", arguments={})
+    mutation_call = ToolCall(id="call_b", name="generate_artifact", arguments={"kind": "tab", "prompt": "x"})
+    turn1 = AssistantTurn(content=None, tool_calls=[unknown_call, mutation_call])
+    fake_provider = _FakeProvider([turn1])
+    monkeypatch.setattr(agent_loop, "get_provider", lambda: fake_provider)
+
+    result = run_agent_turn(None, [{"role": "user", "content": "hi"}])
+
+    assert result.status == "awaiting_approval"
+    assert result.pending_tool["tool_call_id"] == "call_b"
+
+    tool_msgs = [m for m in result.messages if m["role"] == "tool"]
+    assert len(tool_msgs) == 1
+    assert tool_msgs[0]["tool_call_id"] == "call_a"
+    assert "unknown tool" in tool_msgs[0]["content"].lower()

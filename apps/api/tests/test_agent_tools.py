@@ -44,12 +44,18 @@ def setup_module(_):
 # ---------------------------------------------------------------------------
 
 def test_registry_has_exactly_the_six_read_tools_this_task_registers():
-    assert set(TOOLS) == {
+    """`TOOLS` is a SHARED registry dict (Plan 5 Task 3 adds 7 "mutation"
+    entries into this same dict — see `test_agent_hitl.py`'s own registry
+    test for those), so this only asserts the READ subset this task (2)
+    registers, not the whole dict's contents.
+    """
+    read_names = {name for name, entry in TOOLS.items() if entry.kind == "read"}
+    assert read_names == {
         "search_knowledge", "explain_concept",
         "list_students", "list_curricula", "list_artifacts", "get_curriculum",
     }
-    for name, entry in TOOLS.items():
-        assert entry.kind == "read"
+    for name in read_names:
+        entry = TOOLS[name]
         assert entry.schema["type"] == "function"
         fn_schema = entry.schema["function"]
         assert fn_schema["name"] == name
