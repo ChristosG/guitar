@@ -132,57 +132,107 @@ export function TabView({ spec }: { spec: TabSpec }) {
     const el = containerRef.current;
     if (!el) return;
 
+    // Reset to the pre-load state *synchronously*, before the async IIFE
+    // below has a chance to run: on a re-run (a theme toggle while a prior
+    // instance was already `"ready"`), the Play button would otherwise stay
+    // enabled reflecting the torn-down instance while the new one is still
+    // constructing — a click in that window would `playPause()` a
+    // not-yet-ready api. A no-op on first mount (already these values).
+    setStatus("loading");
+    setIsPlaying(false);
+
     let cancelled = false;
     let api: AlphaTabApi | null = null;
     let readyTimeout: ReturnType<typeof setTimeout> | undefined;
 
     (async () => {
-      const alphaTab = await import("@coderline/alphatab");
-      if (cancelled) return;
+      try {
+        const alphaTab = await import("@coderline/alphatab");
+        if (cancelled) return;
 
-      api = new alphaTab.AlphaTabApi(el, {
-        core: {
-          fontDirectory: FONT_DIRECTORY,
-          scriptFile: new URL(SCRIPT_FILE_PATH, window.location.origin).toString(),
-          useWorkers: false,
-          logLevel: alphaTab.LogLevel.Warning,
-        },
-        display: {
-          resources: palette,
-        },
-        player: {
-          playerMode: alphaTab.PlayerMode.EnabledSynthesizer,
-          soundFont: SOUND_FONT,
-          // Sidesteps a second, less forgiving asset-resolution path: the
-          // AudioWorklet module load has no fallback to `scriptFile` if its
-          // own `import.meta.url`-relative URL doesn't resolve (unlike the
-          // worker path above, which does) — confirmed by reading the
-          // shipped source. ScriptProcessorNode is deprecated but still
-          // implemented everywhere and needs no separate module file.
-          outputMode: alphaTab.PlayerOutputMode.WebAudioScriptProcessor,
-          enableCursor: true,
-          scrollMode: alphaTab.ScrollMode.Off,
-        },
-      });
-      apiRef.current = api;
+        api = new alphaTab.AlphaTabApi(el, {
+          core: {
+            fontDirectory: FONT_DIRECTORY,
+            scriptFile: new URL(SCRIPT_FILE_PATH, window.location.origin).toString(),
+            useWorkers: false,
+            // Render every bar up front instead of AlphaTab's default
+            // IntersectionObserver-gated lazy rendering. The default defers
+            // each bar's render until it scrolls into view — which never
+            // fires reliably in a headless browser (the test environment),
+            // leaving the notation SVG permanently unrendered even though
+            // the player-cursor overlay and font both initialize fine (a
+            // real bug the vacuous card-root `locator("svg")` assertion hid,
+            // since it matched the always-present lucide Play icon). Eager
+            // rendering is the right default for artifacts regardless: these
+            // are short, self-contained licks/exercises, not long scores
+            // where lazy rendering would pay off.
+            enableLazyLoading: false,
+            logLevel: alphaTab.LogLevel.Warning,
+          },
+          display: {
+            resources: palette,
+          },
+          player: {
+            playerMode: alphaTab.PlayerMode.EnabledSynthesizer,
+            soundFont: SOUND_FONT,
+            // Sidesteps a second, less forgiving asset-resolution path: the
+            // AudioWorklet module load has no fallback to `scriptFile` if its
+            // own `import.meta.url`-relative URL doesn't resolve (unlike the
+            // worker path above, which does) — confirmed by reading the
+            // shipped source. ScriptProcessorNode is deprecated but still
+            // implemented everywhere and needs no separate module file.
+            outputMode: alphaTab.PlayerOutputMode.WebAudioScriptProcessor,
+            enableCursor: true,
+            scrollMode: alphaTab.ScrollMode.Off,
+          },
+        });
+        apiRef.current = api;
 
-      api.error.on((e) => {
-        console.error("AlphaTab error:", e);
+        // Every emitter callback re-checks `cancelled` before touching
+        // state: `AlphaTabApi.destroy()` tears down the player/renderer but
+        // does *not* gate these callbacks, so a worker-originated event
+        // (e.g. a late `playerReady`) still in flight from a torn-down
+        // instance during a rapid re-init could otherwise clobber the new
+        // instance's state. `cancelled` is per-effect-run, so an old
+        // instance's callbacks see their own run's `cancelled === true`.
+        api.error.on((e) => {
+          if (cancelled) return;
+          console.error("AlphaTab error:", e);
+          setStatus("unavailable");
+        });
+        api.playerReady.on(() => {
+          if (cancelled) return;
+          clearTimeout(readyTimeout);
+          setStatus("ready");
+        });
+        // `alphaTab.PlayerState` (as shown in AlphaTab's own docs examples)
+        // is not actually exported at the top level in 1.8.4 — confirmed by
+        // inspecting the shipped bundle's export list; the real export lives
+        // under the `synth` sub-namespace.
+        api.playerStateChanged.on((e) => {
+          if (cancelled) return;
+          setIsPlaying(e.state === alphaTab.synth.PlayerState.Playing);
+        });
+
+        readyTimeout = setTimeout(() => {
+          if (cancelled) return;
+          setStatus((s) => (s === "loading" ? "unavailable" : s));
+        }, PLAYER_READY_TIMEOUT_MS);
+
+        api.tex(spec.alphaTex);
+      } catch (e) {
+        // A rejected dynamic `import(...)`, or a synchronous throw from
+        // `new AlphaTabApi(...)`/`api.tex(...)`, would otherwise leave
+        // `status` stuck at `"loading"` and the notation blank forever —
+        // contradicting this component's "notation must always render"
+        // contract (its own error path via `api.error` above only covers
+        // *async* failures of an already-constructed instance). Fall back to
+        // `"unavailable"` (Play present-but-disabled), same as any other
+        // playback-unavailable path.
+        if (cancelled) return;
+        console.error("AlphaTab failed to initialize:", e);
         setStatus("unavailable");
-      });
-      api.playerReady.on(() => {
-        clearTimeout(readyTimeout);
-        setStatus("ready");
-      });
-      // `alphaTab.PlayerState` (as shown in AlphaTab's own docs examples) is
-      // not actually exported at the top level in 1.8.4 — confirmed by
-      // inspecting the shipped bundle's export list; the real export lives
-      // under the `synth` sub-namespace.
-      api.playerStateChanged.on((e) => setIsPlaying(e.state === alphaTab.synth.PlayerState.Playing));
-
-      readyTimeout = setTimeout(() => setStatus((s) => (s === "loading" ? "unavailable" : s)), PLAYER_READY_TIMEOUT_MS);
-
-      api.tex(spec.alphaTex);
+      }
     })();
 
     return () => {
@@ -197,7 +247,7 @@ export function TabView({ spec }: { spec: TabSpec }) {
 
   return (
     <Card data-testid="tab-view" className="w-full max-w-2xl">
-      <CardHeader className="has-data-[slot=card-action]:grid-cols-[1fr_auto]">
+      <CardHeader>
         <CardTitle>{title}</CardTitle>
         <CardAction>
           <Button
@@ -215,7 +265,12 @@ export function TabView({ spec }: { spec: TabSpec }) {
         </CardAction>
       </CardHeader>
       <CardContent>
-        <div ref={containerRef} aria-label={title} className="overflow-x-auto" />
+        {/* The notation container AlphaTab draws into imperatively. Its own
+            `data-testid` (distinct from the card root) lets tests scope an
+            "svg present" assertion to *AlphaTab's* output specifically — the
+            card also contains the lucide Play/Pause icon SVG, which renders
+            from first paint regardless of whether AlphaTab ever loads. */}
+        <div ref={containerRef} data-testid="tab-view-notation" aria-label={title} className="overflow-x-auto" />
       </CardContent>
     </Card>
   );

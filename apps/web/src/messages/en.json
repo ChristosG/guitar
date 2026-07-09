@@ -190,7 +190,7 @@
   },
   "artifacts": {
     "heading": "Artifacts",
-    "subheading": "Deterministic renderers for validated specs — chord diagrams, scale patterns, tone recipes, signal chains and amp dials, drawn client-side.",
+    "subheading": "Deterministic renderers for validated specs — chord diagrams, scale patterns, tone recipes, signal chains, amp dials and tab/notation, drawn client-side.",
     "sections": {
       "chordDiagram": "Chord Diagram",
       "scaleDiagram": "Scale Diagram",

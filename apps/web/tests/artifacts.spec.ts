@@ -49,12 +49,24 @@ test.describe("artifacts demo page", () => {
     // Tab/staff: AlphaTab mounts client-side (dynamic import + useEffect), so
     // its container starts empty and only gains an <svg> after its own
     // async render pass — toBeVisible()'s auto-retry covers that, no manual
-    // wait needed. A Play control must exist per the brief; whether it's
-    // enabled (real synth playback wired) or present-but-disabled (the
-    // brief's sanctioned notation-only escape hatch) is a rendering detail
-    // this test deliberately doesn't pin down — "audio itself not asserted".
-    const tab = page.getByTestId("tab-view");
-    await expect(tab.locator("svg")).toBeVisible();
+    // wait needed. The SVG assertion is scoped to the `tab-view-notation`
+    // container specifically — *not* the card root, which also holds the
+    // lucide Play/Pause icon SVG that renders from first paint regardless of
+    // whether AlphaTab ever loads (so a card-root `locator("svg")` would
+    // pass even if the dynamic import failed outright). A Play control must
+    // exist per the brief; whether it's enabled (real synth playback wired)
+    // or present-but-disabled (the brief's sanctioned notation-only escape
+    // hatch) is a rendering detail this test deliberately doesn't pin down —
+    // "audio itself not asserted". `.first()` because AlphaTab renders the
+    // notation as several stacked `at-surface-svg` strips (title / staff /
+    // footer), so the bare locator is a multi-element match — `.first()`
+    // asserts "at least one AlphaTab SVG rendered and is visible", which is
+    // the real signal. Timeout raised above Playwright's 5s default:
+    // AlphaTab's ~2.3 MB library is a lazy dynamic import that Turbopack
+    // compiles on-demand on the first navigation to this route, so the first
+    // test to hit it pays a cold-compile cost (~2-3s observed, with headroom
+    // here for CI variance under parallel-worker load).
+    await expect(page.getByTestId("tab-view-notation").locator("svg").first()).toBeVisible({ timeout: 15_000 });
     await expect(page.getByTestId("tab-view-play")).toBeVisible();
   });
 
@@ -78,7 +90,11 @@ test.describe("artifacts demo page", () => {
     });
 
     await page.goto("/en/artifacts");
-    await expect(page.getByTestId("tab-view").locator("svg")).toBeVisible();
+    // Scoped to the notation container (not the card root) so this asserts
+    // AlphaTab's own SVG, not the always-present lucide Play-icon SVG;
+    // `.first()` + raised timeout for the same reasons as the "one of each
+    // kind" test above.
+    await expect(page.getByTestId("tab-view-notation").locator("svg").first()).toBeVisible({ timeout: 15_000 });
     // Wait for the Play control to become *enabled*, not just for the
     // notation to render: it only enables once AlphaTab's `playerReady`
     // fires, which — per tab-view.tsx's own player.ready handler (confirmed
