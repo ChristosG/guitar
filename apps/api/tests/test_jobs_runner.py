@@ -1,0 +1,162 @@
+"""Tests for `run_curriculum_job` (Plan 8 Task 2's background runner).
+
+`generate_curriculum` is monkeypatched in every test here — no live LLM call
+ever happens — but (unlike `test_curriculum_generate_errors.py`) this module
+DOES need a live Postgres: `run_curriculum_job` opens its OWN `SessionLocal()`
+and reads/writes a real `GenerationJob` row, and the entire point of these
+tests is proving that own-session commit is actually visible to a separate
+reader afterward. Mirrors `test_generation_job.py`'s skip-guard +
+setup_module pattern (DB-touching, no live LLM -> no `integration` marker).
+
+Own-session proof (every test below relies on this shape): the job is
+created and committed in one `SessionLocal()` (closed before the runner ever
+runs, via `_create_job`), `run_curriculum_job` is called with ONLY the id
+(it cannot see the test's session at all, let alone reuse it), and the
+result is observed through YET ANOTHER fresh `SessionLocal()` (`_reread`).
+A same-session `db.refresh(job)` would only prove the runner mutated some
+object reachable from the test's own session — which it isn't, since only a
+bare UUID crosses the call boundary — so three independent sessions is the
+strongest available proof that the status change is a real, durably
+committed row, not an in-process artifact of a shared/stale session.
+"""
+import uuid
+
+import httpx
+import openai
+import pytest
+from sqlalchemy import text
+
+from app.db import Base, SessionLocal, engine
+
+# Skip cleanly (not error) when no DB is reachable — mirrors test_generation_job.py.
+try:
+    with engine.connect() as _c:
+        _c.execute(text("SELECT 1"))
+except Exception:
+    pytest.skip(
+        "database not reachable — set DATABASE_URL to a running Postgres",
+        allow_module_level=True,
+    )
+
+import app.jobs.runner as runner
+import app.models  # noqa: F401  register every model's table on Base.metadata
+from app.llm.errors import GuidedJSONError
+from app.models.generation_job import GenerationJob
+
+
+def setup_module(_):
+    Base.metadata.create_all(engine)  # test DB build (Alembic verified separately)
+
+
+_PARAMS = {"title": "Test Course", "language": "en", "profile": {"level": "beginner"}}
+
+
+def _create_job(**overrides) -> GenerationJob:
+    db = SessionLocal()
+    try:
+        job = GenerationJob(kind="curriculum", status="pending", params=dict(_PARAMS), **overrides)
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+        return job
+    finally:
+        db.close()
+
+
+def _reread(job_id: uuid.UUID) -> GenerationJob:
+    """Fresh session -> a genuine DB round-trip (see module docstring)."""
+    db = SessionLocal()
+    try:
+        job = db.get(GenerationJob, job_id)
+        assert job is not None
+        return job
+    finally:
+        db.close()
+
+
+def test_run_curriculum_job_success_sets_succeeded_and_result_root_id(monkeypatch):
+    job = _create_job()
+    fixed_root_id = uuid.uuid4()
+    seen_kwargs = {}
+
+    def _fake_generate_curriculum(db, **kwargs):
+        seen_kwargs.update(kwargs)
+        return fixed_root_id
+
+    monkeypatch.setattr(runner, "generate_curriculum", _fake_generate_curriculum)
+
+    runner.run_curriculum_job(job.id)
+
+    assert seen_kwargs == _PARAMS  # job.params unpacked as kwargs, verbatim
+    got = _reread(job.id)
+    assert got.status == "succeeded"
+    assert got.result_root_id == fixed_root_id
+    assert got.error is None
+    assert got.error_kind is None
+
+
+def test_run_curriculum_job_guided_json_error_sets_failed_upstream(monkeypatch):
+    job = _create_job()
+
+    def _raise(*args, **kwargs):
+        raise GuidedJSONError("guided_json: response truncated (finish_reason='length')")
+
+    monkeypatch.setattr(runner, "generate_curriculum", _raise)
+
+    runner.run_curriculum_job(job.id)
+
+    got = _reread(job.id)
+    assert got.status == "failed"
+    assert got.error_kind == "upstream"
+    assert got.error and "try again" in got.error.lower()
+    assert got.result_root_id is None
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        openai.APIConnectionError(request=httpx.Request("POST", "http://example.invalid")),
+        httpx.ConnectError("connection refused"),
+        httpx.TimeoutException("timed out"),
+    ],
+    ids=["openai-connection-error", "httpx-connect-error", "httpx-timeout"],
+)
+def test_run_curriculum_job_transport_error_sets_failed_timeout(monkeypatch, exc):
+    job = _create_job()
+
+    def _raise(*args, **kwargs):
+        raise exc
+
+    monkeypatch.setattr(runner, "generate_curriculum", _raise)
+
+    runner.run_curriculum_job(job.id)
+
+    got = _reread(job.id)
+    assert got.status == "failed"
+    assert got.error_kind == "timeout"
+    assert got.error and "timed out" in got.error.lower()
+
+
+def test_run_curriculum_job_generic_exception_sets_failed_internal(monkeypatch):
+    job = _create_job()
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("boom - some internal detail")
+
+    monkeypatch.setattr(runner, "generate_curriculum", _raise)
+
+    runner.run_curriculum_job(job.id)
+
+    got = _reread(job.id)
+    assert got.status == "failed"
+    assert got.error_kind == "internal"
+    assert got.error
+    assert "boom" not in got.error  # real detail is logged, not stored on the row
+
+
+def test_run_curriculum_job_unknown_job_id_is_a_defensive_noop():
+    """The enqueue endpoint (Task 3) always creates the row before scheduling
+    this runner, so a missing job is not expected in practice — but the
+    runner must not raise if it somehow happens (see its docstring).
+    """
+    runner.run_curriculum_job(uuid.uuid4())  # must not raise

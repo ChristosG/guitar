@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.routers import artifacts, curriculum, health, knowledge, students
+from app.routers import artifacts, curriculum, health, jobs, knowledge, students
 
 app = FastAPI(title="Guitar Tutor Copilot API")
 
@@ -21,3 +21,4 @@ app.include_router(knowledge.router)
 app.include_router(curriculum.router)
 app.include_router(students.router)
 app.include_router(artifacts.router)
+app.include_router(jobs.router)
