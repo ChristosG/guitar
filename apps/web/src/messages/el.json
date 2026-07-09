@@ -196,7 +196,8 @@
       "scaleDiagram": "Διάγραμμα Κλίμακας",
       "toneRecipe": "Συνταγή Ήχου",
       "signalChain": "Αλυσίδα Σήματος",
-      "ampDials": "Κομβία Ενισχυτή"
+      "ampDials": "Κομβία Ενισχυτή",
+      "tab": "Ταμπλατούρα / Παρτιτούρα"
     },
     "scaleDiagram": {
       "root": "Ρίζα"
@@ -209,6 +210,13 @@
       "hands": "Χέρια",
       "listen": "Ακούστε",
       "fallbackTitle": "Συνταγή Ήχου"
+    },
+    "tab": {
+      "fallbackTitle": "Ταμπλατούρα",
+      "play": "Αναπαραγωγή",
+      "pause": "Παύση",
+      "playbackLoading": "Προετοιμασία αναπαραγωγής…",
+      "playbackUnavailable": "Η αναπαραγωγή δεν είναι διαθέσιμη — μόνο παρτιτούρα"
     },
     "unsupported": {
       "title": "Μη υποστηριζόμενο υλικό",

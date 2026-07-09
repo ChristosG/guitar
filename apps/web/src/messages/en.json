@@ -196,7 +196,8 @@
       "scaleDiagram": "Scale Diagram",
       "toneRecipe": "Tone Recipe",
       "signalChain": "Signal Chain",
-      "ampDials": "Amp Dials"
+      "ampDials": "Amp Dials",
+      "tab": "Tab / Notation"
     },
     "scaleDiagram": {
       "root": "Root"
@@ -209,6 +210,13 @@
       "hands": "Hands",
       "listen": "Listen",
       "fallbackTitle": "Tone Recipe"
+    },
+    "tab": {
+      "fallbackTitle": "Tab",
+      "play": "Play",
+      "pause": "Pause",
+      "playbackLoading": "Preparing playback…",
+      "playbackUnavailable": "Playback unavailable — notation only"
     },
     "unsupported": {
       "title": "Unsupported artifact",

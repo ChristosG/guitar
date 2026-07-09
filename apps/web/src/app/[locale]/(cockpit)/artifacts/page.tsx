@@ -5,14 +5,15 @@ import type {
   ChordDiagramSpec,
   ScaleDiagramSpec,
   SignalChainSpec,
+  TabSpec,
   ToneRecipeSpec,
 } from "@/components/artifacts/types";
 
 // Fixed, in-file demo specs — this route is a temporary preview harness for
-// Plan 4 Task 2's renderers (`components/artifacts/*`); a later task wires
-// real generation (LLM `guided_json` -> validate_spec -> persisted
-// Artifact) and a proper gallery behind this same URL. One of each of the
-// five kinds this task renders, per the brief.
+// Plan 4's renderers (`components/artifacts/*`); a later task wires real
+// generation (LLM `guided_json` -> validate_spec -> persisted Artifact) and
+// a proper gallery behind this same URL. One of each rendered kind, per the
+// brief (five from Task 2, "tab" added in Task 3).
 
 const CHORD_DEMO: ChordDiagramSpec = {
   name: "G",
@@ -78,11 +79,37 @@ const AMP_DEMO: AmpSettingsSpec = {
   ],
 };
 
+// An open-position E minor pentatonic lick (root, b3, 4, 5, b7 — the same
+// box the A minor pentatonic SCALE_DEMO above draws, transposed down to E
+// and played open-position rather than at the 5th fret) — up across four
+// strings then back down to a resting low-E, entirely open-string/first-
+// three-frets, matching this app's tab-first beginner pedagogy. AlphaTex
+// note syntax is `fret.string[.duration]`, string 1 = high-e .. 6 = low-E
+// (confirmed against AlphaTab's own shipped examples — the *opposite* order
+// from this repo's own ChordDiagramSpec/ScaleDiagramSpec convention in
+// types.ts, which is `string.fret`; easy to transpose backwards by mistake).
+// Rendered + visually verified in a real browser (see task report) rather
+// than just assumed correct from hand-derived music theory. No `\title`
+// directive in the alphaTex itself: TabView's own CardTitle already shows
+// `spec.title`, and AlphaTab renders any embedded `\title` a second time as
+// part of the notation itself — confirmed (and then deliberately avoided)
+// live, where the two duplicated visually.
+const TAB_DEMO: TabSpec = {
+  title: "E Minor Pentatonic Lick",
+  alphaTex: `
+\\tempo 90
+.
+:8 0.6 3.6 0.5 2.5 0.4 2.4 0.3 2.3 |
+2.3 0.3 2.4 0.4 2.5 0.5 3.6 0.6.2
+`,
+};
+
 /** A plain Server Component, same reasoning as `today/page.tsx`: purely
  * static in-file demo data, no client state or API calls, so nothing here
- * needs "use client" (the one renderer that does — `ChordDiagram`, for its
- * theme-driven svguitar redraw — is still fine to render as a child; a
- * Server Component can render a Client Component directly). */
+ * needs "use client" (the renderers that do — `ChordDiagram` for its
+ * theme-driven svguitar redraw, `TabView` for AlphaTab — are still fine to
+ * render as children; a Server Component can render a Client Component
+ * directly). */
 export default function ArtifactsPage() {
   const t = useTranslations("artifacts");
 
@@ -92,6 +119,7 @@ export default function ArtifactsPage() {
     { key: "toneRecipe", node: <Artifact kind="tone_recipe" spec={TONE_DEMO} /> },
     { key: "signalChain", node: <Artifact kind="signal_chain" spec={CHAIN_DEMO} /> },
     { key: "ampDials", node: <Artifact kind="amp_settings" spec={AMP_DEMO} /> },
+    { key: "tab", node: <Artifact kind="tab" spec={TAB_DEMO} /> },
   ] as const;
 
   return (

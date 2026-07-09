@@ -12,6 +12,12 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Static assets served as-is (svg/etc. never matched eslint's default
+    // .js/.ts extension filter, so this never mattered before; Task 3 added
+    // public/alphatab/alphaTab.min.js — a vendored, already-minified
+    // third-party build — which does, and lints as ~3000 meaningless
+    // warnings otherwise since it's plain JS as far as eslint can tell).
+    "public/**",
   ]),
 ]);
 

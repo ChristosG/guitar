@@ -79,10 +79,19 @@ export interface ToneRecipeSpec {
   listen: string[];
 }
 
+export interface TabSpec {
+  /** AlphaTex source — AlphaTab's own compact text format for notation/tab,
+   * rendered via `api.tex(alphaTex)` (see tab-view.tsx). Not re-parsed or
+   * validated here; the server's `TabSpec` validator only checks it's
+   * non-empty (specs.py) — a syntactically invalid AlphaTex string is a
+   * renderer-time (AlphaTab) concern, not a spec-shape one. */
+  alphaTex: string;
+  title?: string | null;
+}
+
 /** Every kind the backend's `SPECS` registry recognizes (see specs.py).
- * `artifact.tsx` only has renderers for the five in this plan's Task 2 scope
- * ("tab" is Task 3 via AlphaTab; "gear_card" is unscheduled) — both fall
- * through to its "unsupported kind" placeholder rather than failing to
+ * `artifact.tsx` has renderers for all but "gear_card" (unscheduled), which
+ * falls through to its "unsupported kind" placeholder rather than failing to
  * render entirely, since a validated-but-not-yet-rendered kind is expected
  * to reach the client over time as later tasks land. */
 export type ArtifactKind =
