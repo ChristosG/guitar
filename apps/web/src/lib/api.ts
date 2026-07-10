@@ -604,3 +604,87 @@ export function getChatHistory(sessionId: string): Promise<ChatMessageOut[]> {
 export function getPendingApproval(sessionId: string): Promise<PendingApprovalOut | null> {
   return request<PendingApprovalOut | null>(`/chat/${sessionId}/pending`);
 }
+
+/**
+ * Typed fetch helpers for the Notes API (`/notes/*`) — Plan 6's free-form
+ * teaching notes with an optional promote-to-Brain action. Same direct-
+ * from-browser convention as every other section of this file (see this
+ * file's top docstring); mirrors `apps/api/app/schemas/notes.py` field-for-
+ * field (`NoteCreate`/`NoteUpdate`/`NoteOut`/`NotePromoteOut`).
+ */
+
+export interface NoteOut {
+  id: string;
+  title: string;
+  body: string;
+  tags: string[];
+  student_id: string | null;
+  promoted_to_knowledge: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+/** `POST /notes/{id}/promote`'s response — the updated Note plus the id of
+ * the `KnowledgeSource` the call just created (mirrors `NotePromoteOut` on
+ * the API side). Structurally a superset of `NoteOut`, so a value of this
+ * type is assignable anywhere a `NoteOut` is expected — e.g. swapping a
+ * promoted note straight into a `NoteOut[]` list without re-shaping it. */
+export interface NotePromoteOut extends NoteOut {
+  source_id: string;
+}
+
+export interface NoteCreateInput {
+  title: string;
+  body: string;
+  tags?: string[];
+  student_id?: string | null;
+}
+
+/** All fields optional — PATCH semantics, mirrors `NoteUpdate`. Same caveat
+ * that schema's docstring documents: the router drops every `null`-valued
+ * field uniformly (`exclude_unset=True, exclude_none=True`), so sending
+ * `student_id: null` to clear an existing link is a no-op, not a clear —
+ * this app's edit form doesn't attempt to work around that (a fresh
+ * unlinked note is the workaround if ever needed). */
+export interface NoteUpdateInput {
+  title?: string;
+  body?: string;
+  tags?: string[];
+  student_id?: string | null;
+}
+
+export function listNotes(studentId?: string | null): Promise<NoteOut[]> {
+  const params = new URLSearchParams();
+  if (studentId) params.set("student_id", studentId);
+  const qs = params.toString();
+  return request<NoteOut[]>(`/notes${qs ? `?${qs}` : ""}`);
+}
+
+export function createNote(input: NoteCreateInput): Promise<NoteOut> {
+  return request<NoteOut>("/notes", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateNote(id: string, input: NoteUpdateInput): Promise<NoteOut> {
+  return request<NoteOut>(`/notes/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export function deleteNote(id: string): Promise<void> {
+  return request<void>(`/notes/${id}`, { method: "DELETE" });
+}
+
+/** Idempotent-as-409 on the API (a note already promoted refuses a second
+ * promote outright — see `routers/notes.py`'s docstring). This app's UI
+ * only ever calls this once per note (`NoteCard` hides/disables the action
+ * once `promoted_to_knowledge` is true), so a 409 here would mean this
+ * client's own guard has a bug, not an expected response to design around —
+ * same posture this file's `sendChatMessage` docstring takes for the
+ * analogous chat 409. */
+export function promoteNote(id: string): Promise<NotePromoteOut> {
+  return request<NotePromoteOut>(`/notes/${id}/promote`, { method: "POST" });
+}
