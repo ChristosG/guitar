@@ -18,9 +18,9 @@ Six reads (Task 2), each a thin wrapper over an existing read path:
     router-independent queries returning plain dicts (never the routers'
     Pydantic response models, and never imported from the router modules
     themselves — small deliberate duplication over a cross-layer import,
-    the same precedent `routers/artifacts.py`'s own `_get_block_or_404`/
-    `routers/curriculum.py`'s `_clone_content_subtree` docstrings state for
-    avoiding a cross-router import). Router functions also take `db` as a
+    the same precedent `routers/artifacts.py`'s own `_get_block_or_404`
+    docstring states for avoiding a cross-router import). Router functions
+    also take `db` as a
     `Depends(...)`-defaulted LAST/keyword parameter, which doesn't fit this
     registry's uniform `fn(db, **args)` calling convention (`db` always
     first, always positional) — another reason a thin reimplementation is
@@ -28,12 +28,13 @@ Six reads (Task 2), each a thin wrapper over an existing read path:
 
 Seven mutations (Task 3), each wrapping a real mutation service the exact
 same "thin, router-independent" way the reads above wrap their GET routes —
-see each `_`-prefixed fn's own docstring for its specific service and any
-deliberate duplication (`assign_curriculum`'s deep-clone in particular
-mirrors `routers/curriculum.py`'s own `_clone_content_subtree`, same
-cross-router-import-avoidance precedent cited above): `create_student`,
-`update_student`, `segment_block`, `update_block`, `assign_curriculum`,
-`generate_artifact`, `generate_curriculum`. NONE of these fns are actually
+see each `_`-prefixed fn's own docstring for its specific service:
+`create_student`, `update_student`, `segment_block`, `update_block`,
+`assign_curriculum`, `generate_artifact`, `generate_curriculum`.
+`assign_curriculum`'s deep-clone is NOT duplicated — it and the HTTP endpoint
+both call the SHARED framework-free `app.curriculum.assign.
+clone_content_subtree` (extracted in Task 3 review precisely so the two can
+never drift). NONE of these fns are actually
 CALLED by this task's own loop change — a mutation `ToolCall` is always
 suspended before `entry.fn` would ever run (see `loop.py`); they're
 registered now so Task 4's approval-resolve step has a real, working
@@ -68,6 +69,7 @@ from sqlalchemy import select
 
 from app.artifacts.generate import generate_artifact as _generate_artifact_service
 from app.brain.retrieve import answer, search
+from app.curriculum.assign import clone_content_subtree
 from app.curriculum.generate import generate_curriculum as _generate_curriculum_service
 from app.curriculum.segment import segment_block as _segment_block_service
 from app.models.artifact import Artifact
@@ -332,50 +334,13 @@ def _update_block(db, *, block_id: str, **fields) -> dict:
     }
 
 
-def _clone_content_subtree(db, node: Block, *, parent_id: UUID | None, student_id: UUID) -> Block:
-    """Recursively deep-clone `node`'s CONTENT-plane subtree — the exact same
-    logic as `routers/curriculum.py`'s own module-private
-    `_clone_content_subtree` (see that function's docstring for the full
-    rationale: content-plane-only, fresh ids, `is_template=False`,
-    `student_id` stamped on every node). Deliberately re-implemented here
-    rather than imported from the router: that helper is module-private
-    (leading underscore) and FastAPI-router-shaped, and this file's own
-    module docstring already establishes "small deliberate duplication over
-    a cross-router import" as this registry's precedent for exactly this
-    situation (its read tools cite the very same router docstring for their
-    own duplicated `_get_block_or_404`-style lookups).
-    """
-    clone = Block(
-        parent_id=parent_id,
-        order=node.order,
-        kind=node.kind,
-        title=node.title,
-        body=node.body,
-        est_minutes=node.est_minutes,
-        language=node.language,
-        is_template=False,
-        target_profile=dict(node.target_profile) if node.target_profile else None,
-        student_id=student_id,
-        plane=node.plane,
-    )
-    db.add(clone)
-    db.flush()
-
-    children = db.scalars(
-        select(Block)
-        .where(Block.parent_id == node.id, Block.plane == "content")
-        .order_by(Block.order)
-    ).all()
-    for child in children:
-        _clone_content_subtree(db, child, parent_id=clone.id, student_id=student_id)
-
-    return clone
-
-
 def _assign_curriculum(db, *, root_id: str, student_id: str) -> dict:
     """Wraps `routers/curriculum.py`'s `assign_curriculum` (`POST
     /curricula/{root_id}/assign`): deep-clones the template's content
-    subtree for `student_id` and records an `Assignment` audit row.
+    subtree for `student_id` (via the SHARED `app.curriculum.assign.
+    clone_content_subtree` this tool and that endpoint both call — extracted
+    in Task 3 review so the two never drift) and records an `Assignment`
+    audit row.
     """
     parsed_root_id = _parse_uuid(root_id)
     if parsed_root_id is None:
@@ -391,7 +356,7 @@ def _assign_curriculum(db, *, root_id: str, student_id: str) -> dict:
     if student is None:
         return {"error": "student not found"}
 
-    new_root = _clone_content_subtree(db, template_root, parent_id=None, student_id=parsed_student_id)
+    new_root = clone_content_subtree(db, template_root, parent_id=None, student_id=parsed_student_id)
     # curriculum_block_id references the TEMPLATE block, mirroring the
     # router's own Assignment row — see routers/curriculum.py's identical
     # comment for why (the audit link is "this student was assigned this

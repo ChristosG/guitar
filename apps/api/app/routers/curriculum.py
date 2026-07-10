@@ -17,6 +17,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.curriculum.assign import clone_content_subtree
 from app.curriculum.segment import segment_block
 from app.db import get_db
 from app.jobs.runner import run_curriculum_job
@@ -72,62 +73,6 @@ def _get_block_or_404(db: Session, block_id: UUID) -> Block:
     if block is None:
         raise HTTPException(status_code=404, detail="block not found")
     return block
-
-
-def _clone_content_subtree(db: Session, node: Block, *, parent_id: UUID | None, student_id: UUID) -> Block:
-    """Recursively deep-clone `node`'s CONTENT-plane subtree only.
-
-    A template that has already been segmented (`POST /blocks/{id}/segment`
-    with `student_id=None`) also carries a delivery-plane child
-    (delivery_root + sessions) alongside its content children — that's a
-    derived pacing plan, not curriculum content, and is deliberately NOT
-    cloned here (the `Block.plane == "content"` filter on the child query
-    below), mirroring `segment.py`'s own `_collect_leaves` plane=="content"
-    filter and its documented rationale. The assigned student gets a clean
-    content copy; segmenting *that* copy for them is a separate, later
-    `POST /blocks/{new_root_id}/segment` call (optionally with their own
-    `student_id`).
-
-    Every cloned node gets a fresh id (`Block`'s own `default=uuid.uuid4`),
-    `is_template=False`, and `student_id` set to the target student —
-    regardless of what the source node had — per the brief ("new tree with
-    is_template=False and student_id set on every node"). `order`/`kind`/
-    `title`/`body`/`est_minutes`/`language`/`plane` are copied verbatim
-    (structure preserved). `target_profile` is copied as an independent
-    dict (not the same aliased object) — harmless either way for a JSON
-    column since nothing mutates it post-clone, but cheap and avoids any
-    accidental-aliasing footgun.
-
-    `db.flush()` after `db.add(clone)` is required (not optional), same
-    reason as `generate.py`'s `_persist_tree`: `clone.id` is a Python-side
-    `default=uuid.uuid4`, resolved at flush not at construction, and is
-    needed as the next level's `parent_id` before this function returns.
-    """
-    clone = Block(
-        parent_id=parent_id,
-        order=node.order,
-        kind=node.kind,
-        title=node.title,
-        body=node.body,
-        est_minutes=node.est_minutes,
-        language=node.language,
-        is_template=False,
-        target_profile=dict(node.target_profile) if node.target_profile else None,
-        student_id=student_id,
-        plane=node.plane,
-    )
-    db.add(clone)
-    db.flush()
-
-    children = db.scalars(
-        select(Block)
-        .where(Block.parent_id == node.id, Block.plane == "content")
-        .order_by(Block.order)
-    ).all()
-    for child in children:
-        _clone_content_subtree(db, child, parent_id=clone.id, student_id=student_id)
-
-    return clone
 
 
 @router.get("/curricula", response_model=list[CurriculumListItem])
@@ -273,7 +218,7 @@ def assign_curriculum(root_id: UUID, payload: AssignRequest, db: Session = Depen
     if student is None:
         raise HTTPException(status_code=404, detail="student not found")
 
-    new_root = _clone_content_subtree(db, template_root, parent_id=None, student_id=payload.student_id)
+    new_root = clone_content_subtree(db, template_root, parent_id=None, student_id=payload.student_id)
     # curriculum_block_id references the TEMPLATE block (per Assignment's own
     # docstring: "A template curriculum Block handed to a specific Student"),
     # not the new clone — this is the audit link "this student was assigned

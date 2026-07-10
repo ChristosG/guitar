@@ -48,9 +48,15 @@ def _stub_tool(monkeypatch, name: str, fn):
     registry entry is a value, same rationale as `ToolCall`), so this swaps
     the whole dict entry via `monkeypatch.setitem` rather than mutating an
     attribute — `monkeypatch` restores the original entry after the test.
+    Carries `async_job` through too (Task 3's field) so stubbing a tool never
+    accidentally resets it to the dataclass default — matches
+    `test_agent_hitl.py`'s equivalent helper.
     """
     original = TOOLS[name]
-    monkeypatch.setitem(TOOLS, name, ToolEntry(schema=original.schema, fn=fn, kind=original.kind))
+    monkeypatch.setitem(
+        TOOLS, name,
+        ToolEntry(schema=original.schema, fn=fn, kind=original.kind, async_job=original.async_job),
+    )
 
 
 # ---------------------------------------------------------------------------
