@@ -11,6 +11,7 @@ import {
   LayoutGrid,
   Library,
   Menu,
+  MessageCircle,
   Search,
   StickyNote,
   Users,
@@ -28,6 +29,7 @@ const NAV_ITEMS = [
   { segment: "knowledge", icon: Library },
   { segment: "notes", icon: StickyNote },
   { segment: "artifacts", icon: LayoutGrid },
+  { segment: "chat", icon: MessageCircle },
 ] as const;
 
 /** The cockpit's persistent chrome: a left nav rail (studio logo, the 5

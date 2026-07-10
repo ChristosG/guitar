@@ -9,6 +9,7 @@
     "knowledge": "Knowledge",
     "notes": "Notes",
     "artifacts": "Artifacts",
+    "chat": "Chat",
     "searchPlaceholder": "Search… (coming soon)",
     "openMenu": "Open menu",
     "closeMenu": "Close menu"
@@ -256,6 +257,32 @@
     "unsupported": {
       "title": "Unsupported artifact",
       "body": "No renderer yet for kind \"{kind}\"."
+    }
+  },
+  "chat": {
+    "heading": "Chat",
+    "subheading": "Ask the copilot to look things up or make changes to your students and curricula — every change needs your approval before it runs.",
+    "placeholder": "Message the copilot…",
+    "send": "Send",
+    "empty": "Say hello to get started — the copilot can look things up or, with your approval, make changes.",
+    "sessionError": "Could not start a chat session.",
+    "error": "Could not send that message.",
+    "approval": {
+      "heading": "Approval needed",
+      "approve": "Approve",
+      "edit": "Edit",
+      "cancelEdit": "Cancel edit",
+      "reject": "Reject",
+      "invalidJson": "That isn't valid JSON.",
+      "error": "Could not resolve this approval."
+    },
+    "job": {
+      "pending": "Generating your curriculum — this can take a minute…",
+      "succeeded": "Your curriculum is ready.",
+      "viewCurriculum": "View curricula",
+      "failed": "Curriculum generation failed.",
+      "stillGenerating": "Still generating — check the Curricula page again shortly.",
+      "pollError": "Lost track of the generation job — check the Curricula page shortly."
     }
   }
 }

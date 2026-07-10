@@ -470,3 +470,137 @@ export function generateArtifact(input: GenerateArtifactInput): Promise<Artifact
 export function deleteArtifact(id: string): Promise<void> {
   return request<void>(`/artifacts/${id}`, { method: "DELETE" });
 }
+
+/**
+ * Typed fetch helpers for the Chat API (`/chat/*`) — Plan 5's HITL agent
+ * copilot: session creation, turn-taking, and the approve/edit/reject flow
+ * that gates every mutation tool call. Same direct-from-browser convention as
+ * every other section of this file (see this file's top docstring); mirrors
+ * `apps/api/app/schemas/chat.py` field-for-field, including that module's own
+ * "one flat response shape, fields vary by `status`" choice for `ChatTurnOut`
+ * (see its docstring) rather than a discriminated union per status.
+ *
+ * `POST /chat/{id}/messages` answers 409 if an approval is already open on
+ * that session (`routers/chat.py`'s `post_message` guard, checked BEFORE the
+ * new user message is even persisted). This app's UI
+ * (`components/chat/chat-panel.tsx`) is what's responsible for never
+ * triggering that: it disables the composer for the entire time a
+ * `ChatTurnOut` with `status: "awaiting_approval"` is unresolved, so a 409
+ * here would mean this client's own guard has a bug, not an expected
+ * response to design around.
+ */
+
+export type ChatTurnStatus = "answer" | "awaiting_approval" | "job_pending";
+
+/** Mirrors `schemas/chat.py`'s `ChatTurnOut` — the response shape for both
+ * `sendChatMessage` and `resolveApproval`. Which fields are populated
+ * depends on `status`: "answer" -> `content`; "awaiting_approval" ->
+ * `approval_id`/`tool_name`/`tool_args`/`description`; "job_pending"
+ * (resolve only) -> `job_id`. `status` keeps the same "soft union" shape as
+ * `SourceOut.status`/`JobOut.status` above (a plain API-side `str`, not a
+ * `Literal`) — an unrecognized future status should still round-trip
+ * instead of failing a type check. */
+export interface ChatTurnOut {
+  status: ChatTurnStatus | (string & {});
+  content?: string | null;
+  approval_id?: string | null;
+  tool_name?: string | null;
+  tool_args?: Record<string, unknown> | null;
+  description?: string | null;
+  job_id?: string | null;
+}
+
+/** One row of `getChatHistory`'s response — mirrors `schemas/chat.py`'s
+ * `MessageOut` (user/assistant rows only; the API omits tool/system rows —
+ * internal plumbing the chat UI never needs to render). */
+export interface ChatMessageOut {
+  id: string;
+  role: string;
+  content: string | null;
+  created_at: string;
+}
+
+/** Mirrors `schemas/chat.py`'s `PendingApprovalOut` — `GET
+ * /chat/{id}/pending`'s response when a mutation is awaiting a decision, or
+ * `null` when the session has none open. */
+export interface PendingApprovalOut {
+  id: string;
+  tool_name: string;
+  tool_args: Record<string, unknown>;
+  status: string;
+  created_at: string;
+}
+
+export interface ResolveApprovalInput {
+  decision: "approve" | "reject";
+  /** Only meaningful alongside `decision: "approve"` — the tutor's edited
+   * `tool_args` to run the tool with instead of the originally-proposed ones
+   * (the "Edit" path in `ApprovalCard`). Omitted/`null` means "run it with
+   * the args as originally proposed" (mirrors `ApprovalResolveRequest.
+   * edited_args`, which the API itself only ever reads on the approve
+   * branch — see `resolve_approval`'s reject branch in `routers/chat.py`). */
+  editedArgs?: Record<string, unknown> | null;
+}
+
+/** `POST /chat`'s response — mirrors `schemas/chat.py`'s
+ * `ChatSessionCreated`: just enough to start posting messages/resolving
+ * approvals against this session. `studentId` is optional (a chat session
+ * need not be scoped to one student). */
+export function createChatSession(studentId?: string | null): Promise<{ session_id: string }> {
+  return request<{ session_id: string }>("/chat", {
+    method: "POST",
+    body: JSON.stringify({ student_id: studentId ?? null }),
+  });
+}
+
+/** Posts one user turn and runs the agent loop against it. Callers MUST NOT
+ * call this again while a previous `ChatTurnOut` came back `awaiting_
+ * approval` and hasn't been resolved yet — the API 409s (see this section's
+ * top docstring) — `chat-panel.tsx` enforces that by disabling its composer
+ * for exactly that window. */
+export function sendChatMessage(sessionId: string, content: string): Promise<ChatTurnOut> {
+  return request<ChatTurnOut>(`/chat/${sessionId}/messages`, {
+    method: "POST",
+    body: JSON.stringify({ content }),
+  });
+}
+
+/** Resolves one pending approval: reject narrates the refusal and hands
+ * control back to the model; approve either runs the mutation synchronously
+ * (`status: "answer"`) or, for the one `async_job` tool (`generate_
+ * curriculum`), enqueues a background job (`status: "job_pending"`, `job_id`
+ * set) — see `resolve_approval` in `routers/chat.py`. Callers handling
+ * `job_pending` should poll the EXISTING Plan 8 `getJob` below, same ~2s/cap
+ * convention as `components/curriculum/generate-dialog.tsx`. */
+export function resolveApproval(
+  sessionId: string,
+  approvalId: string,
+  input: ResolveApprovalInput,
+): Promise<ChatTurnOut> {
+  return request<ChatTurnOut>(`/chat/${sessionId}/approvals/${approvalId}/resolve`, {
+    method: "POST",
+    body: JSON.stringify({
+      decision: input.decision,
+      edited_args: input.editedArgs ?? null,
+    }),
+  });
+}
+
+/** The session's transcript (user/assistant rows only, oldest first).
+ * Exposed for API completeness (mirrors `GET /chat/{id}`) — the chat page
+ * always starts a brand-new session on mount (`chat-panel.tsx`), which can
+ * never already have history, so nothing in this app calls this yet; it's
+ * here for whenever this app grows a way to resume a previous session (e.g.
+ * a session id kept in the URL/storage). */
+export function getChatHistory(sessionId: string): Promise<ChatMessageOut[]> {
+  return request<ChatMessageOut[]>(`/chat/${sessionId}`);
+}
+
+/** The session's currently-open approval, or `null`. Same "exposed for
+ * completeness, not yet called" status as `getChatHistory` above, for the
+ * same reason — mirrors `GET /chat/{id}/pending`, useful once this app can
+ * resume a session that might already have one outstanding (a fresh session
+ * from `createChatSession` never does). */
+export function getPendingApproval(sessionId: string): Promise<PendingApprovalOut | null> {
+  return request<PendingApprovalOut | null>(`/chat/${sessionId}/pending`);
+}
