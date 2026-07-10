@@ -121,5 +121,17 @@ def promote_note_endpoint(note_id: UUID, db: Session = Depends(get_db)) -> NoteP
     if not note.body or not note.body.strip():
         raise HTTPException(status_code=422, detail="cannot promote a note with an empty body")
 
-    source = promote_note(db, note)
+    try:
+        source = promote_note(db, note)
+    except ValueError as e:
+        # promote_note raises when ingestion didn't complete (source status
+        # != "ready"): `ingest_source` SWALLOWS ordinary failures, so this is
+        # an upstream-dependency failure (embed/extract) -> 502, same class as
+        # the guided-JSON generators' GuidedJSONError->502. The note's
+        # `promoted_to_knowledge` flag stays False (promote_note didn't flip
+        # it), so the tutor can retry rather than being permanently stuck with
+        # a "promoted" but empty, non-retrievable source. (An oversized-body
+        # HTTPException(413) from create_source is NOT a ValueError and still
+        # propagates unmodified, exactly as before.)
+        raise HTTPException(status_code=502, detail=str(e)) from e
     return NotePromoteOut(**_to_note_out(note).model_dump(), source_id=source.id)

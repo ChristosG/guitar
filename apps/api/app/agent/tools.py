@@ -88,7 +88,7 @@ from app.curriculum.progress import upsert_progress as _upsert_progress_service
 from app.curriculum.segment import segment_block as _segment_block_service
 from app.models.artifact import Artifact
 from app.models.block import Block
-from app.models.curriculum import Assignment
+from app.models.curriculum import Assignment, Progress
 from app.models.note import Note
 from app.models.student import Student
 from app.notes.promote import promote_note as _promote_note_service
@@ -499,6 +499,13 @@ def _promote_note_to_knowledge(db, *, note_id: str) -> dict:
     (missing note, already-promoted, empty body) as graceful `{"error": ...}`
     dicts instead of that endpoint's 404/409/422 `HTTPException`s — same
     "guard, don't crash" spirit as every other tool fn in this registry.
+
+    `promote_note` itself also raises `ValueError` when ingestion didn't
+    complete (source status != "ready" — the flag is deliberately NOT
+    flipped in that case, see its docstring / whole-plan review Important 2);
+    caught here into a graceful dict too, same as `_segment_block` catches
+    `segment_block`'s `ValueError`. The note's `promoted_to_knowledge` stays
+    False, so a retry stays possible.
     """
     parsed_id = _parse_uuid(note_id)
     if parsed_id is None:
@@ -511,7 +518,10 @@ def _promote_note_to_knowledge(db, *, note_id: str) -> dict:
     if not note.body or not note.body.strip():
         return {"error": "cannot promote a note with an empty body"}
 
-    source = _promote_note_service(db, note)
+    try:
+        source = _promote_note_service(db, note)
+    except ValueError as e:
+        return {"error": str(e)}
     return {"note_id": note.id, "title": note.title, "source_id": source.id}
 
 
@@ -531,6 +541,25 @@ def _log_progress(
     send one of the four values, but a chat model has no such fixed picker
     and could otherwise persist an invented status string, so this tool
     layer adds the guard the HTTP boundary doesn't need.
+
+    `notes` is PRESERVE-BY-DEFAULT here, unlike the HTTP route (whole-plan
+    review, Important 1): `upsert_progress` overwrites notes WHOLESALE (its
+    own docstring — an omitted `notes` clears the row's prior note). The web
+    UI copes by resending the existing `notes` unchanged on every status
+    click (`progress-row.tsx`), but the AGENT structurally CAN'T — there is
+    no read tool exposing a student's Progress rows, so a plain "mark barre
+    chords as mastered for Maria" makes the model call this with `notes`
+    OMITTED (-> None), which would silently NULL a previously-recorded note,
+    and the approval card (proposed args only) can't even show the loss. So
+    when `notes is None` AND a Progress row already exists for this
+    (student, block), its current `notes` is carried through to the service
+    rather than None. An explicitly-provided `notes` (the model restating
+    the note) still applies, and a brand-new row with no `notes` still
+    stores None — only the "omitted on an existing row" case is preserved.
+    Deliberately scoped to THIS wrapper (not `upsert_progress`/`ProgressIn`/
+    the HTTP route, all left untouched): the UI's wholesale-overwrite
+    contract is correct for the UI; only this one structurally-blind caller
+    needs the guard.
 
     Student/block existence is checked here, BEFORE calling the service, for
     the same reason `routers/students.py`'s `upsert_student_progress` checks
@@ -554,9 +583,20 @@ def _log_progress(
     if db.get(Block, parsed_block_id) is None:
         return {"error": "block not found"}
 
+    notes_to_apply = notes
+    if notes_to_apply is None:
+        existing = db.scalars(
+            select(Progress).where(
+                Progress.student_id == parsed_student_id,
+                Progress.block_id == parsed_block_id,
+            )
+        ).first()
+        if existing is not None:
+            notes_to_apply = existing.notes  # preserve, don't clobber (see docstring)
+
     progress = _upsert_progress_service(
         db, student_id=parsed_student_id, block_id=parsed_block_id,
-        status=status, notes=notes,
+        status=status, notes=notes_to_apply,
     )
     return {"status": progress.status, "block_id": progress.block_id}
 

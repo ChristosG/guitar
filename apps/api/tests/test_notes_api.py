@@ -333,3 +333,32 @@ def test_promote_note_with_whitespace_only_body_422s():
 def test_promote_unknown_note_404s():
     r = client.post("/notes/00000000-0000-0000-0000-000000000000/promote")
     assert r.status_code == 404
+
+
+def test_promote_note_ingestion_failure_502s_and_does_not_flip_flag(monkeypatch):
+    """Regression (whole-plan review, Important 2): `ingest_source` swallows
+    ordinary ingestion failures and leaves status='failed' WITHOUT raising
+    (see `app.brain.ingest`). `promote_note` must NOT flip the one-way
+    `promoted_to_knowledge` flag on such a failure — otherwise a transient
+    embed/extract failure permanently and silently "succeeds" an empty,
+    non-retrievable source (a second promote would 409). The failure must
+    surface (502, an upstream-dependency failure like the guided-JSON
+    generators' GuidedJSONError->502) and the flag must stay False so the
+    tutor can retry. Overrides this module's autouse `_stub_ingest` fixture
+    (which forces status='ready') with a failing stub for this one test.
+    """
+    def _failing_ingest(db, source_id, payload):
+        source = db.get(KnowledgeSource, source_id)
+        source.status = "failed"
+        source.error = "embed model unreachable"
+        db.commit()
+
+    monkeypatch.setattr(knowledge_router, "ingest_source", _failing_ingest)
+
+    created = _create_note(title="Fails to ingest", body="some real body text")
+    r = client.post(f"/notes/{created['id']}/promote")
+    assert r.status_code == 502, r.text
+
+    # Flag stays False -> a retry is possible (NOT a 409 "already promoted").
+    r2 = client.get(f"/notes/{created['id']}")
+    assert r2.json()["promoted_to_knowledge"] is False

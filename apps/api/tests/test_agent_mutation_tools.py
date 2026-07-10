@@ -607,6 +607,44 @@ def test_promote_note_to_knowledge_whitespace_only_body_returns_graceful_error()
     assert result == {"error": "cannot promote a note with an empty body"}
 
 
+def _failing_ingest_source(db, source_id, payload):
+    """Stands in for a swallowed ingestion failure (embed model down /
+    extraction error): leaves the KnowledgeSource at status='failed' WITHOUT
+    raising — exactly what the real `app.brain.ingest.ingest_source` does for
+    an ordinary failure (see that module's swallow-not-raise design)."""
+    source = db.get(KnowledgeSource, source_id)
+    source.status = "failed"
+    source.error = "embed model unreachable"
+    db.commit()
+
+
+def test_promote_note_to_knowledge_ingestion_failure_does_not_flip_flag(monkeypatch):
+    """Regression (whole-plan review, Important 2): `ingest_source` swallows
+    ordinary failures and leaves status='failed' without raising. Because
+    promotion is a documented ONE-WAY flip (no un-promote; a second attempt
+    hard-errors), flipping `promoted_to_knowledge` on a FAILED ingest would
+    permanently and silently "succeed" an empty, non-retrievable source. The
+    wrapper must surface the failure AND leave the flag False so a retry is
+    still possible.
+    """
+    monkeypatch.setattr(knowledge_router, "ingest_source", _failing_ingest_source)
+
+    db = SessionLocal()
+    try:
+        note = Note(title="Fails to ingest", body="some real body text")
+        db.add(note)
+        db.commit()
+        note_id = note.id
+
+        result = TOOLS["promote_note_to_knowledge"].fn(db, note_id=str(note_id))
+
+        got = db.get(Note, note_id)
+        assert "error" in result  # failure surfaced, not a silent success
+        assert got.promoted_to_knowledge is False  # NOT flipped -> retryable
+    finally:
+        db.close()
+
+
 # ---------------------------------------------------------------------------
 # log_progress (Plan 6 Task 6) — wraps app.curriculum.progress.upsert_progress;
 # same "create then update same block = one row, new status" upsert precedent
@@ -659,6 +697,73 @@ def test_log_progress_second_call_updates_same_row_not_duplicate():
 
     assert len(rows) == 1
     assert rows[0].status == "mastered"
+
+
+def test_log_progress_omitting_notes_preserves_existing_notes():
+    """Regression (whole-plan review, Important 1): the agent has NO read
+    tool surfacing a student's Progress rows, so a plain "mark barre chords
+    as mastered for Maria" makes the model call log_progress with `notes`
+    OMITTED. `upsert_progress` overwrites notes WHOLESALE (documented — never
+    merges), so an omitted notes would silently NULL a previously-recorded
+    note, and the approval card (proposed args only, no `notes` key) can't
+    even show the loss coming. The tool wrapper — the one caller structurally
+    unable to resend a value it never saw (unlike progress-row.tsx, which
+    resends the existing notes on every status click) — must preserve the
+    existing notes when the caller omits them.
+    """
+    root_id = _seed_template_course()
+    db = SessionLocal()
+    try:
+        student = TOOLS["create_student"].fn(db, name="Notes Preserve Kid")
+        student_id = student["id"]
+        # first: record a status WITH a note
+        TOOLS["log_progress"].fn(
+            db, student_id=str(student_id), block_id=str(root_id),
+            status="practicing", notes="struggled with barre chords",
+        )
+        # then: change ONLY the status, omitting notes (exactly what the model
+        # emits for "mark that as mastered")
+        result = TOOLS["log_progress"].fn(
+            db, student_id=str(student_id), block_id=str(root_id), status="mastered",
+        )
+        assert result == {"status": "mastered", "block_id": root_id}
+
+        row = db.scalars(
+            select(Progress).where(Progress.student_id == student_id, Progress.block_id == root_id)
+        ).first()
+    finally:
+        db.close()
+
+    assert row.status == "mastered"
+    assert row.notes == "struggled with barre chords"  # PRESERVED, not nulled
+
+
+def test_log_progress_explicit_notes_still_overwrites_existing():
+    """The preserve-by-default guard above must NOT block an explicitly
+    provided new note from replacing the old one — only an OMITTED `notes`
+    preserves; a provided value (the caller genuinely restating the note)
+    still applies, same as it always did.
+    """
+    root_id = _seed_template_course()
+    db = SessionLocal()
+    try:
+        student = TOOLS["create_student"].fn(db, name="Notes Overwrite Kid")
+        student_id = student["id"]
+        TOOLS["log_progress"].fn(
+            db, student_id=str(student_id), block_id=str(root_id),
+            status="practicing", notes="old note",
+        )
+        TOOLS["log_progress"].fn(
+            db, student_id=str(student_id), block_id=str(root_id),
+            status="mastered", notes="new note",
+        )
+        row = db.scalars(
+            select(Progress).where(Progress.student_id == student_id, Progress.block_id == root_id)
+        ).first()
+    finally:
+        db.close()
+
+    assert row.notes == "new note"
 
 
 def test_log_progress_malformed_student_id_returns_graceful_error():
