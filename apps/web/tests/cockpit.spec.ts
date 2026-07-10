@@ -564,3 +564,430 @@ test.describe("curricula (mocked API)", () => {
     expect(mock.unexpected).toEqual([]);
   });
 });
+
+// --- Student detail (mocked API) --------------------------------------------
+//
+// Plan 6 Task 4: the student-detail page (assignments/progress/recent
+// lessons + the assign-curriculum and log-a-lesson flows). Deliberately a
+// NEW, self-contained mock (`mockStudentDetailApi` below), not a retrofit of
+// `mockStudentsApi`/`mockCurriculaApi` above — this page's endpoint
+// combination (detail/progress/lessons/assign/blocks, all at once) doesn't
+// overlap either existing helper's scope, and extending them risked the
+// already-green tests those helpers back. Same CORS/OPTIONS/unexpected-
+// request-500 conventions as every mock above.
+
+interface FixtureAssignment {
+  assignment_id: string;
+  curriculum_block_id: string;
+  title: string;
+}
+
+interface FixtureProgress {
+  id: string;
+  student_id: string;
+  block_id: string;
+  status: string;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function seedProgress(overrides: Partial<FixtureProgress> = {}): FixtureProgress {
+  const now = new Date().toISOString();
+  return {
+    id: randomUUID(),
+    student_id: "",
+    block_id: randomUUID(),
+    status: "practicing",
+    notes: null,
+    created_at: now,
+    updated_at: now,
+    ...overrides,
+  };
+}
+
+interface FixtureLessonLog {
+  id: string;
+  student_id: string;
+  session_block_id: string;
+  date: string | null;
+  taught: boolean;
+  notes: string | null;
+  homework: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function seedLessonLog(overrides: Partial<FixtureLessonLog> = {}): FixtureLessonLog {
+  const now = new Date().toISOString();
+  return {
+    id: randomUUID(),
+    student_id: "",
+    session_block_id: randomUUID(),
+    date: null,
+    taught: false,
+    notes: null,
+    homework: null,
+    created_at: now,
+    updated_at: now,
+    ...overrides,
+  };
+}
+
+/** Mocks the whole student-detail page's API surface for one student:
+ * `GET /students` (list, so the "click through from the roster" test can
+ * find the row), `GET /students/{id}/detail` (stateful — reflects every
+ * mutation below on its NEXT call), `POST /students/{id}/progress` (upsert
+ * by block_id, same semantics as the real `upsert_progress`), `POST
+ * /students/{id}/lessons` (always appends), `GET /curricula` (the assign
+ * dialog's picker) + `POST /curricula/{root_id}/assign` (records a new
+ * assignment + returns a trivial cloned tree), and `GET /blocks/{id}`
+ * (resolves a bare block id to its title for `BlockTitle`). */
+async function mockStudentDetailApi(
+  page: Page,
+  {
+    student,
+    assignments = [],
+    progress = [],
+    lessons = [],
+    curricula = [],
+    blocksById = {},
+  }: {
+    student: FixtureStudent;
+    assignments?: FixtureAssignment[];
+    progress?: FixtureProgress[];
+    lessons?: FixtureLessonLog[];
+    curricula?: CurriculumListItemFixture[];
+    blocksById?: Record<string, { id: string; title: string }>;
+  },
+) {
+  const state = { assignments: [...assignments], progress: [...progress], lessons: [...lessons] };
+  const calls = { students: 0, detail: 0, progress: 0, lessons: 0, curricula: 0, assign: 0, block: 0 };
+  const lastBody: { progress?: unknown; lessons?: unknown; assign?: unknown } = {};
+  const unexpected: string[] = [];
+
+  async function handler(route: Route) {
+    const req = route.request();
+    const method = req.method();
+    const { pathname } = new URL(req.url());
+
+    if (method === "OPTIONS") {
+      await route.fulfill({ status: 204, headers: CORS_HEADERS });
+      return;
+    }
+
+    if (pathname === "/students" && method === "GET") {
+      calls.students++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        headers: CORS_HEADERS,
+        body: JSON.stringify([student]),
+      });
+      return;
+    }
+    if (pathname === `/students/${student.id}/detail` && method === "GET") {
+      calls.detail++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        headers: CORS_HEADERS,
+        body: JSON.stringify({
+          student,
+          assignments: state.assignments,
+          progress: state.progress,
+          recent_lessons: state.lessons,
+        }),
+      });
+      return;
+    }
+    if (pathname === `/students/${student.id}/progress` && method === "POST") {
+      calls.progress++;
+      const payload = req.postDataJSON() as { block_id: string; status: string; notes?: string | null };
+      lastBody.progress = payload;
+      const now = new Date().toISOString();
+      const existingIdx = state.progress.findIndex((p) => p.block_id === payload.block_id);
+      if (existingIdx >= 0) {
+        state.progress[existingIdx] = {
+          ...state.progress[existingIdx],
+          status: payload.status,
+          notes: payload.notes ?? null,
+          updated_at: now,
+        };
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          headers: CORS_HEADERS,
+          body: JSON.stringify(state.progress[existingIdx]),
+        });
+        return;
+      }
+      const created = seedProgress({
+        student_id: student.id,
+        block_id: payload.block_id,
+        status: payload.status,
+        notes: payload.notes ?? null,
+      });
+      state.progress.unshift(created);
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        headers: CORS_HEADERS,
+        body: JSON.stringify(created),
+      });
+      return;
+    }
+    if (pathname === `/students/${student.id}/lessons` && method === "POST") {
+      calls.lessons++;
+      const payload = req.postDataJSON() as {
+        session_block_id: string;
+        date?: string | null;
+        taught?: boolean;
+        notes?: string | null;
+        homework?: string | null;
+      };
+      lastBody.lessons = payload;
+      const created = seedLessonLog({
+        student_id: student.id,
+        session_block_id: payload.session_block_id,
+        date: payload.date ?? null,
+        taught: payload.taught ?? false,
+        notes: payload.notes ?? null,
+        homework: payload.homework ?? null,
+      });
+      state.lessons.unshift(created);
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        headers: CORS_HEADERS,
+        body: JSON.stringify(created),
+      });
+      return;
+    }
+    if (pathname === "/curricula" && method === "GET") {
+      calls.curricula++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        headers: CORS_HEADERS,
+        body: JSON.stringify(curricula),
+      });
+      return;
+    }
+    const assignMatch = pathname.match(/^\/curricula\/([^/]+)\/assign$/);
+    if (assignMatch && method === "POST") {
+      calls.assign++;
+      const payload = req.postDataJSON() as { student_id: string };
+      lastBody.assign = payload;
+      const rootId = assignMatch[1];
+      const template = curricula.find((c) => c.id === rootId);
+      const title = template?.title ?? "Untitled";
+      state.assignments.unshift({ assignment_id: randomUUID(), curriculum_block_id: rootId, title });
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        headers: CORS_HEADERS,
+        body: JSON.stringify({
+          id: randomUUID(),
+          kind: "course",
+          title,
+          body: null,
+          est_minutes: null,
+          order: 0,
+          language: template?.language ?? "en",
+          plane: "content",
+          student_id: payload.student_id,
+          children: [],
+        }),
+      });
+      return;
+    }
+    const blockMatch = pathname.match(/^\/blocks\/([^/]+)$/);
+    if (blockMatch && method === "GET") {
+      calls.block++;
+      const block = blocksById[blockMatch[1]];
+      if (!block) {
+        await route.fulfill({
+          status: 404,
+          contentType: "application/json",
+          headers: CORS_HEADERS,
+          body: JSON.stringify({ detail: "block not found" }),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        headers: CORS_HEADERS,
+        body: JSON.stringify({
+          id: block.id,
+          kind: "lesson",
+          title: block.title,
+          body: null,
+          est_minutes: null,
+          order: 0,
+          language: "en",
+          plane: "content",
+          student_id: null,
+          children: [],
+        }),
+      });
+      return;
+    }
+
+    unexpected.push(`${method} ${pathname}`);
+    await route.fulfill({
+      status: 500,
+      contentType: "application/json",
+      headers: CORS_HEADERS,
+      body: JSON.stringify({ detail: "unmocked request in test" }),
+    });
+  }
+
+  await page.route(`${API_ORIGIN}/students`, handler);
+  await page.route(`${API_ORIGIN}/students/**`, handler);
+  await page.route(`${API_ORIGIN}/curricula`, handler);
+  await page.route(`${API_ORIGIN}/curricula/**`, handler);
+  await page.route(`${API_ORIGIN}/blocks/**`, handler);
+
+  return { calls, lastBody, state, unexpected };
+}
+
+test.describe("student detail (mocked API)", () => {
+  test("opens from the students list and shows assignments, progress, and recent lessons", async ({ page }) => {
+    const student = seedStudent({ name: "Elena Nikolaou", level: "intermediate", instrument: "guitar" });
+    const blockA = randomUUID();
+    const rootTemplate = randomUUID();
+
+    const mock = await mockStudentDetailApi(page, {
+      student,
+      assignments: [
+        { assignment_id: randomUUID(), curriculum_block_id: rootTemplate, title: "Tone Shaping Fundamentals" },
+      ],
+      progress: [
+        seedProgress({ student_id: student.id, block_id: blockA, status: "practicing", notes: "sounding good" }),
+      ],
+      lessons: [
+        seedLessonLog({
+          student_id: student.id,
+          session_block_id: blockA,
+          date: "2026-01-15",
+          taught: true,
+          notes: "good session",
+          homework: "practice 15 min/day",
+        }),
+      ],
+      blocksById: { [blockA]: { id: blockA, title: "Pickups and Tone" } },
+    });
+
+    await page.goto("/en/students");
+    const row = page.getByTestId("student-item").filter({ hasText: "Elena Nikolaou" });
+    await row.getByTestId("student-name").click();
+
+    await expect(page).toHaveURL(new RegExp(`/en/students/${student.id}$`));
+    await expect(page.getByTestId("student-detail-heading")).toHaveText("Elena Nikolaou");
+    await expect(page.getByTestId("student-level")).toContainText("intermediate");
+
+    await expect(page.getByTestId("assignment-item")).toHaveCount(1);
+    await expect(page.getByTestId("assignment-title")).toHaveText("Tone Shaping Fundamentals");
+
+    await expect(page.getByTestId("progress-item")).toHaveCount(1);
+    await expect(page.getByTestId("progress-block-title")).toContainText("Pickups and Tone");
+    await expect(page.getByTestId("progress-status-practicing")).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByTestId("progress-notes")).toHaveText("sounding good");
+
+    await expect(page.getByTestId("lesson-item")).toHaveCount(1);
+    await expect(page.getByTestId("lesson-block-title")).toContainText("Pickups and Tone");
+    await expect(page.getByTestId("lesson-notes")).toHaveText("good session");
+    await expect(page.getByTestId("lesson-homework")).toContainText("practice 15 min/day");
+
+    expect(mock.calls.detail).toBeGreaterThanOrEqual(1);
+    expect(mock.unexpected).toEqual([]);
+  });
+
+  test("changing a progress status posts the new status while preserving existing notes", async ({ page }) => {
+    const student = seedStudent({ name: "Progress Student" });
+    const blockA = randomUUID();
+    const mock = await mockStudentDetailApi(page, {
+      student,
+      progress: [
+        seedProgress({ student_id: student.id, block_id: blockA, status: "practicing", notes: "sounding good" }),
+      ],
+      blocksById: { [blockA]: { id: blockA, title: "Pickups and Tone" } },
+    });
+
+    await page.goto(`/en/students/${student.id}`);
+    await expect(page.getByTestId("progress-item")).toHaveCount(1);
+    await expect(page.getByTestId("progress-status-practicing")).toHaveAttribute("aria-pressed", "true");
+
+    await page.getByTestId("progress-status-mastered").click();
+
+    await expect(page.getByTestId("progress-status-mastered")).toHaveAttribute("aria-pressed", "true");
+    expect(mock.calls.progress).toBe(1);
+    // Notes were NOT part of this click — they must still be resent
+    // unchanged (see `ProgressInput`'s docstring in `lib/api.ts`): the API
+    // overwrites `notes` wholesale, so omitting it here would silently wipe
+    // the existing note.
+    expect(mock.lastBody.progress).toEqual({ block_id: blockA, status: "mastered", notes: "sounding good" });
+    expect(mock.unexpected).toEqual([]);
+  });
+
+  test("assigning a curriculum posts to /curricula/{root}/assign and the assignment appears", async ({ page }) => {
+    const student = seedStudent({ name: "Assign Student" });
+    const rootId = randomUUID();
+    const mock = await mockStudentDetailApi(page, {
+      student,
+      curricula: [
+        { id: rootId, title: "Rhythm Basics", language: "en", target_profile: null, created_at: new Date().toISOString() },
+      ],
+    });
+
+    await page.goto(`/en/students/${student.id}`);
+    await expect(page.getByTestId("student-assignments-empty")).toBeVisible();
+
+    await page.getByTestId("assign-curriculum-button").click();
+    await expect(page.getByTestId("assign-curriculum-dialog")).toBeVisible();
+    await expect(page.getByTestId("assign-curriculum-select")).toBeVisible();
+    await page.getByTestId("assign-curriculum-select").selectOption({ value: rootId });
+    await page.getByTestId("assign-curriculum-submit").click();
+
+    await expect(page.getByTestId("assign-curriculum-dialog")).toBeHidden();
+    await expect(page.getByTestId("assignment-item").filter({ hasText: "Rhythm Basics" })).toBeVisible();
+
+    expect(mock.calls.assign).toBe(1);
+    expect(mock.lastBody.assign).toEqual({ student_id: student.id });
+    expect(mock.unexpected).toEqual([]);
+  });
+
+  test("logging a lesson posts to /students/{id}/lessons and it appears in recent lessons", async ({ page }) => {
+    const student = seedStudent({ name: "Lesson Student" });
+    const blockA = randomUUID();
+    const mock = await mockStudentDetailApi(page, {
+      student,
+      blocksById: { [blockA]: { id: blockA, title: "Session 1" } },
+    });
+
+    await page.goto(`/en/students/${student.id}`);
+    await expect(page.getByTestId("student-lessons-empty")).toBeVisible();
+
+    await page.getByTestId("log-lesson-block-id").fill(blockA);
+    await page.getByTestId("log-lesson-date").fill("2026-02-01");
+    await page.getByTestId("log-lesson-notes").fill("worked on strumming");
+    await page.getByTestId("log-lesson-homework").fill("practice daily");
+    await page.getByTestId("log-lesson-submit").click();
+
+    await expect(page.getByTestId("lesson-item")).toHaveCount(1);
+    await expect(page.getByTestId("lesson-notes")).toHaveText("worked on strumming");
+    await expect(page.getByTestId("lesson-homework")).toContainText("practice daily");
+
+    expect(mock.calls.lessons).toBe(1);
+    expect(mock.lastBody.lessons).toEqual({
+      session_block_id: blockA,
+      date: "2026-02-01",
+      taught: true, // this form's own default, unchanged in this test
+      notes: "worked on strumming",
+      homework: "practice daily",
+    });
+    expect(mock.unexpected).toEqual([]);
+  });
+});

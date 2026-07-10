@@ -92,6 +92,63 @@
       "submit": "Add student",
       "submitting": "Adding…",
       "error": "Could not add the student."
+    },
+    "detail": {
+      "back": "Back to students",
+      "loading": "Loading student…",
+      "error": "Could not load this student.",
+      "assignments": {
+        "heading": "Assignments",
+        "empty": "No curricula assigned yet.",
+        "viewBoard": "View board"
+      },
+      "progress": {
+        "heading": "Progress",
+        "empty": "No progress tracked yet.",
+        "statusLabel": "Status",
+        "updateError": "Could not update this status.",
+        "status": {
+          "not_started": "Not started",
+          "introduced": "Introduced",
+          "practicing": "Practicing",
+          "mastered": "Mastered"
+        }
+      },
+      "lessons": {
+        "heading": "Recent lessons",
+        "empty": "No lessons logged yet.",
+        "taught": "Taught",
+        "notTaught": "Not taught",
+        "homeworkLabel": "Homework"
+      },
+      "assignDialog": {
+        "trigger": "Assign curriculum",
+        "heading": "Assign a curriculum",
+        "description": "Clone a curriculum template for this student to follow.",
+        "pickLabel": "Curriculum",
+        "loading": "Loading curricula…",
+        "empty": "No curricula yet — generate one on the Curricula page first.",
+        "loadError": "Could not load curricula.",
+        "cancel": "Cancel",
+        "submit": "Assign",
+        "assigning": "Assigning…",
+        "error": "Could not assign this curriculum."
+      },
+      "logLessonForm": {
+        "heading": "Log a lesson",
+        "blockIdLabel": "Session/block ID",
+        "blockIdPlaceholder": "Paste a block ID from the curriculum board",
+        "dateLabel": "Date",
+        "taughtOn": "Taught",
+        "taughtOff": "Not taught",
+        "notesLabel": "Notes",
+        "notesPlaceholder": "What happened in this session…",
+        "homeworkLabel": "Homework",
+        "homeworkPlaceholder": "What to practice before next time…",
+        "submit": "Log lesson",
+        "submitting": "Logging…",
+        "error": "Could not log this lesson."
+      }
     }
   },
   "curricula": {

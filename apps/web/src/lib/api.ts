@@ -365,6 +365,119 @@ export function assignCurriculum(rootId: string, studentId: string): Promise<Blo
 }
 
 /**
+ * Progress / LessonLog / student-detail types (Plan 6 Task 4) — mirrors
+ * `apps/api/app/schemas/students.py`'s `ProgressOut`/`LessonLogOut`/
+ * `AssignmentSummary`/`StudentDetailOut` field-for-field. `status` on
+ * `ProgressOut`/`ProgressInput` is the same soft, relabelable plain `string`
+ * (not a union) as `BlockNode.kind`/`JobOut.status` above, for the identical
+ * reason: this app's 4 known values (not_started/introduced/practicing/
+ * mastered — see `components/students/progress-row.tsx`) are a UI picker's
+ * concern, not this layer's.
+ */
+
+export interface ProgressOut {
+  id: string;
+  student_id: string;
+  block_id: string;
+  status: string;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** `blockId` is camelCase here for the same reason `CreateArtifactInput.
+ * blockId` is below (see this file's Artifacts-section docstring): callers
+ * read/destructure it more naturally than `block_id`. `notes` is passed
+ * straight through to `POST /students/{id}/progress`'s wholesale-overwrite
+ * `notes` field (see `upsertProgress` below) — callers changing ONLY
+ * `status` MUST still resend the row's current `notes`, or the API clears
+ * it (mirrors `app.curriculum.progress.upsert_progress`'s own docstring:
+ * "OVERWRITTEN wholesale ... not merged in PATCH-fashion"). */
+export interface ProgressInput {
+  blockId: string;
+  status: string;
+  notes?: string | null;
+}
+
+export interface LessonLogOut {
+  id: string;
+  student_id: string;
+  session_block_id: string;
+  date: string | null;
+  taught: boolean;
+  notes: string | null;
+  homework: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Same camelCase-input convention as `ProgressInput` above (`sessionBlockId`
+ * for the wire's `session_block_id`). Unlike `ProgressInput`, this always
+ * CREATES a new row (`POST /students/{id}/lessons` never upserts — see
+ * `LessonLogIn`'s own docstring), so there's no overwrite footgun to
+ * document here. */
+export interface LessonLogInput {
+  sessionBlockId: string;
+  date?: string | null;
+  taught?: boolean;
+  notes?: string | null;
+  homework?: string | null;
+}
+
+/** One row of `StudentDetailOut.assignments` — `curriculum_block_id` is the
+ * TEMPLATE block's id, NOT a student-specific clone (see `AssignmentSummary`'s
+ * own docstring on the API side: the clone's id is never recorded anywhere).
+ * `assignCurriculum` above is what actually creates one of these server-side;
+ * its `BlockNode` response is the clone, not this summary row. */
+export interface AssignmentSummary {
+  assignment_id: string;
+  curriculum_block_id: string;
+  title: string;
+}
+
+/** `GET /students/{id}/detail`'s aggregate response — everything the
+ * student-detail cockpit page (`app/[locale]/(cockpit)/students/[id]/
+ * page.tsx`) needs in one round trip. */
+export interface StudentDetailOut {
+  student: StudentOut;
+  assignments: AssignmentSummary[];
+  progress: ProgressOut[];
+  recent_lessons: LessonLogOut[];
+}
+
+export function getStudentDetail(id: string): Promise<StudentDetailOut> {
+  return request<StudentDetailOut>(`/students/${id}/detail`);
+}
+
+/** Upserts the student's Progress row for `input.blockId` — see
+ * `ProgressInput`'s own docstring above for the "must resend `notes`"
+ * caveat this call is NOT responsible for enforcing (the caller is). */
+export function upsertProgress(studentId: string, input: ProgressInput): Promise<ProgressOut> {
+  return request<ProgressOut>(`/students/${studentId}/progress`, {
+    method: "POST",
+    body: JSON.stringify({
+      block_id: input.blockId,
+      status: input.status,
+      notes: input.notes ?? null,
+    }),
+  });
+}
+
+/** Always creates a new LessonLog row — see `LessonLogInput`'s own docstring. */
+export function logLesson(studentId: string, input: LessonLogInput): Promise<LessonLogOut> {
+  return request<LessonLogOut>(`/students/${studentId}/lessons`, {
+    method: "POST",
+    body: JSON.stringify({
+      session_block_id: input.sessionBlockId,
+      date: input.date ?? null,
+      taught: input.taught ?? false,
+      notes: input.notes ?? null,
+      homework: input.homework ?? null,
+    }),
+  });
+}
+
+/**
  * Typed fetch helpers for the Artifacts API (`/artifacts/*`). Same direct-
  * from-browser convention as the Knowledge/Curriculum helpers above (see this
  * file's top docstring) — the Artifacts gallery page and the curriculum
