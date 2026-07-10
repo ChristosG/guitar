@@ -114,6 +114,9 @@ def _stringify(result) -> str:
     return json.dumps(result, default=str)
 
 
+_RESULT_REF_MAX = 255  # ApprovalRequest.result_ref is String(255)
+
+
 def _result_ref(tool_result) -> str | None:
     """Best-effort opaque pointer for `ApprovalRequest.result_ref` on a sync
     mutation's success (`app.models.chat.ApprovalRequest.result_ref` is
@@ -125,13 +128,30 @@ def _result_ref(tool_result) -> str | None:
     id, only `"session_ids"`. Anything else (or a non-dict result) falls
     back to `None` rather than raising — this is bookkeeping, not a
     correctness-critical value.
+
+    The `session_ids` case records a BOUNDED COUNT summary, never a join of
+    every id: `segment_block` commonly yields many sessions (a 3.5h
+    curriculum at 30min/session = 7 ids × 36-char UUID + separators = 264
+    chars), which would overflow the `String(255)` column and raise
+    `DataError` on commit — and that commit happens in `persist_new_messages`
+    OUTSIDE the resolve endpoint's fn-error try/except (the fn already
+    succeeded), so the overflow would surface as a raw 500 AND roll back the
+    approval status-flip + tool-result persist, bricking the session. The
+    full ids are already in the tool-message `content`; a count is all this
+    bookkeeping pointer needs. Every return is clamped to `_RESULT_REF_MAX`
+    as a defensive backstop so NO branch can ever overflow the column
+    (`id`/`assign_curriculum`'s UUID is only 36 chars, but the clamp is free
+    insurance against a future tool returning a longer `"id"`).
     """
-    if isinstance(tool_result, dict):
-        if "id" in tool_result:
-            return str(tool_result["id"])
-        if "session_ids" in tool_result:
-            return ", ".join(str(i) for i in tool_result["session_ids"])
-    return None
+    if not isinstance(tool_result, dict):
+        return None
+    if "id" in tool_result:
+        ref = str(tool_result["id"])
+    elif "session_ids" in tool_result:
+        ref = f"{len(tool_result['session_ids'])} sessions"
+    else:
+        return None
+    return ref[:_RESULT_REF_MAX]
 
 
 def _default_description(tool_name: str, tool_args: dict) -> str:

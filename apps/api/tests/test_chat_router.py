@@ -724,3 +724,64 @@ def test_resume_after_approve_can_propose_a_second_mutation_creating_a_new_pendi
     # GET /pending now surfaces the SECOND (most-recent) pending approval.
     pending = client.get(f"/chat/{session_id}/pending")
     assert pending.json()["id"] == second_approval_id
+
+
+# ---------------------------------------------------------------------------
+# resolve approve — segment_block with many sessions must not overflow
+# ApprovalRequest.result_ref (String(255)) → 500 + bricked session (review Critical)
+# ---------------------------------------------------------------------------
+
+def test_resolve_approve_segment_block_with_many_sessions_does_not_overflow_result_ref(monkeypatch):
+    """Regression: `segment_block` commonly yields many session ids — a 3.5h
+    curriculum at 30min/session = 7 ids. `_result_ref` must NOT join them all
+    into `ApprovalRequest.result_ref`: 7 × 36-char UUID + ", " separators =
+    264 chars, over the column's VARCHAR(255) cap. That assignment is
+    committed by `persist_new_messages` OUTSIDE the fn-error try/except (the fn
+    already succeeded), so the overflow raises `DataError` as a raw 500 AND
+    rolls back the approval status-flip + the tool-result persist — leaving a
+    dangling unanswered tool_call + a forever-`pending` approval that
+    `post_message` now 409s behind = a bricked session with no in-app escape.
+    `_result_ref` must record a BOUNDED summary instead (the full ids are
+    already in the tool-message content; result_ref is best-effort opaque
+    bookkeeping).
+    """
+    fake_session_ids = [str(uuid.uuid4()) for _ in range(7)]  # 7 × 36 + separators = 264 > 255
+
+    def _fake_segment(db, **kwargs):
+        return {"session_ids": fake_session_ids}
+
+    _stub_tool(monkeypatch, "segment_block", _fake_segment)
+    _use_provider(monkeypatch, [
+        AssistantTurn(
+            content="I'll segment that block into sessions.",
+            tool_calls=[ToolCall(
+                id="call_1", name="segment_block",
+                arguments={"block_id": "b1", "session_minutes": 30},
+            )],
+        ),
+        AssistantTurn(content="Done — I split it into 7 sessions.", tool_calls=[]),
+    ])
+    session_id = _create_session()
+    propose = client.post(f"/chat/{session_id}/messages", json={"content": "segment that block at 30 min"})
+    approval_id = propose.json()["approval_id"]
+
+    r = client.post(
+        f"/chat/{session_id}/approvals/{approval_id}/resolve", json={"decision": "approve"},
+    )
+
+    assert r.status_code == 200, r.text  # NOT a 500 from a VARCHAR(255) overflow
+    assert r.json()["status"] == "answer"
+
+    approval = _db_approval(approval_id)
+    assert approval.status == "approved"  # flip committed (not rolled back)
+    assert approval.result_ref is not None
+    assert len(approval.result_ref) <= 255  # bounded, fits the column
+
+    # The pending tool_call was answered + persisted (transcript not dangling).
+    rows = _db_messages(session_id)
+    tool_msgs = [m for m in rows if m.role == "tool"]
+    assert len(tool_msgs) == 1
+    assert tool_msgs[0].tool_call_id == "call_1"
+
+    # And the session is not bricked: no longer pending.
+    assert client.get(f"/chat/{session_id}/pending").json() is None
