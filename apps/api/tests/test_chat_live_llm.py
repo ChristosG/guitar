@@ -46,6 +46,14 @@ Two turns, mirroring the brief exactly:
     name substring-matches both name parts). Also asserts the mutation fn
     was NEVER actually invoked (no Student row exists) — suspend-before-
     execute is the entire point of the HITL gate this task re-verifies.
+
+A third turn (Plan 6 Task 6's own brief) re-runs the identical proof for one
+of the THREE tools this task wired into the very same registry the two turns
+above already drive the full roster of: "make a note that Maria struggled
+with barre chords today" -> `status == "awaiting_approval"`,
+`tool_name == "add_note"`, plausible `tool_args` (title/body plausibly
+mention Maria/barre chords), and — same suspend-before-execute proof as the
+`create_student` turn — no `Note` row exists yet.
 """
 import uuid
 
@@ -58,6 +66,7 @@ from app.db import Base, SessionLocal, engine
 from app.main import app
 from app.models.chat import ApprovalRequest, Message
 from app.models.knowledge import KnowledgeSource
+from app.models.note import Note
 from app.models.student import Student
 
 # Skip cleanly (not error) when no DB is reachable — mirrors test_curriculum_api.py.
@@ -217,6 +226,57 @@ def test_mutation_intent_suspends_for_approval_with_the_right_tool():
         maria_rows = db.query(Student).filter(Student.name.ilike("%Maria%")).all()
         assert maria_rows == [], (
             f"create_student fn must NOT run before approval, but found: {maria_rows}"
+        )
+    finally:
+        db.close()
+
+
+@pytest.mark.integration
+def test_note_intent_suspends_for_approval_with_the_right_tool():
+    """Plan 6 Task 6's own live-LLM proof: same shape as the `create_student`
+    turn above, for one of the three tools this task added into the SAME
+    ~16-tool roster (6 read + 10 mutation) — confirming the registry's growth
+    since Task 6 of Plan 5 didn't suppress tool-calling for a NEW tool either.
+    """
+    session_id = _create_session()
+    r = client.post(
+        f"/chat/{session_id}/messages",
+        json={"content": "Make a note that Maria struggled with barre chords today"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+
+    print(
+        f"\n[live-llm note-intent] status={body['status']!r} "
+        f"tool_name={body.get('tool_name')!r} tool_args={body.get('tool_args')!r} "
+        f"description={body.get('description')!r}"
+    )
+
+    assert body["status"] == "awaiting_approval", (
+        f"expected the turn to suspend for approval, got: {body}"
+    )
+    assert body["tool_name"] == "add_note", (
+        f"model proposed the wrong tool for a make-a-note request: {body['tool_name']!r}"
+    )
+    assert body["approval_id"]
+
+    tool_args = body["tool_args"]
+    text_blob = " ".join(str(v) for v in tool_args.values()).lower()
+    assert "maria" in text_blob, f"proposed add_note args don't mention Maria: {tool_args}"
+    assert "barre" in text_blob, f"proposed add_note args don't mention barre chords: {tool_args}"
+
+    # Suspended, not executed: the ApprovalRequest is pending, and no Note row
+    # exists yet — proving the router gated the mutation rather than running it.
+    db = SessionLocal()
+    try:
+        approval = db.get(ApprovalRequest, uuid.UUID(body["approval_id"]))
+        assert approval is not None
+        assert approval.status == "pending"
+        assert approval.tool_name == "add_note"
+
+        note_rows = db.query(Note).all()
+        assert note_rows == [], (
+            f"add_note fn must NOT run before approval, but found: {note_rows}"
         )
     finally:
         db.close()

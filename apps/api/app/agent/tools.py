@@ -3,11 +3,12 @@
 `TOOLS` maps each tool's name to a `ToolEntry`: the OpenAI-shape JSON schema
 the model sees (`schema`), the Python callable the loop dispatches to
 (`fn(db, **args) -> <JSON-serializable result>`), `kind` ("read" or
-"mutation" — Plan 5 Task 2 registered only reads; THIS task (3) adds the
-"mutation" entries into this SAME dict), and `async_job` (Task 3 — see
-below). `loop.py` dispatches the two kinds differently: a "read" executes
-inline, same turn; a "mutation" SUSPENDS the turn instead of executing (see
-`loop.py`'s own module docstring for the suspend design).
+"mutation" — Plan 5 Task 2 registered only reads; Task 3 added the first
+"mutation" entries into this SAME dict; Plan 6 Task 6 wired in three more
+mutations the identical way), and `async_job` (Task 3 — see below). `loop.py`
+dispatches the two kinds differently: a "read" executes inline, same turn; a
+"mutation" SUSPENDS the turn instead of executing (see `loop.py`'s own module
+docstring for the suspend design).
 
 Six reads (Task 2), each a thin wrapper over an existing read path:
   - `search_knowledge` / `explain_concept` -> `app.brain.retrieve.search` /
@@ -44,6 +45,18 @@ LLM generation (`app.curriculum.generate`'s own docstring) that Task 4 must
 enqueue as a `GenerationJob` rather than call inline — the other six are
 cheap enough to call synchronously at resolve time.
 
+Three more mutations (Plan 6 Task 6), wired in the SAME "thin wrapper,
+registered but never called by the loop itself" way, once their backing
+services existed: `add_note` (wraps Plan 6 Task 1's `routers/notes.py`
+`create_note`), `promote_note_to_knowledge` (wraps Task 1's `app.notes.
+promote.promote_note`), and `log_progress` (wraps Task 3's `app.curriculum.
+progress.upsert_progress`). These three were deferred out of Plan 5 for
+exactly this reason — Plan 5's own recon (`.superpowers/sdd/progress.md`)
+notes they had "NO backing model/service yet" until Plan 6 built the Note
+model and the Progress/LessonLog services. None is `async_job` (all three
+are cheap, single-row DB writes, same cost class as `create_student`/
+`update_block`).
+
 Every fn (read or mutation) returns plain JSON-serializable Python objects
 (dicts/lists), never a pre-stringified blob — turning that into the tool
 message's `content` string (`json.dumps(result, default=str)`) is
@@ -71,12 +84,16 @@ from app.artifacts.generate import generate_artifact as _generate_artifact_servi
 from app.brain.retrieve import answer, search
 from app.curriculum.assign import clone_content_subtree
 from app.curriculum.generate import generate_curriculum as _generate_curriculum_service
+from app.curriculum.progress import upsert_progress as _upsert_progress_service
 from app.curriculum.segment import segment_block as _segment_block_service
 from app.models.artifact import Artifact
 from app.models.block import Block
 from app.models.curriculum import Assignment
+from app.models.note import Note
 from app.models.student import Student
+from app.notes.promote import promote_note as _promote_note_service
 from app.schemas.curriculum import BlockUpdate
+from app.schemas.notes import NoteCreate
 from app.schemas.students import StudentCreate, StudentUpdate
 
 
@@ -426,6 +443,122 @@ def _generate_curriculum(
         domain=domain, target_minutes_total=target_minutes_total,
     )
     return {"root_id": root_id}
+
+
+# ---------------------------------------------------------------------------
+# Mutations (Plan 6 Task 6) — wired the same way once their backing services
+# existed: `add_note`/`promote_note_to_knowledge` wrap Plan 6 Task 1's Note
+# create + promote logic; `log_progress` wraps Task 3's `app.curriculum.
+# progress.upsert_progress`. Same "never called by loop.py itself, registered
+# for the resolve step to dispatch once approved" treatment as the seven
+# mutations above — nothing about the suspend mechanism changes for these
+# (`loop.py`'s `_first_mutation_index` is generic over `kind == "mutation"`).
+# ---------------------------------------------------------------------------
+
+_ALLOWED_PROGRESS_STATUSES = {"not_started", "introduced", "practicing", "mastered"}
+
+
+def _add_note(
+    db, *, title: str, body: str, tags: list[str] | None = None, student_id: str | None = None,
+) -> dict:
+    """Wraps `routers/notes.py`'s `create_note` (`POST /notes`). Routed
+    through `NoteCreate` (not constructed by hand) — same reasoning
+    `_create_student` states for `StudentCreate`: a future validation rule on
+    that schema (e.g. `title`'s `max_length=300`) applies here too instead of
+    drifting out of sync with the HTTP boundary's own rules. Pydantic has no
+    opinion on an empty-but-present title or a dangling `student_id`, so both
+    of the router's own guards are reimplemented here, graceful-dict style,
+    exactly like every other tool fn in this registry.
+    """
+    parsed_student_id = None
+    if student_id is not None:
+        parsed_student_id = _parse_uuid(student_id)
+        if parsed_student_id is None:
+            return {"error": f"invalid student_id: {student_id!r}"}
+        if db.get(Student, parsed_student_id) is None:
+            return {"error": "student not found"}
+
+    payload = NoteCreate(title=title, body=body, tags=tags or [], student_id=parsed_student_id)
+    if payload.title == "":
+        return {"error": "title cannot be empty"}
+
+    note = Note(
+        title=payload.title, body=payload.body, tags=payload.tags,
+        student_id=payload.student_id,
+    )
+    db.add(note)
+    db.commit()
+    return {"note_id": note.id, "title": note.title}
+
+
+def _promote_note_to_knowledge(db, *, note_id: str) -> dict:
+    """Wraps `app.notes.promote.promote_note` (also `POST
+    /notes/{id}/promote`'s service): creates a `kind="text"` KnowledgeSource
+    from the note's title/body and flips `promoted_to_knowledge`. Mirrors
+    `routers/notes.py`'s `promote_note_endpoint`'s three precondition guards
+    (missing note, already-promoted, empty body) as graceful `{"error": ...}`
+    dicts instead of that endpoint's 404/409/422 `HTTPException`s — same
+    "guard, don't crash" spirit as every other tool fn in this registry.
+    """
+    parsed_id = _parse_uuid(note_id)
+    if parsed_id is None:
+        return {"error": f"invalid note_id: {note_id!r}"}
+    note = db.get(Note, parsed_id)
+    if note is None:
+        return {"error": "note not found"}
+    if note.promoted_to_knowledge:
+        return {"error": "note already promoted to knowledge"}
+    if not note.body or not note.body.strip():
+        return {"error": "cannot promote a note with an empty body"}
+
+    source = _promote_note_service(db, note)
+    return {"note_id": note.id, "title": note.title, "source_id": source.id}
+
+
+def _log_progress(
+    db, *, student_id: str, block_id: str, status: str, notes: str | None = None,
+) -> dict:
+    """Wraps `app.curriculum.progress.upsert_progress` (also `POST
+    /students/{id}/progress`'s service) — insert-or-update the single
+    Progress row for (student_id, block_id); see that function's own
+    docstring for the upsert/overwrite semantics (a fresh call always states
+    the row's new status/notes wholesale, never merges).
+
+    `status` is checked against `_ALLOWED_PROGRESS_STATUSES` here even though
+    `Progress.status` is itself a soft, unconstrained string column (`app.
+    models.curriculum.Progress`'s own comment: "soft, relabelable") — the
+    HTTP route trusts its caller (a fixed-choice UI control) to only ever
+    send one of the four values, but a chat model has no such fixed picker
+    and could otherwise persist an invented status string, so this tool
+    layer adds the guard the HTTP boundary doesn't need.
+
+    Student/block existence is checked here, BEFORE calling the service, for
+    the same reason `routers/students.py`'s `upsert_student_progress` checks
+    first (`upsert_progress`'s own docstring: "student/block existence is the
+    CALLER's responsibility" — an unchecked bad id would otherwise reach
+    `Progress(...)`'s insert and fail as a raw FK IntegrityError/500 instead
+    of a clean graceful dict).
+    """
+    parsed_student_id = _parse_uuid(student_id)
+    if parsed_student_id is None:
+        return {"error": f"invalid student_id: {student_id!r}"}
+    parsed_block_id = _parse_uuid(block_id)
+    if parsed_block_id is None:
+        return {"error": f"invalid block_id: {block_id!r}"}
+    if status not in _ALLOWED_PROGRESS_STATUSES:
+        return {
+            "error": f"invalid status: {status!r}; must be one of {sorted(_ALLOWED_PROGRESS_STATUSES)}",
+        }
+    if db.get(Student, parsed_student_id) is None:
+        return {"error": "student not found"}
+    if db.get(Block, parsed_block_id) is None:
+        return {"error": "block not found"}
+
+    progress = _upsert_progress_service(
+        db, student_id=parsed_student_id, block_id=parsed_block_id,
+        status=status, notes=notes,
+    )
+    return {"status": progress.status, "block_id": progress.block_id}
 
 
 TOOLS: dict[str, ToolEntry] = {
@@ -844,5 +977,113 @@ TOOLS: dict[str, ToolEntry] = {
         fn=_generate_curriculum,
         kind="mutation",
         async_job=True,
+    ),
+    "add_note": ToolEntry(
+        schema={
+            "type": "function",
+            "function": {
+                "name": "add_note",
+                "description": (
+                    "Add a free-form teaching note — e.g. an observation "
+                    "about a student's progress, a technique they struggled "
+                    "with, or a reminder for next lesson. This is a "
+                    "MUTATION — it requires the tutor's explicit approval "
+                    "before it's actually saved."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "description": "a short title for the note"},
+                        "body": {"type": "string", "description": "the note's content"},
+                        "tags": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "optional: free-form tags, e.g. ['technique', 'chords']",
+                        },
+                        "student_id": {
+                            "type": "string",
+                            "description": (
+                                "optional: the student id (UUID) this note is about, "
+                                "from list_students"
+                            ),
+                        },
+                    },
+                    "required": ["title", "body"],
+                },
+            },
+        },
+        fn=_add_note,
+        kind="mutation",
+    ),
+    "promote_note_to_knowledge": ToolEntry(
+        schema={
+            "type": "function",
+            "function": {
+                "name": "promote_note_to_knowledge",
+                "description": (
+                    "Promote an existing note into the knowledge base, so "
+                    "its content can ground future search/curriculum/"
+                    "artifact generation. This is a MUTATION — it requires "
+                    "the tutor's explicit approval before it's actually "
+                    "applied."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "note_id": {
+                            "type": "string",
+                            "description": "the note id (UUID) to promote, from list_students/context",
+                        },
+                    },
+                    "required": ["note_id"],
+                },
+            },
+        },
+        fn=_promote_note_to_knowledge,
+        kind="mutation",
+    ),
+    "log_progress": ToolEntry(
+        schema={
+            "type": "function",
+            "function": {
+                "name": "log_progress",
+                "description": (
+                    "Record or update a student's mastery status against a "
+                    "curriculum block — upserts, so calling this again for "
+                    "the same student+block replaces the prior status. This "
+                    "is a MUTATION — it requires the tutor's explicit "
+                    "approval before it's actually applied."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "student_id": {
+                            "type": "string",
+                            "description": "the student id (UUID), from list_students",
+                        },
+                        "block_id": {
+                            "type": "string",
+                            "description": (
+                                "the curriculum block id (UUID), from "
+                                "list_curricula/get_curriculum"
+                            ),
+                        },
+                        "status": {
+                            "type": "string",
+                            "description": (
+                                "one of: not_started, introduced, practicing, mastered"
+                            ),
+                        },
+                        "notes": {
+                            "type": "string",
+                            "description": "optional: free-text notes about this progress update",
+                        },
+                    },
+                    "required": ["student_id", "block_id", "status"],
+                },
+            },
+        },
+        fn=_log_progress,
+        kind="mutation",
     ),
 }
