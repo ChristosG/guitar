@@ -519,3 +519,208 @@ def test_resolve_approve_async_generate_curriculum_enqueues_a_job_and_does_not_r
     poll = client.get(f"/jobs/{job_id}")
     assert poll.status_code == 200
     assert poll.json()["status"] == "pending"
+
+
+# ---------------------------------------------------------------------------
+# post_message while an approval is still pending -> 409 (review Important)
+# ---------------------------------------------------------------------------
+
+def test_post_message_while_an_approval_is_pending_409s_then_ok_after_resolve(monkeypatch):
+    """A second `POST .../messages` while an `ApprovalRequest` is still
+    `pending` must 409, not run another turn: the transcript ends with an
+    UNANSWERED assistant tool-calls turn (the suspended mutation), so
+    persisting a new `user` row after it and handing `...assistant(tool_calls),
+    user(new)` to `chat_tools` is an out-of-protocol shape (an assistant
+    tool-calls turn must be answered by its `tool` messages before any user
+    turn) — vLLM would 500 or silently degrade, and whatever it returned
+    would get PERSISTED, durably corrupting the transcript. The user must
+    resolve the pending approval first.
+    """
+    def _spy(db, **kwargs):
+        raise AssertionError("mutation fn must not be called")
+
+    _stub_tool(monkeypatch, "create_student", _spy)
+    _use_provider(monkeypatch, [
+        AssistantTurn(
+            content="I'll add that student.",
+            tool_calls=[ToolCall(id="call_1", name="create_student", arguments={"name": "New Kid"})],
+        ),
+        AssistantTurn(content="Okay, I won't add them.", tool_calls=[]),
+    ])
+    session_id = _create_session()
+
+    first = client.post(f"/chat/{session_id}/messages", json={"content": "add New Kid"})
+    assert first.json()["status"] == "awaiting_approval"
+    approval_id = first.json()["approval_id"]
+
+    blocked = client.post(f"/chat/{session_id}/messages", json={"content": "actually, wait"})
+    assert blocked.status_code == 409, blocked.text
+
+    # The blocked message was NOT persisted (we bailed before writing it).
+    contents = [m.content for m in _db_messages(session_id)]
+    assert "actually, wait" not in contents
+
+    # Resolving the pending approval unblocks the next message.
+    resolve = client.post(
+        f"/chat/{session_id}/approvals/{approval_id}/resolve", json={"decision": "reject"},
+    )
+    assert resolve.status_code == 200, resolve.text
+
+    ok = client.post(f"/chat/{session_id}/messages", json={"content": "hello again"})
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["status"] == "answer"
+
+
+# ---------------------------------------------------------------------------
+# resolve approve — SYNC mutation fn RETURNS a graceful {"error": ...} dict
+# (review Minor: audit-status parity with the raise path)
+# ---------------------------------------------------------------------------
+
+def test_resolve_approve_when_fn_returns_error_dict_records_error_status(monkeypatch):
+    """A mutation fn can RETURN a graceful `{"error": ...}` dict (bad/
+    hallucinated UUID, not-found, empty-title — tools.py's `{"error"}` paths)
+    instead of raising. That is a failed action too, so the approval must be
+    recorded `status="error"` (same value the raise path uses), not
+    "approved" with a misleading `result_ref=None` that's indistinguishable
+    from a real no-id success. The tool message still carries the error dict
+    so the model narrates it.
+    """
+    def _returns_error(db, **kwargs):
+        return {"error": "student not found"}
+
+    _stub_tool(monkeypatch, "update_student", _returns_error)
+    _use_provider(monkeypatch, [
+        AssistantTurn(
+            content="I'll update that student.",
+            tool_calls=[ToolCall(
+                id="call_1", name="update_student",
+                arguments={"student_id": "00000000-0000-0000-0000-000000000000", "level": "advanced"},
+            )],
+        ),
+        AssistantTurn(content="I couldn't find that student.", tool_calls=[]),
+    ])
+    session_id = _create_session()
+    propose = client.post(f"/chat/{session_id}/messages", json={"content": "update that student"})
+    approval_id = propose.json()["approval_id"]
+
+    r = client.post(
+        f"/chat/{session_id}/approvals/{approval_id}/resolve", json={"decision": "approve"},
+    )
+
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "answer"
+
+    approval = _db_approval(approval_id)
+    assert approval.status == "error"
+    assert approval.result_ref is None
+
+    rows = _db_messages(session_id)
+    tool_msgs = [m for m in rows if m.role == "tool"]
+    assert len(tool_msgs) == 1
+    assert tool_msgs[0].tool_call_id == "call_1"
+    assert "student not found" in tool_msgs[0].content  # model sees + narrates it
+
+
+# ---------------------------------------------------------------------------
+# coverage for the two previously-unexercised paths (review Optional)
+# ---------------------------------------------------------------------------
+
+def test_resolve_approve_when_fn_flushes_then_raises_rolls_back_partial_writes(monkeypatch):
+    """Exercises the actual mid-flush-rollback purpose of the resolve
+    endpoint's `db.rollback()` + re-fetch: a mutation fn that FLUSHES a row
+    into the session and THEN raises (unlike the raise-before-any-write case
+    the other error test covers). The flushed-but-uncommitted row must be
+    rolled back (not leaked), AND the error tool-message + `status="error"`
+    must still land afterward (proving the post-rollback re-fetch works).
+    """
+    def _flush_then_raise(db, **kwargs):
+        db.add(Student(name="Partial Ghost"))
+        db.flush()  # partial, uncommitted write now in the session
+        raise ValueError("boom after flush")
+
+    _stub_tool(monkeypatch, "create_student", _flush_then_raise)
+    _use_provider(monkeypatch, [
+        AssistantTurn(
+            content="I'll add that student.",
+            tool_calls=[ToolCall(id="call_1", name="create_student", arguments={"name": "Partial Ghost"})],
+        ),
+        AssistantTurn(content="Sorry, that failed.", tool_calls=[]),
+    ])
+    session_id = _create_session()
+    propose = client.post(f"/chat/{session_id}/messages", json={"content": "add Partial Ghost"})
+    approval_id = propose.json()["approval_id"]
+
+    r = client.post(
+        f"/chat/{session_id}/approvals/{approval_id}/resolve", json={"decision": "approve"},
+    )
+
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "answer"
+
+    # The flushed-but-uncommitted Student was rolled back — not leaked.
+    db = SessionLocal()
+    try:
+        assert db.query(Student).filter(Student.name == "Partial Ghost").count() == 0
+    finally:
+        db.close()
+
+    approval = _db_approval(approval_id)
+    assert approval.status == "error"
+    assert approval.resolved_at is not None
+
+    rows = _db_messages(session_id)
+    tool_msgs = [m for m in rows if m.role == "tool"]
+    assert len(tool_msgs) == 1
+    assert tool_msgs[0].content.startswith("ERROR:")
+
+
+def test_resume_after_approve_can_propose_a_second_mutation_creating_a_new_pending(monkeypatch):
+    """A RESUMED turn (after a sync approve) can itself immediately propose
+    ANOTHER mutation — `_respond_to_turn` must react the same way as the
+    original suspend: persist the new assistant tool-call turn and create a
+    FRESH `ApprovalRequest`, so the second mutation is trackable/resolvable
+    via `GET .../pending` rather than left as an orphan unanswered tool_call.
+    """
+    _use_provider(monkeypatch, [
+        AssistantTurn(
+            content="I'll add that student.",
+            tool_calls=[ToolCall(id="call_1", name="create_student", arguments={"name": "Chained Kid"})],
+        ),
+        AssistantTurn(
+            content="Now I'll segment that block.",
+            tool_calls=[ToolCall(
+                id="call_2", name="segment_block",
+                arguments={"block_id": "b1", "session_minutes": 30},
+            )],
+        ),
+    ])
+    session_id = _create_session()
+    propose = client.post(f"/chat/{session_id}/messages", json={"content": "add Chained Kid then segment"})
+    first_approval_id = propose.json()["approval_id"]
+
+    r = client.post(
+        f"/chat/{session_id}/approvals/{first_approval_id}/resolve", json={"decision": "approve"},
+    )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "awaiting_approval"
+    assert body["tool_name"] == "segment_block"
+    second_approval_id = body["approval_id"]
+    assert second_approval_id != first_approval_id
+
+    # First approved (its real fn ran — a Student now exists); second pending.
+    assert _db_approval(first_approval_id).status == "approved"
+    db = SessionLocal()
+    try:
+        assert db.query(Student).filter(Student.name == "Chained Kid").count() == 1
+    finally:
+        db.close()
+
+    second = _db_approval(second_approval_id)
+    assert second.status == "pending"
+    assert second.tool_call_id == "call_2"
+
+    # GET /pending now surfaces the SECOND (most-recent) pending approval.
+    pending = client.get(f"/chat/{session_id}/pending")
+    assert pending.json()["id"] == second_approval_id

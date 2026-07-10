@@ -68,6 +68,22 @@ def _ordered_messages(db: Session, session_id: UUID) -> list[Message]:
     ).all()
 
 
+def _open_pending_approval(db: Session, session_id: UUID) -> ApprovalRequest | None:
+    """The session's currently-open (`status == "pending"`) `ApprovalRequest`,
+    most-recent first, or None. Shared by `GET .../pending` (surfaces it) and
+    `post_message`'s guard (refuses a new turn while one is open) so both
+    read "is there an open approval" identically — a chat turn's suspend
+    leaves exactly one unanswered mutation tool_call, so there is at most one
+    pending approval per session at a time in practice; `.first()` on a
+    most-recent ordering is defensive regardless.
+    """
+    return db.scalars(
+        select(ApprovalRequest)
+        .where(ApprovalRequest.session_id == session_id, ApprovalRequest.status == "pending")
+        .order_by(ApprovalRequest.created_at.desc())
+    ).first()
+
+
 def _new_tail(result_messages: list[dict], prior_wire: list[dict]) -> list[dict]:
     """The part of `result_messages` (an `AgentResult.messages`) genuinely
     NEW relative to `prior_wire` (what was actually fed into `run_agent_turn`)
@@ -188,11 +204,7 @@ def get_chat_history(session_id: UUID, db: Session = Depends(get_db)) -> list[Me
 @router.get("/chat/{session_id}/pending", response_model=PendingApprovalOut | None)
 def get_pending_approval(session_id: UUID, db: Session = Depends(get_db)) -> PendingApprovalOut | None:
     _get_session_or_404(db, session_id)
-    approval = db.scalars(
-        select(ApprovalRequest)
-        .where(ApprovalRequest.session_id == session_id, ApprovalRequest.status == "pending")
-        .order_by(ApprovalRequest.created_at.desc())
-    ).first()
+    approval = _open_pending_approval(db, session_id)
     if approval is None:
         return None
     return PendingApprovalOut.model_validate(approval, from_attributes=True)
@@ -201,6 +213,24 @@ def get_pending_approval(session_id: UUID, db: Session = Depends(get_db)) -> Pen
 @router.post("/chat/{session_id}/messages", response_model=ChatTurnOut)
 def post_message(session_id: UUID, payload: ChatMessageIn, db: Session = Depends(get_db)) -> ChatTurnOut:
     _get_session_or_404(db, session_id)
+
+    # Refuse a new turn while an approval is still open (409, same vocabulary
+    # as the resolve endpoint's non-pending 409). After an `awaiting_approval`
+    # turn the transcript ends with an UNANSWERED assistant tool-calls turn
+    # (the suspended mutation); persisting a new `user` row after it and
+    # handing `...assistant(tool_calls), user(new)` to `chat_tools` is an
+    # out-of-protocol shape (an assistant tool-calls turn must be answered by
+    # its `tool` messages before any user turn) that vLLM would 500 or
+    # silently degrade on — and whatever it returned would then get
+    # PERSISTED, durably corrupting the transcript (the mutation call stranded
+    # unanswered forever). The user must resolve the pending approval first.
+    # Checked BEFORE persisting the user message, so a refused message never
+    # lands in history at all.
+    if _open_pending_approval(db, session_id) is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="an approval is pending — resolve it before sending a new message",
+        )
 
     persist_new_messages(db, session_id, [{"role": "user", "content": payload.content}])
 
@@ -306,8 +336,20 @@ def resolve_approval(
         approval.resolved_at = datetime.now(timezone.utc)
         tool_msg = {"role": "tool", "tool_call_id": tool_call_id, "content": f"ERROR: {exc}"}
     else:
-        approval.status = "approved"
-        approval.result_ref = _result_ref(tool_result)
+        # A mutation fn can also FAIL GRACEFULLY by RETURNING a `{"error":
+        # ...}` dict (bad/hallucinated UUID, not-found, empty-title — the
+        # `{"error"}` paths in `agent/tools.py`) rather than raising. That's a
+        # failed action too, so record `status="error"` (same terminal value
+        # as the raise path above), not "approved" with a misleading
+        # `result_ref=None` indistinguishable from a real no-id success. The
+        # tool message still carries the stringified error dict so the model
+        # narrates it — identical to the success shape, only the audit status
+        # differs.
+        if isinstance(tool_result, dict) and "error" in tool_result:
+            approval.status = "error"
+        else:
+            approval.status = "approved"
+            approval.result_ref = _result_ref(tool_result)
         approval.resolved_at = datetime.now(timezone.utc)
         tool_msg = {"role": "tool", "tool_call_id": tool_call_id, "content": _stringify(tool_result)}
 
