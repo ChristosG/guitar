@@ -140,6 +140,59 @@ def test_message_persists_tool_calls_json_payload_and_null_content():
         db2.close()
 
 
+def test_message_persists_tool_call_id_for_a_tool_role_message():
+    """Task 4: `Message.tool_call_id` pairs a `role="tool"` row back to the
+    assistant `tool_call` it answers — needed for lossless wire-transcript
+    round-tripping (`messages_to_wire` reconstructs `{"role":"tool",
+    "tool_call_id": ..., "content": ...}` from this column).
+    """
+    db = SessionLocal()
+    try:
+        session = ChatSession()
+        db.add(session)
+        db.commit()
+        msg = Message(
+            session_id=session.id, role="tool", content="42",
+            tool_call_id="call_abc123",
+        )
+        db.add(msg)
+        db.commit()
+        msg_id = msg.id
+    finally:
+        db.close()
+
+    db2 = SessionLocal()
+    try:
+        got = db2.get(Message, msg_id)
+        assert got.role == "tool"
+        assert got.tool_call_id == "call_abc123"
+        assert got.content == "42"
+    finally:
+        db2.close()
+
+
+def test_message_tool_call_id_defaults_to_none_for_user_and_assistant():
+    db = SessionLocal()
+    try:
+        session = ChatSession()
+        db.add(session)
+        db.commit()
+        user_msg = Message(session_id=session.id, role="user", content="hi")
+        assistant_msg = Message(session_id=session.id, role="assistant", content="hello")
+        db.add_all([user_msg, assistant_msg])
+        db.commit()
+        user_id, assistant_id = user_msg.id, assistant_msg.id
+    finally:
+        db.close()
+
+    db2 = SessionLocal()
+    try:
+        assert db2.get(Message, user_id).tool_call_id is None
+        assert db2.get(Message, assistant_id).tool_call_id is None
+    finally:
+        db2.close()
+
+
 def test_message_cascade_deletes_with_its_session():
     db = SessionLocal()
     try:
@@ -199,6 +252,57 @@ def test_approval_request_persists_with_defaults():
         assert got.edited_args is None
         assert got.result_ref is None
         assert got.resolved_at is None
+    finally:
+        db2.close()
+
+
+def test_approval_request_persists_tool_call_id():
+    """Task 4: `ApprovalRequest.tool_call_id` is the `tool_call_id` of the
+    pending mutation call it gates (`AgentResult.pending_tool["tool_call_id"]`
+    at suspend time) — the resolve endpoint needs it to answer the exact
+    right call without re-scanning the transcript for it.
+    """
+    db = SessionLocal()
+    try:
+        session = ChatSession()
+        db.add(session)
+        db.commit()
+        approval = ApprovalRequest(
+            session_id=session.id,
+            tool_name="create_student",
+            tool_args={"name": "New Kid"},
+            tool_call_id="call_xyz",
+        )
+        db.add(approval)
+        db.commit()
+        approval_id = approval.id
+    finally:
+        db.close()
+
+    db2 = SessionLocal()
+    try:
+        got = db2.get(ApprovalRequest, approval_id)
+        assert got.tool_call_id == "call_xyz"
+    finally:
+        db2.close()
+
+
+def test_approval_request_tool_call_id_defaults_to_none():
+    db = SessionLocal()
+    try:
+        session = ChatSession()
+        db.add(session)
+        db.commit()
+        approval = ApprovalRequest(session_id=session.id, tool_name="x", tool_args={})
+        db.add(approval)
+        db.commit()
+        approval_id = approval.id
+    finally:
+        db.close()
+
+    db2 = SessionLocal()
+    try:
+        assert db2.get(ApprovalRequest, approval_id).tool_call_id is None
     finally:
         db2.close()
 

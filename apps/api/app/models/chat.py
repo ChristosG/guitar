@@ -66,6 +66,15 @@ class Message(Base, PkMixin, TimestampMixin):
     plain user message, a plain assistant-text-only message, or a tool-result
     message.
 
+    `tool_call_id` (Task 4) is the OpenAI `tool_call_id` a `role="tool"` row
+    answers (`{"role": "tool", "tool_call_id": ..., "content": ...}` per the
+    wire protocol — see `loop.py`'s module docstring) — None for "user"/
+    "assistant" rows, which never carry one (an assistant's own PROPOSED
+    calls live in `tool_calls` above, not here). Required for a lossless
+    transcript round-trip: without it, `app.agent.transcript.
+    messages_to_wire` could not pair a reloaded tool-result row back to the
+    call it answers.
+
     `session_id` IS a `ForeignKey` (unlike `ChatSession.student_id` above):
     a `Message` has no meaning detached from its session, so CASCADE-deleting
     it along with the session it belongs to is correct — same ownership
@@ -78,6 +87,7 @@ class Message(Base, PkMixin, TimestampMixin):
     role: Mapped[str] = mapped_column(String(16))
     content: Mapped[str | None] = mapped_column(Text, nullable=True)
     tool_calls: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    tool_call_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
 
 class ApprovalRequest(Base, PkMixin, TimestampMixin):
@@ -88,19 +98,29 @@ class ApprovalRequest(Base, PkMixin, TimestampMixin):
     model proposed, captured verbatim so Task 4's resolve step can replay
     them (`edited_args`, when set, overrides `tool_args` at execute time
     instead of the raw model proposal — the human's edit wins). `status`
-    starts "pending" and is later flipped to "approved" | "rejected" by Task
-    4 — same pending -> terminal lifecycle SHAPE as `GenerationJob.status`
-    (pending -> running -> succeeded|failed), just a different vocabulary
-    for a one-shot human decision instead of a multi-step background job.
+    starts "pending" and is later flipped to "approved" | "rejected" — or,
+    Task 4 adds, "error" when an APPROVED mutation's `fn` itself raised (the
+    human said yes, but execution failed; distinct from "rejected", which
+    means the human said no) — same pending -> terminal lifecycle SHAPE as
+    `GenerationJob.status` (pending -> running -> succeeded|failed), just a
+    different vocabulary for a one-shot human decision instead of a
+    multi-step background job.
 
     `result_ref` is an opaque, untyped pointer Task 4 fills in on approve —
-    e.g. a created row's id, or "job:<job_id>" for the async
-    `generate_curriculum` path (per the design doc's compose-two-pauses
-    flow). Deliberately a plain `String`, not a `ForeignKey`: which table it
-    points at depends entirely on which tool was approved, so a single typed
-    FK column could never cover it. `resolved_at` is None until a decision is
-    made — no `server_default` (unlike `created_at`/`updated_at`), since it
-    must reflect the actual resolution moment, not row-creation time.
+    e.g. a created row's id, or the enqueued job's own id (as a plain
+    string) for the async `generate_curriculum` path. Deliberately a plain
+    `String`, not a `ForeignKey`: which table it points at depends entirely
+    on which tool was approved, so a single typed FK column could never
+    cover it. `resolved_at` is None until a decision is made — no
+    `server_default` (unlike `created_at`/`updated_at`), since it must
+    reflect the actual resolution moment, not row-creation time.
+
+    `tool_call_id` (Task 4) is the `tool_call_id` of the pending mutation
+    call this approval gates — copied verbatim from `AgentResult.
+    pending_tool["tool_call_id"]` (`loop.py`) at suspend time, so the resolve
+    endpoint can answer that EXACT call (`{"role": "tool", "tool_call_id":
+    this, "content": ...}`) without re-deriving or re-scanning the
+    transcript for it.
 
     `session_id` IS a `ForeignKey` + CASCADE, same rationale as `Message.
     session_id`: an approval only makes sense scoped to the session that
@@ -112,8 +132,10 @@ class ApprovalRequest(Base, PkMixin, TimestampMixin):
         ForeignKey("chat_session.id", ondelete="CASCADE"), index=True)
     tool_name: Mapped[str] = mapped_column(String(50))
     tool_args: Mapped[dict] = mapped_column(JSON)
+    tool_call_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="pending")
-    # pending | approved | rejected
+    # pending | approved | rejected | error (Task 4: the approved mutation's
+    # fn raised — see routers/chat.py's resolve endpoint)
     edited_args: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     result_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
