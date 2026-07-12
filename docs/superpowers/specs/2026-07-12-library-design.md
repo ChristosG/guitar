@@ -92,7 +92,7 @@ KnowledgeSource                        (changed)
 
 `app/brain/ocr.py` (new):
 
-1. **Render** — PyMuPDF rasterizes each page at 150dpi → JPEG (~500KB/page, measured on the
+1. **Render** — PyMuPDF rasterizes each page at 110dpi → JPEG (~500KB/page, measured on the
    real book) → written to a mounted volume. A `Page` row is created per page, `status=pending`.
 2. **Transcribe** — each page image → `provider.vision()` → page text. One page at a time, each
    **committing independently** (D5). A failed page is retried automatically; on final failure it

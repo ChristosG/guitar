@@ -143,6 +143,13 @@ class QwenVLLM(LLMProvider):
         base64 data URI returned a faithful verbatim transcription of a real
         scanned book page (~1,127 prompt tokens/page at 110dpi).
 
+        RENDER CEILING — 110dpi. Callers must not hand this method a page
+        rendered above ~110dpi: this server's vLLM is configured with a
+        multimodal encoder cache of 2048, and a 150dpi page overflows it with
+        a hard HTTP 400 ("image item with length 2080 exceeds pre-allocated
+        encoder cache size 2048"). Every page would fail, not just large ones.
+        Raising the render DPI requires raising the server's mm budget first.
+
         `max_tokens=4000` is deliberate and load-bearing: the first live probe
         used 400 and came back `finish_reason="length"` with `content=None` —
         a dense page of body text simply does not fit in a small budget, and a
