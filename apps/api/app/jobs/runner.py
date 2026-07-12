@@ -45,6 +45,7 @@ from app.brain.ingest import IngestPayload, ingest_source
 from app.brain.ocr import ocr_source
 from app.curriculum.generate import generate_curriculum
 from app.db import SessionLocal
+from app.lessons.draft import draft_lesson_from_selection
 from app.llm.errors import GuidedJSONError
 from app.models.generation_job import GenerationJob
 from app.models.knowledge import KnowledgeSource
@@ -128,6 +129,90 @@ def run_curriculum_job(job_id: uuid.UUID) -> None:
         else:
             job.status = "succeeded"
             job.result_root_id = root_id
+            db.commit()
+    finally:
+        db.close()
+
+
+def run_lesson_job(job_id: uuid.UUID) -> None:
+    """Load `GenerationJob(job_id)`, draft a lesson from its `params`
+    selection, record the outcome — all on a session this function opens and
+    closes itself. Mirrors `run_curriculum_job` EXACTLY (same session
+    ownership, same `status` lifecycle, same `error_kind` classification,
+    same best-effort nested failure-recording guard): `draft_lesson_from_
+    selection` is, like `generate_curriculum`, a blocking guided-JSON LLM
+    call unsuitable for a synchronous request/response cycle (Plan 10 Task 1,
+    B4 — "reuse the EXISTING pattern verbatim; add no new infrastructure").
+
+    Missing job: logged and returned (not raised) — defensive only, same as
+    `run_curriculum_job`. The enqueue endpoint (`routers/lessons.py`) always
+    creates the row before scheduling this runner.
+    """
+    db = SessionLocal()
+    try:
+        job = db.get(GenerationJob, job_id)
+        if job is None:
+            log.warning("run_lesson_job: job_id=%s not found, skipping", job_id)
+            return
+
+        job.status = "running"
+        db.commit()
+
+        try:
+            # `job.params` came back off the JSON column as plain str/int/
+            # dict — `source_id` needs an explicit uuid.UUID() conversion
+            # before it can be used as a KnowledgeSource primary key lookup
+            # (mirrors run_reingest_job's identical `uuid.UUID(job.params[
+            # "source_id"])` conversion just below in this same module).
+            lesson_id = draft_lesson_from_selection(
+                db,
+                source_id=uuid.UUID(job.params["source_id"]),
+                page_no=job.params["page_no"],
+                text=job.params["text"],
+                language=job.params.get("language", "en"),
+            )
+        except GuidedJSONError:
+            job.status = "failed"
+            job.error_kind = "upstream"
+            job.error = (
+                "Lesson drafting failed (model returned invalid/truncated output). Try again."
+            )
+            db.commit()
+        except (openai.APIConnectionError, httpx.TransportError):
+            job.status = "failed"
+            job.error_kind = "timeout"
+            job.error = "Lesson drafting timed out. Try again."
+            db.commit()
+        except Exception:
+            log.exception("run_lesson_job: job_id=%s failed unexpectedly", job_id)
+            # Same recovery reasoning as run_curriculum_job's identical block:
+            # rollback first (a flush-time error invalidates this Session's
+            # transaction), then re-fetch `job` (rollback expires the
+            # identity map) before recording failure.
+            try:
+                db.rollback()
+                job = db.get(GenerationJob, job_id)
+                if job is None:
+                    log.warning(
+                        "run_lesson_job: job_id=%s gone during failure recovery", job_id)
+                    return
+                job.status = "failed"
+                job.error_kind = "internal"
+                job.error = "Lesson drafting failed unexpectedly. Try again."
+                db.commit()
+            except Exception:
+                # Best-effort recovery — see run_curriculum_job's identical
+                # guard for the full reasoning (must not propagate, or an
+                # uncaught exception here strands the job in "running"
+                # forever).
+                log.warning(
+                    "run_lesson_job: failed to record failure status for job_id=%s",
+                    job_id,
+                    exc_info=True,
+                )
+        else:
+            job.status = "succeeded"
+            job.result_root_id = lesson_id
             db.commit()
     finally:
         db.close()
