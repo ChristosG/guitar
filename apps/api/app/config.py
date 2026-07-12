@@ -16,4 +16,6 @@ class Settings(BaseSettings):
     # Comma-separated allowlist of browser origins the API accepts (CORS).
     cors_origins: str = "http://localhost:3000,http://localhost:8790,https://guitar.cgrigoriadis.online"
 
+    media_dir: str = "/media"     # page scans live here; mounted volume
+
 settings = Settings()

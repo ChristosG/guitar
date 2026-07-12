@@ -1,0 +1,77 @@
+"""Turn a source into Page rows — the unit of OCR, of the reader, and of a
+verifiable citation.
+
+A PDF becomes one Page per physical page, each with its scan rendered to disk
+(`status="pending"` — Task 4's OCR job fills in the text). Everything else
+(url/text/note) becomes exactly ONE Page, already `ready`, with the extracted
+text and no image (spec D2). That degenerate row is deliberate: it means the
+reader, the chunker, the citation renderer and the retry path never branch on
+`source.type`.
+
+110dpi is measured, not guessed — and it is a CEILING, not a preference. At
+150dpi this vLLM server rejects the image outright (HTTP 400: "image item with
+length 2080 exceeds pre-allocated encoder cache size 2048"), so every page
+would fail. At 110dpi the local VL model transcribes a real book page
+faithfully at ~1,127 prompt tokens. Do not raise this without also raising the
+server's mm-encoder budget.
+"""
+import logging
+import os
+
+import fitz
+
+from app.brain.extract import extract_text
+from app.config import settings
+from app.models.knowledge import Page
+
+log = logging.getLogger(__name__)
+
+RENDER_DPI = 110      # HARD CEILING on this server — see module docstring
+
+
+def paginate_source(db, source_id, *, kind, data=None, url=None, text=None) -> list[Page]:
+    if kind == "pdf" and data:
+        return _paginate_pdf(db, source_id, data)
+    return _single_page(db, source_id, kind=kind, url=url, text=text)
+
+
+def _paginate_pdf(db, source_id, data: bytes) -> list[Page]:
+    doc = fitz.open(stream=data, filetype="pdf")
+    out_dir = os.path.join(settings.media_dir, str(source_id))
+    os.makedirs(out_dir, exist_ok=True)
+
+    pages: list[Page] = []
+    for i in range(doc.page_count):
+        page_no = i + 1
+        pix = doc[i].get_pixmap(dpi=RENDER_DPI)
+        rel = os.path.join(str(source_id), f"{page_no:04d}.jpg")
+        with open(os.path.join(settings.media_dir, rel), "wb") as fh:
+            fh.write(pix.tobytes("jpeg"))
+
+        # A page that already has a text layer needs no OCR at all — take it
+        # for free and mark it ready. (The book has none; other PDFs may.)
+        layer = (doc[i].get_text() or "").strip()
+        page = Page(
+            source_id=source_id, page_no=page_no, image_path=rel,
+            text=layer or None,
+            status="ready" if layer else "pending",
+        )
+        db.add(page)
+        pages.append(page)
+
+    db.commit()
+    log.info("paginate: source=%s pages=%d", source_id, len(pages))
+    return pages
+
+
+def _single_page(db, source_id, *, kind, url, text) -> list[Page]:
+    sections = extract_text(kind, url=url, text=text)
+    body = "\n\n".join(s.text for s in sections).strip()
+    page = Page(
+        source_id=source_id, page_no=1, image_path=None,
+        text=body or None,
+        status="ready" if body else "empty",
+    )
+    db.add(page)
+    db.commit()
+    return [page]

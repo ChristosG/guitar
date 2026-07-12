@@ -23,6 +23,8 @@ services:
       postgres: { condition: service_healthy }
     ports:
       - "127.0.0.1:${API_PORT:-8791}:8000"
+    volumes:
+      - media:/media
     networks: [appnet, platform-net]   # platform-net → reach qwen-vllm / qwen-emb-vllm
 
   worker:
@@ -46,6 +48,7 @@ services:
 
 volumes:
   pgdata:
+  media:
 
 networks:
   appnet:
