@@ -48,6 +48,14 @@ class SourceOut(BaseModel):
     char_count: int | None
     error: str | None
     created_at: datetime
+    # Review fix: `KnowledgeSource.collection_id` exists on the ORM model
+    # (`app/models/knowledge.py`) but was never declared here, so
+    # `model_validate(source, from_attributes=True)` silently dropped it —
+    # `GET /knowledge/sources` never told the Library UI which `Collection` a
+    # source was filed under (everything looked "Unfiled", and a PATCH that
+    # filed a source appeared to revert on the next refresh). `SourceDetailOut`
+    # inherits this field for free.
+    collection_id: UUID | None = None
 
 
 class ChunkPreviewOut(BaseModel):

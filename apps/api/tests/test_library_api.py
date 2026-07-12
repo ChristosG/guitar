@@ -242,6 +242,57 @@ def test_deleting_an_unknown_collection_is_404(db):
     assert client.delete(f"/library/collections/{uuid.uuid4()}").status_code == 404
 
 
+# --- Review fix: `KnowledgeSource.collection_id` exists on the ORM model but
+# was never declared on `SourceOut`, so `SourceOut.model_validate(source,
+# from_attributes=True)` silently dropped it — `GET /knowledge/sources` never
+# returned `collection_id`, so the Library UI could never tell which
+# collection a source was really in (every source looked "Unfiled", and a
+# PATCH that filed a source appeared to revert on the next refresh). These go
+# through the real FastAPI app + real schema serialization (no mocked
+# network), unlike the frontend's page.route()-stubbed Playwright tests,
+# which hand-craft a response that includes collection_id and so could never
+# catch this. -----------------------------------------------------------
+
+def test_list_sources_reports_collection_id_for_a_filed_source(db):
+    col = Collection(name="Tone & Gear"); db.add(col); db.commit()
+    src = KnowledgeSource(type="text", title="Filed Source", status="ready",
+                          collection_id=col.id)
+    db.add(src); db.commit()
+
+    body = client.get("/knowledge/sources").json()
+
+    row = next(s for s in body if s["id"] == str(src.id))
+    assert row["collection_id"] == str(col.id)
+
+
+def test_list_sources_reports_null_collection_id_for_an_unfiled_source(db):
+    src = KnowledgeSource(type="text", title="Unfiled Source", status="ready")
+    db.add(src); db.commit()
+
+    body = client.get("/knowledge/sources").json()
+
+    row = next(s for s in body if s["id"] == str(src.id))
+    assert row["collection_id"] is None
+
+
+def test_patching_a_source_into_a_collection_survives_a_relist(db):
+    """The exact round-trip the Library UI does: PATCH a source into a
+    collection, then GET /knowledge/sources again — the source must still
+    report that collection_id, not silently snap back to Unfiled."""
+    col = Collection(name="Tone & Gear"); db.add(col); db.commit()
+    src = KnowledgeSource(type="text", title="Moved Source", status="ready")
+    db.add(src); db.commit()
+
+    patch = client.patch(f"/knowledge/sources/{src.id}",
+                         json={"collection_id": str(col.id)})
+    assert patch.status_code == 200
+
+    body = client.get("/knowledge/sources").json()
+
+    row = next(s for s in body if s["id"] == str(src.id))
+    assert row["collection_id"] == str(col.id)
+
+
 # --- Retry: the three-way controller decision -------------------------------
 
 def test_retry_on_a_pdf_source_enqueues_an_ocr_job(db, monkeypatch):
