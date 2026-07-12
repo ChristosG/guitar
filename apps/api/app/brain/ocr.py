@@ -68,9 +68,15 @@ class OcrResult:
 
 
 def ocr_source(db, source_id) -> OcrResult:
+    # "ocr_running" is included so a page orphaned by a hard process kill
+    # mid-vision() (which never gets to write `failed`) is resumed on the
+    # next run instead of being stuck forever. Safe to re-pick-up: re-OCRing
+    # a page is idempotent (_embed_page deletes that page's existing chunks
+    # before re-adding them).
     pages = (
         db.query(Page)
-        .filter(Page.source_id == source_id, Page.status.in_(["pending", "failed"]))
+        .filter(Page.source_id == source_id,
+                Page.status.in_(["pending", "failed", "ocr_running"]))
         .order_by(Page.page_no)
         .all()
     )
@@ -78,6 +84,15 @@ def ocr_source(db, source_id) -> OcrResult:
     ready = failed = 0
 
     for page in pages:
+        if page.image_path is None:
+            # D2 degenerate page (url/text/note sources get exactly one Page
+            # row with image_path=NULL): there is nothing to OCR here — any
+            # text it has came from extraction, not vision(). Marking it
+            # `failed` would be worse than doing nothing: `failed` pages are
+            # re-picked-up by this same query, so it would fail forever with
+            # a cryptic os.path.join(..., None) error on every run.
+            continue
+
         page.status = "ocr_running"
         db.commit()
         try:
@@ -93,21 +108,65 @@ def ocr_source(db, source_id) -> OcrResult:
             continue
 
         page.text = text or None
-        page.status = "ready" if text else "empty"
         page.ocr_error = None
-        db.commit()                       # <-- this page is now safe, whatever happens next
 
-        if text:
-            _embed_page(db, provider, page)
-            ready += 1
+        if not text:
+            page.status = "empty"
+            db.commit()
+            continue
+
+        # Embed BEFORE committing `ready` — and commit the page's status
+        # together with its chunks in one transaction. This is what makes
+        # "status==ready implies chunks exist" hold: a page can never be
+        # durably ready with zero chunks, because the only commit that sets
+        # status="ready" is the same commit that persists those chunks.
+        #
+        # An embed() failure gets the SAME per-page handling as a transcribe
+        # failure: mark this page `failed`, record why, and continue the
+        # batch — an embedding-service hiccup on page 60 must not cost pages
+        # 1-59, and must not silently leave page 60 "ready" with nothing to
+        # cite.
+        try:
+            n_chunks = _embed_page(db, provider, page)
+        except Exception as e:
+            log.warning("ocr: page %s embed failed", page.page_no, exc_info=True)
+            db.rollback()
+            page = db.get(Page, page.id)
+            page.status = "failed"
+            page.ocr_error = f"embedding failed: {e}"
+            db.commit()
+            failed += 1
+            continue
+
+        if n_chunks == 0:
+            # Non-empty transcription that chunk_sections still couldn't
+            # turn into anything chunkable (e.g. whitespace-only after
+            # normalization). There's nothing to cite, so this can't be
+            # `ready` either — that would repeat the same "ready with zero
+            # chunks" bug this fix exists to close.
+            page.status = "empty"
+            db.commit()
+            continue
+
+        page.status = "ready"
+        db.commit()                       # page + its chunks, one transaction
+        ready += 1
 
     return OcrResult(total=len(pages), ready=ready, failed=failed)
 
 
 def _transcribe_with_retry(provider, page: Page) -> str:
     path = os.path.join(settings.media_dir, page.image_path)
-    with open(path, "rb") as fh:
-        image_bytes = fh.read()
+    try:
+        with open(path, "rb") as fh:
+            image_bytes = fh.read()
+    except FileNotFoundError:
+        # A clear, human-meaningful ocr_error, not a raw errno string — this
+        # is what a tutor (or a future debugging session) actually needs to
+        # know: the scan is missing from disk, not a transcription failure.
+        raise RuntimeError(f"OCR image file not found on disk: {path}") from None
+    except OSError as e:
+        raise RuntimeError(f"OCR image file could not be read ({path}): {e}") from None
 
     last: Exception | None = None
     for attempt in range(1, _MAX_ATTEMPTS + 1):
@@ -127,17 +186,24 @@ def _transcribe_with_retry(provider, page: Page) -> str:
     raise last                                       # type: ignore[misc]
 
 
-def _embed_page(db, provider, page: Page) -> None:
+def _embed_page(db, provider, page: Page) -> int:
     """Chunk + embed ONE page, deleting any prior chunks for it first so a
-    re-run (retry) replaces rather than duplicates."""
+    re-run (retry) replaces rather than duplicates. Returns the number of
+    chunks created.
+
+    Deliberately does NOT commit: the caller (`ocr_source`) commits this
+    page's `status="ready"` in the SAME transaction as these chunks, so a
+    page can never be durably `ready` with zero chunks — if the embed()
+    call raises, everything added here (and the delete above) rolls back
+    together with it."""
     db.query(Chunk).filter(Chunk.page_id == page.id).delete()
     drafts = chunk_sections([Section(heading=None, text=page.text, page=page.page_no)])
     if not drafts:
-        return
+        return 0
     vectors = provider.embed([d.text for d in drafts], is_query=False)
     for draft, vector in zip(drafts, vectors):
         db.add(Chunk(
             source_id=page.source_id, page_id=page.id, text=draft.text,
             section_path=draft.section_path, embedding=vector,
         ))
-    db.commit()
+    return len(drafts)
