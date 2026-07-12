@@ -960,3 +960,95 @@ export function authorFromSelection(
     body: JSON.stringify({ source_id: sourceId, page_no: pageNo, text }),
   });
 }
+
+/**
+ * Typed fetch helpers for Lesson Authoring (`routers/lessons.py`, Plan 10
+ * Task 4) — the lesson list + outline editor. Same direct-from-browser
+ * convention as every other section of this file. `getLesson`/
+ * `splitSession`/`mergeSessions`/`addSession` all return the SAME `BlockNode`
+ * tree shape `getCurriculum`/`getBlock` do above (`block_to_tree`, reused
+ * verbatim by `routers.lessons` from `routers.curriculum` — see that
+ * router's own docstring) — a lesson is just `Block(kind="lesson")` with
+ * `session` children and `item` grandchildren, no separate shape needed.
+ * Renaming/deleting any single session or item block reuses the EXISTING
+ * `updateBlock`/`deleteBlock` above — there is no lesson-specific PATCH/
+ * DELETE route.
+ */
+
+export interface LessonProvenance {
+  source_id: string;
+  page_no: number;
+}
+
+/** `GET /lessons` row shape — mirrors `schemas/lessons.py`'s
+ * `LessonListItem`. `provenance` is `null` for a lesson created any way
+ * other than `POST /lessons/from-selection` (there is currently no other
+ * way to create one, but the API leaves room for it). */
+export interface LessonListItem {
+  id: string;
+  title: string;
+  created_at: string;
+  provenance: LessonProvenance | null;
+}
+
+export function listLessons(): Promise<LessonListItem[]> {
+  return request<LessonListItem[]>("/lessons");
+}
+
+/** `GET /lessons/{id}` — the lesson -> session -> item tree. Deliberately
+ * does NOT carry `provenance` (that only lives on `LessonListItem`, above —
+ * see `schemas/lessons.py`'s `get_lesson` route, which returns the shared
+ * `BlockTreeOut` with no provenance field at all): a caller that needs both
+ * the tree AND the provenance chip (the editor page) also calls
+ * `listLessons()` and looks its own id up there. */
+export function getLesson(id: string): Promise<BlockNode> {
+  return request<BlockNode>(`/lessons/${id}`);
+}
+
+export interface SplitSessionInput {
+  session_minutes: number;
+}
+
+/** Cuts one over-long session into several, packed to ~`session_minutes`
+ * each (`app.lessons.edit.split_session`'s deterministic bin-packer — no LLM
+ * call). Returns the WHOLE lesson tree, not just the new sessions — callers
+ * replace their entire tree state with the response wholesale (see
+ * `components/lessons/session-card.tsx`'s `applyTree`) rather than trying to
+ * splice the split session's replacement in by hand. 422s (thrown here as an
+ * `ApiError`) if the session has no items to split. */
+export function splitSession(lessonId: string, sessionId: string, input: SplitSessionInput): Promise<BlockNode> {
+  return request<BlockNode>(`/lessons/${lessonId}/sessions/${sessionId}/split`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+/** Folds >=2 sessions of the same lesson into the first (`sessionIds[0]`,
+ * the survivor). The API 422s (surfaced as an `ApiError`) unless the given
+ * sessions are ADJACENT in order (`app.lessons.edit.merge_sessions`'s own
+ * docstring) — this app's UI never offers a picker that could ask for a
+ * non-adjacent pair (`SessionCard`'s "merge with the one below" only ever
+ * passes `[this session, the very next one]`), so a 422 here is a genuine
+ * edge case to surface honestly, not a client bug to paper over. Returns
+ * the whole lesson tree, same as `splitSession`. */
+export function mergeSessions(lessonId: string, sessionIds: string[]): Promise<BlockNode> {
+  return request<BlockNode>(`/lessons/${lessonId}/sessions/merge`, {
+    method: "POST",
+    body: JSON.stringify({ session_ids: sessionIds }),
+  });
+}
+
+export interface AddSessionInput {
+  title: string;
+  est_minutes?: number | null;
+  after?: string | null;
+}
+
+/** Appends a new, empty session (or inserts it right after `input.after`).
+ * Returns the whole lesson tree, same as `splitSession`/`mergeSessions`. */
+export function addSession(lessonId: string, input: AddSessionInput): Promise<BlockNode> {
+  return request<BlockNode>(`/lessons/${lessonId}/sessions`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}

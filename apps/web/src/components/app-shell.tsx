@@ -10,6 +10,7 @@ import {
   Guitar,
   LayoutGrid,
   Library,
+  ListTree,
   Menu,
   MessageCircle,
   Search,
@@ -27,12 +28,13 @@ const NAV_ITEMS = [
   { segment: "students", icon: Users },
   { segment: "curricula", icon: GraduationCap },
   { segment: "library", icon: Library },
+  { segment: "lessons", icon: ListTree },
   { segment: "notes", icon: StickyNote },
   { segment: "artifacts", icon: LayoutGrid },
   { segment: "chat", icon: MessageCircle },
 ] as const;
 
-/** The cockpit's persistent chrome: a left nav rail (studio logo, the 5
+/** The cockpit's persistent chrome: a left nav rail (studio logo, the
  * section links, GR/EN + theme toggles) plus a slim top bar (current page
  * title, a disabled search stub) over a scrollable content area. Every
  * `(cockpit)/*` page renders inside this via `(cockpit)/layout.tsx`.

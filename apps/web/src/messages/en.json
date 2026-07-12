@@ -7,6 +7,7 @@
     "students": "Students",
     "curricula": "Curricula",
     "library": "Library",
+    "lessons": "Lessons",
     "notes": "Notes",
     "artifacts": "Artifacts",
     "chat": "Chat",
@@ -314,6 +315,49 @@
       "authorLesson": "Author a lesson from this",
       "authorSaved": "Saved from {source} — ready for a lesson.",
       "authorError": "Could not save this selection."
+    }
+  },
+  "lessons": {
+    "heading": "Lessons",
+    "subheading": "Everything you've drafted from your library, ready to pick up and teach.",
+    "loading": "Loading your lessons…",
+    "error": "Could not load your lessons.",
+    "empty": "No lessons yet — open a page in your Library and author one from a passage.",
+    "noProvenance": "No source recorded",
+    "provenance": {
+      "chip": "from {source}, p.{page}",
+      "chipLoading": "from your library, p.{page}"
+    },
+    "editor": {
+      "back": "Back to Lessons",
+      "loading": "Loading this lesson…",
+      "error": "Could not load this lesson.",
+      "renameError": "Could not save this title.",
+      "noSessions": "This lesson has no sessions yet.",
+      "sessionLabel": "Session {index}",
+      "sessionTitlePlaceholder": "Session title",
+      "estMinutes": "{count} min",
+      "setMinutes": "Set length",
+      "noItems": "Nothing in this session yet.",
+      "split": "Split",
+      "splitHeading": "Split this session",
+      "splitDescription": "Cut \"{title}\" into shorter sessions, packed to about the length you choose.",
+      "splitMinutesLabel": "Target session length (minutes)",
+      "cancel": "Cancel",
+      "splitSubmit": "Split",
+      "splitting": "Splitting…",
+      "splitError": "Could not split this session.",
+      "mergeDown": "Merge down",
+      "mergeDownTitle": "Merge with \"{next}\"",
+      "mergeError": "Could not merge these sessions.",
+      "deleteSession": "Delete session",
+      "deleteSessionError": "Could not delete this session.",
+      "deleteItem": "Delete item",
+      "deleteItemError": "Could not delete this item.",
+      "addSession": "Add a session",
+      "addingSession": "Adding…",
+      "newSessionTitle": "New session",
+      "addSessionError": "Could not add a session."
     }
   },
   "artifacts": {
