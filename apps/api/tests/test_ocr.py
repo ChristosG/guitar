@@ -263,6 +263,108 @@ def test_missing_jpeg_on_disk_yields_a_clear_error_not_a_raw_traceback(db, tmp_p
     assert pages[1].status == "ready"           # the batch continued past page 1
 
 
+# --- Review fix (Finding 1): OCR success never rolled up to the source row.
+# All pages could reach status="ready" with real text while the parent
+# `KnowledgeSource` still said status="empty", char_count=0 — nothing ever
+# re-derived it from the pages. That's what the Library UI renders, so a
+# perfectly-OCR'd book still showed RED/broken with a "Retry" button. Mirrors
+# the D6 rule `ingest_source` already applies (app/brain/ingest.py) — ready
+# iff char_count > 0 — rather than inventing a new rule here. -------------
+
+def test_ocr_source_rolls_up_to_ready_with_summed_char_count(db, tmp_path, monkeypatch):
+    src = _src_with_pending_pages(db, 2)
+    monkeypatch.setattr("app.brain.ocr.settings.media_dir", str(tmp_path))
+    for i in (1, 2):
+        p = tmp_path / str(src.id); p.mkdir(exist_ok=True)
+        (p / f"{i:04d}.jpg").write_bytes(b"jpeg")
+    fake = _Vision(["Page one about humbuckers.", "Page two about tube screamers."])
+    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+
+    ocr_source(db, src.id)
+
+    reloaded = db.get(KnowledgeSource, src.id)
+    pages = db.query(Page).filter_by(source_id=src.id).order_by(Page.page_no).all()
+    assert reloaded.status == "ready"
+    assert reloaded.char_count == sum(len(p.text) for p in pages)
+    assert reloaded.char_count > 0
+
+
+def test_ocr_source_all_pages_blank_leaves_source_empty_never_ready(db, tmp_path, monkeypatch):
+    """D6: a source whose pages all come back blank must never roll up to
+    `ready` — that would repeat the exact "ready but actually empty" lie the
+    rest of this module already guards against per-page."""
+    src = _src_with_pending_pages(db, 2)
+    monkeypatch.setattr("app.brain.ocr.settings.media_dir", str(tmp_path))
+    for i in (1, 2):
+        p = tmp_path / str(src.id); p.mkdir(exist_ok=True)
+        (p / f"{i:04d}.jpg").write_bytes(b"jpeg")
+    fake = _Vision(["", ""])
+    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+
+    ocr_source(db, src.id)
+
+    reloaded = db.get(KnowledgeSource, src.id)
+    assert reloaded.status == "empty"
+    assert reloaded.char_count == 0
+
+
+def test_ocr_source_partial_success_rolls_up_to_ready_counting_only_ready_pages(
+    db, tmp_path, monkeypatch
+):
+    src = _src_with_pending_pages(db, 2)
+    monkeypatch.setattr("app.brain.ocr.settings.media_dir", str(tmp_path))
+    for i in (1, 2):
+        p = tmp_path / str(src.id); p.mkdir(exist_ok=True)
+        (p / f"{i:04d}.jpg").write_bytes(b"jpeg")
+    # page 1 succeeds; page 2 fails twice (initial + one retry)
+    fake = _Vision(["Good page text.", RuntimeError("vl timeout"), RuntimeError("vl timeout")])
+    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+
+    ocr_source(db, src.id)
+
+    reloaded = db.get(KnowledgeSource, src.id)
+    pages = db.query(Page).filter_by(source_id=src.id).order_by(Page.page_no).all()
+    assert pages[0].status == "ready"
+    assert pages[1].status == "failed"
+    assert reloaded.status == "ready"
+    assert reloaded.char_count == len(pages[0].text)
+
+
+def test_ocr_source_rollup_failure_does_not_undo_committed_page_work(db, tmp_path, monkeypatch):
+    """A rollup failure (e.g. the re-fetch/commit of the source row blowing
+    up) must not cost already-committed page work — pages that reached
+    `ready` in the per-page loop must stay `ready` regardless of what
+    happens to the source-row rollup afterwards. Guarded the same
+    swallow-and-log way as every other commit in `ocr_source` (module
+    docstring, D5): a rollup hiccup must not crash the whole batch either."""
+    src = _src_with_pending_pages(db, 1)
+    monkeypatch.setattr("app.brain.ocr.settings.media_dir", str(tmp_path))
+    p = tmp_path / str(src.id); p.mkdir(exist_ok=True)
+    (p / "0001.jpg").write_bytes(b"jpeg")
+    fake = _Vision(["Some transcribed text."])
+    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+
+    real_commit = db.commit
+    calls = {"n": 0}
+
+    def flaky_commit():
+        calls["n"] += 1
+        # Let every per-page commit inside the loop succeed; blow up only on
+        # the rollup's own commit (the last one `ocr_source` issues).
+        if calls["n"] > 2:
+            raise RuntimeError("rollup commit boom")
+        return real_commit()
+
+    monkeypatch.setattr(db, "commit", flaky_commit)
+
+    result = ocr_source(db, src.id)   # must NOT raise — swallowed like any other commit here
+
+    assert (result.total, result.ready, result.failed) == (1, 1, 0)
+    page = db.query(Page).filter_by(source_id=src.id).one()
+    assert page.status == "ready"           # already-committed page work survives
+    assert page.text == "Some transcribed text."
+
+
 # --- Review fix (minor): a page stuck at ocr_running (process killed
 # mid-vision()) must be resumable, not stuck forever -----------------------
 

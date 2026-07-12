@@ -169,11 +169,23 @@ def patch_source(
     """`model_fields_set` (not `exclude_none`/`exclude_unset` on a dict) so
     an explicit `{"collection_id": null}` (move to Unfiled) is distinguished
     from the field being omitted entirely (leave untouched) — both are legal
-    and mean different things for a nullable FK."""
+    and mean different things for a nullable FK.
+
+    Review fix: an unknown (or stale — collection deleted in one tab, moved-
+    to in another) `collection_id` used to be assigned straight onto
+    `source.collection_id` with no existence check, so `db.commit()` blew up
+    as a raw FK IntegrityError -> 500. Look the collection up and 404
+    cleanly BEFORE assigning, same existence-check-before-assignment
+    precedent as `students.py::upsert_student_progress` and
+    `curriculum.py::update_block`. `collection_id: None` stays valid (it
+    means "Unfiled") — only a non-null, unknown id 404s.
+    """
     source = _source_or_404(db, source_id)
     if payload.title is not None:
         source.title = payload.title
     if "collection_id" in payload.model_fields_set:
+        if payload.collection_id is not None and db.get(Collection, payload.collection_id) is None:
+            raise HTTPException(status_code=404, detail="Collection not found")
         source.collection_id = payload.collection_id
     db.commit()
     return {

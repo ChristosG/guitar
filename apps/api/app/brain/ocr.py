@@ -17,7 +17,7 @@ from app.brain.chunk import chunk_sections
 from app.brain.extract import Section
 from app.config import settings
 from app.llm.factory import get_provider
-from app.models.knowledge import Chunk, Page
+from app.models.knowledge import Chunk, KnowledgeSource, Page
 
 log = logging.getLogger(__name__)
 
@@ -152,7 +152,45 @@ def ocr_source(db, source_id) -> OcrResult:
         db.commit()                       # page + its chunks, one transaction
         ready += 1
 
+    _rollup_source_status(db, source_id)
+
     return OcrResult(total=len(pages), ready=ready, failed=failed)
+
+
+def _rollup_source_status(db, source_id) -> None:
+    """Re-derive the parent `KnowledgeSource`'s `status`/`char_count` from
+    its pages, after the per-page loop above has finished.
+
+    Review fix: without this, a PDF whose pages ALL reached `ready` with real
+    transcribed text still left the source row at status="empty",
+    char_count=0 forever — nothing had ever re-derived it. The Library UI
+    renders `source.status`, so a perfectly-OCR'd, fully-searchable book kept
+    showing RED/broken with a "Retry" button.
+
+    Mirrors the D6 rule `ingest_source` already applies (app/brain/ingest.py:
+    ready iff char_count > 0) rather than inventing a new rule here — only
+    READY pages' text counts, so a partially-failed batch still rolls up to
+    `ready` with a char_count that reflects just the citable pages.
+
+    Guarded the same swallow-and-log way as every other commit in this
+    module (module docstring, D5): a rollup failure is logged and rolled
+    back, but must not raise back into the caller and must not undo the
+    per-page work already durably committed above.
+    """
+    try:
+        source = db.get(KnowledgeSource, source_id)
+        if source is None:
+            return
+        source_pages = db.query(Page).filter(Page.source_id == source_id).all()
+        char_count = sum(
+            len(p.text) for p in source_pages if p.status == "ready" and p.text
+        )
+        source.char_count = char_count
+        source.status = "ready" if char_count > 0 else "empty"
+        db.commit()
+    except Exception:
+        log.warning("ocr: source status rollup failed for source_id=%s", source_id, exc_info=True)
+        db.rollback()
 
 
 def _transcribe_with_retry(provider, page: Page) -> str:

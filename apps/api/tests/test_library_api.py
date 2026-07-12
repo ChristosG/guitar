@@ -201,6 +201,28 @@ def test_patch_source_can_move_a_source_back_to_unfiled(db):
     assert db.get(KnowledgeSource, src.id).collection_id is None
 
 
+# --- Review fix (Finding 2): an unknown collection_id used to reach
+# `source.collection_id = payload.collection_id` -> `db.commit()` with no
+# existence check, and blow up as a raw 500 IntegrityError (FK violation) —
+# e.g. the collection was deleted in one tab while moved-to in another.
+# Mirrors the existence-check-before-assignment precedent already established
+# by `students.py::upsert_student_progress` and `curriculum.py::update_block`.
+# `collection_id: None` stays valid (it means "Unfiled") — only an unknown,
+# non-null id should 404. ---------------------------------------------------
+
+def test_patch_source_unknown_collection_id_is_404_not_500(db):
+    src = KnowledgeSource(type="pdf", title="Book", status="ready")
+    db.add(src); db.commit()
+
+    r = client.patch(
+        f"/knowledge/sources/{src.id}", json={"collection_id": str(uuid.uuid4())}
+    )
+
+    assert r.status_code == 404
+    db.expire_all()
+    assert db.get(KnowledgeSource, src.id).collection_id is None  # untouched
+
+
 def test_deleting_a_collection_unfiles_its_sources_rather_than_deleting_them(db):
     """A folder is a label, not a container — deleting it must never destroy
     the tutor's material."""
