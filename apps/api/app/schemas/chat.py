@@ -40,6 +40,12 @@ class MessageOut(BaseModel):
     role: str
     content: str | None = None
     created_at: datetime
+    # Plan 11 Task 1 (C2): the grounding hits `run_agent_turn`'s forced
+    # retrieval found for this turn, if this row is the assistant message
+    # that answered it — None for a user row, or an assistant row from a
+    # turn that had nothing to cite. Lets the UI render a citation chip that
+    # deep-links into the Reader at `page_no`.
+    citations: list[dict] | None = None
 
 
 class ChatTurnOut(BaseModel):
@@ -63,6 +69,11 @@ class ChatTurnOut(BaseModel):
     tool_args: dict | None = None
     description: str | None = None
     job_id: UUID | None = None
+    # Plan 11 Task 1 (C2) — mirrors `MessageOut.citations`: populated for an
+    # "answer"/"awaiting_approval" turn that had something to cite, None
+    # otherwise (never persisted for "job_pending" — that response never
+    # carries a fresh assistant turn of its own).
+    citations: list[dict] | None = None
 
 
 class ApprovalResolveRequest(BaseModel):

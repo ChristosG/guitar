@@ -75,6 +75,20 @@ class Message(Base, PkMixin, TimestampMixin):
     messages_to_wire` could not pair a reloaded tool-result row back to the
     call it answers.
 
+    `citations` (Plan 11 Task 1, C1/C2 — the ONE migration in this plan) is
+    the `AgentResult.citations` list `run_agent_turn`'s forced-retrieval
+    pre-hop produced for the turn this row belongs to (`app.agent.loop.
+    _to_citation`'s shape: `{source_id, source_title, page_no, page_id,
+    snippet}` per hit) — nullable/JSON, same "opaque LLM-shaped payload"
+    precedent as `tool_calls` above. Only ever set on an "assistant" row
+    (`app.agent.transcript.persist_new_messages` is what actually assigns
+    it); None everywhere else, including an assistant row from a turn that
+    wasn't content-bearing (nothing was retrieved, so there is nothing to
+    cite — `[]` and `None` are both "no citations" here, but the pre-hop
+    itself always produces a concrete `[]` rather than never running, so a
+    stored `None` specifically means "this row predates this column" or
+    "not an assistant row", not "retrieval was skipped").
+
     `session_id` IS a `ForeignKey` (unlike `ChatSession.student_id` above):
     a `Message` has no meaning detached from its session, so CASCADE-deleting
     it along with the session it belongs to is correct — same ownership
@@ -88,6 +102,7 @@ class Message(Base, PkMixin, TimestampMixin):
     content: Mapped[str | None] = mapped_column(Text, nullable=True)
     tool_calls: Mapped[list | None] = mapped_column(JSON, nullable=True)
     tool_call_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    citations: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
 
 class ApprovalRequest(Base, PkMixin, TimestampMixin):

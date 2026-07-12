@@ -58,11 +58,23 @@ def messages_to_wire(rows: list[Message]) -> list[dict]:
     return wire
 
 
-def persist_new_messages(db, session_id: uuid.UUID, wire_tail: list[dict]) -> list[Message]:
+def persist_new_messages(
+    db, session_id: uuid.UUID, wire_tail: list[dict], *, citations: list[dict] | None = None,
+) -> list[Message]:
     """Persist each wire-shape message in `wire_tail`, IN ORDER, as a new
     `Message` row — the exact inverse of `messages_to_wire`. Returns the
     created rows, also in order. A `{"role": "system"}` entry is skipped
     entirely (see this module's own docstring for why).
+
+    `citations` (Plan 11 Task 1, C2) — `AgentResult.citations` for the turn
+    this tail belongs to — is attached to the LAST persisted row, and only
+    when that row is "assistant": that's the one row a citation chip could
+    ever point at (the turn's final answer, or the assistant message that
+    proposes a suspended mutation — the pre-hop already ran either way, see
+    `loop.py`'s own `AgentResult.citations` docstring for why suspending
+    doesn't clear it). Every existing call site that doesn't pass
+    `citations` is unaffected — `None` here is a no-op, identical to this
+    function's behavior before the parameter existed.
 
     Commits ONCE PER MESSAGE — deliberately not once for the whole batch.
     `TimestampMixin.created_at` is `server_default=func.now()`, which is
@@ -93,4 +105,7 @@ def persist_new_messages(db, session_id: uuid.UUID, wire_tail: list[dict]) -> li
         db.add(row)
         db.commit()
         persisted.append(row)
+    if citations and persisted and persisted[-1].role == "assistant":
+        persisted[-1].citations = citations
+        db.commit()
     return persisted

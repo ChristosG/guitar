@@ -141,6 +141,11 @@ def test_post_message_plain_answer_returns_content_and_persists_history(monkeypa
     _use_provider(monkeypatch, [
         AssistantTurn(content="A humbucker cancels hum.", tool_calls=[]),
     ])
+    # "what cancels hum?" is CONTENT-BEARING (Plan 11 Task 1, C1) — stub the
+    # loop's forced-retrieval pre-hop to no-hits so it doesn't reach the real
+    # embedding provider; this test's own concern is history persistence,
+    # not grounding (see `test_agent_grounding.py` for that).
+    monkeypatch.setattr(agent_loop, "search", lambda db_, q, k=5: [])
     session_id = _create_session()
 
     r = client.post(f"/chat/{session_id}/messages", json={"content": "what cancels hum?"})

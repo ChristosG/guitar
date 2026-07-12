@@ -193,7 +193,7 @@ def _respond_to_turn(db: Session, session_id: UUID, prior_wire: list[dict], resu
     row and no way to ever resolve it via `GET .../pending`).
     """
     tail = _new_tail(result.messages, prior_wire)
-    persist_new_messages(db, session_id, tail)
+    persist_new_messages(db, session_id, tail, citations=result.citations)
 
     if result.status == "awaiting_approval":
         pending = result.pending_tool
@@ -213,9 +213,10 @@ def _respond_to_turn(db: Session, session_id: UUID, prior_wire: list[dict], resu
             tool_name=pending["name"],
             tool_args=pending["arguments"],
             description=description,
+            citations=result.citations or None,
         )
 
-    return ChatTurnOut(status="answer", content=result.content)
+    return ChatTurnOut(status="answer", content=result.content, citations=result.citations or None)
 
 
 @router.post("/chat", response_model=ChatSessionCreated)

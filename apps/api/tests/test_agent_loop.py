@@ -72,6 +72,13 @@ def test_run_agent_turn_dispatches_read_tool_then_returns_final_answer(monkeypat
         return [{"source": "Pickups 101", "text": "a humbucker cancels hum", "score": 0.9}]
 
     _stub_tool(monkeypatch, "search_knowledge", _fake_search_knowledge)
+    # "what cancels hum?" is CONTENT-BEARING per `_is_content_bearing`
+    # (Plan 11 Task 1, C1) — the loop's own forced-retrieval pre-hop would
+    # call the real `app.brain.retrieve.search` otherwise. Stubbed here to
+    # no-hits since this test's own concern is the `search_knowledge` TOOL
+    # dispatch above, not C1's pre-hop (that's `test_agent_grounding.py`'s
+    # job) — an empty pre-hop result doesn't touch any assertion below.
+    monkeypatch.setattr(agent_loop, "search", lambda db_, q, k=5: [])
 
     call = ToolCall(id="call_1", name="search_knowledge", arguments={"query": "what cancels hum?"})
     turn1 = AssistantTurn(content=None, tool_calls=[call])

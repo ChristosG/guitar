@@ -14,6 +14,30 @@ vllm_interract/reference/agentic-gotchas.md`:
     top-level constant in `prompts.py`) and `_tool_schemas()` (deterministic,
     same list every call within a process) never interpolate per-request data.
 
+Plan 11 Task 1 (C1/C2 — "forced retrieval, not requested") adds a pre-hop
+BEFORE the main loop below ever calls the model: on a fresh, CONTENT-BEARING
+user turn (see `_is_content_bearing`'s own docstring for the exact rule and
+its defence), `run_agent_turn` itself calls `app.brain.retrieve.search` —
+not a tool the model may or may not decide to invoke — and appends the hits
+as a `GROUNDING` block (`_grounding_block`) onto the END of that SAME user
+turn's own content, before the first `chat_tools` call (NOT a second system
+message — the live vLLM chat template 400s on a system message that isn't
+the very first one, and a mid-transcript system message would defeat
+agentic-gotchas.md #8's prefix-caching invariant regardless; see
+`_grounding_block`'s own docstring). The model never gets a turn where it
+could have skipped retrieval. Every hit is also surfaced as a citation
+(`_to_citation`) on `AgentResult.citations`, persisted onto the `Message` row
+by `app/routers/chat.py` via `app.agent.transcript.persist_new_messages` —
+this is what lets the UI show a citation chip back to a real page. A turn
+with NO hits (or none clearing `_RELEVANCE_FLOOR`) still gets a GROUNDING
+block — one that instructs the model to say his library doesn't cover this
+and label the rest of the answer as general knowledge, rather than silently
+falling back to unlabelled pretrained knowledge. This pre-hop runs BEFORE
+the mutation-suspend logic below and does not touch it in any way: it only
+ever rewrites the trailing user message's own content before the loop
+starts, and only ever adds `citations` to the `AgentResult` this function
+already returns from every branch — C6 (the approval gate) is unchanged.
+
 Plan 5 Task 2 built this loop dispatching ONLY "read" tools inline (the
 `TOOLS` registry was reads-only). THIS task (3) adds "mutation" entries into
 that same registry (`app/agent/tools.py`) and teaches this loop to SUSPEND
@@ -37,10 +61,12 @@ instead of executing them:
 """
 import json
 import logging
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 
 from app.agent.prompts import SYSTEM_PROMPT
 from app.agent.tools import TOOLS
+from app.brain.retrieve import search
 from app.llm.errors import ToolArgsError
 from app.llm.factory import get_provider
 from app.llm.tools_types import ToolCall
@@ -56,6 +82,157 @@ _MAX_REPAIR_ATTEMPTS = 2
 _REPAIR_MESSAGE = "Your previous tool call had invalid JSON arguments. Retry with valid JSON."
 _GIVEUP_MESSAGE = "Sorry, I couldn't complete that request. Could you rephrase it?"
 _MAX_STEPS_MESSAGE = "I couldn't finish that within the allotted steps. Could you try rephrasing or narrowing the request?"
+
+
+# ---------------------------------------------------------------------------
+# C1: forced retrieval pre-hop — the content-bearing rule
+# ---------------------------------------------------------------------------
+#
+# THE RULE: a turn forces a library search only when it plausibly asks a
+# guitar technique/theory/gear/tone QUESTION. Two categories are excluded
+# even though neither is small talk:
+#   1. small talk / pleasantries ("hi", "hello", "thanks") — nothing to
+#      look up.
+#   2. an INSTRUCTION about an entity already in the tutor's OWN data (a
+#      student, curriculum, lesson, session, note, progress entry, or a
+#      request for a generated artifact/tab/diagram/scale) — these are
+#      resolved by a read/mutation tool (`app/agent/tools.py`), never by a
+#      library search: "split session 2 of that lesson" is about session #2
+#      of one specific row, not a question his book could ever answer, and
+#      forcing a search on it would inject irrelevant "grounding" noise into
+#      a command turn for no benefit.
+#
+# DEFENCE: kept a plain regex/keyword rule — deliberately NOT an LLM call.
+# The entire point of C1 is removing an unreliable judgment call FROM the
+# model ("the model routinely declines to retrieve"); asking a model
+# (possibly the very same one) to classify the turn first would just move
+# that same unreliability one hop earlier and re-introduce exactly the
+# failure mode this task exists to remove. A keyword rule is auditable,
+# deterministic, and — because both exclusion categories above are already
+# literally enumerated in `SYSTEM_PROMPT` itself ("students, curricula,
+# lessons, sessions, notes, progress, artifacts" vs "any guitar technique/
+# theory/gear/tone question") — this rule is not a new taxonomy, it is the
+# SAME split the prompt already draws, just enforced in code instead of
+# requested in prose. See `tests/test_agent_grounding.py`'s "TEST BOTH
+# SIDES" section for the concrete cases this is pinned against (small talk,
+# entity instructions, and genuine content questions).
+_SMALL_TALK_RE = re.compile(
+    r"^\s*(hi|hey|hello|yo|sup|thanks|thank you|ok|okay|cool|bye|goodbye|"
+    r"good\s+(morning|afternoon|evening|night)|how'?s?\s+it\s+going|"
+    r"how\s+are\s+you|what'?s\s+up)\b",
+    re.IGNORECASE,
+)
+
+# Nouns naming the tutor's OWN data (students/curricula/lessons/sessions/
+# notes/progress) or a structured artifact request (tab/chord diagram/scale)
+# — exactly the domain `SYSTEM_PROMPT` already routes to a read/mutation
+# tool rather than a knowledge question about the library.
+_ENTITY_OR_ARTIFACT_RE = re.compile(
+    r"\b(students?|curricul(?:um|a)\w*|lessons?|sessions?|notes?|progress|"
+    r"artifacts?|chord\s+diagrams?|diagrams?|tabs?|scales?)\b",
+    re.IGNORECASE,
+)
+
+# A positive signal that the turn is actually ASKING something, not issuing
+# a bare command ("do three things", "split session 2") — a literal "?", or
+# a leading wh-question word. Deliberately excludes bare modal starters
+# ("do", "can", "is", ...): those are just as common as imperative-sentence
+# openers ("do three things") as they are real questions, so including them
+# produced false positives on exactly the entity-instruction turns category
+# 2 above exists to exclude.
+_QUESTION_RE = re.compile(r"\?|^\s*(what|why|how|when|where|which)\b", re.IGNORECASE)
+
+# Conservative on purpose: this PoC has no calibration data for what a
+# "genuinely relevant" cosine score looks like against this corpus/embedder,
+# so the floor only screens out clear noise (near-zero/negative similarity)
+# rather than risking false-negative filtering of a real hit. Revisit with
+# real usage data once there's a distribution to tune against.
+_RELEVANCE_FLOOR = 0.15
+
+
+def _is_content_bearing(text: str) -> bool:
+    """True iff `text` plausibly asks a guitar technique/theory/gear/tone
+    question — see the module-level comment block above for the full rule
+    and its defence.
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    if _SMALL_TALK_RE.match(stripped):
+        return False
+    if _ENTITY_OR_ARTIFACT_RE.search(stripped):
+        return False
+    return bool(_QUESTION_RE.search(stripped))
+
+
+def _snippet(text: str, limit: int = 300) -> str:
+    """A bounded preview of a hit's chunk text for a citation payload — the
+    full text already reached the model via the GROUNDING block; this is
+    only what a citation chip would show, not what the model reasons over.
+    """
+    stripped = text.strip()
+    return stripped if len(stripped) <= limit else stripped[:limit].rstrip() + "…"
+
+
+def _to_citation(hit) -> dict:
+    """One `AgentResult.citations` entry (C2) from an `app.brain.retrieve.
+    Hit` — `{source_id, source_title, page_no, page_id, snippet}`, the exact
+    shape the brief specifies so the UI can render a chip that deep-links
+    into the Reader at the cited page. `page_no`/`page_id` are None when the
+    chunk predates page-addressable ingest (`Hit`'s own documented case) —
+    passed through as-is rather than papered over.
+    """
+    return {
+        "source_id": str(hit.source_id),
+        "source_title": hit.source_title,
+        "page_no": hit.page,
+        "page_id": str(hit.page_id) if hit.page_id is not None else None,
+        "snippet": _snippet(hit.text),
+    }
+
+
+_NO_HITS_GROUNDING = (
+    "GROUNDING: searched the tutor's library for this question and found nothing "
+    "relevant. Say plainly, in your answer, that his material doesn't cover this, "
+    "and label the rest of your answer as general knowledge (not from his library)."
+)
+
+
+def _grounding_block(hits: list) -> str:
+    """The injected context TEXT (C1/C2) — appended onto the end of the
+    user's OWN turn (see `run_agent_turn`'s pre-hop), deliberately NOT a
+    second `{"role": "system", ...}` message: the real vLLM chat template
+    this app targets 400s a system message that isn't the very first one
+    ("System message must be at the beginning") — confirmed against the
+    live server while building this pre-hop, not a theoretical concern. A
+    mid-transcript system message would also defeat agentic-gotchas.md #8's
+    prefix-caching invariant (`loop.py`'s own module docstring) even if the
+    server tolerated it: that invariant is about `SYSTEM_PROMPT` staying
+    BYTE-IDENTICAL turn over turn, and retrieved passages are per-query by
+    definition. Appending to the user turn instead keeps index 0 untouched
+    (still exactly `SYSTEM_PROMPT`) and the dynamic part where it belongs —
+    in the part of the prefix that was already going to change this turn.
+
+    Empty `hits` (no results, or every result screened out by
+    `_RELEVANCE_FLOOR`) gets the explicit "say so, label as general
+    knowledge" instruction (`_NO_HITS_GROUNDING`) rather than silently
+    omitting a grounding block — an omitted block is indistinguishable from
+    "retrieval wasn't attempted" and invites exactly the unlabelled-
+    pretrained-knowledge failure C2 exists to prevent.
+    """
+    if not hits:
+        return _NO_HITS_GROUNDING
+    passages = "\n\n".join(
+        f"[{i}] (source_id={hit.source_id}, page={hit.page}) {hit.text}"
+        for i, hit in enumerate(hits, start=1)
+    )
+    return (
+        "GROUNDING — from the tutor's library, the passages most relevant to this "
+        f"question:\n\n{passages}\n\n"
+        "Answer from this context and cite the passages you use inline as [n]. If "
+        "none of it actually answers the question, say his material doesn't cover "
+        "this and label the rest of your answer as general knowledge."
+    )
 
 
 @dataclass
@@ -75,12 +252,23 @@ class AgentResult:
     resolve, answers `pending_tool["tool_call_id"]` with a `{"role":"tool",
     ...}` result before resuming `run_agent_turn` — this loop itself never
     persists anything (session-agnostic; Task 4 owns persistence).
+
+    `citations` (Plan 11 Task 1, C1/C2) is the list of `_to_citation(hit)`
+    dicts for whatever this turn's forced-retrieval pre-hop found —
+    `[]` when the turn wasn't content-bearing (no search ran at all) OR the
+    search ran but returned nothing above `_RELEVANCE_FLOOR`. Populated on
+    EVERY return branch below (not just the plain "answer" path), since a
+    turn can still be genuinely grounded even when it also suspends on a
+    mutation in the same reply (see `test_agent_grounding.py`'s C1/C6
+    composition test) — `app/routers/chat.py` persists this onto the
+    `Message` row it writes for the turn's own trailing assistant message.
     """
 
     status: str
     content: str | None
     messages: list[dict]
     pending_tool: dict | None = None
+    citations: list[dict] = field(default_factory=list)
 
 
 def _tool_schemas() -> list[dict]:
@@ -197,6 +385,38 @@ def run_agent_turn(db, messages: list[dict], *, max_steps: int = 6) -> AgentResu
     provider = get_provider()
     repair_attempts = 0
     last_content: str | None = None
+    citations: list[dict] = []
+
+    # --- C1: forced retrieval pre-hop ---------------------------------------
+    # Fires ONLY when the newest message in the transcript is a fresh user
+    # turn (i.e. `messages[-1]["role"] == "user"`) — a resumed turn after an
+    # HITL resolve always ends with a `{"role": "tool", ...}` answer to the
+    # approved/rejected mutation, never a user message, so this never
+    # re-triggers mid-approval. `search()` is called directly — not offered
+    # to the model as a tool it might decline — and its hits are appended
+    # onto the END of the user's own turn (see `_grounding_block`'s own
+    # docstring for why NOT a second system message) BEFORE the loop's first
+    # `chat_tools` call below, so every branch that follows (plain answer,
+    # mutation suspend, max_steps fallback, ...) already has grounding in
+    # `messages` by construction.
+    #
+    # `messages[-1] = {...}` REPLACES the list slot with a NEW dict rather
+    # than mutating `last["content"]` in place: `messages` here shares its
+    # element objects (not just the list) with the caller's own transcript
+    # (`_ensure_system_prompt` unpacks the caller's original dicts into a new
+    # list, but doesn't copy the dicts themselves) — `app/routers/chat.py`
+    # holds onto that same list as `prior_wire` and diffs against it
+    # (`_new_tail`) to compute what to persist. An in-place mutation would
+    # retroactively rewrite `prior_wire`'s own last entry too, corrupting
+    # that diff; reassigning the slot only ever changes what THIS function's
+    # local list points to.
+    last = messages[-1]
+    if last.get("role") == "user" and _is_content_bearing(last.get("content") or ""):
+        raw_hits = search(db, last["content"], k=5)
+        hits = [hit for hit in raw_hits if hit.score >= _RELEVANCE_FLOOR]
+        citations = [_to_citation(hit) for hit in hits]
+        grounded_content = f"{last['content']}\n\n{_grounding_block(hits)}"
+        messages[-1] = {**last, "content": grounded_content}
 
     for _ in range(max_steps):
         try:
@@ -212,7 +432,7 @@ def run_agent_turn(db, messages: list[dict], *, max_steps: int = 6) -> AgentResu
                 # "couldn't complete" reply silently drops out of history and
                 # the model has no memory of it next turn.
                 messages.append({"role": "assistant", "content": _GIVEUP_MESSAGE})
-                return AgentResult(status="answer", content=_GIVEUP_MESSAGE, messages=messages)
+                return AgentResult(status="answer", content=_GIVEUP_MESSAGE, messages=messages, citations=citations)
             # The broken turn is NOT added to history (no assistant message,
             # no dangling tool_call) — just a corrective user turn, so the
             # model gets a clean shot at a valid call next time.
@@ -224,7 +444,7 @@ def run_agent_turn(db, messages: list[dict], *, max_steps: int = 6) -> AgentResu
 
         if not turn.tool_calls:
             messages.append(_wire_assistant_message(turn.content, turn.tool_calls))
-            return AgentResult(status="answer", content=turn.content, messages=messages)
+            return AgentResult(status="answer", content=turn.content, messages=messages, citations=citations)
 
         pending_index = _first_mutation_index(turn.tool_calls)
 
@@ -279,6 +499,7 @@ def run_agent_turn(db, messages: list[dict], *, max_steps: int = 6) -> AgentResu
                 "name": pending_call.name,
                 "arguments": pending_call.arguments,
             },
+            citations=citations,
         )
 
     log.warning("run_agent_turn: max_steps=%d exhausted without a final answer", max_steps)
@@ -292,5 +513,5 @@ def run_agent_turn(db, messages: list[dict], *, max_steps: int = 6) -> AgentResu
     # without re-appending avoids a duplicate assistant message.
     if last_content is None:
         messages.append({"role": "assistant", "content": _MAX_STEPS_MESSAGE})
-        return AgentResult(status="answer", content=_MAX_STEPS_MESSAGE, messages=messages)
-    return AgentResult(status="answer", content=last_content, messages=messages)
+        return AgentResult(status="answer", content=_MAX_STEPS_MESSAGE, messages=messages, citations=citations)
+    return AgentResult(status="answer", content=last_content, messages=messages, citations=citations)
