@@ -15,7 +15,7 @@ from sqlalchemy import text
 from app.brain.ingest import IngestPayload, ingest_source
 from app.brain.retrieve import Hit, answer, build_grounded_messages, search
 from app.db import Base, SessionLocal, engine
-from app.models.knowledge import KnowledgeSource
+from app.models.knowledge import KnowledgeSource, Chunk, Page
 
 # Skip cleanly (not error) when no DB is reachable — mirrors test_ingest.py.
 try:
@@ -188,3 +188,82 @@ def test_build_grounded_messages_has_locale_instruction_and_numbered_context():
     assert "what is a humbucker?" in user
     assert "[1] hum is cancelled by two coils" in user  # numbered context, in order
     assert "[2] single coils buzz more" in user
+
+
+def test_search_returns_chunks_with_and_without_pages(db, monkeypatch):
+    """Regression test for outerjoin vs join on Page: chunks with page_id=NULL
+    must still be returned (not silently dropped), with page=None / page_id=None.
+
+    If someone ever "tidies" the outerjoin into a plain join, those chunks would
+    silently disappear from search results — this test catches that regression.
+
+    Tests two branches:
+    - A chunk WITH a page resolves its real page_no and page_id.
+    - A chunk WITHOUT a page (page_id=NULL, legacy rows from before Page model
+      existed) is STILL RETURNED with page=None and page_id=None.
+    """
+    from app.config import settings
+
+    # Fake provider: returns a constant zero vector for all queries/documents.
+    # The search query embedding doesn't matter (all chunks have the same
+    # embedding, so cosine distance is 0 for all); we're testing retrieval
+    # cardinality and nullability, not ranking.
+    class _ZeroVectorProvider:
+        def embed(self, texts, *, is_query=False):
+            return [[0.0] * settings.embed_dim for _ in texts]
+
+    monkeypatch.setattr("app.brain.retrieve.get_provider", lambda: _ZeroVectorProvider())
+
+    # Create a source.
+    source = KnowledgeSource(type="text", title="Test Source", language="en")
+    db.add(source)
+    db.commit()
+
+    # Create a page linked to this source.
+    page = Page(source_id=source.id, page_no=42)
+    db.add(page)
+    db.commit()
+
+    # Create a chunk WITH a page.
+    chunk_with_page = Chunk(
+        source_id=source.id,
+        page_id=page.id,
+        text="This chunk has a page",
+        section_path=None,
+        embedding=[0.0] * settings.embed_dim,
+    )
+    db.add(chunk_with_page)
+    db.commit()
+
+    # Create a chunk WITHOUT a page (legacy, page_id=NULL).
+    chunk_without_page = Chunk(
+        source_id=source.id,
+        page_id=None,  # Explicitly NULL: legacy chunk from before Page model existed.
+        text="This chunk has no page",
+        section_path=None,
+        embedding=[0.0] * settings.embed_dim,
+    )
+    db.add(chunk_without_page)
+    db.commit()
+
+    # Search and verify both chunks are returned.
+    hits = search(db, "test query")
+
+    # Both chunks should be in the results (equal distance, both returned by outerjoin).
+    assert len(hits) == 2, f"expected 2 hits, got {len(hits)}"
+    assert all(isinstance(h, Hit) for h in hits)
+
+    # Find the hits by text to distinguish them (order might vary).
+    hit_with_page = next((h for h in hits if h.text == "This chunk has a page"), None)
+    hit_without_page = next((h for h in hits if h.text == "This chunk has no page"), None)
+
+    assert hit_with_page is not None, "chunk with page not found"
+    assert hit_without_page is not None, "chunk without page not found (regression: outerjoin dropped it)"
+
+    # Verify the chunk WITH a page resolves its page number and page_id.
+    assert hit_with_page.page == 42, f"expected page_no=42, got {hit_with_page.page}"
+    assert hit_with_page.page_id == page.id, f"expected page_id={page.id}, got {hit_with_page.page_id}"
+
+    # Verify the chunk WITHOUT a page has page=None and page_id=None (not dropped).
+    assert hit_without_page.page is None, f"expected page=None, got {hit_without_page.page}"
+    assert hit_without_page.page_id is None, f"expected page_id=None, got {hit_without_page.page_id}"
