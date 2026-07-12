@@ -1,17 +1,22 @@
-"""Ingestion pipeline: extract -> chunk -> embed -> store, with a status lifecycle.
+"""Ingestion pipeline: paginate -> extract -> chunk -> embed -> store, with a
+status lifecycle.
 
 Orchestrates the Brain pipeline for one already-created ``KnowledgeSource`` row:
-``extract_text`` -> ``chunk_sections`` -> ``get_provider().embed(...)`` -> persist
-``Chunk`` rows, using the Foundations embedding provider (never re-embedded or
-re-normalized here — the provider already L2-normalizes, index-sorts, and
-batches internally).
+``paginate_source`` (creates/replaces this source's ``Page`` rows) ->
+``extract_text`` -> ``chunk_sections`` -> ``get_provider().embed(...)`` ->
+persist ``Chunk`` rows (each linked to its ``Page`` via ``page_id``), using
+the Foundations embedding provider (never re-embedded or re-normalized here —
+the provider already L2-normalizes, index-sorts, and batches internally).
 
 Status lifecycle (never leaves a source in "ingesting" on return):
-    "ingesting" (committed immediately, before any extract/chunk/embed work)
-    -> ... -> "ready" (success — including the legitimate empty-extraction
-    case: 0 sections/chunks is NOT a failure, it's just an empty source) or
-    "failed", with ``error=str(e)``, on any exception raised anywhere in the
-    pipeline (extract/chunk/embed/persist).
+    "ingesting" (committed immediately, before any paginate/extract/chunk/
+    embed work) -> ... -> "ready" (success, char_count > 0) or "empty"
+    (success, but nothing was extracted — SPEC D6: this is NOT "ready".
+    Three live sources once sat "ready" with 0 characters and rendered as a
+    healthy green badge in the UI for two days, hiding a broken knowledge
+    base — an empty source must be visibly distinguishable from a populated
+    one) or "failed", with ``error=str(e)``, on any exception raised
+    anywhere in the pipeline (paginate/extract/chunk/embed/persist).
 
 Design choice — swallow, don't re-raise: like ``extract_text`` ("the one hard
 guarantee is the contract used by ingest.py: never raise"), this function does
@@ -30,6 +35,7 @@ from dataclasses import dataclass
 
 from app.brain.chunk import chunk_sections
 from app.brain.extract import Section, extract_text
+from app.brain.paginate import paginate_source
 from app.llm.factory import get_provider
 from app.models.knowledge import Chunk, KnowledgeSource
 
@@ -114,7 +120,38 @@ def ingest_source(db, source_id, payload: IngestPayload) -> None:
     db.commit()
 
     try:
-        sections = extract_text(payload.kind, data=payload.data, url=payload.url, text=payload.text)
+        # Create/replace this source's Page rows first (Plan 9 Task 3's
+        # paginate_source — idempotent, deletes-then-recreates). Every chunk
+        # created below gets linked to one of these via page_id.
+        pages = paginate_source(
+            db, source_id, kind=payload.kind, data=payload.data, url=payload.url, text=payload.text,
+        )
+        page_by_no = {p.page_no: p for p in pages}
+
+        # Ordering/double-fetch note: for kind="url", paginate_source's
+        # single-Page path (app/brain/paginate.py's `_single_page`) already
+        # called extract_text -> safe_fetch_html and fetched this exact URL
+        # once, storing the result on the one Page it created. Calling
+        # extract_text again here would fetch the SAME URL a second time over
+        # the network for no reason — so for "url" we reuse that Page's text
+        # instead of re-extracting. For "text"/"pdf" there is no network cost
+        # to re-extracting (a string, or bytes already held in memory), so
+        # those still go through extract_text directly, unchanged from
+        # before this task — and for "pdf" that's not just cheaper-to-skip
+        # duplication anyway: paginate_source's PDF path only renders page
+        # images and opportunistically captures an existing text layer (or
+        # leaves a page "pending" for the Task 4 OCR job) — it does not run
+        # the full heading-aware section extraction the chunker needs.
+        if payload.kind == "url":
+            single_page = pages[0] if pages else None
+            sections = (
+                [Section(heading=None, text=single_page.text, page=single_page.page_no)]
+                if single_page and single_page.text
+                else []
+            )
+        else:
+            sections = extract_text(payload.kind, data=payload.data, url=payload.url, text=payload.text)
+
         sections = _cap_total_chars(sections, source_id)
         drafts = chunk_sections(sections)
 
@@ -127,16 +164,11 @@ def ingest_source(db, source_id, payload: IngestPayload) -> None:
 
         char_count = 0
         for draft, vector in zip(drafts, vectors):
-            # `draft.page` (a bare page NUMBER from the extractor) is no
-            # longer written here: Plan 9 replaced Chunk.page (int) with
-            # Chunk.page_id, a FK to a Page row that carries the scan image
-            # alongside its text. Populating page_id requires Page rows to
-            # exist for this source, which this pipeline does not yet
-            # create — that wiring lands in a later Plan 9 task. Until then
-            # chunks are persisted with page_id=NULL (nullable by design).
+            page = page_by_no.get(draft.page or 1) or (pages[0] if pages else None)
             db.add(
                 Chunk(
                     source_id=source.id,
+                    page_id=page.id if page else None,
                     text=draft.text,
                     section_path=draft.section_path,
                     embedding=vector,
@@ -145,7 +177,11 @@ def ingest_source(db, source_id, payload: IngestPayload) -> None:
             char_count += len(draft.text)
 
         source.char_count = char_count
-        source.status = "ready"
+        # SPEC D6 — a source with nothing in it is NOT ready. Three live rows
+        # sat "ready" with 0 chars and rendered green; that lie hid a broken
+        # knowledge base for two days and is why the agent had nothing to
+        # ground against.
+        source.status = "ready" if char_count > 0 else "empty"
         db.commit()
     except Exception as e:
         log.exception("ingest_source failed for source_id=%s", source_id)

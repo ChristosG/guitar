@@ -158,7 +158,14 @@ def test_ask_endpoint_returns_grounded_answer_with_citations():
     assert len(body["citations"]) >= 1
 
 
-def test_upload_source_ingests_pdf():
+def test_upload_source_ingests_pdf(tmp_path, monkeypatch):
+    # Plan 9 Task 5 wired paginate_source into ingest_source, so a PDF upload
+    # now renders a page image to settings.media_dir (default "/media", a
+    # mounted volume in the real container) — redirect it to a tmp dir here,
+    # same as test_paginate.py's PDF tests, so this doesn't need real
+    # filesystem permissions on whatever host runs the test suite.
+    monkeypatch.setattr("app.brain.paginate.settings.media_dir", str(tmp_path))
+
     import fitz  # pymupdf; build a throwaway one-page PDF entirely in memory (mirrors test_extract.py)
 
     doc = fitz.open()

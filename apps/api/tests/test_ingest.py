@@ -77,7 +77,13 @@ def test_ingest_text_source_stores_real_embeddings_and_char_count():
 
 
 @pytest.mark.integration
-def test_ingest_empty_text_yields_ready_with_zero_chunks():
+def test_ingest_empty_text_yields_empty_status_with_zero_chunks():
+    """Plan 9 Task 5 / spec D6: a zero-character extraction is a successful,
+    non-failing outcome, but it must NEVER be reported as "ready" — three
+    real Wikipedia sources sat "ready" with 0 chars for two days and nobody
+    noticed, because the UI painted them green. status="empty" makes that
+    visibly distinguishable from a populated source.
+    """
     db = SessionLocal()
     try:
         source_id = _make_source(db, "Empty source").id
@@ -92,7 +98,7 @@ def test_ingest_empty_text_yields_ready_with_zero_chunks():
     try:
         got = db2.get(KnowledgeSource, source_id)
         assert got is not None
-        assert got.status == "ready"
+        assert got.status == "empty"  # NOT "ready" (spec D6)
         assert got.error is None
         assert got.char_count == 0
 
@@ -209,6 +215,19 @@ def test_ingest_caps_total_extracted_text_at_max_ingest_chars(monkeypatch):
     is monkeypatched to hand back controlled Sections that comfortably cross
     that tiny cap; and the embed call is monkeypatched to zero-vectors of the
     right dimension so this test needs a live DB but not a live embed server.
+
+    kind="url" now goes through paginate_source (Plan 9 Task 5): its
+    single-Page path calls its OWN `extract_text` (app.brain.paginate's copy
+    of the name, bound at import time) to fetch+store this source's one Page,
+    and ingest_source reuses that Page's text instead of re-extracting (see
+    ingest.py's ordering/double-fetch comment) — so the fake must be patched
+    at BOTH import sites for this to stay real-network-free, and
+    ingest_source ends up seeing the three sections re-joined onto that one
+    Page rather than as three separate Sections. The cap math still lands on
+    the same numbers either way: `_cap_total_chars` truncates mid-text
+    regardless of section boundaries, and the join preserves ordering
+    (a's, then b's, then c's), so the first 50 characters after the cap are
+    still all "a"/"b" with no "c" — same assertions as before this task.
     """
     monkeypatch.setattr("app.brain.ingest.MAX_INGEST_CHARS", 50)
 
@@ -218,6 +237,7 @@ def test_ingest_caps_total_extracted_text_at_max_ingest_chars(monkeypatch):
         extract_mod.Section(heading=None, text="c" * 40, page=None),  # dropped entirely
     ]
     monkeypatch.setattr("app.brain.ingest.extract_text", lambda *a, **k: huge_sections)
+    monkeypatch.setattr("app.brain.paginate.extract_text", lambda *a, **k: huge_sections)
 
     class _ZeroVectorProvider:
         def embed(self, texts, *, is_query=False):
@@ -311,7 +331,10 @@ def test_ingest_failure_recovery_itself_failing_does_not_propagate(monkeypatch):
 
         def _flaky_commit():
             state["calls"] += 1
-            if state["calls"] == 2:  # 1st commit = "ingesting"; 2nd = the recovery write
+            # 1st commit = "ingesting"; 2nd = paginate_source's own Page-row
+            # commit (Plan 9 Task 5 wired paginate_source into ingest_source,
+            # ahead of extract_text in the pipeline); 3rd = the recovery write.
+            if state["calls"] == 3:
                 raise RuntimeError("synthetic secondary failure during recovery")
             return real_commit()
 
