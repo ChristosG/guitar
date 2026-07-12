@@ -39,6 +39,36 @@ def test_list_lessons_surfaces_provenance_newest_first(client, db):
     assert newest_row["provenance"]["page_no"] == 21
 
 
+def test_list_lessons_excludes_curriculum_nested_lesson_nodes(client, db):
+    """GET /lessons must surface only standalone authored lessons (root
+    Blocks, parent_id IS NULL) — not the internal `Block(kind="lesson")`
+    nodes nested inside a generated curriculum's module tree (which share
+    the same `kind` and `plane`, but always have a parent). Real-data check
+    (Plan 10 Task 4 review): every one of the 52 `kind='lesson'` rows in the
+    live app DB has `parent_id IS NOT NULL` with parent kind='module' — i.e.
+    they're all curriculum-internal nodes, none are standalone."""
+    standalone, _ = _lesson_with_one_long_session(
+        db, provenance={"source_id": str(uuid.uuid4()), "page_no": 21},
+    )
+
+    course = Block(kind="course", title="Course", plane="content", order=0)
+    db.add(course); db.commit()
+    module = Block(kind="module", title="Module", parent_id=course.id, plane="content", order=0)
+    db.add(module); db.commit()
+    nested_lesson = Block(kind="lesson", title="Nested", parent_id=module.id, plane="content", order=0)
+    db.add(nested_lesson); db.commit()
+
+    r = client.get("/lessons")
+    assert r.status_code == 200
+    body = r.json()
+    ids = [row["id"] for row in body]
+    assert str(standalone.id) in ids
+    assert str(nested_lesson.id) not in ids
+    # the standalone lesson's provenance still comes through
+    standalone_row = next(row for row in body if row["id"] == str(standalone.id))
+    assert standalone_row["provenance"]["page_no"] == 21
+
+
 def test_get_lesson_returns_the_tree(client, db):
     lesson, session = _lesson_with_one_long_session(db)
 

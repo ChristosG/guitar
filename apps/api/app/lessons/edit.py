@@ -110,6 +110,26 @@ def split_session(db, session_id: uuid.UUID, *, session_minutes: int) -> list[Bl
     try:
         partitions = partition_by_minutes(leaves, session_minutes)
 
+        # Make room for the new parts BEFORE assigning them `order` values:
+        # shift every LATER sibling (order > original_order — the split
+        # session itself is excluded and about to be deleted) down by
+        # `len(partitions) - 1`. Without this, new sessions land at
+        # `original_order + i` and collide (tie) with whatever sibling used
+        # to sit right after the split session — e.g. splitting the middle
+        # of [A(0),B(1),C(2)] into B1,B2 previously assigned B1=1, B2=2,
+        # DIRECTLY COLLIDING with C's order=2. `_renormalise_order`'s
+        # `ORDER BY Block.order` tiebreak on that collision is not guaranteed
+        # to keep C last, so C could silently move before the new parts —
+        # reordering untouched sibling work the tutor never touched.
+        shift = len(partitions) - 1
+        if shift:
+            later_siblings = db.scalars(
+                select(Block).where(Block.parent_id == lesson_id, Block.order > original_order)
+            ).all()
+            for sib in later_siblings:
+                sib.order = sib.order + shift
+            db.flush()
+
         new_sessions: list[Block] = []
         for i, partition in enumerate(partitions):
             new_session = Block(

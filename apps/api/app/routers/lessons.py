@@ -101,14 +101,29 @@ def from_selection(
 
 @router.get("", response_model=list[LessonListItem])
 def list_lessons(db: Session = Depends(get_db)) -> list[LessonListItem]:
-    """Every drafted lesson (`Block(kind="lesson", plane="content")`),
-    newest first, with its provenance (if any — B3, set by `draft_lesson_
-    from_selection`) lifted out of `target_profile` so the UI can render
-    "from <book>, p.21" without reaching into the JSON column itself.
+    """Every STANDALONE authored lesson (`Block(kind="lesson", plane=
+    "content")` with `parent_id IS NULL`), newest first, with its provenance
+    (if any — B3, set by `draft_lesson_from_selection`) lifted out of
+    `target_profile` so the UI can render "from <book>, p.21" without
+    reaching into the JSON column itself.
+
+    `parent_id IS NULL` is deliberate (Plan 10 Task 4 review, D-B1-list-
+    scope): `Block(kind="lesson")` is used for TWO different things —
+    (1) a standalone lesson the tutor authored from a book selection
+    (`from_selection` above / `draft_lesson_from_selection`), which is
+    always a root Block; and (2) a curriculum's internal lesson node,
+    nested under a `module` Block inside a generated course tree
+    (`app.curriculum.segment`), which is never a root. Without this filter
+    every lesson node of every generated curriculum shows up here too — in
+    the live app DB that was 52 `kind='lesson'` rows (verified via `SELECT
+    count(*), parent_id IS NULL FROM block WHERE kind='lesson' GROUP BY 2`),
+    ALL of them curriculum-internal (parent kind='module'), drowning out the
+    one screen this endpoint exists for: standalone lessons drafted from the
+    Library.
     """
     lessons = db.scalars(
         select(Block)
-        .where(Block.kind == "lesson", Block.plane == "content")
+        .where(Block.kind == "lesson", Block.plane == "content", Block.parent_id.is_(None))
         .order_by(Block.created_at.desc())
     ).all()
     return [

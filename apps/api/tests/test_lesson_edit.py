@@ -34,6 +34,107 @@ def test_split_cuts_one_session_into_several_by_minutes_and_keeps_every_item(db)
     assert orders == list(range(len(orders)))
 
 
+def _lesson_with_three_sessions(db):
+    """[A(order=0), B(order=1), C(order=2)] — B has 2 items (60min total,
+    splittable into 2 parts at 30min/session), A and C have 1 item each."""
+    lesson = Block(kind="lesson", title="L", plane="content", order=0)
+    db.add(lesson); db.commit()
+    a = Block(kind="session", title="A", parent_id=lesson.id, order=0, est_minutes=30)
+    b = Block(kind="session", title="B", parent_id=lesson.id, order=1, est_minutes=60)
+    c = Block(kind="session", title="C", parent_id=lesson.id, order=2, est_minutes=30)
+    db.add_all([a, b, c]); db.commit()
+    db.add(Block(kind="item", title="a1", parent_id=a.id, order=0, est_minutes=30))
+    db.add(Block(kind="item", title="b1", parent_id=b.id, order=0, est_minutes=30))
+    db.add(Block(kind="item", title="b2", parent_id=b.id, order=1, est_minutes=30))
+    db.add(Block(kind="item", title="c1", parent_id=c.id, order=0, est_minutes=30))
+    db.commit()
+    return lesson, a, b, c
+
+
+def test_split_middle_session_inserts_parts_between_siblings_no_ties(db):
+    """Splitting the MIDDLE session of [A,B,C] must yield [A, B1, B2, C] in
+    that exact order, with contiguous orders 0,1,2,3 and NO order ties.
+    Regression for Plan 10 Task 4 review: the old code assigned new sessions
+    `order = original_order + i` without shifting C out of the way, so a new
+    part and C could collide on the same `order` value — and since
+    `_renormalise_order`'s tie-broken-by-DB-row-order re-sort isn't
+    guaranteed to preserve C last, C could silently move before the new
+    parts, reordering the tutor's untouched work."""
+    lesson, a, b, c = _lesson_with_three_sessions(db)
+
+    new_sessions = split_session(db, b.id, session_minutes=30)
+    assert len(new_sessions) == 2  # b1, b2
+
+    siblings = db.query(Block).filter_by(parent_id=lesson.id).order_by(Block.order).all()
+    titles = [s.title for s in siblings]
+    orders = [s.order for s in siblings]
+
+    assert titles == ["A"] + [s.title for s in new_sessions] + ["C"]
+    assert orders == [0, 1, 2, 3]
+    assert len(orders) == len(set(orders))  # no ties
+    assert titles[-1] == "C"  # C must stay LAST
+
+    # no-work-lost invariant: re-query every item from the DB under its
+    # (possibly new) parent
+    item_titles = [
+        i.title for s in siblings
+        for i in db.query(Block).filter_by(parent_id=s.id).order_by(Block.order)
+    ]
+    assert item_titles == ["a1", "b1", "b2", "c1"]
+
+
+def test_split_last_session_still_works(db):
+    """Regression guard: splitting the LAST session ([A,B,C], split C) must
+    still work exactly as before (nothing to shift after it)."""
+    lesson, a, b, c = _lesson_with_three_sessions(db)
+    # give C a second item so it's splittable into 2 parts
+    db.add(Block(kind="item", title="c2", parent_id=c.id, order=1, est_minutes=30))
+    db.commit()
+
+    new_sessions = split_session(db, c.id, session_minutes=30)
+    assert len(new_sessions) == 2  # c1, c2
+
+    siblings = db.query(Block).filter_by(parent_id=lesson.id).order_by(Block.order).all()
+    titles = [s.title for s in siblings]
+    orders = [s.order for s in siblings]
+
+    assert titles == ["A", "B"] + [s.title for s in new_sessions]
+    assert orders == [0, 1, 2, 3]
+    assert len(orders) == len(set(orders))
+
+    item_titles = [
+        i.title for s in siblings
+        for i in db.query(Block).filter_by(parent_id=s.id).order_by(Block.order)
+    ]
+    assert item_titles == ["a1", "b1", "b2", "c1", "c2"]
+
+
+def test_split_first_session_keeps_the_others_after_it(db):
+    """Splitting the FIRST session ([A,B,C], split A) must keep B and C
+    after it, in order, with no ties."""
+    lesson, a, b, c = _lesson_with_three_sessions(db)
+    # give A a second item so it's splittable into 2 parts
+    db.add(Block(kind="item", title="a2", parent_id=a.id, order=1, est_minutes=30))
+    db.commit()
+
+    new_sessions = split_session(db, a.id, session_minutes=30)
+    assert len(new_sessions) == 2  # a1, a2
+
+    siblings = db.query(Block).filter_by(parent_id=lesson.id).order_by(Block.order).all()
+    titles = [s.title for s in siblings]
+    orders = [s.order for s in siblings]
+
+    assert titles == [s.title for s in new_sessions] + ["B", "C"]
+    assert orders == [0, 1, 2, 3]
+    assert len(orders) == len(set(orders))
+
+    item_titles = [
+        i.title for s in siblings
+        for i in db.query(Block).filter_by(parent_id=s.id).order_by(Block.order)
+    ]
+    assert item_titles == ["a1", "a2", "b1", "b2", "c1"]
+
+
 def test_merge_folds_adjacent_sessions_into_one_preserving_item_order(db):
     lesson = Block(kind="lesson", title="L", plane="content", order=0)
     db.add(lesson); db.commit()
