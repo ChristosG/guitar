@@ -92,6 +92,12 @@ class HitOut(BaseModel):
     text: str
     section_path: str | None
     page: int | None
+    # Page.id (FK) — Task 10 wired retrieve.search() to resolve this via
+    # Chunk.page_id, so a citation's scan is fetchable at
+    # GET /media/pages/{page_id}.jpg (see routers/library.py) instead of
+    # merely claimed. None only for chunks from sources ingested before
+    # Plan 9 Task 1, which predate Page rows entirely.
+    page_id: UUID | None = None
     score: float
 
 

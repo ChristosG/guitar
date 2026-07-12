@@ -31,7 +31,7 @@ from uuid import UUID
 from sqlalchemy import select
 
 from app.llm.factory import get_provider
-from app.models.knowledge import Chunk, KnowledgeSource
+from app.models.knowledge import Chunk, KnowledgeSource, Page
 
 
 @dataclass
@@ -43,6 +43,15 @@ class Hit:
     section_path: str | None
     page: int | None
     score: float  # 1 - cosine_distance (1.0 == identical direction)
+    # Page.id (FK), resolved below by joining Chunk.page_id -> Page. Lets a
+    # caller fetch the Page row (and therefore its scan, Page.image_path) to
+    # make a citation VERIFIABLE rather than merely claimed — this is the
+    # wiring the T1/T5 docstrings deferred to "later Plan 9 work"; it lands
+    # here in T10 because the acceptance criterion (a grounded answer citing
+    # a real, showable page) cannot be proven without it. Defaults to None so
+    # existing call sites that construct a bare Hit (e.g.
+    # test_build_grounded_messages_...) keep working unchanged.
+    page_id: UUID | None = None
 
 
 def search(
@@ -57,9 +66,13 @@ def search(
     qv = get_provider().embed([query], is_query=True)[0]
     distance = Chunk.embedding.cosine_distance(qv)
 
+    # outerjoin, not join: chunks from sources ingested before Plan 9 Task 1
+    # (or any future ingest path that legitimately has no Page) still have
+    # page_id=None — those must still be searchable, just with page=None.
     stmt = (
-        select(Chunk, KnowledgeSource, distance.label("distance"))
+        select(Chunk, KnowledgeSource, Page, distance.label("distance"))
         .join(KnowledgeSource, Chunk.source_id == KnowledgeSource.id)
+        .outerjoin(Page, Chunk.page_id == Page.id)
         .order_by(distance)
         .limit(k)
     )
@@ -76,15 +89,11 @@ def search(
             source_title=source.title,
             text=chunk.text,
             section_path=chunk.section_path,
-            # Chunk.page (int) was replaced by Chunk.page_id (FK to Page) in
-            # Plan 9 Task 1. Resolving a page NUMBER now means joining to
-            # Page.page_no via page_id; the ingest pipeline doesn't yet
-            # populate page_id (see brain/ingest.py), so there's nothing to
-            # join to today. Wiring that join is a later Plan 9 task.
-            page=None,
+            page=page.page_no if page is not None else None,
+            page_id=chunk.page_id,
             score=1.0 - dist,
         )
-        for chunk, source, dist in rows
+        for chunk, source, page, dist in rows
     ]
 
 
