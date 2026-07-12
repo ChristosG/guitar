@@ -200,3 +200,69 @@ def test_merging_non_adjacent_sessions_is_rejected(db):
     assert unchanged_s1 is not None
     assert unchanged_s1.title == "S1"
     assert unchanged_s1.order == 1
+
+
+def test_split_survives_a_caller_that_already_loaded_the_session_children(db):
+    """Regression for a live-acceptance finding (Plan 10 Task 5): a caller
+    that inspects `session.children` (e.g. "how many items does this session
+    have?") BEFORE calling `split_session`, in the SAME db Session, is an
+    entirely natural thing to do — and used to silently DELETE every item.
+
+    Why: the re-parenting above assigns `item.parent_id` directly (not via
+    the collection API), which never updates an ALREADY-LOADED `children`
+    collection on the OLD session. `db.delete(session)`'s `cascade="all,
+    delete-orphan"` then cascades off that STALE collection (which still
+    lists the — by-now re-parented — items) instead of a fresh query,
+    deleting them right along with `session`. No exception was raised; the
+    function returned normally with the right number of new sessions, just
+    with every item silently gone. `split_session` now `db.expire`s the
+    collection immediately before `db.delete` specifically to defeat this.
+    """
+    lesson, session = _lesson_with_one_long_session(db)
+
+    # The exact trigger: touch `.children` on the session about to be split,
+    # in this SAME session, before calling split_session — as natural a
+    # caller pattern as it gets.
+    touched_titles = [c.title for c in session.children]
+    assert touched_titles == ["Item 1", "Item 2", "Item 3", "Item 4"]
+
+    new_sessions = split_session(db, session.id, session_minutes=60)
+    assert len(new_sessions) == 2
+
+    db.expire_all()
+    titles = [
+        i.title for s in new_sessions
+        for i in db.query(Block).filter_by(parent_id=s.id).order_by(Block.order)
+    ]
+    assert titles == ["Item 1", "Item 2", "Item 3", "Item 4"], (
+        "split_session lost items when the caller had already loaded "
+        "the target session's `.children` collection"
+    )
+
+
+def test_merge_survives_a_caller_that_already_loaded_the_donor_children(db):
+    """Same regression as `test_split_survives_a_caller_that_already_loaded_
+    the_session_children` above, for `merge_sessions`'s donor-session
+    deletion (identical re-parent-then-delete shape, identical stale-
+    collection risk)."""
+    lesson = Block(kind="lesson", title="L", plane="content", order=0)
+    db.add(lesson); db.commit()
+    a = Block(kind="session", title="A", parent_id=lesson.id, order=0, est_minutes=30)
+    b = Block(kind="session", title="B", parent_id=lesson.id, order=1, est_minutes=45)
+    db.add_all([a, b]); db.commit()
+    db.add(Block(kind="item", title="a1", parent_id=a.id, order=0))
+    db.add(Block(kind="item", title="b1", parent_id=b.id, order=0))
+    db.commit()
+
+    # Touch the DONOR's `.children` before merging — the trigger condition.
+    touched = [c.title for c in b.children]
+    assert touched == ["b1"]
+
+    merged = merge_sessions(db, [a.id, b.id])
+
+    db.expire_all()
+    items = db.query(Block).filter_by(parent_id=merged.id).order_by(Block.order).all()
+    assert [i.title for i in items] == ["a1", "b1"], (
+        "merge_sessions lost an item when the caller had already loaded "
+        "the donor session's `.children` collection"
+    )

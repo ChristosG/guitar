@@ -935,27 +935,23 @@ export function apiMediaUrl(path: string): string {
 
 /**
  * Typed fetch helper for the Library-to-lesson-authoring seam
- * (`routers/lessons.py::from_selection`, Plan 9 Task 9) — the Reader's
- * "author a lesson" action. DELIBERATELY a stub destination: the API just
- * echoes the captured selection back (`selection_id` proves it was
- * recorded, `source_title` lets the Reader confirm what it saved) rather
- * than drafting anything — see that router's own module docstring. Drafting
- * the lesson is sub-project B's job.
+ * (`routers/lessons.py::from_selection`, Plan 10 Task 1) — the Reader's
+ * "author a lesson" action. Enqueues a `GenerationJob(kind="lesson")` and
+ * returns 202 almost immediately (same `JobAccepted` shape/convention as
+ * `startCurriculumGeneration` below): `draft_lesson_from_selection` is a
+ * blocking guided-JSON LLM call, too slow for a synchronous request/response
+ * cycle. Callers MUST poll `getJob(job_id)` until it reaches a terminal
+ * status — `result_root_id` is the drafted lesson's root Block id, fetchable
+ * via `getLesson` once `status === "succeeded"` — same "enqueue, then poll"
+ * contract `components/library/selection-action.tsx` drives, mirroring
+ * `components/curriculum/generate-dialog.tsx`'s poll loop verbatim.
  */
-export interface SelectionOut {
-  selection_id: string;
-  source_id: string;
-  source_title: string;
-  page_no: number;
-  text: string;
-}
-
 export function authorFromSelection(
   sourceId: string,
   pageNo: number,
   text: string,
-): Promise<SelectionOut> {
-  return request<SelectionOut>("/lessons/from-selection", {
+): Promise<JobAccepted> {
+  return request<JobAccepted>("/lessons/from-selection", {
     method: "POST",
     body: JSON.stringify({ source_id: sourceId, page_no: pageNo, text }),
   });

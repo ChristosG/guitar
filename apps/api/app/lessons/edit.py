@@ -154,6 +154,25 @@ def split_session(db, session_id: uuid.UUID, *, session_minutes: int) -> list[Bl
 
             new_sessions.append(new_session)
 
+        # Force a fresh reload of `session.children` (Plan 10 Task 5 review,
+        # live-acceptance finding): if a CALLER already accessed
+        # `session.children` earlier in this same db Session — e.g. to
+        # inspect item counts before deciding what to split, exactly what a
+        # tutor-facing caller naturally does — SQLAlchemy cached that
+        # collection at load time. The re-parenting above changed each
+        # item's `parent_id` column via plain attribute assignment (not via
+        # the collection API, e.g. `session.children.remove(item)`), which
+        # does NOT update that cached collection. Without this `expire`,
+        # `db.delete(session)`'s `cascade="all, delete-orphan"` reads the
+        # STALE cached collection — which still lists the (already
+        # re-parented) items — and deletes them right along with `session`,
+        # silently violating this function's own "every item that went in
+        # must come out" invariant with NO exception raised. Expiring forces
+        # a fresh `SELECT ... WHERE parent_id = session.id` at cascade time,
+        # which correctly returns zero rows (every item was already flushed
+        # onto its new parent above). Harmless when `children` was never
+        # loaded (expiring an unloaded attribute is a no-op).
+        db.expire(session, ["children"])
         db.delete(session)  # safe now: every item has already been re-parented away
         db.flush()
 
@@ -219,6 +238,14 @@ def merge_sessions(db, session_ids: list[uuid.UUID]) -> Block:
             db.flush()  # persist re-parent BEFORE deleting the donor session
 
             total_minutes += donor.est_minutes or 0
+            # See `split_session`'s identical `db.expire(..., ["children"])`
+            # call above for the full reasoning: without this, a caller that
+            # already loaded `donor.children` earlier in this same db
+            # Session (before calling `merge_sessions`) would have those
+            # already-re-parented items silently deleted by the
+            # delete-orphan cascade below instead of surviving under
+            # `survivor` — the exact live-acceptance finding this guards.
+            db.expire(donor, ["children"])
             db.delete(donor)  # safe: donor has no children left to orphan
 
         survivor.est_minutes = total_minutes

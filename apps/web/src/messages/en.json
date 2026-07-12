@@ -313,8 +313,10 @@
         "failed": "This page could not be read."
       },
       "authorLesson": "Author a lesson from this",
-      "authorSaved": "Saved from {source} — ready for a lesson.",
-      "authorError": "Could not save this selection."
+      "authorDrafting": "Drafting your lesson — this can take a minute…",
+      "authorStillDrafting": "Still drafting — check the Lessons list in a bit.",
+      "authorError": "Could not draft a lesson from this passage.",
+      "authorRetry": "Retry"
     }
   },
   "lessons": {
