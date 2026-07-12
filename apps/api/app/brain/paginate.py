@@ -30,6 +30,26 @@ RENDER_DPI = 110      # HARD CEILING on this server — see module docstring
 
 
 def paginate_source(db, source_id, *, kind, data=None, url=None, text=None) -> list[Page]:
+    """Create this source's Page rows — idempotent: re-running for an
+    existing source (Task 6's retry-a-failed-ingest path) REPLACES its Page
+    rows rather than duplicating them. Deleting a source's Pages cascades
+    (ON DELETE CASCADE) to their Chunks too, which is correct here: a
+    re-paginate invalidates whatever was chunked/embedded against the old
+    pages anyway.
+    """
+    # Bulk delete (not ORM cascade): the FK's ON DELETE CASCADE removes this
+    # source's Chunks too, in the SAME statement/transaction — no separate
+    # commit needed for that to take effect. What IS needed: this session
+    # (expire_on_commit=False, and synchronize_session=False on the delete
+    # itself) has no idea any of that happened, so any Chunk/Page objects
+    # already sitting in its identity map are now silently stale. Expire them
+    # so the next access re-fetches from the DB instead of handing back rows
+    # that no longer exist. Deliberately NOT committing here: the delete and
+    # the fresh inserts below stay one atomic transaction, so a failure
+    # partway through page creation doesn't leave the source pageless.
+    db.query(Page).filter(Page.source_id == source_id).delete(synchronize_session=False)
+    db.expire_all()
+
     if kind == "pdf" and data:
         return _paginate_pdf(db, source_id, data)
     return _single_page(db, source_id, kind=kind, url=url, text=text)
@@ -37,31 +57,34 @@ def paginate_source(db, source_id, *, kind, data=None, url=None, text=None) -> l
 
 def _paginate_pdf(db, source_id, data: bytes) -> list[Page]:
     doc = fitz.open(stream=data, filetype="pdf")
-    out_dir = os.path.join(settings.media_dir, str(source_id))
-    os.makedirs(out_dir, exist_ok=True)
+    try:
+        out_dir = os.path.join(settings.media_dir, str(source_id))
+        os.makedirs(out_dir, exist_ok=True)
 
-    pages: list[Page] = []
-    for i in range(doc.page_count):
-        page_no = i + 1
-        pix = doc[i].get_pixmap(dpi=RENDER_DPI)
-        rel = os.path.join(str(source_id), f"{page_no:04d}.jpg")
-        with open(os.path.join(settings.media_dir, rel), "wb") as fh:
-            fh.write(pix.tobytes("jpeg"))
+        pages: list[Page] = []
+        for i in range(doc.page_count):
+            page_no = i + 1
+            pix = doc[i].get_pixmap(dpi=RENDER_DPI)
+            rel = os.path.join(str(source_id), f"{page_no:04d}.jpg")
+            with open(os.path.join(settings.media_dir, rel), "wb") as fh:
+                fh.write(pix.tobytes("jpeg"))
 
-        # A page that already has a text layer needs no OCR at all — take it
-        # for free and mark it ready. (The book has none; other PDFs may.)
-        layer = (doc[i].get_text() or "").strip()
-        page = Page(
-            source_id=source_id, page_no=page_no, image_path=rel,
-            text=layer or None,
-            status="ready" if layer else "pending",
-        )
-        db.add(page)
-        pages.append(page)
+            # A page that already has a text layer needs no OCR at all — take it
+            # for free and mark it ready. (The book has none; other PDFs may.)
+            layer = (doc[i].get_text() or "").strip()
+            page = Page(
+                source_id=source_id, page_no=page_no, image_path=rel,
+                text=layer or None,
+                status="ready" if layer else "pending",
+            )
+            db.add(page)
+            pages.append(page)
 
-    db.commit()
-    log.info("paginate: source=%s pages=%d", source_id, len(pages))
-    return pages
+        db.commit()
+        log.info("paginate: source=%s pages=%d", source_id, len(pages))
+        return pages
+    finally:
+        doc.close()
 
 
 def _single_page(db, source_id, *, kind, url, text) -> list[Page]:

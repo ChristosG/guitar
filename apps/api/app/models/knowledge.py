@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import String, Integer, Text, ForeignKey
+from sqlalchemy import String, Integer, Text, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from pgvector.sqlalchemy import Vector
 from app.db import Base
@@ -49,8 +49,16 @@ class Page(Base, PkMixin, TimestampMixin):
     with image_path=NULL. Paying one cheap redundant row here deletes a
     `source.type` branch from the reader, the chunker, the citation renderer,
     and the retry logic.
+
+    (source_id, page_no) is unique: paginate_source replaces a source's Pages
+    on every call (re-paginate is idempotent, not additive — see
+    app/brain/paginate.py), and this constraint enforces that invariant at
+    the DB level too, not just in application code.
     """
     __tablename__ = "page"
+    __table_args__ = (
+        UniqueConstraint("source_id", "page_no", name="uq_page_source_page_no"),
+    )
     source_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("knowledge_source.id", ondelete="CASCADE"), index=True)
     page_no: Mapped[int] = mapped_column(Integer)          # 1-based, as printed
