@@ -57,6 +57,21 @@ model and the Progress/LessonLog services. None is `async_job` (all three
 are cheap, single-row DB writes, same cost class as `create_student`/
 `update_block`).
 
+Four more mutations (Plan 10 Task 3, "Lesson Authoring") — the payoff of
+"an agent that actually checks his lectures... and does stuff for them, e.g.
+change/add something, or split/segment the sessions": `draft_lesson_from_
+selection`/`split_session`/`merge_sessions`/`add_session` wrap Plan 10 Tasks
+1-2's `app.lessons.draft`/`app.lessons.edit` services, the identical "thin
+wrapper, registered but never called by loop.py itself" way every mutation
+above is. BINDING DECISION B5: every one of these edits the tutor's own
+book-derived work, so all four are `kind="mutation"` (HITL-gated by
+construction — no loop.py/chat.py change needed for that, see `loop.py`'s
+own module docstring and `test_agent_hitl.py`'s section (f)). `draft_
+lesson_from_selection` alone is `async_job=True` (a blocking guided-JSON LLM
+call, same reasoning as `generate_curriculum`); `split_session`/`merge_
+sessions`/`add_session` are cheap deterministic DB writes, same cost class
+as `update_block`.
+
 Every fn (read or mutation) returns plain JSON-serializable Python objects
 (dicts/lists), never a pre-stringified blob — turning that into the tool
 message's `content` string (`json.dumps(result, default=str)`) is
@@ -86,6 +101,10 @@ from app.curriculum.assign import clone_content_subtree
 from app.curriculum.generate import generate_curriculum as _generate_curriculum_service
 from app.curriculum.progress import upsert_progress as _upsert_progress_service
 from app.curriculum.segment import segment_block as _segment_block_service
+from app.lessons.draft import draft_lesson_from_selection as _draft_lesson_service
+from app.lessons.edit import add_session as _add_session_service
+from app.lessons.edit import merge_sessions as _merge_sessions_service
+from app.lessons.edit import split_session as _split_session_service
 from app.models.artifact import Artifact
 from app.models.block import Block
 from app.models.curriculum import Assignment, Progress
@@ -599,6 +618,136 @@ def _log_progress(
         status=status, notes=notes_to_apply,
     )
     return {"status": progress.status, "block_id": progress.block_id}
+
+
+# ---------------------------------------------------------------------------
+# Mutations (Plan 10 Task 3) — "Lesson Authoring" agent tools: wire the
+# agent up to Plan 10 Tasks 1-2's lesson drafting/editing services, the
+# SAME "thin wrapper, registered but never called by loop.py itself" way
+# every mutation above is (BINDING DECISION B5: every one of these edits the
+# tutor's own book-derived work, so it is `kind="mutation"` and therefore
+# HITL-gated by construction — the suspend mechanism itself needed no
+# change, see `test_agent_hitl.py` section (f)). `draft_lesson_from_
+# selection` alone is `async_job=True`, same reasoning as `generate_
+# curriculum`: a blocking guided-JSON LLM call unsuitable for a synchronous
+# resolve-time dispatch. `split_session`/`merge_sessions`/`add_session` are
+# cheap deterministic DB writes, same cost class as `update_block`.
+# ---------------------------------------------------------------------------
+
+def _draft_lesson_from_selection(
+    db, *, source_id: str, page_no: int, text: str, language: str = "en",
+) -> dict:
+    """Wraps `app.lessons.draft.draft_lesson_from_selection` (also `POST
+    /lessons/from-selection`'s service, Plan 10 Task 1) — REGISTRY
+    COMPLETENESS ONLY, same status `_generate_curriculum` above has: a
+    blocking guided-JSON LLM call (that function's own docstring), too slow
+    for a synchronous resolve-time dispatch, which is exactly why this entry
+    is `async_job=True`.
+
+    `source_id` is parsed here (a malformed/hallucinated id never reaches
+    the service); an UNKNOWN source_id, by contrast, is checked INSIDE the
+    real service itself (`draft_lesson_from_selection` raises `ValueError`
+    for that, BEFORE ever calling the LLM) — caught here into a graceful
+    dict either way, same "guard, don't crash" spirit as every other tool fn
+    in this registry.
+    """
+    parsed_source_id = _parse_uuid(source_id)
+    if parsed_source_id is None:
+        return {"error": f"invalid source_id: {source_id!r}"}
+    try:
+        lesson_id = _draft_lesson_service(
+            db, source_id=parsed_source_id, page_no=page_no, text=text, language=language,
+        )
+    except ValueError as e:
+        return {"error": str(e)}
+    return {"lesson_id": lesson_id}
+
+
+def _split_session(db, *, session_id: str, session_minutes: int) -> dict:
+    """Wraps `app.lessons.edit.split_session` (also `POST /lessons/
+    {lesson_id}/sessions/{session_id}/split`'s service, Plan 10 Task 2): cuts
+    one over-long session into several, packed to ~session_minutes each by
+    the same deterministic bin-packer `segment_block` uses. `split_session`
+    raises `ValueError` for an unknown/wrong-kind block, a session with no
+    items to split, or a non-positive `session_minutes` — all caught here
+    into a graceful dict, same as `_segment_block` catches its own service's
+    `ValueError`.
+
+    Kept "reasonably compact" per this module's own docstring: each new
+    session is summarized as id/title/est_minutes, not its full item tree
+    (get_curriculum already exposes that for any block id, lesson roots
+    included).
+    """
+    parsed_session_id = _parse_uuid(session_id)
+    if parsed_session_id is None:
+        return {"error": f"invalid session_id: {session_id!r}"}
+    try:
+        new_sessions = _split_session_service(
+            db, parsed_session_id, session_minutes=session_minutes,
+        )
+    except ValueError as e:
+        return {"error": str(e)}
+    return {
+        "sessions": [
+            {"id": s.id, "title": s.title, "est_minutes": s.est_minutes} for s in new_sessions
+        ],
+    }
+
+
+def _merge_sessions(db, *, session_ids: list[str]) -> dict:
+    """Wraps `app.lessons.edit.merge_sessions` (also `POST /lessons/
+    {lesson_id}/sessions/merge`'s service, Plan 10 Task 2): folds >=2
+    ADJACENT sessions of the same lesson into the first, concatenating items
+    in order. `merge_sessions` raises `ValueError` for fewer than 2 ids, an
+    unknown/wrong-kind block, sessions from different lessons, or — the
+    case this task's brief specifically flags — NON-ADJACENT sessions (a
+    model choosing session ids freely will eventually pick non-adjacent
+    ones). All of those are caught here into a graceful dict rather than
+    raising into the ReAct loop, same "guard, don't crash" spirit as every
+    other tool fn in this registry.
+
+    Every id is parsed BEFORE the service is ever called, so one malformed/
+    hallucinated id among several well-formed ones still short-circuits
+    cleanly (mirrors `_assign_curriculum`'s "parse every id first" order).
+    """
+    parsed_ids = []
+    for sid in session_ids:
+        parsed = _parse_uuid(sid)
+        if parsed is None:
+            return {"error": f"invalid session_id: {sid!r}"}
+        parsed_ids.append(parsed)
+    try:
+        survivor = _merge_sessions_service(db, parsed_ids)
+    except ValueError as e:
+        return {"error": str(e)}
+    return {"id": survivor.id, "title": survivor.title, "est_minutes": survivor.est_minutes}
+
+
+def _add_session(
+    db, *, lesson_id: str, title: str, est_minutes: int | None = None, after: str | None = None,
+) -> dict:
+    """Wraps `app.lessons.edit.add_session` (also `POST /lessons/{lesson_id}
+    /sessions`'s service, Plan 10 Task 2): creates a new, empty session under
+    `lesson_id`, appended at the end or inserted right after `after`.
+    `add_session` raises `ValueError` for an unknown/wrong-kind lesson, or an
+    `after` that isn't actually a session of that lesson — caught here into
+    a graceful dict, same as every other tool fn in this registry.
+    """
+    parsed_lesson_id = _parse_uuid(lesson_id)
+    if parsed_lesson_id is None:
+        return {"error": f"invalid lesson_id: {lesson_id!r}"}
+    parsed_after = None
+    if after is not None:
+        parsed_after = _parse_uuid(after)
+        if parsed_after is None:
+            return {"error": f"invalid after: {after!r}"}
+    try:
+        new_session = _add_session_service(
+            db, parsed_lesson_id, title=title, est_minutes=est_minutes, after=parsed_after,
+        )
+    except ValueError as e:
+        return {"error": str(e)}
+    return {"id": new_session.id, "title": new_session.title, "est_minutes": new_session.est_minutes}
 
 
 TOOLS: dict[str, ToolEntry] = {
@@ -1124,6 +1273,160 @@ TOOLS: dict[str, ToolEntry] = {
             },
         },
         fn=_log_progress,
+        kind="mutation",
+    ),
+    "draft_lesson_from_selection": ToolEntry(
+        schema={
+            "type": "function",
+            "function": {
+                "name": "draft_lesson_from_selection",
+                "description": (
+                    "Draft a brand-new lesson (title, teaching sessions, "
+                    "items) grounded in a passage of text the tutor "
+                    "selected from a source in the Library — every session "
+                    "and item is generated FROM that exact passage, nothing "
+                    "invented. Slow (roughly 1-3 minutes) — runs as a "
+                    "background job once approved. This is a MUTATION — it "
+                    "requires the tutor's explicit approval before it "
+                    "starts."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "source_id": {
+                            "type": "string",
+                            "description": "the knowledge source id (UUID) the passage was selected from",
+                        },
+                        "page_no": {
+                            "type": "integer",
+                            "description": "the page number the passage was selected from",
+                        },
+                        "text": {
+                            "type": "string",
+                            "description": "the exact passage text to ground the lesson in",
+                        },
+                        "language": {
+                            "type": "string",
+                            "description": (
+                                "optional: 2-letter language for the generated "
+                                "lesson, e.g. 'en'/'el' (default 'en')"
+                            ),
+                        },
+                    },
+                    "required": ["source_id", "page_no", "text"],
+                },
+            },
+        },
+        fn=_draft_lesson_from_selection,
+        kind="mutation",
+        async_job=True,
+    ),
+    "split_session": ToolEntry(
+        schema={
+            "type": "function",
+            "function": {
+                "name": "split_session",
+                "description": (
+                    "Split one over-long teaching session into several "
+                    "shorter ones, packed to ~session_minutes each — every "
+                    "item the session had is preserved, just re-grouped, in "
+                    "order. This is a MUTATION — it requires the tutor's "
+                    "explicit approval before it's actually applied."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": {
+                            "type": "string",
+                            "description": (
+                                "the session block id (UUID) to split "
+                                "(see get_curriculum for a lesson's session ids)"
+                            ),
+                        },
+                        "session_minutes": {
+                            "type": "integer",
+                            "description": "target minutes per resulting session",
+                        },
+                    },
+                    "required": ["session_id", "session_minutes"],
+                },
+            },
+        },
+        fn=_split_session,
+        kind="mutation",
+    ),
+    "merge_sessions": ToolEntry(
+        schema={
+            "type": "function",
+            "function": {
+                "name": "merge_sessions",
+                "description": (
+                    "Merge two or more ADJACENT teaching sessions of the "
+                    "same lesson into one, concatenating their items in "
+                    "order. Non-adjacent sessions are rejected (merging "
+                    "them would silently reorder whatever sits between "
+                    "them). This is a MUTATION — it requires the tutor's "
+                    "explicit approval before it's actually applied."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "session_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "at least 2 session block ids (UUID), in the "
+                                "order to concatenate them; must be adjacent "
+                                "sessions of the same lesson (see "
+                                "get_curriculum for a lesson's session ids)"
+                            ),
+                        },
+                    },
+                    "required": ["session_ids"],
+                },
+            },
+        },
+        fn=_merge_sessions,
+        kind="mutation",
+    ),
+    "add_session": ToolEntry(
+        schema={
+            "type": "function",
+            "function": {
+                "name": "add_session",
+                "description": (
+                    "Add a new, empty teaching session to a lesson — "
+                    "appended at the end by default, or inserted right "
+                    "after another session. This is a MUTATION — it "
+                    "requires the tutor's explicit approval before it's "
+                    "actually applied."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "lesson_id": {
+                            "type": "string",
+                            "description": "the lesson block id (UUID) to add a session to",
+                        },
+                        "title": {"type": "string", "description": "the new session's title"},
+                        "est_minutes": {
+                            "type": "integer",
+                            "description": "optional: estimated minutes for the new session",
+                        },
+                        "after": {
+                            "type": "string",
+                            "description": (
+                                "optional: insert immediately after this "
+                                "existing session id (UUID); omit to append "
+                                "at the end"
+                            ),
+                        },
+                    },
+                    "required": ["lesson_id", "title"],
+                },
+            },
+        },
+        fn=_add_session,
         kind="mutation",
     ),
 }

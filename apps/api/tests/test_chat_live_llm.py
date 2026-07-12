@@ -59,11 +59,12 @@ import uuid
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from app.brain.ingest import IngestPayload, ingest_source
 from app.db import Base, SessionLocal, engine
 from app.main import app
+from app.models.block import Block
 from app.models.chat import ApprovalRequest, Message
 from app.models.knowledge import KnowledgeSource
 from app.models.note import Note
@@ -277,6 +278,117 @@ def test_note_intent_suspends_for_approval_with_the_right_tool():
         note_rows = db.query(Note).all()
         assert note_rows == [], (
             f"add_note fn must NOT run before approval, but found: {note_rows}"
+        )
+    finally:
+        db.close()
+
+
+@pytest.mark.integration
+def test_split_session_intent_suspends_for_approval_with_the_right_tool():
+    """Plan 10 Task 3's own live-LLM proof — the whole reason this task
+    exists: Chris says "split session 2, it's too long" and the model must
+    actually propose split_session (not another tool, not prose), and the
+    router must still suspend rather than execute (B5 — every lesson tool is
+    kind="mutation", same suspend-before-execute proof as the two turns
+    above).
+
+    Seeds a real 2-session lesson directly (no LLM call needed for the seed
+    itself — draft_lesson_from_selection is a separate, already-covered
+    concern) and gives the model the lesson's root id in the user message,
+    as if the UI had just shown it. This lets the model call get_curriculum
+    itself (a READ, executed inline, same turn) to discover session 2's real
+    id before proposing split_session (the MUTATION, which suspends) —
+    exercising the exact "read-then-mutate in one turn" path `test_agent_
+    hitl.py`'s scripted-fake tests cover in isolation, but here against the
+    real model + real roster.
+    """
+    db = SessionLocal()
+    try:
+        lesson = Block(
+            kind="lesson", title="Barre Chords", language="en",
+            is_template=False, plane="content",
+        )
+        db.add(lesson)
+        db.flush()
+
+        session1 = Block(
+            kind="session", title="Session 1: Warm-up", order=0, parent_id=lesson.id,
+            language="en", is_template=False, plane="content", est_minutes=15,
+        )
+        db.add(session1)
+        db.flush()
+        db.add(Block(
+            kind="item", title="Finger stretches", order=0, parent_id=session1.id,
+            language="en", is_template=False, plane="content", est_minutes=15,
+        ))
+
+        session2 = Block(
+            kind="session", title="Session 2: Barre technique", order=1, parent_id=lesson.id,
+            language="en", is_template=False, plane="content", est_minutes=90,
+        )
+        db.add(session2)
+        db.flush()
+        for i, minutes in enumerate([30, 30, 30]):
+            db.add(Block(
+                kind="item", title=f"Barre drill {i + 1}", order=i, parent_id=session2.id,
+                language="en", is_template=False, plane="content", est_minutes=minutes,
+            ))
+        db.commit()
+        lesson_id = lesson.id
+        session2_id = session2.id
+    finally:
+        db.close()
+
+    session_id = _create_session()
+    r = client.post(
+        f"/chat/{session_id}/messages",
+        json={
+            "content": (
+                f"Here is a lesson id: {lesson_id}. Look up its sessions, "
+                "then split session 2 into roughly 30-minute sessions — "
+                "it's too long."
+            ),
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+
+    print(
+        f"\n[live-llm split-intent] status={body['status']!r} "
+        f"tool_name={body.get('tool_name')!r} tool_args={body.get('tool_args')!r} "
+        f"description={body.get('description')!r}"
+    )
+
+    assert body["status"] == "awaiting_approval", (
+        f"expected the turn to suspend for approval, got: {body}"
+    )
+    assert body["tool_name"] == "split_session", (
+        f"model proposed the wrong tool for a split-session request: {body['tool_name']!r}"
+    )
+    assert body["approval_id"]
+
+    tool_args = body["tool_args"]
+    assert str(tool_args.get("session_id")) == str(session2_id), (
+        f"model proposed splitting the wrong session (expected session 2, "
+        f"{session2_id}): {tool_args}"
+    )
+
+    # Suspended, not executed: the ApprovalRequest is pending, and session
+    # 2's own 3 original items are still exactly where they were seeded —
+    # proving the router gated the mutation rather than running it.
+    db = SessionLocal()
+    try:
+        approval = db.get(ApprovalRequest, uuid.UUID(body["approval_id"]))
+        assert approval is not None
+        assert approval.status == "pending"
+        assert approval.tool_name == "split_session"
+
+        untouched_session = db.get(Block, session2_id)
+        assert untouched_session is not None, "split_session fn must NOT run before approval"
+        items = db.scalars(select(Block).where(Block.parent_id == session2_id)).all()
+        assert len(items) == 3, (
+            f"split_session fn must NOT run before approval, but session 2's "
+            f"items were already re-parented: {items}"
         )
     finally:
         db.close()

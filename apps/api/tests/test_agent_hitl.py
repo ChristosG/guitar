@@ -63,17 +63,20 @@ def _stub_tool(monkeypatch, name: str, fn):
 # Registry shape: the 7 mutation tools this task registers
 # ---------------------------------------------------------------------------
 
-def test_registry_has_exactly_the_ten_mutation_tools_registered_so_far():
-    """Task 3 registered the first seven; Plan 6 Task 6 wired in three more
-    (`add_note`, `promote_note_to_knowledge`, `log_progress`) once their
-    backing services existed (Plan 6 Tasks 1/3) — same registry, same "kind"
-    convention, so this test's set grows rather than a new one replacing it.
+def test_registry_has_exactly_the_fourteen_mutation_tools_registered_so_far():
+    """Task 3 (Plan 5) registered the first seven; Plan 6 Task 6 wired in
+    three more (`add_note`, `promote_note_to_knowledge`, `log_progress`);
+    Plan 10 Task 3 wires in the four Lesson Authoring tools
+    (`draft_lesson_from_selection`, `split_session`, `merge_sessions`,
+    `add_session`) — same registry, same "kind" convention, so this test's
+    set grows rather than a new one replacing it.
     """
     mutation_names = {name for name, entry in TOOLS.items() if entry.kind == "mutation"}
     assert mutation_names == {
         "create_student", "update_student", "segment_block", "update_block",
         "assign_curriculum", "generate_artifact", "generate_curriculum",
         "add_note", "promote_note_to_knowledge", "log_progress",
+        "draft_lesson_from_selection", "split_session", "merge_sessions", "add_session",
     }
     for name in mutation_names:
         entry = TOOLS[name]
@@ -84,11 +87,13 @@ def test_registry_has_exactly_the_ten_mutation_tools_registered_so_far():
         assert fn_schema["parameters"]["type"] == "object"
 
 
-def test_generate_curriculum_is_the_only_tool_marked_async_job():
-    assert TOOLS["generate_curriculum"].async_job is True
-    for name, entry in TOOLS.items():
-        if name != "generate_curriculum":
-            assert entry.async_job is False, f"{name} should default async_job=False"
+def test_exactly_generate_curriculum_and_draft_lesson_are_marked_async_job():
+    """`generate_curriculum` (Plan 5 Task 3) and `draft_lesson_from_selection`
+    (Plan 10 Task 3) are both blocking guided-JSON LLM calls too slow for a
+    synchronous resolve-time dispatch — every other mutation defaults False.
+    """
+    async_job_names = {name for name, entry in TOOLS.items() if entry.async_job}
+    assert async_job_names == {"generate_curriculum", "draft_lesson_from_selection"}
 
 
 def test_tool_schemas_now_exposes_both_read_and_mutation_tools_to_the_model():
@@ -100,7 +105,7 @@ def test_tool_schemas_now_exposes_both_read_and_mutation_tools_to_the_model():
     schemas = agent_loop._tool_schemas()
     names = {s["function"]["name"] for s in schemas}
     assert names == set(TOOLS.keys())
-    assert len(schemas) == 16  # 6 read (Task 2) + 10 mutation (7 Task 3 + 3 Plan 6 Task 6)
+    assert len(schemas) == 20  # 6 read (Task 2) + 14 mutation (7 Plan 5 T3 + 3 Plan 6 T6 + 4 Plan 10 T3)
 
 
 # ---------------------------------------------------------------------------
@@ -441,4 +446,108 @@ def test_log_progress_call_suspends_and_never_invokes_the_fn(monkeypatch):
     assert result.status == "awaiting_approval"
     assert result.pending_tool["tool_call_id"] == "call_1"
     assert result.pending_tool["name"] == "log_progress"
+    assert not any(m["role"] == "tool" for m in result.messages)
+
+
+# ---------------------------------------------------------------------------
+# (f) Plan 10 Task 3's four Lesson Authoring tools suspend the same way —
+# same "one-test-each confirmation" role as (e) above: the suspend mechanism
+# is generic over `kind == "mutation"`, so registering these new entries
+# needed no loop.py change at all (B5 — every lesson tool is kind="mutation"
+# and therefore HITL-gated by construction).
+# ---------------------------------------------------------------------------
+
+def test_draft_lesson_from_selection_call_suspends_and_never_invokes_the_fn(monkeypatch):
+    def _spy(db, **kwargs):
+        raise AssertionError("mutation fn must never be called by run_agent_turn")
+
+    _stub_tool(monkeypatch, "draft_lesson_from_selection", _spy)
+
+    call = ToolCall(
+        id="call_1", name="draft_lesson_from_selection",
+        arguments={"source_id": "src-1", "page_no": 21, "text": "Open position chords..."},
+    )
+    turn1 = AssistantTurn(content="I'll draft that lesson.", tool_calls=[call])
+    fake_provider = _FakeProvider([turn1])
+    monkeypatch.setattr(agent_loop, "get_provider", lambda: fake_provider)
+
+    result = run_agent_turn(
+        None, [{"role": "user", "content": "draft a lesson from that passage"}],
+    )
+
+    assert result.status == "awaiting_approval"
+    assert result.pending_tool["tool_call_id"] == "call_1"
+    assert result.pending_tool["name"] == "draft_lesson_from_selection"
+    assert not any(m["role"] == "tool" for m in result.messages)
+
+
+def test_split_session_call_suspends_and_never_invokes_the_fn(monkeypatch):
+    def _spy(db, **kwargs):
+        raise AssertionError("mutation fn must never be called by run_agent_turn")
+
+    _stub_tool(monkeypatch, "split_session", _spy)
+
+    call = ToolCall(
+        id="call_1", name="split_session",
+        arguments={"session_id": "sess-2", "session_minutes": 30},
+    )
+    turn1 = AssistantTurn(content="I'll split that session.", tool_calls=[call])
+    fake_provider = _FakeProvider([turn1])
+    monkeypatch.setattr(agent_loop, "get_provider", lambda: fake_provider)
+
+    result = run_agent_turn(
+        None, [{"role": "user", "content": "split session 2, it's too long"}],
+    )
+
+    assert result.status == "awaiting_approval"
+    assert result.pending_tool["tool_call_id"] == "call_1"
+    assert result.pending_tool["name"] == "split_session"
+    assert not any(m["role"] == "tool" for m in result.messages)
+
+
+def test_merge_sessions_call_suspends_and_never_invokes_the_fn(monkeypatch):
+    def _spy(db, **kwargs):
+        raise AssertionError("mutation fn must never be called by run_agent_turn")
+
+    _stub_tool(monkeypatch, "merge_sessions", _spy)
+
+    call = ToolCall(
+        id="call_1", name="merge_sessions",
+        arguments={"session_ids": ["sess-1", "sess-2"]},
+    )
+    turn1 = AssistantTurn(content="I'll merge those sessions.", tool_calls=[call])
+    fake_provider = _FakeProvider([turn1])
+    monkeypatch.setattr(agent_loop, "get_provider", lambda: fake_provider)
+
+    result = run_agent_turn(
+        None, [{"role": "user", "content": "merge sessions 1 and 2"}],
+    )
+
+    assert result.status == "awaiting_approval"
+    assert result.pending_tool["tool_call_id"] == "call_1"
+    assert result.pending_tool["name"] == "merge_sessions"
+    assert not any(m["role"] == "tool" for m in result.messages)
+
+
+def test_add_session_call_suspends_and_never_invokes_the_fn(monkeypatch):
+    def _spy(db, **kwargs):
+        raise AssertionError("mutation fn must never be called by run_agent_turn")
+
+    _stub_tool(monkeypatch, "add_session", _spy)
+
+    call = ToolCall(
+        id="call_1", name="add_session",
+        arguments={"lesson_id": "lesson-1", "title": "Extra practice"},
+    )
+    turn1 = AssistantTurn(content="I'll add that session.", tool_calls=[call])
+    fake_provider = _FakeProvider([turn1])
+    monkeypatch.setattr(agent_loop, "get_provider", lambda: fake_provider)
+
+    result = run_agent_turn(
+        None, [{"role": "user", "content": "add another session to that lesson"}],
+    )
+
+    assert result.status == "awaiting_approval"
+    assert result.pending_tool["tool_call_id"] == "call_1"
+    assert result.pending_tool["name"] == "add_session"
     assert not any(m["role"] == "tool" for m in result.messages)
