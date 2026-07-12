@@ -136,3 +136,17 @@ def test_add_session_route_appends_and_inserts_after(client, db):
     assert r2.status_code == 200
     titles = [s["title"] for s in r2.json()["children"]]
     assert titles == ["Everything", "Intro", "Warm-up"]
+
+
+def test_add_session_route_404s_when_after_belongs_to_a_different_lesson(client, db):
+    """The route should pre-check that the 'after' session belongs to the
+    target lesson and return 404 if not, consistent with split/merge routes."""
+    lesson1, session1 = _lesson_with_one_long_session(db)
+    lesson2, session2 = _lesson_with_one_long_session(db)
+
+    # Attempt to add a session after session2 (which belongs to lesson2, not lesson1)
+    r = client.post(
+        f"/lessons/{lesson1.id}/sessions",
+        json={"title": "New", "est_minutes": 10, "after": str(session2.id)},
+    )
+    assert r.status_code == 404

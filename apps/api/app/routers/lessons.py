@@ -173,6 +173,11 @@ def add_session_endpoint(
 ) -> dict:
     lesson = _get_lesson_or_404(db, lesson_id)
 
+    # Pre-check 'after' parameter membership at the route boundary, consistent
+    # with split/merge routes, to return 404 on cross-lesson ids rather than 422.
+    if payload.after is not None:
+        _get_session_of_lesson_or_404(db, lesson_id, payload.after)
+
     try:
         add_session(
             db, lesson_id, title=payload.title, est_minutes=payload.est_minutes, after=payload.after,

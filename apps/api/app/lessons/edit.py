@@ -154,10 +154,10 @@ def merge_sessions(db, session_ids: list[uuid.UUID]) -> Block:
     each session's own item order, summing `est_minutes`.
 
     Raises `ValueError` if fewer than 2 session ids are given, any id doesn't
-    name a real `session` Block, or the sessions don't all share the same
-    `parent_id` (lesson) — merging across lessons is nonsensical (an item
-    would end up teaching material from a lesson its parent no longer
-    belongs to) and is rejected rather than silently reparented.
+    name a real `session` Block, the sessions don't all share the same
+    `parent_id` (lesson), or the sessions are not contiguous (adjacent) in
+    `order` — merging non-adjacent sessions would cause silent reordering of
+    in-between sessions and is rejected.
 
     All-or-nothing, same rollback contract as `split_session`.
     """
@@ -168,6 +168,16 @@ def merge_sessions(db, session_ids: list[uuid.UUID]) -> Block:
     lesson_id = sessions[0].parent_id
     if any(s.parent_id != lesson_id for s in sessions):
         raise ValueError("cannot merge sessions from different lessons")
+
+    # Check that sessions are contiguous (adjacent) in order to prevent silent
+    # reordering of in-between sessions.
+    sorted_sessions = sorted(sessions, key=lambda s: s.order)
+    for i in range(len(sorted_sessions) - 1):
+        if sorted_sessions[i].order + 1 != sorted_sessions[i + 1].order:
+            raise ValueError(
+                f"cannot merge non-adjacent sessions: order {sorted_sessions[i].order} "
+                f"and order {sorted_sessions[i + 1].order} are not contiguous"
+            )
 
     survivor, donors = sessions[0], sessions[1:]
 

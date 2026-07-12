@@ -76,3 +76,26 @@ def test_add_session_appends_and_can_insert_after_a_given_session(db):
     sessions = db.query(Block).filter_by(parent_id=lesson.id).order_by(Block.order).all()
     assert [s.title for s in sessions] == ["Everything", "Intro", "Warm-up"]
     assert [s.order for s in sessions] == [0, 1, 2]
+
+
+def test_merging_non_adjacent_sessions_is_rejected(db):
+    """Merging sessions that are not contiguous in order must be rejected
+    to prevent silent reordering of in-between sessions."""
+    lesson = Block(kind="lesson", title="L", plane="content", order=0)
+    db.add(lesson); db.commit()
+
+    # Create three sessions at orders 0, 1, 2
+    s0 = Block(kind="session", title="S0", parent_id=lesson.id, order=0, est_minutes=30)
+    s1 = Block(kind="session", title="S1", parent_id=lesson.id, order=1, est_minutes=30)
+    s2 = Block(kind="session", title="S2", parent_id=lesson.id, order=2, est_minutes=30)
+    db.add_all([s0, s1, s2]); db.commit()
+
+    # Attempt to merge s0 and s2 (skipping s1) should raise ValueError
+    with pytest.raises(ValueError):
+        merge_sessions(db, [s0.id, s2.id])
+
+    # Verify s1 is untouched by the rejected merge
+    unchanged_s1 = db.get(Block, s1.id)
+    assert unchanged_s1 is not None
+    assert unchanged_s1.title == "S1"
+    assert unchanged_s1.order == 1
