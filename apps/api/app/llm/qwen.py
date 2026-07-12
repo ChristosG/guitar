@@ -1,3 +1,4 @@
+import base64
 import json
 import logging
 
@@ -133,6 +134,41 @@ class QwenVLLM(LLMProvider):
             ordered = sorted(r.json()["data"], key=lambda d: d["index"])
             vectors.extend(l2_normalize(d["embedding"]) for d in ordered)
         return vectors
+
+    def vision(self, image_bytes, prompt, *, media_type="image/jpeg") -> str:
+        """Transcribe/describe one image. Backs OCR (`app.brain.ocr`).
+
+        The local Qwen3.5-9B IS vision-capable — empirically confirmed against
+        this exact server: an OpenAI `image_url` content block carrying a
+        base64 data URI returned a faithful verbatim transcription of a real
+        scanned book page (~1,127 prompt tokens/page at 110dpi).
+
+        `max_tokens=4000` is deliberate and load-bearing: the first live probe
+        used 400 and came back `finish_reason="length"` with `content=None` —
+        a dense page of body text simply does not fit in a small budget, and a
+        truncated transcription is a silently corrupted page.
+
+        Returns "" rather than raising on empty output; `ocr.py` owns the
+        retry/failed lifecycle and treats "" as "nothing readable here".
+
+        SWAP POINT (spec D3): this is the one method to reimplement to move
+        OCR to Claude (`{"type": "document", ...}` with native PDF support and
+        `page_location` citations). Nothing above this seam changes.
+        """
+        b64 = base64.b64encode(image_bytes).decode()
+        resp = self._client.chat.completions.create(
+            model=settings.llm_model,
+            messages=[{"role": "user", "content": [
+                {"type": "image_url",
+                 "image_url": {"url": f"data:{media_type};base64,{b64}"}},
+                {"type": "text", "text": prompt},
+            ]}],
+            temperature=0.0,          # transcription, not creativity
+            max_tokens=4000,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            timeout=180,
+        )
+        return resp.choices[0].message.content or ""
 
     def health(self) -> dict:
         out = {"llm": False, "embed": False}

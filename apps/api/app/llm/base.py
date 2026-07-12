@@ -20,3 +20,7 @@ class LLMProvider(ABC):
 
     @abstractmethod
     def health(self) -> dict: ...
+
+    @abstractmethod
+    def vision(self, image_bytes: bytes, prompt: str, *,
+               media_type: str = "image/jpeg") -> str: ...
