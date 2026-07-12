@@ -932,3 +932,31 @@ export function getSourcePage(id: string, pageNo: number): Promise<PageDetailOut
 export function apiMediaUrl(path: string): string {
   return `${API_BASE}${path}`;
 }
+
+/**
+ * Typed fetch helper for the Library-to-lesson-authoring seam
+ * (`routers/lessons.py::from_selection`, Plan 9 Task 9) — the Reader's
+ * "author a lesson" action. DELIBERATELY a stub destination: the API just
+ * echoes the captured selection back (`selection_id` proves it was
+ * recorded, `source_title` lets the Reader confirm what it saved) rather
+ * than drafting anything — see that router's own module docstring. Drafting
+ * the lesson is sub-project B's job.
+ */
+export interface SelectionOut {
+  selection_id: string;
+  source_id: string;
+  source_title: string;
+  page_no: number;
+  text: string;
+}
+
+export function authorFromSelection(
+  sourceId: string,
+  pageNo: number,
+  text: string,
+): Promise<SelectionOut> {
+  return request<SelectionOut>("/lessons/from-selection", {
+    method: "POST",
+    body: JSON.stringify({ source_id: sourceId, page_no: pageNo, text }),
+  });
+}

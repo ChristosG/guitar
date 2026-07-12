@@ -310,7 +310,10 @@
         "ocr_running": "Reading this page…",
         "empty": "Nothing was read from this page.",
         "failed": "This page could not be read."
-      }
+      },
+      "authorLesson": "Author a lesson from this",
+      "authorSaved": "Saved from {source} — ready for a lesson.",
+      "authorError": "Could not save this selection."
     }
   },
   "artifacts": {
