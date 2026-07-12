@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.db import SessionLocal
 from app.jobs.sweep import sweep_orphaned_jobs
-from app.routers import artifacts, chat, curriculum, health, jobs, knowledge, notes, students
+from app.routers import artifacts, chat, curriculum, health, jobs, knowledge, library, notes, students
 
 
 @asynccontextmanager
@@ -48,3 +48,4 @@ app.include_router(artifacts.router)
 app.include_router(jobs.router)
 app.include_router(chat.router)
 app.include_router(notes.router)
+app.include_router(library.router)

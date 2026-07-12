@@ -41,10 +41,13 @@ import uuid
 import httpx
 import openai
 
+from app.brain.ingest import IngestPayload, ingest_source
+from app.brain.ocr import ocr_source
 from app.curriculum.generate import generate_curriculum
 from app.db import SessionLocal
 from app.llm.errors import GuidedJSONError
 from app.models.generation_job import GenerationJob
+from app.models.knowledge import KnowledgeSource
 
 log = logging.getLogger(__name__)
 
@@ -125,6 +128,111 @@ def run_curriculum_job(job_id: uuid.UUID) -> None:
         else:
             job.status = "succeeded"
             job.result_root_id = root_id
+            db.commit()
+    finally:
+        db.close()
+
+
+def run_ocr_job(job_id: uuid.UUID) -> None:
+    """Run OCR for one source on its OWN session, off the request path
+    (Plan 9 Task 6 — `POST /knowledge/sources/{id}/ocr` and the pdf branch of
+    `POST /knowledge/sources/{id}/retry`, both in `routers/library.py`).
+
+    Mirrors `run_curriculum_job`: broad `except Exception` is deliberate — a
+    background task has no HTTP caller to surface to, so anything uncaught
+    would strand the job in "running" forever. `ocr_source` already commits
+    each page independently, so a mid-run failure keeps every page OCR'd so
+    far (see `app/brain/ocr.py`'s own docstring for the per-page-commit
+    contract).
+    """
+    db = SessionLocal()
+    try:
+        job = db.get(GenerationJob, job_id)
+        if job is None:
+            log.warning("run_ocr_job: job_id=%s not found, skipping", job_id)
+            return
+
+        job.status = "running"
+        db.commit()
+        try:
+            result = ocr_source(db, uuid.UUID(job.params["source_id"]))
+        except Exception:
+            log.exception("run_ocr_job: job_id=%s failed", job_id)
+            try:
+                db.rollback()
+                job = db.get(GenerationJob, job_id)
+                if job is None:
+                    return
+                job.status = "failed"
+                job.error_kind = "internal"
+                job.error = "OCR failed unexpectedly. Try again."
+                db.commit()
+            except Exception:
+                log.warning(
+                    "run_ocr_job: could not record failure for %s", job_id, exc_info=True)
+        else:
+            job.status = "succeeded"
+            job.error = None if result.failed == 0 else f"{result.failed} page(s) unreadable"
+            db.commit()
+    finally:
+        db.close()
+
+
+def run_reingest_job(job_id: uuid.UUID) -> None:
+    """Re-run the full ingest pipeline for a "url"-kind source, off the
+    request path (Plan 9 Task 6's controller decision for the url branch of
+    `POST /knowledge/sources/{id}/retry`).
+
+    Re-fetches the `KnowledgeSource` row by id and reads its OWN stored
+    `.url` column rather than trusting anything the retry caller supplied —
+    that column exists precisely so a retry needs no fresh input (see
+    `KnowledgeSource.url`'s docstring, Plan 9 Task 1).
+
+    `ingest_source` already has its own swallow-and-record status lifecycle
+    (it never raises, except for an unknown `source_id` — a
+    caller/programming error, not an ingestion failure); after it returns,
+    this just mirrors the source's resulting status onto the job row so a
+    poller sees the same failed/succeeded distinction without a second
+    request to `GET /knowledge/sources/{id}`.
+    """
+    db = SessionLocal()
+    try:
+        job = db.get(GenerationJob, job_id)
+        if job is None:
+            log.warning("run_reingest_job: job_id=%s not found, skipping", job_id)
+            return
+
+        job.status = "running"
+        db.commit()
+        try:
+            source_id = uuid.UUID(job.params["source_id"])
+            source = db.get(KnowledgeSource, source_id)
+            if source is None:
+                raise ValueError(f"KnowledgeSource {source_id!r} not found")
+            ingest_source(db, source_id, IngestPayload(kind="url", url=source.url))
+        except Exception:
+            log.exception("run_reingest_job: job_id=%s failed", job_id)
+            try:
+                db.rollback()
+                job = db.get(GenerationJob, job_id)
+                if job is None:
+                    return
+                job.status = "failed"
+                job.error_kind = "internal"
+                job.error = "Reingest failed unexpectedly. Try again."
+                db.commit()
+            except Exception:
+                log.warning(
+                    "run_reingest_job: could not record failure for %s", job_id, exc_info=True)
+        else:
+            source = db.get(KnowledgeSource, source_id)
+            if source is not None and source.status == "failed":
+                job.status = "failed"
+                job.error_kind = "internal"
+                job.error = source.error
+            else:
+                job.status = "succeeded"
+                job.error = None
             db.commit()
     finally:
         db.close()
