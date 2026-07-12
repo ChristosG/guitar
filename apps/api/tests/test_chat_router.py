@@ -522,6 +522,94 @@ def test_resolve_approve_async_generate_curriculum_enqueues_a_job_and_does_not_r
 
 
 # ---------------------------------------------------------------------------
+# resolve approve — ASYNC draft_lesson_from_selection: job_pending, no resume
+#
+# Review fix (found during Plan 10 Task 3): `resolve_approval`'s async-job
+# branch used to be hardcoded for `generate_curriculum` only — ANY
+# `async_job=True` tool got `kind="curriculum"` + `run_curriculum_job`, so
+# approving a `draft_lesson_from_selection` proposal enqueued the WRONG job
+# kind/runner (a curriculum job run against lesson params -> TypeError ->
+# job status="failed", no crash but a misleading result). This is the
+# regression test proving the second async tool now gets its OWN job kind
+# and OWN runner.
+# ---------------------------------------------------------------------------
+
+def test_resolve_approve_async_draft_lesson_enqueues_a_lesson_job_and_does_not_resume(monkeypatch):
+    curriculum_calls = []
+    lesson_calls = []  # (job_id, "was the job row already committed/visible from a fresh session")
+
+    def _fake_curriculum_runner(job_id):
+        curriculum_calls.append(job_id)
+
+    def _fake_lesson_runner(job_id):
+        # Mirrors the REAL run_lesson_job's own session ownership (it opens
+        # its OWN SessionLocal() — see app/jobs/runner.py's docstring): if
+        # resolve_approval scheduled this background task BEFORE committing
+        # the GenerationJob row, this fresh session would see nothing.
+        fresh_db = SessionLocal()
+        try:
+            lesson_calls.append((job_id, fresh_db.get(GenerationJob, job_id) is not None))
+        finally:
+            fresh_db.close()
+
+    monkeypatch.setattr(chat_router, "run_curriculum_job", _fake_curriculum_runner)
+    monkeypatch.setattr(chat_router, "run_lesson_job", _fake_lesson_runner)
+
+    args = {"source_id": str(uuid.uuid4()), "page_no": 3, "text": "Some selected passage."}
+    fake_provider = _use_provider(monkeypatch, [
+        AssistantTurn(
+            content="I'll draft that lesson.",
+            tool_calls=[ToolCall(id="call_1", name="draft_lesson_from_selection", arguments=args)],
+        ),
+    ])
+    session_id = _create_session()
+    propose = client.post(
+        f"/chat/{session_id}/messages", json={"content": "draft a lesson from that passage"},
+    )
+    approval_id = propose.json()["approval_id"]
+
+    r = client.post(
+        f"/chat/{session_id}/approvals/{approval_id}/resolve", json={"decision": "approve"},
+    )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "job_pending"
+    job_id = uuid.UUID(body["job_id"])
+
+    # The LESSON runner ran, exactly once, with the job already committed —
+    # the CURRICULUM runner must never have been touched by this approval.
+    assert lesson_calls == [(job_id, True)]
+    assert curriculum_calls == []
+    assert len(fake_provider.calls) == 1  # NO resume — still just the original propose call
+
+    db = SessionLocal()
+    try:
+        job = db.get(GenerationJob, job_id)
+        assert job is not None
+        assert job.kind == "lesson"
+        assert job.status == "pending"
+        assert job.params == args
+    finally:
+        db.close()
+
+    approval = _db_approval(approval_id)
+    assert approval.status == "approved"
+    assert approval.result_ref == str(job_id)
+    assert approval.resolved_at is not None
+
+    rows = _db_messages(session_id)
+    tool_msgs = [m for m in rows if m.role == "tool"]
+    assert len(tool_msgs) == 1
+    assert tool_msgs[0].tool_call_id == "call_1"
+    assert str(job_id) in tool_msgs[0].content
+
+    poll = client.get(f"/jobs/{job_id}")
+    assert poll.status_code == 200
+    assert poll.json()["status"] == "pending"
+
+
+# ---------------------------------------------------------------------------
 # post_message while an approval is still pending -> 409 (review Important)
 # ---------------------------------------------------------------------------
 

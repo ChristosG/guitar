@@ -123,18 +123,34 @@ class ToolEntry:
     (nothing should mutate a live registry entry in place; `loop.py`'s tests
     replace a whole entry via `monkeypatch.setitem` instead).
 
-    `async_job` (Task 3): True ONLY for `generate_curriculum` — a marker for
-    Task 4's resolve step, which special-cases it to enqueue a
-    `GenerationJob` + background runner (Plan 8's pattern) instead of
-    calling `fn` inline like every other mutation. Defaults False so every
-    Task 2 read entry (and 6 of this task's 7 mutations) doesn't need to
-    mention it explicitly.
+    `async_job` (Task 3): True for a tool too slow to call inline at resolve
+    time (a blocking guided-JSON LLM call) — a marker for `chat.py`'s
+    `resolve_approval`, which enqueues a `GenerationJob` + background runner
+    (Plan 8's pattern) instead of calling `fn` directly. Defaults False so
+    every read entry (and most mutations) doesn't need to mention it
+    explicitly.
+
+    `job_kind` (review fix, Plan 10 Task 3): the `GenerationJob.kind` value
+    THIS tool enqueues when `async_job` is True — `"curriculum"` for
+    `generate_curriculum`, `"lesson"` for `draft_lesson_from_selection`.
+    Required whenever `async_job=True` (unused/None otherwise). Added
+    because `resolve_approval` used to hardcode `kind="curriculum"` +
+    `run_curriculum_job` for ANY `async_job=True` tool — harmless while
+    `generate_curriculum` was the only one, but silently WRONG the moment a
+    second async tool (`draft_lesson_from_selection`) was registered: a
+    lesson-draft approval would enqueue a `kind="curriculum"` job and run
+    `run_curriculum_job` against lesson params (TypeError -> job
+    `status="failed"`). `resolve_approval` now dispatches on this field
+    (plus a small job_kind -> runner lookup it owns) instead of a hardcoded
+    single case, so a THIRD async tool needs no new branching logic there —
+    just a `job_kind` here and one runner-lookup entry in `chat.py`.
     """
 
     schema: dict
     fn: Callable[..., Any]
     kind: str  # "read" | "mutation"
     async_job: bool = False
+    job_kind: str | None = None
 
 
 def _parse_uuid(raw: str) -> UUID | None:
@@ -1166,6 +1182,7 @@ TOOLS: dict[str, ToolEntry] = {
         fn=_generate_curriculum,
         kind="mutation",
         async_job=True,
+        job_kind="curriculum",
     ),
     "add_note": ToolEntry(
         schema={
@@ -1320,6 +1337,7 @@ TOOLS: dict[str, ToolEntry] = {
         fn=_draft_lesson_from_selection,
         kind="mutation",
         async_job=True,
+        job_kind="lesson",
     ),
     "split_session": ToolEntry(
         schema={

@@ -2,8 +2,10 @@
 copilot: session creation, turn-taking through `run_agent_turn` (Task 2),
 and the HITL approve/reject/resume + async-generation compose built on
 Task 3's suspend-on-mutation models, reusing Plan 8's exact enqueue/poll
-pattern (`routers/curriculum.py:88-131`, `app.jobs.runner.run_curriculum_job`)
-for the one async mutation (`generate_curriculum`).
+pattern (`routers/curriculum.py:88-131`) for every `async_job=True` mutation
+in `app.agent.tools.TOOLS` — DATA-DRIVEN off each tool's own `job_kind`
+(review fix, Plan 10 Task 3; see `_ASYNC_JOB_RUNNERS`/`_ASYNC_JOB_LABELS`
+below and `resolve_approval`'s async branch), not hardcoded to one tool.
 
 This router owns ALL persistence for the chat state machine — `run_agent_turn`
 itself stays session-agnostic and never writes anything (see `loop.py`'s own
@@ -30,7 +32,7 @@ from app.agent.loop import AgentResult, run_agent_turn
 from app.agent.tools import TOOLS
 from app.agent.transcript import messages_to_wire, persist_new_messages
 from app.db import get_db
-from app.jobs.runner import run_curriculum_job
+from app.jobs.runner import run_curriculum_job, run_lesson_job
 from app.models.chat import ApprovalRequest, ChatSession, Message
 from app.models.generation_job import GenerationJob
 from app.schemas.chat import (
@@ -46,6 +48,16 @@ from app.schemas.chat import (
 log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["chat"])
+
+# Human-facing label per `job_kind`, for the tool message `resolve_approval`
+# records when it enqueues an async job (e.g. "Curriculum generation started
+# (job <id>)."). Purely cosmetic strings — safe at module scope, unlike the
+# runner lookup below (see `resolve_approval`'s own comment for why THAT one
+# can't live here).
+_ASYNC_JOB_LABELS: dict[str, str] = {
+    "curriculum": "Curriculum generation",
+    "lesson": "Lesson drafting",
+}
 
 
 def _get_session_or_404(db: Session, session_id: UUID) -> ChatSession:
@@ -308,22 +320,46 @@ def resolve_approval(
         raise HTTPException(status_code=422, detail=f"unknown tool: {approval.tool_name!r}")
 
     if entry.async_job:
-        # generate_curriculum ONLY (Task 3's one `async_job=True` entry) —
-        # exact Plan 8 enqueue pattern (`routers/curriculum.py:117-131`):
+        # DATA-DRIVEN dispatch off `entry.job_kind` (review fix, Plan 10
+        # Task 3) — this used to hardcode `kind="curriculum"` +
+        # `run_curriculum_job` for ANY `async_job=True` tool, which was
+        # harmless while `generate_curriculum` was the only one but silently
+        # WRONG the moment `draft_lesson_from_selection` (`job_kind="lesson"`)
+        # was registered alongside it: approving a lesson-draft would enqueue
+        # a `kind="curriculum"` job and run `run_curriculum_job` against
+        # lesson params (TypeError -> job `status="failed"`, no crash but a
+        # misleading result). A THIRD async tool needs no new branch here —
+        # just a `job_kind` on its `ToolEntry` (`app/agent/tools.py`) and one
+        # entry in the two dicts below.
+        #
+        # The runner lookup is built HERE, inside the function body (NOT at
+        # module scope), specifically so `run_curriculum_job`/`run_lesson_job`
+        # are resolved through THIS module's own globals on every call — the
+        # tests rely on `monkeypatch.setattr(chat_router, "run_curriculum_job"
+        # / "run_lesson_job", ...)` still taking effect (Starlette's
+        # TestClient runs `BackgroundTasks` in-process, AFTER the response;
+        # an unpatched runner would fire a real multi-minute LLM call). A
+        # module-level dict built once at import time would freeze in the
+        # ORIGINAL function objects and silently ignore that monkeypatch.
+        job_kind = entry.job_kind
+        runner = {"curriculum": run_curriculum_job, "lesson": run_lesson_job}[job_kind]
+        label = _ASYNC_JOB_LABELS[job_kind]
+
+        # Exact Plan 8 enqueue pattern (`routers/curriculum.py:117-131`):
         # commit the GenerationJob row BEFORE scheduling/returning, so an
         # immediate `GET /jobs/{id}` poll is guaranteed to see it.
-        job = GenerationJob(kind="curriculum", status="pending", params=args)
+        job = GenerationJob(kind=job_kind, status="pending", params=args)
         db.add(job)
         db.commit()
         db.refresh(job)
-        background_tasks.add_task(run_curriculum_job, job.id)
+        background_tasks.add_task(runner, job.id)
 
         approval.status = "approved"
         approval.result_ref = str(job.id)
         approval.resolved_at = datetime.now(timezone.utc)
         tool_msg = {
             "role": "tool", "tool_call_id": tool_call_id,
-            "content": f"Curriculum generation started (job {job.id}).",
+            "content": f"{label} started (job {job.id}).",
         }
         persist_new_messages(db, session_id, [tool_msg])
 
