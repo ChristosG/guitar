@@ -6,7 +6,7 @@
     "today": "Today",
     "students": "Students",
     "curricula": "Curricula",
-    "knowledge": "Knowledge",
+    "library": "Library",
     "notes": "Notes",
     "artifacts": "Artifacts",
     "chat": "Chat",
@@ -232,62 +232,85 @@
       "error": "Could not generate the artifact."
     }
   },
-  "knowledge": {
-    "title": "Knowledge Cockpit",
-    "addSource": {
-      "heading": "Add source",
-      "kindText": "Text",
-      "kindUrl": "URL",
-      "kindPdf": "PDF",
-      "title": "Title",
+  "library": {
+    "heading": "Library",
+    "subheading": "Your book, your links, your notes — filed away and honestly labeled.",
+    "loading": "Loading your library…",
+    "error": "Could not load your library.",
+    "empty": "Nothing here yet — add your first source to get started.",
+    "collectionEmpty": "Nothing filed here yet.",
+    "unfiled": "Unfiled",
+    "sourceCount": "{count} sources",
+    "charCount": "{count} characters",
+    "moveTo": "File under",
+    "moveError": "Could not move this source.",
+    "retry": "Retry",
+    "retrying": "Retrying…",
+    "retryError": "Could not retry this source.",
+    "notRetryable": "Nothing to retry — remove and re-add this source.",
+    "delete": "Remove",
+    "deleting": "Removing…",
+    "deleteError": "Could not remove this source.",
+    "ocrProgress": "Reading page {ready} of {total}…",
+    "status": {
+      "ingesting": "Adding…",
+      "ready": "Ready",
+      "empty": "Empty — nothing was read from this source",
+      "failed": "Couldn't read this source",
+      "ocr_running": "Reading your book…"
+    },
+    "types": {
+      "pdf": "PDF",
+      "url": "Link",
+      "text": "Note",
+      "note": "Note",
+      "image": "Image"
+    },
+    "addDialog": {
+      "trigger": "Add source",
+      "heading": "Add a source",
+      "description": "A book, a link, or something you typed up yourself.",
+      "modeText": "Typed note",
+      "modeUrl": "Link",
+      "modePdf": "PDF",
+      "titleLabel": "Title",
       "titlePlaceholder": "e.g. Getting Great Guitar Sounds",
-      "domain": "Domain",
-      "domainPlaceholder": "tone, beginner, theory…",
-      "language": "Language",
-      "languagePlaceholder": "en, el…",
       "textLabel": "Text",
-      "textPlaceholder": "Paste the source text…",
-      "urlLabel": "URL",
+      "textPlaceholder": "Paste or type it here…",
+      "urlLabel": "Link",
       "urlPlaceholder": "https://example.com/article",
       "fileLabel": "PDF file",
-      "submit": "Add source",
+      "cancel": "Cancel",
+      "submit": "Add",
       "submitting": "Adding…",
-      "error": "Could not add the source."
+      "error": "Could not add this source."
     },
-    "sources": {
-      "heading": "Sources",
-      "empty": "No sources yet.",
-      "loading": "Loading sources…",
-      "error": "Could not load sources.",
-      "chars": "{count} chars",
-      "delete": "Delete",
-      "deleting": "Deleting…",
-      "deleteError": "Could not delete the source."
+    "collectionDialog": {
+      "trigger": "New collection",
+      "heading": "New collection",
+      "description": "A folder to group related sources — like a shelf in a filing cabinet.",
+      "nameLabel": "Name",
+      "namePlaceholder": "e.g. Tone & Gear",
+      "cancel": "Cancel",
+      "submit": "Create",
+      "submitting": "Creating…",
+      "error": "Could not create this collection."
     },
-    "status": {
-      "ingesting": "Ingesting",
-      "ready": "Ready",
-      "failed": "Failed"
-    },
-    "search": {
-      "heading": "Search",
-      "placeholder": "Search the knowledge base…",
-      "submit": "Search",
-      "searching": "Searching…",
-      "empty": "No results yet.",
-      "error": "Search failed.",
-      "score": "score"
-    },
-    "ask": {
-      "heading": "Ask",
-      "placeholder": "Ask a grounded question…",
-      "submit": "Ask",
-      "asking": "Thinking…",
-      "answerHeading": "Answer",
-      "citationsHeading": "Citations",
-      "locale": "Answer language",
-      "empty": "Ask a question to get a grounded answer.",
-      "error": "Could not get an answer."
+    "reader": {
+      "back": "Back to Library",
+      "loading": "Loading…",
+      "error": "Could not load this source.",
+      "pageOf": "Page {page} of {total}",
+      "prev": "Previous page",
+      "next": "Next page",
+      "noText": "No text on this page yet.",
+      "scanAlt": "Scan of page {page}",
+      "pageStatus": {
+        "pending": "Not read yet.",
+        "ocr_running": "Reading this page…",
+        "empty": "Nothing was read from this page.",
+        "failed": "This page could not be read."
+      }
     }
   },
   "artifacts": {

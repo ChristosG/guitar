@@ -12,7 +12,18 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8791";
 
 export type SourceKind = "text" | "url";
-export type SourceStatus = "ingesting" | "ready" | "failed";
+/** Mirrors `app.models.knowledge.KnowledgeSource.status`'s full lifecycle
+ * (`ingest.py`'s module docstring + `ocr.py`'s `_rollup_source_status`):
+ * "ingesting" (transient, committed before the pipeline runs) -> "ready"
+ * (char_count > 0) or "empty" (pipeline succeeded but extracted nothing —
+ * SPEC D6: this is NOT "ready", see this file's `library` section docstring
+ * below) or "failed" (pipeline raised). Note there is no "ocr_running" value
+ * here — that only ever exists on `Page.status` (`PAGE_STATUSES` on the API
+ * side); a source's own row doesn't change while its pages are mid-OCR, so
+ * the Library page synthesizes an "OCR'ing" display state itself instead of
+ * reading it off `SourceOut.status` (see `library/page.tsx`'s `ocrProgress`
+ * state). */
+export type SourceStatus = "ingesting" | "ready" | "empty" | "failed";
 
 export interface SourceOut {
   id: string;
@@ -24,6 +35,11 @@ export interface SourceOut {
   char_count: number | null;
   error: string | null;
   created_at: string;
+  /** Which `Collection` this source is filed under, or `null` for the
+   * synthetic "Unfiled" bucket the Library page renders client-side (there
+   * is no `Collection` row for "Unfiled" — it's just every source with a
+   * null FK). Added alongside `routers/library.py` (Plan 9 Task 6). */
+  collection_id: string | null;
 }
 
 export interface ChunkPreviewOut {
@@ -800,4 +816,119 @@ export function deleteNote(id: string): Promise<void> {
  * analogous chat 409. */
 export function promoteNote(id: string): Promise<NotePromoteOut> {
   return request<NotePromoteOut>(`/notes/${id}/promote`, { method: "POST" });
+}
+
+/**
+ * Typed fetch helpers for the Library API (`routers/library.py`, Plan 9
+ * Task 6) — collections, the source patch/retry/OCR controls, and the
+ * page-level reader. Same direct-from-browser convention as every other
+ * section of this file (see this file's top docstring). Ingestion itself
+ * (`createSource`/`uploadSource`/`listSources`/`deleteSource` above) stays
+ * where it is — this section is everything downstream of a `SourceOut`
+ * already existing, mirroring the API-side router split.
+ */
+
+export interface CollectionOut {
+  id: string;
+  name: string;
+  source_count: number;
+}
+
+export function listCollections(): Promise<CollectionOut[]> {
+  return request<CollectionOut[]>("/library/collections");
+}
+
+export function createCollection(name: string): Promise<CollectionOut> {
+  return request<CollectionOut>("/library/collections", {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+}
+
+/** Mirrors `routers/library.py::patch_source`'s response — deliberately NOT
+ * the full `SourceOut` (the API only echoes back the 3 fields it touched).
+ * Callers that need the full row (every caller in this app) just `refresh()`
+ * their own `listSources()` afterward rather than trying to splice this
+ * partial shape back into one. */
+export interface SourcePatchResult {
+  id: string;
+  title: string;
+  collection_id: string | null;
+}
+
+/** Files (or un-files, via `collectionId: null`) a source into a
+ * `Collection`. `collection_id` is ALWAYS sent explicitly (never omitted) —
+ * `routers/library.py::patch_source` distinguishes "field omitted" (leave
+ * untouched) from "field explicitly null" (move to Unfiled) via Pydantic's
+ * `model_fields_set`, and this call only ever means the latter. */
+export function moveSource(id: string, collectionId: string | null): Promise<SourcePatchResult> {
+  return request<SourcePatchResult>(`/knowledge/sources/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ collection_id: collectionId }),
+  });
+}
+
+/** Retries a failed/empty ingest. 202 with a `job_id` for "pdf" (re-enqueues
+ * OCR) and "url" (re-fetches the source's own stored `url`) sources; the API
+ * 409s for any other type ("text"/"note"/"image" have no original to
+ * re-fetch — see `routers/library.py::retry_source`'s docstring), which
+ * surfaces here as a thrown `ApiError`. Callers (`SourceRow`) only render
+ * the Retry button for "pdf"/"url" sources in the first place, so a 409 here
+ * would mean that gate has a bug, not an expected response to design
+ * around — same posture this file takes for `sendChatMessage`'s 409. */
+export function retrySource(id: string): Promise<{ job_id: string | null }> {
+  return request<{ job_id: string | null }>(`/knowledge/sources/${id}/retry`, { method: "POST" });
+}
+
+/** Enqueues OCR for a "pdf" source's pending/failed pages. Safe to call
+ * unconditionally right after a PDF upload (`AddSourceDialog` does exactly
+ * that) — a page that's already `ready` (e.g. one with a native text layer,
+ * skipped by pagination) is left untouched; `ocr_source` only re-picks-up
+ * pending/failed/ocr_running pages (see `app.brain.ocr.ocr_source`'s own
+ * docstring). */
+export function startOcr(id: string): Promise<{ job_id: string }> {
+  return request<{ job_id: string }>(`/knowledge/sources/${id}/ocr`, { method: "POST" });
+}
+
+/** One row of `GET /knowledge/sources/{id}/pages` — mirrors
+ * `schemas/library.py`'s `PageSummary`. `status` is the full
+ * `PAGE_STATUSES` set (`pending`/`ocr_running`/`ready`/`failed`/`empty`) as
+ * a plain `string`, not a union — same "unrecognized future value still
+ * round-trips" reasoning as `SourceOut.status`/`JobOut.status` above. Used
+ * by the Library page to derive OCR progress ("page N of M ready") for a
+ * source it's actively watching — see `library/page.tsx`'s `watchOcr`. */
+export interface PageSummary {
+  page_no: number;
+  status: string;
+}
+
+export function listSourcePages(id: string): Promise<PageSummary[]> {
+  return request<PageSummary[]>(`/knowledge/sources/${id}/pages`);
+}
+
+/** `GET /knowledge/sources/{id}/pages/{n}` — mirrors `schemas/library.py`'s
+ * `PageOut`: the reader's single-page view. `image_url` is a path relative
+ * to `API_BASE` (`/media/pages/{page_id}.jpg`, only set when the page has a
+ * scan — see `routers/library.py::get_page_image`'s docstring on why a D2
+ * degenerate url/text/note page has none); resolve it with `apiMediaUrl`
+ * below before using it as an `<img src>`. */
+export interface PageDetailOut {
+  id: string;
+  page_no: number;
+  status: string;
+  text: string | null;
+  image_url: string | null;
+  total_pages: number;
+}
+
+export function getSourcePage(id: string, pageNo: number): Promise<PageDetailOut> {
+  return request<PageDetailOut>(`/knowledge/sources/${id}/pages/${pageNo}`);
+}
+
+/** Resolves a server-relative media path (`PageDetailOut.image_url`) against
+ * `API_BASE` for use as an `<img src>` — same "browser is the caller, not a
+ * Next.js server" reasoning as this file's top docstring, so this can't be a
+ * root-relative Next.js asset path. */
+export function apiMediaUrl(path: string): string {
+  return `${API_BASE}${path}`;
 }

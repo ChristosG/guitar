@@ -4,7 +4,7 @@ import { test, expect, type Page, type Route } from "@playwright/test";
 // Deterministic, offline coverage of the cockpit shell + Students +
 // Curricula pages: every `/students/*` and `/curricula*`/`/blocks/*` call is
 // intercepted via `page.route` and answered from an in-memory fixture —
-// same convention as `knowledge.spec.ts` (CORS headers + explicit OPTIONS
+// same convention as `library.spec.ts` (CORS headers + explicit OPTIONS
 // handling, because these are cross-origin calls to NEXT_PUBLIC_API_BASE
 // even under Playwright's route interception; an "unexpected request ->
 // 500" catch-all so a routing mistake fails loudly instead of leaking to a
@@ -16,10 +16,10 @@ import { test, expect, type Page, type Route } from "@playwright/test";
 // page URLs (`http://localhost:3100/en/students` ends in "/students" just
 // as much as the real `http://localhost:8791/students` does), which risks
 // swallowing the page navigation itself instead of only the API call.
-// `knowledge.spec.ts` avoids this by coincidence (every `/knowledge/*` API
-// path it mocks has a segment after "knowledge", which the bare
-// `/en/knowledge` page URL doesn't) — anchoring to the origin here removes
-// the ambiguity outright rather than relying on that kind of coincidence.
+// `library.spec.ts` avoids this by coincidence (every `/knowledge/*`/
+// `/library/*` API path it mocks has a segment after that prefix, which the
+// bare `/en/library` page URL doesn't) — anchoring to the origin here
+// removes the ambiguity outright rather than relying on that coincidence.
 const API_ORIGIN = "http://localhost:8791";
 
 const CORS_HEADERS = {
@@ -396,18 +396,18 @@ async function mockCurriculaApi(
 }
 
 test.describe("cockpit shell", () => {
-  test("the persistent nav shows all 5 sections and links to /students, /knowledge", async ({ page }) => {
+  test("the persistent nav shows all 5 sections and links to /students, /library", async ({ page }) => {
     await page.goto("/en/today");
 
     await expect(page.getByTestId("app-title")).toHaveText(/Guitar Tutor Copilot/);
     await expect(page.getByTestId("today-heading")).toBeVisible();
     await expect(page.getByTestId("today-placeholder-card")).toHaveCount(2);
 
-    for (const section of ["today", "students", "curricula", "knowledge", "notes"]) {
+    for (const section of ["today", "students", "curricula", "library", "notes"]) {
       await expect(page.getByTestId(`nav-${section}`)).toBeVisible();
     }
     await expect(page.getByTestId("nav-students")).toHaveAttribute("href", "/en/students");
-    await expect(page.getByTestId("nav-knowledge")).toHaveAttribute("href", "/en/knowledge");
+    await expect(page.getByTestId("nav-library")).toHaveAttribute("href", "/en/library");
 
     // Root locale redirects into the shell too.
     await page.goto("/en");

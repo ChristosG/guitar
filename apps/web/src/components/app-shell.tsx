@@ -26,7 +26,7 @@ const NAV_ITEMS = [
   { segment: "today", icon: Calendar },
   { segment: "students", icon: Users },
   { segment: "curricula", icon: GraduationCap },
-  { segment: "knowledge", icon: Library },
+  { segment: "library", icon: Library },
   { segment: "notes", icon: StickyNote },
   { segment: "artifacts", icon: LayoutGrid },
   { segment: "chat", icon: MessageCircle },
@@ -39,7 +39,7 @@ const NAV_ITEMS = [
  *
  * A client component (not the server `layout.tsx` itself) because active-
  * route highlighting and the current page title both need `usePathname()`,
- * and the mobile nav drawer needs local `useState` — see `knowledge/
+ * and the mobile nav drawer needs local `useState` — see `library/
  * page.tsx`'s docstring for why client components are the norm here
  * whenever a page/shell needs the browser's own state or the API base
  * (CORS: the browser is the caller, not a Next.js server).
