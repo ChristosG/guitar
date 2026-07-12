@@ -127,12 +127,18 @@ def ingest_source(db, source_id, payload: IngestPayload) -> None:
 
         char_count = 0
         for draft, vector in zip(drafts, vectors):
+            # `draft.page` (a bare page NUMBER from the extractor) is no
+            # longer written here: Plan 9 replaced Chunk.page (int) with
+            # Chunk.page_id, a FK to a Page row that carries the scan image
+            # alongside its text. Populating page_id requires Page rows to
+            # exist for this source, which this pipeline does not yet
+            # create — that wiring lands in a later Plan 9 task. Until then
+            # chunks are persisted with page_id=NULL (nullable by design).
             db.add(
                 Chunk(
                     source_id=source.id,
                     text=draft.text,
                     section_path=draft.section_path,
-                    page=draft.page,
                     embedding=vector,
                 )
             )

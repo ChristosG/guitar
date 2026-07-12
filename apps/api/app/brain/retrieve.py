@@ -76,7 +76,12 @@ def search(
             source_title=source.title,
             text=chunk.text,
             section_path=chunk.section_path,
-            page=chunk.page,
+            # Chunk.page (int) was replaced by Chunk.page_id (FK to Page) in
+            # Plan 9 Task 1. Resolving a page NUMBER now means joining to
+            # Page.page_no via page_id; the ingest pipeline doesn't yet
+            # populate page_id (see brain/ingest.py), so there's nothing to
+            # join to today. Wiring that join is a later Plan 9 task.
+            page=None,
             score=1.0 - dist,
         )
         for chunk, source, dist in rows

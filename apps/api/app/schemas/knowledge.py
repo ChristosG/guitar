@@ -56,7 +56,12 @@ class ChunkPreviewOut(BaseModel):
     id: UUID
     text: str
     section_path: str | None
-    page: int | None
+    # Chunk.page (int) was replaced by Chunk.page_id (FK to Page) in Plan 9
+    # Task 1; the ORM object no longer has a bare `.page` attribute at all.
+    # Defaulting to None lets `from_attributes` validation fall back instead
+    # of raising on the missing attribute — resolving a real page NUMBER via
+    # page_id is later Plan 9 work.
+    page: int | None = None
 
 
 class SourceDetailOut(SourceOut):

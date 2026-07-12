@@ -15,7 +15,7 @@ import pytest
 from sqlalchemy import text
 
 import app.models  # noqa: F401  register every model's table on Base.metadata
-from app.db import Base, engine
+from app.db import Base, SessionLocal, engine
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -50,3 +50,19 @@ def _truncate_all_tables(_test_database):
     if table_names:
         with engine.begin() as conn:
             conn.execute(text(f"TRUNCATE TABLE {table_names} RESTART IDENTITY CASCADE"))
+
+
+@pytest.fixture
+def db():
+    """Plain SQLAlchemy session for model-level tests (e.g. test_library_models.py).
+
+    Mirrors `app.db.get_db`, just without the FastAPI generator wrapping —
+    tests want a bare session they can `.add()`/`.commit()`/`.get()` on
+    directly. Rows are cleaned up by `_truncate_all_tables` above, so this
+    fixture itself does no rollback/truncation.
+    """
+    session = SessionLocal()
+    try:
+        yield session
+    finally:
+        session.close()

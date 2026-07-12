@@ -34,7 +34,7 @@ def test_recursive_block_tree_and_vector_roundtrip():
                               status="ready", language="en")
         db.add(src); db.flush()
         chunk = Chunk(source_id=src.id, text="A humbucker cancels hum.",
-                      section_path="Ch1", page=25, embedding=[0.1] * 2560)
+                      section_path="Ch1", embedding=[0.1] * 2560)
         db.add(chunk); db.commit()
         course_id, module_id, src_id, chunk_id = course.id, module.id, src.id, chunk.id
     finally:

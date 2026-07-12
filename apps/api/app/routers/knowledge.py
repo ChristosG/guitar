@@ -82,6 +82,7 @@ def create_source(payload: SourceCreate, db: Session = Depends(get_db)) -> Sourc
         title=payload.title,
         domain=payload.domain,
         language=payload.language,
+        url=payload.url,
     )
     db.add(source)
     db.commit()  # assigns source.id; durable row before ingest_source's own commits
