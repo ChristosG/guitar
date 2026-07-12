@@ -13,9 +13,11 @@ os.environ["DATABASE_URL"] = "postgresql+psycopg://guitar:guitar@localhost:5434/
 
 import pytest
 from sqlalchemy import text
+from fastapi.testclient import TestClient
 
 import app.models  # noqa: F401  register every model's table on Base.metadata
 from app.db import Base, SessionLocal, engine
+from app.main import app
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -66,3 +68,9 @@ def db():
         yield session
     finally:
         session.close()
+
+
+@pytest.fixture
+def client():
+    """FastAPI TestClient for API endpoint tests."""
+    return TestClient(app)
