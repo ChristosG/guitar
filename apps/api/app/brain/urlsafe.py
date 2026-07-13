@@ -22,11 +22,21 @@ otherwise-public URL that 302s to `http://169.254.169.254/...` or a
 compose-internal host (`http://qwen-emb-vllm:8090`) sailed straight past
 `assert_public_url` and got fetched anyway — the guard checked the front
 door while the redirect walked in the back. `safe_fetch_html` is now the
-ONE fetch used by both extraction paths: it disables the HTTP client's own
-redirect-following and instead follows redirects itself, re-running
+ONE fetch used by both extraction paths: it disables redirect-following at
+the transport level and instead follows redirects itself, re-running
 `assert_public_url` on every hop's target before ever requesting it, and it
-caps the response body at `max_bytes` via a stream (stopping partway through
-a huge body instead of buffering it fully first).
+caps the response body at `max_bytes` (stopping partway through a huge body
+instead of buffering it fully first).
+
+Transport (Plan 12 Task 1): the actual GET for each hop is delegated to
+`app.brain.fetch.fetch_one_hop`, which uses `urllib.request` rather than
+`httpx` — see that module's docstring for why (httpx's TLS fingerprint gets
+blocked outright by some real sites, e.g. Wikimedia, that a plain `urllib`
+request with identical headers sails through). `fetch_one_hop` does not
+follow redirects and implements no SSRF protection itself; this module still
+owns 100% of the security-relevant logic (validate-before-connect, re-
+validate every hop, size cap) — only the one line that talks to the network
+changed.
 
 Known limitation, accepted for this PoC (applies identically to both
 functions below): this validates the *name* at each hop, not necessarily the
@@ -44,7 +54,8 @@ import ipaddress
 import socket
 from urllib.parse import urljoin, urlsplit
 
-import httpx
+from app.brain import fetch as fetch_module
+from app.brain.fetch import FetchError
 
 _ALLOWED_SCHEMES = {"http", "https"}
 
@@ -106,6 +117,24 @@ def assert_public_url(url: str) -> None:
             )
 
 
+def _decode(raw: bytes, headers: dict[str, str]) -> str:
+    """Decode a response body using its declared Content-Type charset, if any.
+
+    Mirrors `httpx.Response.encoding`'s fallback behavior (which the previous
+    implementation relied on): default to utf-8 when no charset is declared
+    or it names an encoding Python doesn't recognize, rather than raising on
+    otherwise-good, size-capped content.
+    """
+    content_type = headers.get("content-type", "")
+    encoding = "utf-8"
+    if "charset=" in content_type:
+        encoding = content_type.split("charset=", 1)[1].split(";", 1)[0].strip().strip("\"'") or "utf-8"
+    try:
+        return raw.decode(encoding, errors="replace")
+    except LookupError:
+        return raw.decode("utf-8", errors="replace")
+
+
 def safe_fetch_html(
     url: str,
     *,
@@ -115,25 +144,24 @@ def safe_fetch_html(
 ) -> str:
     """Fetch `url` and return its decoded body text, redirect-safely.
 
-    Unlike a plain `httpx.get(url, follow_redirects=True)` (the SSRF hole this
-    closes — see the module docstring above), this:
+    Unlike a plain "fetch and auto-follow redirects" client call (the SSRF
+    hole this closes — see the module docstring above), this:
 
     1. Validates `url` itself with `assert_public_url` before touching the
        network.
-    2. Disables the HTTP client's own redirect-following and instead follows
-       redirects one hop at a time: on a 3xx response, it resolves the
-       `Location` header against the current URL and re-runs
-       `assert_public_url` on THAT before ever requesting it. A redirect to a
-       disallowed host raises right there — the disallowed host is never
-       requested. More than `max_redirects` hops also raises.
-    3. Reads the final 2xx response body via a stream, stopping as soon as
-       `max_bytes` have been read rather than buffering an arbitrarily large
-       body fully in memory first (resource-exhaustion hardening — the
-       previous httpx fallback had no size cap at all).
+    2. Disables the transport's own redirect-following (`app.brain.fetch.
+       fetch_one_hop`) and instead follows redirects one hop at a time: on a
+       3xx response, it resolves the `Location` header against the current
+       URL and re-runs `assert_public_url` on THAT before ever requesting it.
+       A redirect to a disallowed host raises right there — the disallowed
+       host is never requested. More than `max_redirects` hops also raises.
+    3. Reads the final 2xx response body bounded at `max_bytes` (enforced by
+       `fetch_one_hop` itself via bounded `.read(n)` calls) rather than
+       buffering an arbitrarily large body fully in memory first.
 
     Raises ValueError for: a disallowed URL/host at any hop (fail-closed, same
     as `assert_public_url`), a redirect with no `Location` header, more than
-    `max_redirects` hops, a non-2xx final response, or any underlying `httpx`
+    `max_redirects` hops, a non-2xx final response, or any underlying
     transport error (connect/timeout/protocol failures) — a single exception
     type so callers that need extract_text's "never raises" contract
     (`app.brain.extract._extract_url`) only need to catch one thing.
@@ -142,42 +170,28 @@ def safe_fetch_html(
     for _hop in range(max_redirects + 1):
         assert_public_url(current)
         try:
-            with httpx.stream(
-                "GET", current, follow_redirects=False, timeout=timeout, headers=_DEFAULT_HEADERS
-            ) as resp:
-                if resp.is_redirect:
-                    location = resp.headers.get("location")
-                    if not location:
-                        raise ValueError(
-                            f"redirect response from {current!r} had no Location header"
-                        )
-                    # Resolve (possibly relative/protocol-relative) against the
-                    # CURRENT hop's URL, then loop: the next iteration's
-                    # assert_public_url call is what actually guards this.
-                    current = urljoin(current, location)
-                    continue
-
-                if not (200 <= resp.status_code < 300):
-                    raise ValueError(
-                        f"fetch of {current!r} failed with status {resp.status_code}"
-                    )
-
-                chunks: list[bytes] = []
-                total = 0
-                for chunk in resp.iter_bytes():
-                    chunks.append(chunk)
-                    total += len(chunk)
-                    if total >= max_bytes:
-                        break  # stop reading now — never buffer the rest of a huge body
-                raw = b"".join(chunks)[:max_bytes]
-                encoding = resp.encoding or "utf-8"
-                try:
-                    return raw.decode(encoding, errors="replace")
-                except LookupError:
-                    # An unrecognized/unsupported declared charset — fall back
-                    # rather than raise on otherwise-good, size-capped content.
-                    return raw.decode("utf-8", errors="replace")
-        except httpx.HTTPError as e:
+            # Called via the module (not a direct `from ... import fetch_one_hop`
+            # binding) so tests can monkeypatch `app.brain.fetch.fetch_one_hop`
+            # and have it take effect here too.
+            result = fetch_module.fetch_one_hop(
+                current, headers=_DEFAULT_HEADERS, timeout=timeout, max_bytes=max_bytes
+            )
+        except FetchError as e:
             raise ValueError(f"fetch of {current!r} failed: {e}") from e
+
+        if 300 <= result.status_code < 400:
+            location = result.headers.get("location")
+            if not location:
+                raise ValueError(f"redirect response from {current!r} had no Location header")
+            # Resolve (possibly relative/protocol-relative) against the
+            # CURRENT hop's URL, then loop: the next iteration's
+            # assert_public_url call is what actually guards this.
+            current = urljoin(current, location)
+            continue
+
+        if not (200 <= result.status_code < 300):
+            raise ValueError(f"fetch of {current!r} failed with status {result.status_code}")
+
+        return _decode(result.body, result.headers)
 
     raise ValueError(f"too many redirects (> {max_redirects}) starting from {url!r}")

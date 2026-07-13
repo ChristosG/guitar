@@ -15,6 +15,13 @@ retrieve, so it invented answers instead. Two independent causes, pinned here:
    `httpx.get` directly at all, it goes through that redirect-safe,
    SSRF-guarded fetch, which sets a browser-like UA. This test pins that
    fix against regression at the `extract_text` boundary.)
+
+   Plan 12 Task 1 found that a browser-like UA alone was not enough —
+   Wikimedia TLS-fingerprints and blocks `httpx` itself, UA or not (proven:
+   an identical UA/headers request via `urllib` succeeds where `httpx`
+   gets a bare 403). The transport moved to `app.brain.fetch.fetch_one_hop`
+   (urllib-based); this test now monkeypatches that seam instead of
+   `httpx.stream`, which no longer sits on this path at all.
 """
 from app.brain.ingest import IngestPayload, ingest_source
 from app.models.knowledge import KnowledgeSource, Page
@@ -77,42 +84,28 @@ def test_chunks_carry_a_real_page_id_after_ingest(db, monkeypatch):
 
 
 def test_url_fetch_sends_a_real_user_agent(monkeypatch):
-    """Wikimedia 403s the default httpx UA — that is why all three Wikipedia
-    sources ingested zero characters. `_extract_url` fetches through
-    `safe_fetch_html` (app/brain/urlsafe.py), which calls `httpx.stream(...)`
-    with a browser-like `_DEFAULT_HEADERS` User-Agent — pin that here at the
-    `extract_text` boundary so this can't silently regress back to the
-    library default.
+    """Wikimedia 403s a bare/default UA (and, per Plan 12 Task 1, blocks
+    httpx's TLS fingerprint outright regardless of UA) — that is why all
+    three Wikipedia sources ingested zero characters. `_extract_url` fetches
+    through `safe_fetch_html` (app/brain/urlsafe.py), which calls
+    `app.brain.fetch.fetch_one_hop(...)` with a browser-like
+    `_DEFAULT_HEADERS` User-Agent — pin that here at the `extract_text`
+    boundary so this can't silently regress back to the library default.
     """
-    import httpx
-
-    from app.brain import extract
+    from app.brain import extract, fetch as fetch_module
+    from app.brain.fetch import FetchResult
 
     captured = {}
 
-    class _FakeStreamResponse:
-        status_code = 200
-        headers = {"content-type": "text/html"}
-        encoding = "utf-8"
+    def fake_fetch_one_hop(url, *, headers, timeout, max_bytes):
+        captured["headers"] = headers
+        return FetchResult(
+            status_code=200,
+            headers={"content-type": "text/html"},
+            body=b"<html><body><p>Humbuckers cancel 60-cycle hum.</p></body></html>",
+        )
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc_info):
-            return False
-
-        @property
-        def is_redirect(self):
-            return False
-
-        def iter_bytes(self):
-            yield b"<html><body><p>Humbuckers cancel 60-cycle hum.</p></body></html>"
-
-    def fake_stream(method, url, **kwargs):
-        captured.update(kwargs)
-        return _FakeStreamResponse()
-
-    monkeypatch.setattr(httpx, "stream", fake_stream)
+    monkeypatch.setattr(fetch_module, "fetch_one_hop", fake_fetch_one_hop)
 
     sections = extract.extract_text("url", url="https://en.wikipedia.org/wiki/Humbucker")
 

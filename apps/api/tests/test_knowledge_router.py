@@ -93,6 +93,52 @@ def test_create_url_source_ingests_via_real_fetch():
     assert body["char_count"] and body["char_count"] > 0
 
 
+def test_bulk_sources_reports_per_url_status_honestly(monkeypatch):
+    """`POST /knowledge/sources/bulk` (Plan 12 Task 1): a URL that really
+    fetches gets a real `char_count` and `"ready"`; a URL that yields nothing
+    is `"empty"` — NEVER a green `"ready"` lie (spec D6, the exact bug that
+    started the whole redesign: three Wikipedia sources sat "ready" with 0
+    chars for two days).
+
+    The "yields nothing" case is deterministic (no reliance on a real page
+    happening to be unextractable): `app.brain.extract.safe_fetch_html` is
+    monkeypatched to return "" for one specific URL only — real network
+    still used for the other, so this is a genuine end-to-end ingest for the
+    URL that succeeds.
+    """
+    if not _online():
+        pytest.skip("no network access in this environment")
+
+    real_url = "https://example.com/"
+    empty_url = "http://93.184.216.34/nothing-here"  # example.com's IP; passes assert_public_url
+
+    from app.brain import extract as extract_module
+
+    original_safe_fetch_html = extract_module.safe_fetch_html
+
+    def fake_safe_fetch_html(url, **kwargs):
+        if url == empty_url:
+            return ""
+        return original_safe_fetch_html(url, **kwargs)
+
+    monkeypatch.setattr(extract_module, "safe_fetch_html", fake_safe_fetch_html)
+
+    r = client.post(
+        "/knowledge/sources/bulk",
+        json={"urls": [real_url, empty_url], "language": "en"},
+    )
+    assert r.status_code == 200, r.text
+    results = {item["url"]: item for item in r.json()["results"]}
+
+    assert results[real_url]["status"] == "ready"
+    assert results[real_url]["source_id"] is not None
+    assert results[real_url]["char_count"] and results[real_url]["char_count"] > 0
+
+    assert results[empty_url]["status"] == "empty"  # not "ready" — spec D6
+    assert results[empty_url]["source_id"] is not None  # a row WAS created (unlike a rejected URL)
+    assert results[empty_url]["char_count"] == 0
+
+
 def test_list_sources_includes_created_source():
     created = _create_text_source(title="Listed Source")
     r = client.get("/knowledge/sources")

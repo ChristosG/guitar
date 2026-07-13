@@ -118,6 +118,55 @@ def test_create_url_source_rejects_cloud_metadata_with_400():
     assert r.status_code == 400
 
 
+# ---- Fix 1 (Plan 12 Task 1): the guard also runs per-URL in the bulk path -
+
+
+def test_bulk_sources_rejects_internal_urls_honestly_without_touching_db():
+    """`POST /knowledge/sources/bulk` runs the same SSRF guard per URL, before
+    creating any row or fetching anything — so an all-internal-URLs request
+    needs neither a live DB nor a live embed server (same reasoning as the
+    single-source SSRF tests above). Each rejected URL is reported as
+    `"rejected"`, never `"ready"` or silently dropped — spec D6's "never a
+    green lie" applies at the batch level too.
+    """
+    r = client.post(
+        "/knowledge/sources/bulk",
+        json={
+            "urls": [
+                "http://127.0.0.1:8791/health/live",
+                "http://169.254.169.254/latest/meta-data/",
+            ]
+        },
+    )
+    assert r.status_code == 200, r.text
+    results = r.json()["results"]
+    assert len(results) == 2
+    for result in results:
+        assert result["status"] == "rejected"
+        assert result["source_id"] is None
+        assert result["error"] == "URL not allowed"
+        assert "127.0.0.1" not in result["error"]
+        assert "169.254" not in result["error"]
+
+
+def test_bulk_sources_rejects_blank_url_entry():
+    r = client.post("/knowledge/sources/bulk", json={"urls": ["   "]})
+    assert r.status_code == 200, r.text
+    result = r.json()["results"][0]
+    assert result["status"] == "rejected"
+    assert result["source_id"] is None
+
+
+def test_bulk_sources_rejects_empty_url_list_with_422():
+    r = client.post("/knowledge/sources/bulk", json={"urls": []})
+    assert r.status_code == 422
+
+
+def test_bulk_sources_rejects_oversized_url_list_with_422():
+    r = client.post("/knowledge/sources/bulk", json={"urls": ["http://example.com/"] * 21})
+    assert r.status_code == 422
+
+
 # ---- Fix 2: search/ask request schema — k and query bounds ----------------
 
 

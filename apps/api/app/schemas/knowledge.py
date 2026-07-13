@@ -18,6 +18,13 @@ _MAX_QUERY_CHARS = 2000
 _MIN_K = 1
 _MAX_K = 50
 
+# Bulk URL ingestion (Plan 12 Task 1 — "paste many URLs" box in the Library).
+# A resource-exhaustion bound on the request itself, same spirit as k/query
+# above: each URL runs a full ingest (fetch -> extract -> chunk -> embed)
+# synchronously in this one request, so an unbounded list is an easy way to
+# make one HTTP call do an enormous amount of work.
+_MAX_BULK_URLS = 20
+
 
 class SourceCreate(BaseModel):
     kind: Literal["text", "url"]  # "pdf" goes through POST /sources/upload instead
@@ -56,6 +63,40 @@ class SourceOut(BaseModel):
     # filed a source appeared to revert on the next refresh). `SourceDetailOut`
     # inherits this field for free.
     collection_id: UUID | None = None
+
+
+class BulkSourceCreate(BaseModel):
+    """`POST /knowledge/sources/bulk` — the Library's "paste many URLs" box.
+
+    Deliberately URL-only (unlike `SourceCreate`, which also handles
+    kind="text"): pasting a batch of URLs is the actual use case (the
+    tutor's 8 real course links), and a bulk "text" ingest has no obvious
+    per-item title/boundary to infer from a list of raw strings.
+    """
+
+    urls: list[str] = Field(min_length=1, max_length=_MAX_BULK_URLS)
+    domain: str | None = None
+    language: str | None = None
+
+
+class BulkSourceResultOut(BaseModel):
+    """One URL's honest outcome. `status` is always a real `KnowledgeSource`
+    status (`ready`/`empty`/`failed`) once a row was created, or the
+    request-level `"rejected"` when the URL never got that far (SSRF guard
+    or an empty string) — never a green lie about a URL that yielded nothing
+    or was never fetched at all (spec D6).
+    """
+
+    url: str
+    status: str
+    source_id: UUID | None = None
+    title: str | None = None
+    char_count: int | None = None
+    error: str | None = None
+
+
+class BulkSourceResponse(BaseModel):
+    results: list[BulkSourceResultOut]
 
 
 class ChunkPreviewOut(BaseModel):

@@ -15,6 +15,7 @@ bounds below guarding against resource exhaustion — not identity checks.
 """
 import logging
 from typing import Annotated
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -30,6 +31,9 @@ from app.models.knowledge import Chunk, KnowledgeSource
 from app.schemas.knowledge import (
     AskRequest,
     AskResponse,
+    BulkSourceCreate,
+    BulkSourceResponse,
+    BulkSourceResultOut,
     ChunkPreviewOut,
     HitOut,
     SearchRequest,
@@ -91,6 +95,81 @@ def create_source(payload: SourceCreate, db: Session = Depends(get_db)) -> Sourc
         db, source.id, IngestPayload(kind=payload.kind, text=payload.text, url=payload.url)
     )
     return _to_source_out(source)
+
+
+# `KnowledgeSource.title` is `String(400)` at the DB level — a derived title
+# (below) must respect that cap same as a hand-typed one would.
+_TITLE_MAX_CHARS = 400
+
+
+def _title_for_url(url: str) -> str:
+    """A reasonable default title for a bulk-added URL: no per-item title
+    field exists in a pasted list of raw URLs (unlike `POST /sources`, which
+    always gets one from the caller), so derive a human-legible one instead
+    of just repeating the raw URL back as its own title.
+    """
+    parts = urlsplit(url)
+    label = f"{parts.netloc}{parts.path}".rstrip("/") or parts.netloc or url
+    return label[:_TITLE_MAX_CHARS]
+
+
+@router.post("/sources/bulk", response_model=BulkSourceResponse)
+def bulk_create_sources(payload: BulkSourceCreate, db: Session = Depends(get_db)) -> BulkSourceResponse:
+    """Create + ingest one `KnowledgeSource` per URL, honestly.
+
+    Per URL: the SSRF guard runs first, exactly like `POST /sources` — a
+    disallowed host is `"rejected"` and never gets a DB row or a fetch. A URL
+    that passes the guard always gets a row and an ingest attempt; its
+    reported `status` is whatever `ingest_source` actually recorded
+    (`"ready"`/`"empty"`/`"failed"`) — never coerced to a green status just
+    because the request as a whole "succeeded" (spec D6: an ingest that
+    pulled 0 characters is `"empty"`, not `"ready"`, and this endpoint must
+    not paper over that at the batch level either).
+
+    One URL's failure does not abort the batch — each is independent, and
+    the response is always 200 with a per-URL breakdown; there is no
+    aggregate failure status for the request itself.
+    """
+    results: list[BulkSourceResultOut] = []
+    for raw_url in payload.urls:
+        url = raw_url.strip()
+        if not url:
+            results.append(BulkSourceResultOut(url=raw_url, status="rejected", error="empty URL"))
+            continue
+
+        try:
+            assert_public_url(url)
+        except ValueError as e:
+            # Same posture as create_source: log the specific reason
+            # server-side only, never echo it back (mild internal-recon
+            # oracle otherwise).
+            log.warning("bulk: rejected kind='url' source (SSRF guard): %s", e)
+            results.append(BulkSourceResultOut(url=url, status="rejected", error="URL not allowed"))
+            continue
+
+        source = KnowledgeSource(
+            type="url",
+            title=_title_for_url(url),
+            domain=payload.domain,
+            language=payload.language,
+            url=url,
+        )
+        db.add(source)
+        db.commit()  # assigns source.id; durable row before ingest_source's own commits
+
+        ingest_source(db, source.id, IngestPayload(kind="url", url=url))
+
+        results.append(
+            BulkSourceResultOut(
+                url=url,
+                status=source.status,
+                source_id=source.id,
+                title=source.title,
+                char_count=source.char_count,
+                error=source.error,
+            )
+        )
+    return BulkSourceResponse(results=results)
 
 
 @router.post("/sources/upload", response_model=SourceOut)
