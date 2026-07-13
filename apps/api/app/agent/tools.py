@@ -27,6 +27,13 @@ Six reads (Task 2), each a thin wrapper over an existing read path:
     first, always positional) — another reason a thin reimplementation is
     cleaner here than reusing the route handlers directly.
 
+A SEVENTH read (Plan 11 Task 2, C5): `find_lesson` — resolves a lesson by a
+partial, case-insensitive title match, returning each match plus its
+sessions (id/title/order). Not part of Task 2's original six; added to fix a
+MEASURED failure (Plan 10's live run needed three guesses to find the right
+session id with no lookup tool available) — see `_find_lesson`'s own
+docstring further down for the full justification.
+
 Seven mutations (Task 3), each wrapping a real mutation service the exact
 same "thin, router-independent" way the reads above wrap their GET routes —
 see each `_`-prefixed fn's own docstring for its specific service:
@@ -259,6 +266,63 @@ def _get_curriculum(db, *, root_id: str) -> dict:
     if block is None:
         return {"error": "curriculum not found"}
     return _block_tree(block)
+
+
+# ---------------------------------------------------------------------------
+# find_lesson (Plan 11 Task 2, C5) — resolve a lesson by title so the model
+# stops GUESSING a session uuid it was never handed.
+# ---------------------------------------------------------------------------
+
+def _find_lesson(db, *, title_query: str) -> list[dict]:
+    """Fixes a MEASURED failure (Plan 10's live run, `.superpowers/sdd/
+    progress.md`): the agent needed THREE attempts to split the right
+    session, because nothing resolved "that lesson" by name — `split_
+    session`/`merge_sessions`/`add_session` all need a real session/lesson
+    uuid, and with no lookup tool the model had to guess one, repeatedly
+    wrong (HITL caught every wrong guess — the gate working exactly as
+    designed — but the guessing itself was the actual bug this fixes).
+
+    A (partial, case-insensitive) title match over `Block(kind="lesson")`
+    rows (see `app.lessons.draft`'s own B1 note: a lesson is `Block(
+    kind="lesson")` with `Block(kind="session")` children) — `kind="read"`,
+    it only ever SELECTs, same as every other read tool in this registry.
+
+    Each match returns `id`/`title`/`provenance` — the `{"source_id",
+    "page_no"}` a lesson drafted via `draft_lesson_from_selection` records on
+    its root block's `target_profile` (B3), or `None` for a lesson with no
+    recorded provenance (e.g. authored inside a curriculum tree rather than
+    drafted from a Library selection) — PLUS `sessions` (each child
+    session's `id`/`title`/`order`). The sessions are included so ONE
+    `find_lesson` call is enough for the model to then call `split_session`/
+    `merge_sessions`/`add_session` with a real id, instead of needing a
+    SECOND round trip through `get_curriculum` just to learn which session
+    ids exist under a lesson it already found by name — directly closing the
+    "three attempts" gap this tool exists to fix.
+    """
+    lessons = db.scalars(
+        select(Block)
+        .where(Block.kind == "lesson", Block.title.ilike(f"%{title_query}%"))
+        .order_by(Block.created_at.desc())
+    ).all()
+    results = []
+    for lesson in lessons:
+        provenance = None
+        if isinstance(lesson.target_profile, dict):
+            provenance = lesson.target_profile.get("provenance")
+        sessions = db.scalars(
+            select(Block)
+            .where(Block.parent_id == lesson.id, Block.kind == "session")
+            .order_by(Block.order)
+        ).all()
+        results.append({
+            "id": lesson.id,
+            "title": lesson.title,
+            "provenance": provenance,
+            "sessions": [
+                {"id": s.id, "title": s.title, "order": s.order} for s in sessions
+            ],
+        })
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -922,6 +986,36 @@ TOOLS: dict[str, ToolEntry] = {
             },
         },
         fn=_get_curriculum,
+        kind="read",
+    ),
+    "find_lesson": ToolEntry(
+        schema={
+            "type": "function",
+            "function": {
+                "name": "find_lesson",
+                "description": (
+                    "Find a lesson by a partial, case-insensitive title "
+                    "match (e.g. \"pick gauge\" matches \"Pick Gauge and "
+                    "Tone\"). Use this BEFORE split_session/merge_sessions/"
+                    "add_session whenever you don't already have a real "
+                    "lesson/session id — never guess one. Returns each "
+                    "match's id, title, provenance (if drafted from a "
+                    "Library selection), and its sessions (id, title, "
+                    "order) so one call is usually enough."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title_query": {
+                            "type": "string",
+                            "description": "text to match against lesson titles",
+                        },
+                    },
+                    "required": ["title_query"],
+                },
+            },
+        },
+        fn=_find_lesson,
         kind="read",
     ),
     "create_student": ToolEntry(

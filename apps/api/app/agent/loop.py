@@ -58,12 +58,29 @@ instead of executing them:
     per-turn mix of reads and (at most one visible) mutation is handled
     without ever leaving more than one tool_call unanswered in `messages`
     (protocol integrity — see the dispatch loop's own comment).
+
+Plan 11 Task 2 (C3) adds a POST-TURN guard on top of all of the above: when a
+turn ends with a plain answer (no tool_calls), and that answer's `content`
+trips `app.agent.guards.looks_like_tablature` (a free-typed ASCII tab —
+Chris's exact bug, see that module's own docstring), the bluff is NEVER
+appended to `messages` and NEVER returned as `content`. The loop re-prompts
+the model ONCE with a corrective user turn naming the tool it should have
+called (`_TAB_BLUFF_REPROMPT_MESSAGE`), bounded by `_MAX_TAB_BLUFF_ATTEMPTS`
+the same "bounded, not unbounded" way `_MAX_REPAIR_ATTEMPTS` bounds the
+ToolArgsError repair loop above; if the model bluffs again anyway, an honest
+fallback (`_TAB_BLUFF_FALLBACK_MESSAGE`) is substituted instead — see the
+comment above those constants for why re-prompting (not auto-proposing a
+`generate_artifact` call the guard itself would have to guess the args for)
+is the right recovery. This is entirely independent of the mutation-suspend
+machinery above: it only ever fires on the "no tool_calls" branch, so it
+cannot interact with — and does not touch — the HITL suspend path at all.
 """
 import json
 import logging
 import re
 from dataclasses import dataclass, field
 
+from app.agent.guards import looks_like_tablature
 from app.agent.prompts import SYSTEM_PROMPT
 from app.agent.tools import TOOLS
 from app.brain.retrieve import search
@@ -82,6 +99,43 @@ _MAX_REPAIR_ATTEMPTS = 2
 _REPAIR_MESSAGE = "Your previous tool call had invalid JSON arguments. Retry with valid JSON."
 _GIVEUP_MESSAGE = "Sorry, I couldn't complete that request. Could you rephrase it?"
 _MAX_STEPS_MESSAGE = "I couldn't finish that within the allotted steps. Could you try rephrasing or narrowing the request?"
+
+# --- C3: no free-typed tablature ------------------------------------------
+#
+# Chris's exact bug: asked for a G major scale tab, the model typed ASCII
+# into a code fence (also WRONG — see `app/agent/guards.py`'s docstring)
+# instead of calling `generate_artifact`. `looks_like_tablature` (imported
+# above) detects that shape; this bounded counter/message pair is this
+# loop's RECOVERY once it does — same "bounded, not unbounded" shape as
+# `_MAX_REPAIR_ATTEMPTS`'s ToolArgsError repair above, deliberately reusing
+# that precedent rather than inventing a new retry idiom.
+#
+# RECOVERY CHOICE (the brief asks for this to be defended): option (a) —
+# suppress the bluff and re-prompt the model ONCE, telling it plainly what
+# it did wrong and which tool to call instead — with option (b) — an honest
+# "I'll generate that properly" fallback — as the bound's fallback if the
+# model bluffs again anyway. Rejected (c) "auto-propose a generate_artifact
+# call": the loop has no reliable way to synthesize a correct `kind`/
+# `prompt` from a bluff's prose (a mis-guessed kind/prompt would show the
+# tutor an HITL approval card for a request he didn't actually make, which
+# is worse than an honest "let me redo that" — the approval card is meant to
+# gate a call the MODEL chose, not one this guard invented on its behalf).
+# Re-prompting instead gives the model a real chance to make the right call
+# itself (this is exactly what the live-model check in the task report
+# verifies actually happens), and the bounded fallback (b) still guarantees
+# the invariant even in the worst case: the bluff NEVER reaches
+# `AgentResult.content` or `AgentResult.messages`, no matter how many times
+# the model keeps bluffing.
+_MAX_TAB_BLUFF_ATTEMPTS = 1
+_TAB_BLUFF_REPROMPT_MESSAGE = (
+    "You just wrote tablature/a chord diagram as plain text instead of "
+    "calling generate_artifact. Never do that — call generate_artifact now "
+    "so it renders as a real, playable artifact instead of typed ASCII."
+)
+_TAB_BLUFF_FALLBACK_MESSAGE = (
+    "Let me generate that properly as a real, playable artifact instead of "
+    "typing it out — please ask again and I'll call the right tool."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +438,7 @@ def run_agent_turn(db, messages: list[dict], *, max_steps: int = 6) -> AgentResu
     tools = _tool_schemas()
     provider = get_provider()
     repair_attempts = 0
+    tab_bluff_attempts = 0
     last_content: str | None = None
     citations: list[dict] = []
 
@@ -443,6 +498,29 @@ def run_agent_turn(db, messages: list[dict], *, max_steps: int = 6) -> AgentResu
         last_content = turn.content
 
         if not turn.tool_calls:
+            if looks_like_tablature(turn.content or ""):
+                # C3: the assistant free-typed a tab instead of calling
+                # generate_artifact. The bluff is NOT appended to `messages`
+                # here — it must never reach the tutor, not even inside the
+                # transcript history — see the module-level comment above
+                # `_MAX_TAB_BLUFF_ATTEMPTS` for the recovery choice/defence.
+                if tab_bluff_attempts >= _MAX_TAB_BLUFF_ATTEMPTS:
+                    log.warning(
+                        "run_agent_turn: model free-typed tablature again after a "
+                        "re-prompt; suppressing and returning an honest fallback"
+                    )
+                    messages.append({"role": "assistant", "content": _TAB_BLUFF_FALLBACK_MESSAGE})
+                    return AgentResult(
+                        status="answer", content=_TAB_BLUFF_FALLBACK_MESSAGE,
+                        messages=messages, citations=citations,
+                    )
+                tab_bluff_attempts += 1
+                log.warning(
+                    "run_agent_turn: model free-typed tablature instead of calling "
+                    "generate_artifact; re-prompting once"
+                )
+                messages.append({"role": "user", "content": _TAB_BLUFF_REPROMPT_MESSAGE})
+                continue
             messages.append(_wire_assistant_message(turn.content, turn.tool_calls))
             return AgentResult(status="answer", content=turn.content, messages=messages, citations=citations)
 

@@ -28,6 +28,18 @@ whether to retrieve — that decision was moved into code — so this sentence
 only covers what to DO with grounding that is already there: cite it, or say
 plainly that it doesn't cover the question and label the rest as general
 knowledge.
+
+Plan 11 Task 2 (C3) added ONE more sentence again — same register, still not
+a new paragraph — the direct fix for the exact bug Chris hit: asked for a G
+major scale tab, the model typed six lines of (also WRONG) ASCII into a code
+fence instead of calling `generate_artifact`, the schema-validated, AlphaTab-
+rendered, ACTUALLY PLAYABLE artifact Plan 4 already built. The new sentence
+bans free-typed tablature/chord diagrams outright and names the tool to call
+instead. Belt-and-suspenders, not the only defence: `app/agent/guards.py`'s
+`looks_like_tablature` is the enforcement layer for when the model ignores
+this sentence anyway (see `loop.py`'s post-turn guard) — the prompt sentence
+lowers how often the model needs catching, the code guard is what makes it
+not matter when it does.
 """
 
 SYSTEM_PROMPT = (
@@ -42,5 +54,7 @@ SYSTEM_PROMPT = (
     "artifacts, or any guitar technique/theory/gear/tone question. Answer directly, in "
     "plain conversational text, only for small talk that needs none of "
     "that. Call tools silently — never describe a tool call as prose "
-    "instead of making it."
+    "instead of making it. Never write tablature or chord diagrams as "
+    "text — always call generate_artifact so it renders as a real, "
+    "playable artifact."
 )

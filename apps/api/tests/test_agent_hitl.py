@@ -105,7 +105,9 @@ def test_tool_schemas_now_exposes_both_read_and_mutation_tools_to_the_model():
     schemas = agent_loop._tool_schemas()
     names = {s["function"]["name"] for s in schemas}
     assert names == set(TOOLS.keys())
-    assert len(schemas) == 20  # 6 read (Task 2) + 14 mutation (7 Plan 5 T3 + 3 Plan 6 T6 + 4 Plan 10 T3)
+    # 7 read (6 Plan 5 T2 + find_lesson, Plan 11 T2/C5) + 14 mutation
+    # (7 Plan 5 T3 + 3 Plan 6 T6 + 4 Plan 10 T3)
+    assert len(schemas) == 21
 
 
 # ---------------------------------------------------------------------------
