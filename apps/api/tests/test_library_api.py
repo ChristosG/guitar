@@ -29,7 +29,7 @@ from sqlalchemy import text
 from app.db import Base, SessionLocal, engine
 from app.main import app
 from app.models.generation_job import GenerationJob
-from app.models.knowledge import Collection, KnowledgeSource, Page
+from app.models.knowledge import Chunk, Collection, KnowledgeSource, Page
 
 # Skip cleanly (not error) when no DB is reachable — mirrors test_knowledge_router.py.
 try:
@@ -106,6 +106,74 @@ def test_missing_page_is_404(db):
     src = KnowledgeSource(type="pdf", title="Book", status="ready")
     db.add(src); db.commit()
     assert client.get(f"/knowledge/sources/{src.id}/pages/99").status_code == 404
+
+
+# --- Self-heal: a "ready" source with 0 Pages must not dead-end the Reader.
+# The live bug: "Guitar Tone & Gear — Course Spine" was ingested in Plan 7,
+# before the Page model existed, so it has real Chunks and status="ready"
+# but zero Pages — GET .../pages/1 404'd and the Reader showed a bare "Page
+# not found". Going forward this is structurally impossible for anything
+# ingested through ingest_source (paginate_source always runs first — see
+# app/brain/ingest.py and tests/test_ready_implies_page_invariant.py), but
+# any row that predates that guarantee must self-heal on read rather than
+# stay a permanent dead end (app/brain/repair.py). ---------------------------
+
+class _Provider:
+    def embed(self, texts, *, is_query=False):
+        return [[0.1] * 2560 for _ in texts]
+
+
+def test_get_page_self_heals_a_ready_source_with_chunks_but_no_pages(db, monkeypatch):
+    from app.brain.chunk import chunk_sections
+    from app.brain.extract import Section
+
+    monkeypatch.setattr("app.brain.ingest.get_provider", lambda: _Provider())
+    original = " ".join(f"tone{i:04d}" for i in range(400))  # > target_chars, real overlap
+    src = KnowledgeSource(type="text", title="Course Spine", status="ready",
+                          char_count=len(original))
+    db.add(src); db.commit()
+    for draft in chunk_sections([Section(heading=None, text=original, page=None)]):
+        db.add(Chunk(source_id=src.id, text=draft.text, embedding=[0.0] * 2560))
+    db.commit()
+    assert db.query(Page).filter_by(source_id=src.id).count() == 0  # reproduces the bug
+
+    r = client.get(f"/knowledge/sources/{src.id}/pages/1")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert original in body["text"] or body["text"] == original
+    db.expire_all()
+    assert db.query(Page).filter_by(source_id=src.id).count() >= 1
+    got = db.get(KnowledgeSource, src.id)
+    assert got.status == "ready"  # unchanged — still honestly ready
+
+
+def test_list_pages_self_heals_a_ready_source_with_chunks_but_no_pages(db, monkeypatch):
+    monkeypatch.setattr("app.brain.ingest.get_provider", lambda: _Provider())
+    src = KnowledgeSource(type="text", title="Course Spine", status="ready", char_count=20)
+    db.add(src); db.commit()
+    db.add(Chunk(source_id=src.id, text="Sixteen thousand chars of real tone notes.",
+                embedding=[0.0] * 2560))
+    db.commit()
+
+    r = client.get(f"/knowledge/sources/{src.id}/pages")
+
+    assert r.status_code == 200
+    assert r.json() == [{"page_no": 1, "status": "ready"}]
+
+
+def test_get_page_gives_an_honest_detail_when_a_ready_source_truly_has_nothing_to_heal_from(db):
+    """Unreachable in practice per spec D6 (status="ready" implies chunks
+    were persisted), but a directly-constructed fixture (no chunks, no url)
+    proves self-heal fails closed with a clear message rather than a bare,
+    misleading "Page not found" for a source the Library says IS ready."""
+    src = KnowledgeSource(type="text", title="Impossible per D6", status="ready")
+    db.add(src); db.commit()
+
+    r = client.get(f"/knowledge/sources/{src.id}/pages/1")
+
+    assert r.status_code == 404
+    assert "ready" in r.json()["detail"].lower()
 
 
 def test_pages_endpoints_404_for_unknown_source(db):

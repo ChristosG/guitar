@@ -11,6 +11,7 @@ No-auth PoC posture, same as `routers/knowledge.py` — no
 authentication/authorization here either; this deploys origin-locked behind
 Cloudflare for a single user.
 """
+import logging
 import os
 import uuid
 
@@ -19,6 +20,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.brain.repair import repair_pageless_source
 from app.config import settings
 from app.db import get_db
 from app.jobs.runner import run_ocr_job, run_reingest_job
@@ -31,6 +33,8 @@ from app.schemas.library import (
     PageSummary,
     SourcePatch,
 )
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["library"])
 
@@ -69,9 +73,42 @@ def start_ocr(
 
 # --- Reader --------------------------------------------------------------
 
+def _ensure_pages_exist(db: Session, source: KnowledgeSource) -> None:
+    """Self-heal a `status="ready"` source that has zero `Page` rows —
+    the exact live bug on "Guitar Tone & Gear — Course Spine" (ingested in
+    Plan 7, before the Page model existed, so it never got one). Per spec
+    D6, "ready" means there IS content; a ready source the Reader can't
+    open is the same class of lie D6 already exists to kill. See
+    `app/brain/repair.py`'s module docstring for the full story and why
+    this can no longer happen to anything ingested since Plan 9 Task 5.
+
+    Deliberately scoped tight — only fires for exactly this shape
+    (`status == "ready"` AND zero Pages) — so it never touches a source
+    that is legitimately still ingesting/failed/empty, or a merely
+    out-of-range page number on an otherwise-healthy source.
+
+    Runs inline on the read path (a GET), not queued as a background job:
+    the repair is a bounded, idempotent, one-time cost (paginate_source
+    always replaces rather than duplicates — Plan 9 Task 3), and the whole
+    point is that the tutor's very first click must not dead-end. Any
+    failure (e.g. the embed server is briefly down) is caught and logged,
+    never raised — the caller re-checks afterward and still gets a clean,
+    honest 404 rather than a 500 if the heal didn't take.
+    """
+    if source.status != "ready":
+        return
+    if db.query(func.count(Page.id)).filter_by(source_id=source.id).scalar() > 0:
+        return
+    try:
+        repair_pageless_source(db, source)
+    except Exception:
+        log.exception("pages self-heal failed for source_id=%s", source.id)
+
+
 @router.get("/knowledge/sources/{source_id}/pages", response_model=list[PageSummary])
 def list_pages(source_id: uuid.UUID, db: Session = Depends(get_db)) -> list[PageSummary]:
-    _source_or_404(db, source_id)
+    source = _source_or_404(db, source_id)
+    _ensure_pages_exist(db, source)
     pages = (
         db.query(Page).filter_by(source_id=source_id).order_by(Page.page_no).all()
     )
@@ -80,10 +117,23 @@ def list_pages(source_id: uuid.UUID, db: Session = Depends(get_db)) -> list[Page
 
 @router.get("/knowledge/sources/{source_id}/pages/{page_no}", response_model=PageOut)
 def get_page(source_id: uuid.UUID, page_no: int, db: Session = Depends(get_db)) -> PageOut:
-    _source_or_404(db, source_id)
+    source = _source_or_404(db, source_id)
     page = db.query(Page).filter_by(source_id=source_id, page_no=page_no).one_or_none()
     if page is None:
-        raise HTTPException(status_code=404, detail="Page not found")
+        _ensure_pages_exist(db, source)
+        page = db.query(Page).filter_by(source_id=source_id, page_no=page_no).one_or_none()
+    if page is None:
+        # Same status code either way (existing behavior pinned by
+        # test_missing_page_is_404 — a plain out-of-range page number stays
+        # a plain 404), but an honest, more actionable detail for the one
+        # case self-heal above could not fix: a source the Library says is
+        # READY that still, somehow, has no pages at all.
+        detail = (
+            "This source is marked ready but has no pages — try re-indexing it."
+            if source.status == "ready"
+            else "Page not found"
+        )
+        raise HTTPException(status_code=404, detail=detail)
     total = db.query(func.count(Page.id)).filter_by(source_id=source_id).scalar()
     return PageOut(
         id=page.id,
