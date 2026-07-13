@@ -86,7 +86,12 @@ def from_selection(
 
     params = {
         "source_id": str(payload.source_id),
-        "page_no": payload.page_no,
+        # page_from/page_to is the current shape (G4 — a selection may span
+        # pages); `payload`'s own validator has already resolved a legacy
+        # single-`page_no` request into an equivalent one-page range, so
+        # these are always both set by the time we get here.
+        "page_from": payload.page_from,
+        "page_to": payload.page_to,
         "text": payload.text,
     }
     job = GenerationJob(kind="lesson", status="pending", params=params)

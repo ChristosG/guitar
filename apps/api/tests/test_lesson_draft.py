@@ -81,3 +81,53 @@ def test_unknown_source_raises(db, monkeypatch):
     monkeypatch.setattr("app.lessons.draft.get_provider", lambda: _FakeProvider())
     with pytest.raises(ValueError):
         draft_lesson_from_selection(db, source_id=uuid.uuid4(), page_no=1, text="x")
+
+
+def test_records_a_cross_page_range_in_provenance(db, monkeypatch):
+    """G4 (Plan 12 Task 4): a selection made in the continuous-scroll Reader
+    can span pages — the provenance must record the WHOLE range, not just
+    one page, while `page_no` still reads as the range's start so the
+    existing single-page UI (ProvenanceChip) keeps working unchanged."""
+    monkeypatch.setattr("app.lessons.draft.get_provider", lambda: _FakeProvider())
+    src = _source(db)
+
+    lesson_id = draft_lesson_from_selection(
+        db, source_id=src.id, page_from=21, page_to=23, text="passage spanning pages",
+    )
+
+    prov = db.get(Block, lesson_id).target_profile["provenance"]
+    assert prov["source_id"] == str(src.id)
+    assert prov["page_no"] == 21
+    assert prov["page_from"] == 21
+    assert prov["page_to"] == 23
+
+
+def test_the_whole_ranged_passage_is_given_to_the_model(db, monkeypatch):
+    # Grounding on a range still means grounding on the FULL text, not a
+    # truncated/one-page slice of it.
+    fake = _FakeProvider()
+    monkeypatch.setattr("app.lessons.draft.get_provider", lambda: fake)
+    src = _source(db)
+
+    draft_lesson_from_selection(
+        db, source_id=src.id, page_from=21, page_to=23,
+        text="RANGE_MARKER_START ... spans three pages ... RANGE_MARKER_END",
+    )
+
+    sent = " ".join(m["content"] for m in fake.messages)
+    assert "RANGE_MARKER_START" in sent and "RANGE_MARKER_END" in sent
+    assert "pages 21-23" in sent
+
+
+def test_page_to_before_page_from_is_rejected(db, monkeypatch):
+    monkeypatch.setattr("app.lessons.draft.get_provider", lambda: _FakeProvider())
+    src = _source(db)
+    with pytest.raises(ValueError):
+        draft_lesson_from_selection(db, source_id=src.id, page_from=23, page_to=21, text="x")
+
+
+def test_missing_page_range_and_page_no_is_rejected(db, monkeypatch):
+    monkeypatch.setattr("app.lessons.draft.get_provider", lambda: _FakeProvider())
+    src = _source(db)
+    with pytest.raises(ValueError):
+        draft_lesson_from_selection(db, source_id=src.id, text="x")

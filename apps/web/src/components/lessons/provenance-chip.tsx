@@ -9,6 +9,11 @@ import { getSource } from "@/lib/api";
 interface ProvenanceChipProps {
   sourceId: string;
   pageNo: number;
+  /** The end of the drafted-from range (G4, Plan 12 Task 4) — omitted or
+   * equal to `pageNo` for a single-page selection, in which case the chip
+   * reads exactly as it always has ("p.21"). A real range reads "p.21–23"
+   * instead, and still links to the range's START page. */
+  pageTo?: number;
   locale: string;
 }
 
@@ -37,9 +42,10 @@ function fetchSourceTitle(sourceId: string): Promise<string> {
  * the link is live and correctly targeted the instant this mounts — even
  * before the book's own title has loaded (`chipLoading` covers that brief
  * window with just the page number). */
-export function ProvenanceChip({ sourceId, pageNo, locale }: ProvenanceChipProps) {
+export function ProvenanceChip({ sourceId, pageNo, pageTo, locale }: ProvenanceChipProps) {
   const t = useTranslations("lessons.provenance");
   const [title, setTitle] = useState<string | null>(null);
+  const isRange = pageTo != null && pageTo !== pageNo;
 
   useEffect(() => {
     let cancelled = false;
@@ -64,7 +70,15 @@ export function ProvenanceChip({ sourceId, pageNo, locale }: ProvenanceChipProps
       className="inline-flex w-fit items-center gap-1.5 rounded-full border border-primary/30 bg-primary/5 px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:border-primary/60 hover:bg-primary/10 hover:text-foreground"
     >
       <BookOpen className="size-3.5 shrink-0 text-primary" />
-      <span>{title ? t("chip", { source: title, page: pageNo }) : t("chipLoading", { page: pageNo })}</span>
+      <span>
+        {isRange
+          ? title
+            ? t("chipRange", { source: title, from: pageNo, to: pageTo })
+            : t("chipRangeLoading", { from: pageNo, to: pageTo })
+          : title
+            ? t("chip", { source: title, page: pageNo })
+            : t("chipLoading", { page: pageNo })}
+      </span>
     </Link>
   );
 }

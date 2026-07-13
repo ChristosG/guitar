@@ -169,7 +169,12 @@ export default function LessonEditorPage() {
               </p>
             )}
             {provenance && (
-              <ProvenanceChip sourceId={provenance.source_id} pageNo={provenance.page_no} locale={locale} />
+              <ProvenanceChip
+                sourceId={provenance.source_id}
+                pageNo={provenance.page_no}
+                pageTo={provenance.page_to}
+                locale={locale}
+              />
             )}
           </div>
 

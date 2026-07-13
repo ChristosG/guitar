@@ -72,7 +72,16 @@ LESSON_SCHEMA = {
 }
 
 
-def _build_messages(*, text: str, page_no: int, source_title: str, language: str) -> list[dict]:
+def _page_label(page_from: int, page_to: int) -> str:
+    """"page 19" for a single-page selection, "pages 19-21" for a range —
+    used both in the prompt (`_build_messages`) and nowhere else; kept as a
+    one-liner rather than duplicating the from==to check in two places."""
+    return f"page {page_from}" if page_to == page_from else f"pages {page_from}-{page_to}"
+
+
+def _build_messages(
+    *, text: str, page_from: int, page_to: int, source_title: str, language: str,
+) -> list[dict]:
     """Pure function: the {system,user} messages for lesson drafting — kept
     separate from `draft_lesson_from_selection` (which also calls the live
     model) so the prompt shape is unit-testable without a model or a DB,
@@ -83,7 +92,10 @@ def _build_messages(*, text: str, page_no: int, source_title: str, language: str
     paraphrased here) so the model — and this function's own test,
     `test_the_selected_passage_is_actually_given_to_the_model` — can verify
     it was actually given the exact text the tutor selected, not just a
-    description of it.
+    description of it. G4 (Plan 12 Task 4): the passage may now span
+    `page_from`..`page_to` (a selection made in the continuous-scroll
+    Reader can cross a page boundary) — `text` is still the WHOLE selected
+    passage, verbatim, regardless of how many pages it spans.
     """
     system = (
         "You generate ONLY the JSON lesson tree matching the given schema — "
@@ -98,7 +110,7 @@ def _build_messages(*, text: str, page_no: int, source_title: str, language: str
         "session a realistic, non-zero est_minutes."
     )
     user = (
-        f"Source: {source_title}, page {page_no}\n\n"
+        f"Source: {source_title}, {_page_label(page_from, page_to)}\n\n"
         f"PASSAGE:\n{text}"
     )
     return [
@@ -120,19 +132,31 @@ def _positive_minutes(value) -> int:
 
 
 def _persist_tree(
-    db, tree: dict, *, source_id: uuid.UUID, page_no: int, language: str,
+    db, tree: dict, *, source_id: uuid.UUID, page_from: int, page_to: int, language: str,
 ) -> Block:
     """Recursively persist an already schema-valid `tree` as a Block
     hierarchy: lesson -> session -> item, `order` = sibling index.
     `db.flush()` after each parent (not just at the end) so its `id` — a
     Python-side `default=uuid.uuid4`, resolved at flush — is available for
     the next level's `parent_id`, mirroring `generate.py`'s `_persist_tree`.
+
+    Provenance (B3) now records the RANGE (G4, Plan 12 Task 4): `page_no`
+    is kept, set to `page_from`, so the EXISTING UI that only knows about
+    `{source_id, page_no}` (the lessons list row, the editor's
+    `ProvenanceChip`) keeps working unchanged and still links into the
+    Reader at the start of the passage. `page_from`/`page_to` are added
+    alongside it for anything that wants to show/link the whole range.
     """
     lesson = Block(
         kind="lesson", title=tree["title"], order=0, language=language,
         is_template=False, plane="content",
         target_profile={
-            "provenance": {"source_id": str(source_id), "page_no": page_no},
+            "provenance": {
+                "source_id": str(source_id),
+                "page_no": page_from,
+                "page_from": page_from,
+                "page_to": page_to,
+            },
         },
     )
     db.add(lesson)
@@ -159,33 +183,60 @@ def _persist_tree(
 
 
 def draft_lesson_from_selection(
-    db, *, source_id: uuid.UUID, page_no: int, text: str, language: str = "en",
+    db, *, source_id: uuid.UUID, text: str, language: str = "en",
+    page_from: int | None = None, page_to: int | None = None,
+    page_no: int | None = None,
 ) -> uuid.UUID:
-    """Guided-JSON a lesson tree grounded in `text` (a passage the tutor
-    selected from `source_id`/`page_no`), persist it as a `Block` hierarchy,
-    return the root (lesson) Block id.
+    """Guided-JSON a lesson tree grounded in `text` (the passage the tutor
+    selected from `source_id`, spanning `page_from`..`page_to`), persist it
+    as a `Block` hierarchy, return the root (lesson) Block id.
+
+    G4 (Plan 12 Task 4): the Reader's continuous scroll lets a selection
+    cross a page boundary, so this grounds on the WHOLE range, not a single
+    page. `page_no` is kept as a backward-compatible single-page alias — for
+    direct callers (this function predates the range and existing tests
+    still call it with just `page_no`) — and is resolved into an equivalent
+    one-page range below. Exactly one of `page_no` or `page_from`+`page_to`
+    must be given (mirrors `SelectionIn`'s own resolution at the API
+    boundary, `app.schemas.lessons`, since this function is also called
+    directly, off a `GenerationJob`'s params, not just through that schema).
 
     Raises `ValueError` if `source_id` doesn't name a real `KnowledgeSource`
     — a caller/programming error (the router validates this itself and
     returns 404 before ever calling this, mirroring `run_reingest_job`'s
-    identical unknown-source guard), not a generation failure.
+    identical unknown-source guard), not a generation failure. Also raises
+    `ValueError` for an inconsistent/missing page range — same "caller
+    error, not a generation failure" reasoning.
 
     `db` is a caller-owned SQLAlchemy Session (mirrors `generate_curriculum`):
     not closed here, but committed here — the persisted tree is this
     function's entire observable output, so the commit is part of its
     contract, not left to the caller.
     """
+    if page_from is None and page_to is None:
+        if page_no is None:
+            raise ValueError(
+                "draft_lesson_from_selection requires page_from/page_to or page_no"
+            )
+        page_from = page_to = page_no
+    elif page_from is None or page_to is None:
+        raise ValueError("page_from and page_to must both be given together")
+    elif page_to < page_from:
+        raise ValueError("page_to must be >= page_from")
+
     source = db.get(KnowledgeSource, source_id)
     if source is None:
         raise ValueError(f"KnowledgeSource {source_id!r} not found")
 
     messages = _build_messages(
-        text=text, page_no=page_no, source_title=source.title, language=language,
+        text=text, page_from=page_from, page_to=page_to,
+        source_title=source.title, language=language,
     )
     tree = get_provider().guided_json(messages, LESSON_SCHEMA)
 
     lesson = _persist_tree(
-        db, tree, source_id=source_id, page_no=page_no, language=language,
+        db, tree, source_id=source_id, page_from=page_from, page_to=page_to,
+        language=language,
     )
     db.commit()
     return lesson.id

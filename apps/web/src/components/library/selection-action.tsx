@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { RefObject } from "react";
 import { useRouter } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
 import { Loader2, Quote } from "lucide-react";
@@ -20,33 +19,54 @@ const MAX_POLLS = 150;
 
 interface SelectionActionProps {
   sourceId: string;
-  pageNo: number;
-  /** The text pane's own DOM node (`ReaderPane`'s `page-text`, via the
-   * reader page's shared ref) — the ONLY thing that makes this component
-   * show its button for a given `window.getSelection()`; a selection
-   * elsewhere on the page (the scan's alt text, the page-indicator, nav
-   * chrome) is deliberately ignored. */
-  textRef: RefObject<HTMLDivElement | null>;
 }
 
 type Status = "idle" | "drafting" | "error";
 
+interface Selection {
+  text: string;
+  pageFrom: number;
+  pageTo: number;
+}
+
+/** Walks up from a `window.getSelection()` endpoint (`anchorNode`/
+ * `focusNode`) to the nearest ancestor carrying `data-reader-text-page`
+ * (set by `ReaderPane` on its text pane, one per page) and returns that
+ * page's number, or `null` if the node isn't inside any page's text pane at
+ * all (the scan's alt text, the page-marker headings, the page-indicator
+ * badge, nav chrome — none of those carry the attribute, so a selection
+ * landing there is correctly treated as "not a real passage selection"). */
+function readerPageOf(node: Node | null): number | null {
+  let el: Element | null = node instanceof Element ? node : node?.parentElement ?? null;
+  while (el) {
+    const raw = el.getAttribute("data-reader-text-page");
+    if (raw != null) return Number(raw);
+    el = el.parentElement;
+  }
+  return null;
+}
+
 /** The Reader's one action: "select a passage, author a lesson from it"
  * (spec — the passage IS how a lesson gets grounded/cited later). Listens
- * for `selectionchange` on `document` (not a `mouseup` handler on the pane
- * — `selectionchange` also fires for keyboard/touch selection, and the
- * reader.spec.ts test drives it by dispatching this event directly) and
- * shows a floating bar only while the live selection is non-empty AND
- * lives inside `textRef`.
+ * for `selectionchange` on `document` (not a `mouseup` handler on any one
+ * pane — `selectionchange` also fires for keyboard/touch selection, and
+ * `reader.spec.ts` drives it by dispatching this event directly) and shows
+ * a floating bar only while the live selection is non-empty AND both its
+ * ends land inside SOME page's text pane.
  *
- * The reader page renders this with `key={pageNo}` — turning the page must
- * never leave a stale selection or an in-flight draft on screen, and
- * remounting a fresh instance resets all of this component's local state
- * for free. That's also *why* there's no `pageNo`-watching `useEffect` here
- * calling `setState` to reset things by hand (`react-hooks/set-state-in-
- * effect` flags exactly that "reset on prop change" shape — see
- * `chat-panel.tsx`'s `startSession` comment for the same rule elsewhere in
- * this codebase); the `key` remount is the idiomatic fix instead.
+ * G4 (Plan 12 Task 4) — THE POINT OF THIS REWRITE: the continuous-scroll
+ * Reader stacks every page's text pane in the same document, so a selection
+ * can start in one page's pane and end in another's. `readerPageOf` reads
+ * off each end independently; `page_from`/`page_to` is
+ * `[min, max]` of the two, so it's correct regardless of which direction
+ * the tutor dragged (top-to-bottom or bottom-to-top). A selection that
+ * never leaves one page still resolves to `page_from === page_to` — the
+ * exact single-page shape this component always sent, unchanged.
+ *
+ * There is no more `key={pageNo}` remount to reset state on a page turn —
+ * continuous scroll has no "current page" to key by. Local state is reset
+ * directly instead (a fresh `selectionchange` firing empty, or navigating
+ * away on success).
  *
  * ASYNC since Plan 10 Task 1/5: `authorFromSelection` enqueues a
  * `GenerationJob(kind="lesson")` and returns 202 almost immediately — this
@@ -62,11 +82,11 @@ type Status = "idle" | "drafting" | "error";
  * Deliberately NOT an OCR editor (spec D5) — this only ever reads
  * `selection.toString()` and posts it verbatim; there is no way to change
  * what gets sent. */
-export function SelectionAction({ sourceId, pageNo, textRef }: SelectionActionProps) {
+export function SelectionAction({ sourceId }: SelectionActionProps) {
   const t = useTranslations("library.reader");
   const locale = useLocale();
   const router = useRouter();
-  const [selectedText, setSelectedText] = useState<string | null>(null);
+  const [selection, setSelection] = useState<Selection | null>(null);
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string | null>(null);
   // Mirrors `status` for the `selectionchange` listener below, which is
@@ -85,35 +105,38 @@ export function SelectionAction({ sourceId, pageNo, textRef }: SelectionActionPr
       // or reset the in-flight job.
       if (statusRef.current === "drafting") return;
 
-      const selection = window.getSelection();
-      const text = selection?.toString().trim() ?? "";
-      const pane = textRef.current;
-      const insidePane =
-        !!pane &&
-        !!selection &&
-        selection.rangeCount > 0 &&
-        pane.contains(selection.anchorNode) &&
-        pane.contains(selection.focusNode);
+      const live = window.getSelection();
+      const text = live?.toString().trim() ?? "";
+      const anchorPage = readerPageOf(live?.anchorNode ?? null);
+      const focusPage = readerPageOf(live?.focusNode ?? null);
+      const validRange =
+        !!live && live.rangeCount > 0 && anchorPage != null && focusPage != null;
 
-      if (text && insidePane) {
-        setSelectedText(text);
+      if (text && validRange) {
+        setSelection({
+          text,
+          pageFrom: Math.min(anchorPage!, focusPage!),
+          pageTo: Math.max(anchorPage!, focusPage!),
+        });
         setStatus("idle");
         setError(null);
       } else {
-        setSelectedText(null);
+        setSelection(null);
       }
     }
 
     document.addEventListener("selectionchange", handleSelectionChange);
     return () => document.removeEventListener("selectionchange", handleSelectionChange);
-  }, [textRef]);
+  }, []);
 
   const handleAuthor = useCallback(async () => {
-    if (!selectedText) return;
+    if (!selection) return;
     setStatus("drafting");
     setError(null);
     try {
-      const { job_id } = await authorFromSelection(sourceId, pageNo, selectedText);
+      const { job_id } = await authorFromSelection(
+        sourceId, selection.pageFrom, selection.pageTo, selection.text,
+      );
 
       // Poll until the job reaches a terminal status or we hit the cap —
       // see the `POLL_INTERVAL_MS`/`MAX_POLLS` docstring above. Same loop
@@ -146,9 +169,10 @@ export function SelectionAction({ sourceId, pageNo, textRef }: SelectionActionPr
       setStatus("error");
       setError(t("authorError"));
     }
-  }, [selectedText, sourceId, pageNo, router, locale, t]);
+  }, [selection, sourceId, router, locale, t]);
 
-  if (!selectedText) return null;
+  if (!selection) return null;
+  const spansPages = selection.pageFrom !== selection.pageTo;
 
   return (
     <div
@@ -158,8 +182,15 @@ export function SelectionAction({ sourceId, pageNo, textRef }: SelectionActionPr
       <div className="flex max-w-lg flex-col gap-2 rounded-2xl border border-border bg-popover px-4 py-2 text-popover-foreground shadow-lg">
         <div className="flex items-center gap-3">
           <Quote className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-          <span className="hidden truncate text-sm text-muted-foreground sm:inline">
-            &ldquo;{selectedText.length > 60 ? `${selectedText.slice(0, 60)}…` : selectedText}&rdquo;
+          <span className="hidden min-w-0 flex-1 flex-col sm:flex">
+            <span className="truncate text-sm text-muted-foreground">
+              &ldquo;{selection.text.length > 60 ? `${selection.text.slice(0, 60)}…` : selection.text}&rdquo;
+            </span>
+            {spansPages && (
+              <span data-testid="selection-range" className="text-xs text-muted-foreground/70">
+                {t("selectionSpans", { from: selection.pageFrom, to: selection.pageTo })}
+              </span>
+            )}
           </span>
           <Button
             type="button"

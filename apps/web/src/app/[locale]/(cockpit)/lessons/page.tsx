@@ -85,6 +85,7 @@ export default function LessonsPage() {
                 <ProvenanceChip
                   sourceId={lesson.provenance.source_id}
                   pageNo={lesson.provenance.page_no}
+                  pageTo={lesson.provenance.page_to}
                   locale={locale}
                 />
               ) : (

@@ -1205,9 +1205,10 @@ export function apiMediaUrl(path: string): string {
 
 /**
  * Typed fetch helper for the Library-to-lesson-authoring seam
- * (`routers/lessons.py::from_selection`, Plan 10 Task 1) — the Reader's
- * "author a lesson" action. Enqueues a `GenerationJob(kind="lesson")` and
- * returns 202 almost immediately (same `JobAccepted` shape/convention as
+ * (`routers/lessons.py::from_selection`, Plan 10 Task 1, extended Plan 12
+ * Task 4 / G4 for a range) — the Reader's "author a lesson" action.
+ * Enqueues a `GenerationJob(kind="lesson")` and returns 202 almost
+ * immediately (same `JobAccepted` shape/convention as
  * `startCurriculumGeneration` below): `draft_lesson_from_selection` is a
  * blocking guided-JSON LLM call, too slow for a synchronous request/response
  * cycle. Callers MUST poll `getJob(job_id)` until it reaches a terminal
@@ -1215,15 +1216,23 @@ export function apiMediaUrl(path: string): string {
  * via `getLesson` once `status === "succeeded"` — same "enqueue, then poll"
  * contract `components/library/selection-action.tsx` drives, mirroring
  * `components/curriculum/generate-dialog.tsx`'s poll loop verbatim.
+ *
+ * `pageFrom`/`pageTo` is the current shape — the continuous-scroll Reader
+ * lets a selection cross a page boundary (G4), so this always sends BOTH
+ * bounds (equal for a single-page selection); the API still separately
+ * accepts a legacy `page_no`-only body from anything else that posts here.
  */
 export function authorFromSelection(
   sourceId: string,
-  pageNo: number,
+  pageFrom: number,
+  pageTo: number,
   text: string,
 ): Promise<JobAccepted> {
   return request<JobAccepted>("/lessons/from-selection", {
     method: "POST",
-    body: JSON.stringify({ source_id: sourceId, page_no: pageNo, text }),
+    body: JSON.stringify({
+      source_id: sourceId, page_from: pageFrom, page_to: pageTo, text,
+    }),
   });
 }
 
@@ -1244,6 +1253,14 @@ export function authorFromSelection(
 export interface LessonProvenance {
   source_id: string;
   page_no: number;
+  /** The whole range a lesson was drafted from (G4, Plan 12 Task 4) —
+   * absent on lessons drafted before this range was recorded, and always
+   * equal to `{page_no, page_no}` for a single-page selection. `page_no`
+   * itself is always `page_from` (see `app.lessons.draft._persist_tree`), so
+   * anything that only knows about `page_no` (this file's own `ProvenanceChip`
+   * usages elsewhere) keeps working unchanged. */
+  page_from?: number;
+  page_to?: number;
 }
 
 /** `GET /lessons` row shape — mirrors `schemas/lessons.py`'s

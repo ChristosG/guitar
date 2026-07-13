@@ -194,10 +194,16 @@ def run_lesson_job(job_id: uuid.UUID) -> None:
             # before it can be used as a KnowledgeSource primary key lookup
             # (mirrors run_reingest_job's identical `uuid.UUID(job.params[
             # "source_id"])` conversion just below in this same module).
+            # `page_from`/`page_to` is the current job-params shape
+            # (`routers/lessons.py::from_selection`, G4); `.get("page_no")`
+            # is a defensive fallback for any job row enqueued by an older
+            # deploy that still stored the single-page shape (a live app can
+            # have a `GenerationJob` row created moments before a deploy).
             lesson_id = draft_lesson_from_selection(
                 db,
                 source_id=uuid.UUID(job.params["source_id"]),
-                page_no=job.params["page_no"],
+                page_from=job.params.get("page_from", job.params.get("page_no")),
+                page_to=job.params.get("page_to", job.params.get("page_no")),
                 text=job.params["text"],
                 language=job.params.get("language", "en"),
             )

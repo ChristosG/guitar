@@ -334,8 +334,7 @@
       "loading": "Loading…",
       "error": "Could not load this source.",
       "pageOf": "Page {page} of {total}",
-      "prev": "Previous page",
-      "next": "Next page",
+      "pageMarker": "Page {page}",
       "noText": "No text on this page yet.",
       "scanAlt": "Scan of page {page}",
       "pageStatus": {
@@ -345,6 +344,7 @@
         "failed": "This page could not be read."
       },
       "authorLesson": "Author a lesson from this",
+      "selectionSpans": "Spans pages {from}–{to}",
       "authorDrafting": "Drafting your lesson — this can take a minute…",
       "authorStillDrafting": "Still drafting — check the Lessons list in a bit.",
       "authorError": "Could not draft a lesson from this passage.",
@@ -360,7 +360,9 @@
     "noProvenance": "No source recorded",
     "provenance": {
       "chip": "from {source}, p.{page}",
-      "chipLoading": "from your library, p.{page}"
+      "chipLoading": "from your library, p.{page}",
+      "chipRange": "from {source}, p.{from}–{to}",
+      "chipRangeLoading": "from your library, p.{from}–{to}"
     },
     "editor": {
       "back": "Back to Lessons",
