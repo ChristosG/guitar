@@ -126,6 +126,15 @@ def ground_topic(
     passage). `search`'s own `domain` filter already exists and does exactly
     this job, so this is restoring behaviour, not adding a new filter
     dimension.
+
+    CRITICAL follow-up fix (also Plan 12): restoring that hard filter
+    faithfully restored a SECOND, latent bug along with it — `search`'s
+    filter used to treat `KnowledgeSource.domain IS NULL` ("unclassified",
+    the state of 95% of the real library's characters) as "not this
+    domain", so a `domain="tone"` call hard-excluded the tutor's entire real
+    library. `search` now matches `domain == X OR domain IS NULL` (see its
+    own docstring), so `ground_topic`'s `domain=` filter still excludes an
+    EXPLICITLY different domain, but never an unclassified source.
     """
     raw_k = max(k * _OVERFETCH, k)
     hits = search(db, topic, k=raw_k, domain=domain)

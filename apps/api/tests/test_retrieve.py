@@ -97,9 +97,23 @@ def test_search_ranks_humbucker_chunk_first_for_hum_query():
 
 
 @pytest.mark.integration
-def test_search_domain_filter_scopes_to_matching_sources_only():
-    """The optional `domain` filter (applied on the joined KnowledgeSource) must
-    exclude chunks from sources tagged with a different (or no) domain.
+def test_search_domain_filter_includes_unclassified_null_domain_sources():
+    """Plan 12 CRITICAL bug (this task's report has the full numbers):
+    `KnowledgeSource.domain` is essentially unpopulated on the real deployed
+    library — 12 of Chris's 16 real sources (95% of his real library's
+    characters, including his entire 77-page book) have `domain=NULL`. The
+    OLD hard `KnowledgeSource.domain == domain` filter treated NULL as "not
+    this domain" and excluded it, so a curriculum interview run with
+    `domain="tone"` threw away his entire real library and left every
+    module a false "gap".
+
+    Fix: `domain=NULL` means UNCLASSIFIED, not "a different domain" — a
+    `domain=` filter must still match it. This test used to assert the OLD
+    (wrong) behaviour (an untagged source excluded alongside a genuinely
+    off-topic one); it's rewritten here to assert the correct invariant
+    instead — see `test_search_domain_filter_excludes_a_source_tagged_a_
+    different_domain` immediately below for the "the filter still excludes
+    something" half of this same story.
 
     Generated fresh per run (not a hardcoded literal): a hardcoded domain
     string would collide with itself the second time this suite runs against
@@ -109,9 +123,38 @@ def test_search_domain_filter_scopes_to_matching_sources_only():
     """
     db = SessionLocal()
     try:
-        domain = f"t5filt-{uuid4().hex[:16]}"  # domain column is String(30); stay well under
+        domain = f"t12null-{uuid4().hex[:16]}"  # domain column is String(30); stay well under
+        null_source = _seed_source(db, "His Real Book (untagged)", _HUM_TEXT, domain=None)
+        _seed_source(
+            db, "Explicitly Other-Domain Source", _DELAY_TEXT,
+            domain=f"t12other-{uuid4().hex[:8]}",
+        )
+
+        hits = search(db, "what removes hum?", domain=domain, k=5)
+
+        assert hits, "a NULL-domain (unclassified) source must still be retrievable under a domain filter"
+        assert any(h.source_id == null_source.id for h in hits), (
+            "domain filter wrongly excluded an unclassified (domain=NULL) source — "
+            f"got source_ids: {[h.source_id for h in hits]}"
+        )
+    finally:
+        db.close()
+
+
+@pytest.mark.integration
+def test_search_domain_filter_excludes_a_source_tagged_a_different_domain():
+    """The domain filter must still do something useful: it excludes a
+    source EXPLICITLY tagged a different domain — only an exact match or an
+    unclassified (NULL) source should survive. Without this, "OR domain IS
+    NULL" alone would make the filter a no-op for any explicitly-tagged
+    off-domain source too.
+    """
+    db = SessionLocal()
+    try:
+        domain = f"t12tone-{uuid4().hex[:16]}"  # domain column is String(30); stay well under
+        other_domain = f"t12theory-{uuid4().hex[:16]}"
         tagged = _seed_source(db, "Tagged Hum Source", _HUM_TEXT, domain=domain)
-        _seed_source(db, "Untagged Delay Source", _DELAY_TEXT, domain=None)
+        _seed_source(db, "Explicitly Other-Domain Source", _DELAY_TEXT, domain=other_domain)
 
         hits = search(db, "what removes hum?", domain=domain, k=5)
 

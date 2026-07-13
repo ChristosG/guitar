@@ -14,8 +14,9 @@ url` blocking SSRF on the URL-ingestion path and (b) the upload/text/`k`/query
 bounds below guarding against resource exhaustion — not identity checks.
 """
 import logging
+import re
 from typing import Annotated
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -107,9 +108,30 @@ def _title_for_url(url: str) -> str:
     field exists in a pasted list of raw URLs (unlike `POST /sources`, which
     always gets one from the caller), so derive a human-legible one instead
     of just repeating the raw URL back as its own title.
+
+    Plan 12 follow-up: this used to be the raw `netloc + path`
+    ("en.wikipedia.org/wiki/Humbucker") — indistinguishable from a URL or a
+    server-log line, and confusing next to the 3 dead pre-Plan-9 Wikipedia
+    rows already in the sources list. Instead, derive a title from the
+    URL's last path segment: decode percent-encoding, turn `-`/`_` into
+    spaces, and title-case it ONLY if the raw slug was all-lowercase (a
+    slug already carrying meaningful casing — e.g. a wiki article's own
+    proper-noun title — is left alone rather than mangled), then append the
+    domain for context/provenance. Falls back to the bare domain (or the
+    raw URL, if even that's empty) when the URL has no path segments at
+    all, e.g. `https://example.com/`.
     """
     parts = urlsplit(url)
-    label = f"{parts.netloc}{parts.path}".rstrip("/") or parts.netloc or url
+    domain = parts.netloc
+    segments = [seg for seg in parts.path.split("/") if seg]
+    if not segments:
+        label = domain or url
+    else:
+        slug = unquote(segments[-1])
+        slug = re.sub(r"[-_]+", " ", slug).strip()
+        if slug and slug == slug.lower():
+            slug = slug.title()
+        label = f"{slug} — {domain}" if slug and domain else (slug or domain or url)
     return label[:_TITLE_MAX_CHARS]
 
 

@@ -28,7 +28,7 @@ regardless of which language the retrieved chunks are written in.
 from dataclasses import dataclass
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.llm.factory import get_provider
 from app.models.knowledge import Chunk, KnowledgeSource, Page
@@ -62,6 +62,26 @@ def search(
     `domain`/`language`, when given, filter on the joined KnowledgeSource
     (e.g. only "tone"-domain sources, or only Greek-language sources) — the
     query itself is still embedded and matched exactly the same way.
+
+    `domain` semantics (CRITICAL bug fix, Plan 12): `KnowledgeSource.domain`
+    is a free-text, essentially UNPOPULATED field in practice — measured on
+    the real deployed library, 12 of 16 real sources (95% of the real
+    library's characters, including the tutor's entire 77-page book) have
+    `domain IS NULL`. A plain `domain == X` filter treats NULL as "not X",
+    which is wrong: NULL means UNCLASSIFIED, not "confirmed to be a
+    different domain". Filtering it out silently threw away the tutor's
+    entire real library whenever a curriculum interview ran with
+    `domain="tone"`, leaving nothing but the tiny synthetic seed-filler and
+    marking every module a false gap ("your library doesn't cover this")
+    when it demonstrably did.
+
+    So `domain=X` here matches `KnowledgeSource.domain == X OR
+    KnowledgeSource.domain IS NULL` — a domain acts as a *preference for
+    same-domain material while never excluding unclassified material*, not
+    as an exclusion filter over everything not explicitly tagged. It still
+    excludes a source EXPLICITLY tagged a *different* domain (e.g.
+    domain="theory" when filtering domain="tone") — the filter isn't a
+    no-op, it just no longer punishes sources nobody got around to tagging.
     """
     qv = get_provider().embed([query], is_query=True)[0]
     distance = Chunk.embedding.cosine_distance(qv)
@@ -77,7 +97,9 @@ def search(
         .limit(k)
     )
     if domain is not None:
-        stmt = stmt.where(KnowledgeSource.domain == domain)
+        stmt = stmt.where(
+            or_(KnowledgeSource.domain == domain, KnowledgeSource.domain.is_(None))
+        )
     if language is not None:
         stmt = stmt.where(KnowledgeSource.language == language)
 

@@ -331,6 +331,87 @@ def test_domain_scopes_ground_topic_to_the_hard_sql_filter_not_a_soft_hint(db, m
     )
 
 
+def test_domain_scoped_ground_topic_still_grounds_against_an_unclassified_null_domain_source(db, monkeypatch):
+    """THE BUG, at the `ground_topic` layer: Chris's real 77-page book (and
+    11 of his other 12 real sources — 95% of his real library's characters)
+    has `domain=NULL`. That is UNCLASSIFIED, not "not tone" — a
+    `domain="tone"` grounding call must still be able to retrieve from it.
+    Real DB, real embeddings (`search` is NOT faked here) — this is the same
+    proof style as the "theory hard-excludes tone" test above, just for the
+    NULL-domain half of the same filter.
+    """
+    from app.brain.ingest import IngestPayload, ingest_source
+    from app.models.knowledge import KnowledgeSource
+
+    text = (
+        "Pick thickness changes the attack and brightness of a note: a "
+        "thin, flexible pick sounds softer and darker, while a thick, stiff "
+        "pick digs into the string for a brighter, more articulate attack "
+        "with more attack transient." * 4
+    )
+    book_source = KnowledgeSource(type="pdf", title="His Real Book", language="en", domain=None)
+    db.add(book_source)
+    db.commit()
+    ingest_source(db, book_source.id, IngestPayload(kind="text", text=text))
+    db.commit()
+    assert book_source.status == "ready", book_source.error
+
+    passages = ground_topic(db, "pick thickness and attack brightness", domain="tone", k=10)
+
+    assert passages, "domain='tone' must still ground against a NULL-domain (unclassified) source"
+    assert all(p.source_title == "His Real Book" for p in passages)
+
+
+def test_a_tone_module_is_grounded_not_a_gap_when_the_matching_source_is_domain_null(db, monkeypatch):
+    """End-to-end-ish reproduction of THE BUG at the `generate_curriculum`
+    layer (this is the shape of the bug Chris actually hit walking the live
+    interview): a real, on-topic source with `domain=NULL` must still ground
+    a "tone" module — NOT come back as a false gap. Real DB, real
+    embeddings: `ground_topic`/`search` are deliberately NOT faked (only the
+    LLM plan/draft calls are), so this exercises the real relevance floor
+    AND the real domain filter together, exactly like the live interview
+    does.
+    """
+    from app.brain.ingest import IngestPayload, ingest_source
+    from app.models.knowledge import KnowledgeSource
+
+    book_text = (
+        "Pickup type shapes guitar tone fundamentally: single-coil pickups "
+        "are brighter and thinner and pick up some audible 60-cycle mains "
+        "hum, while humbucker pickups cancel that hum in exchange for a "
+        "thicker, warmer, louder sound — the first tone trade-off every "
+        "guitarist learns about pickups and tone."
+    ) * 3
+    book_source = KnowledgeSource(type="pdf", title="His Real Book", language="en", domain=None)
+    db.add(book_source)
+    db.commit()
+    ingest_source(db, book_source.id, IngestPayload(kind="text", text=book_text))
+    db.commit()
+    assert book_source.status == "ready", book_source.error
+
+    plan = {
+        "title": "Tone Fundamentals",
+        "modules": [{"title": "Pickups and Tone", "objective": "How pickup type shapes guitar tone."}],
+    }
+    fake_provider = _FakeProvider([plan, _MODULE_DRAFT])
+    monkeypatch.setattr(generate_mod, "get_provider", lambda: fake_provider)
+    # Deliberately NOT monkeypatching ground_topic/search — this must go
+    # through the real relevance floor + real domain filter against the
+    # real (guitar_test) DB, exactly like the live interview does.
+
+    root_id = generate_curriculum(
+        db, title="Tone Fundamentals", language="en", profile={"level": "beginner"},
+        domain="tone",
+    )
+
+    module = _modules(db, root_id)[0]
+    assert "gap" not in module.target_profile, (
+        f"module wrongly marked as a gap: {module.target_profile!r} — "
+        "domain='tone' must still retrieve from a domain=NULL source"
+    )
+    assert module.target_profile["provenance"]["passages"][0]["source_title"] == "His Real Book"
+
+
 def test_source_ids_scopes_retrieval_to_the_tutors_chosen_sources(db, monkeypatch):
     wanted_source = uuid.uuid4()
     other_source = uuid.uuid4()
