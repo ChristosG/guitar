@@ -19,6 +19,7 @@ import app.artifacts.generate as artifact_generate
 from app.artifacts.generate import TITLE_MAX_LEN, _build_messages, derive_title, generate_artifact
 from app.brain.retrieve import Hit
 from app.db import Base, SessionLocal, engine
+from app.llm.errors import GuidedJSONError
 from app.models.artifact import Artifact
 
 # Skip cleanly (not error) when no DB is reachable — mirrors test_retrieve.py.
@@ -282,6 +283,101 @@ def test_generate_artifact_tab_never_persists_a_broken_artifact_when_both_attemp
 
     assert count_after == count_before  # nothing persisted
     assert len(fake.calls) == 2  # one initial attempt + one repair, no more
+
+
+# ---------------------------------------------------------------------------
+# Plan 12 Task 5 (G6): "substantively empty" specs for OTHER kinds fail
+# loudly through the SAME repair-retry / raise-uncaught path the tab tests
+# above already pin — no new error-handling machinery, only the tighter
+# `app.artifacts.specs` validators. One kind exercised end-to-end here
+# (chord_diagram); `test_artifact_specs.py` covers every guarded kind's
+# validator directly.
+# ---------------------------------------------------------------------------
+
+_CHORD_ALL_MUTED = {"name": "G", "frets": [-1, -1, -1, -1, -1, -1], "fingers": [0, 0, 0, 0, 0, 0]}
+
+
+def test_generate_artifact_repairs_an_all_muted_chord_into_a_real_one(monkeypatch):
+    fake = _FakeProvider([_CHORD_ALL_MUTED, _VALID_G])
+    monkeypatch.setattr(artifact_generate, "get_provider", lambda: fake)
+
+    db = SessionLocal()
+    try:
+        artifact = generate_artifact(db, kind="chord_diagram", prompt="G major open chord")
+        assert artifact.spec["frets"] == [3, 2, 0, 0, 0, 3]
+    finally:
+        db.close()
+
+    assert len(fake.calls) == 2
+
+
+def test_generate_artifact_never_persists_an_all_muted_chord_when_both_attempts_fail(monkeypatch):
+    """Same invariant as the tab test above, for a different kind: a
+    schema-valid-but-empty chord (every string muted) must fail loudly and
+    persist nothing if the repair retry doesn't fix it either.
+    """
+    fake = _FakeProvider([_CHORD_ALL_MUTED, _CHORD_ALL_MUTED])
+    monkeypatch.setattr(artifact_generate, "get_provider", lambda: fake)
+
+    db = SessionLocal()
+    try:
+        count_before = db.query(Artifact).count()
+        with pytest.raises(ValidationError):
+            generate_artifact(db, kind="chord_diagram", prompt="G major open chord")
+        count_after = db.query(Artifact).count()
+    finally:
+        db.close()
+
+    assert count_after == count_before
+    assert len(fake.calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# Plan 12 Task 5 (G6): truncation/timeout must not be swallowed either
+# ---------------------------------------------------------------------------
+#
+# Chris: the FIRST attempt "took too much time then generated nothing" — a
+# plausible root cause is a `finish_reason == "length"` truncation getting
+# silently swallowed and persisted as an empty artifact, which would be a
+# WORSE bug than the validator gap above (no spec to even validate). Pins
+# that `generate_artifact` does NOT catch/swallow `GuidedJSONError` (the
+# typed error `LLMProvider.guided_json` already raises for exactly this —
+# see `app.llm.qwen.QwenVLLM.guided_json`'s own docstring) — it must
+# propagate uncaught, with NOTHING persisted, same as every other raised
+# failure in this module (the router already maps this to a 502 "retry").
+
+class _ProviderThatTruncates:
+    """Mirrors what a REAL truncated `finish_reason == "length"` response
+    looks like from the caller's side: `guided_json` itself detects this and
+    raises `GuidedJSONError` (see `qwen.py`) — this fake reproduces that
+    contract directly rather than re-implementing OpenAI response parsing.
+    """
+    def __init__(self):
+        self.calls = 0
+
+    def guided_json(self, messages, schema, *, temperature=0.2):
+        self.calls += 1
+        raise GuidedJSONError("guided_json: unusable response (finish_reason='length')")
+
+
+def test_generate_artifact_propagates_truncation_without_persisting_or_repairing(monkeypatch):
+    fake = _ProviderThatTruncates()
+    monkeypatch.setattr(artifact_generate, "get_provider", lambda: fake)
+
+    db = SessionLocal()
+    try:
+        count_before = db.query(Artifact).count()
+        with pytest.raises(GuidedJSONError):
+            generate_artifact(db, kind="chord_diagram", prompt="G major open chord")
+        count_after = db.query(Artifact).count()
+    finally:
+        db.close()
+
+    assert count_after == count_before  # nothing persisted
+    # No repair retry either: a truncated response isn't a validation
+    # failure `generate_artifact`'s repair path is built to fix (there's no
+    # spec to repair), so it must not attempt a second call.
+    assert fake.calls == 1
 
 
 class _ProviderThatMustNotBeCalled:

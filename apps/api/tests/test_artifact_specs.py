@@ -131,6 +131,88 @@ def test_validate_signal_chain_requires_at_least_one_node():
         validate_spec("signal_chain", {"nodes": []})
 
 
+# ---------------------------------------------------------------------------
+# Plan 12 Task 5 (G6): "substantively empty" specs must fail loudly
+# ---------------------------------------------------------------------------
+#
+# Chris: "it generated nothing i could only see a 'TAB' component" — a spec
+# that is schema-valid (every field present, every type/range check passes)
+# but carries no actual musical content must be REJECTED here, the same
+# class of bug as `TabSpec.alphaTex` accepting a plain-English label (Plan
+# 11) — just the broader case, across every other kind that can go
+# schema-valid-but-empty. One test per kind guarded.
+
+def test_validate_chord_diagram_all_muted_raises():
+    """`frets` all `-1` (every string muted) is schema-shaped (6 ints,
+    each >= -1) but describes NO chord at all — nothing for the tutor to
+    play. A real chord always has at least one sounded string.
+    """
+    spec = {"name": "G", "frets": [-1, -1, -1, -1, -1, -1], "fingers": [0, 0, 0, 0, 0, 0]}
+    with pytest.raises(ValidationError):
+        validate_spec("chord_diagram", spec)
+
+
+def test_validate_scale_diagram_empty_positions_raises():
+    """`positions: []` was previously schema-valid (no `min_length`) — a
+    scale diagram with no positions has nothing to draw on the fretboard.
+    """
+    with pytest.raises(ValidationError):
+        validate_spec("scale_diagram", {"name": "G major", "root": "G", "positions": []})
+
+
+def test_validate_scale_diagram_real_positions_accepts():
+    spec = {
+        "name": "G major", "root": "G",
+        "positions": [{"string": 6, "fret": 3, "degree": "1"}],
+    }
+    out = validate_spec("scale_diagram", spec)
+    assert out["positions"] == [{"string": 6, "fret": 3, "degree": "1"}]
+
+
+def test_validate_signal_chain_all_blank_labels_raises():
+    """`nodes` non-empty (passes the existing `min_length=1`) but every
+    node's `label` is blank — schema-shaped (a `str`, and `""` is a valid
+    `str`), but there is nothing to actually show in the chain diagram.
+    """
+    with pytest.raises(ValidationError):
+        validate_spec("signal_chain", {"nodes": [{"label": ""}, {"label": "   "}]})
+
+
+def test_validate_amp_settings_empty_dials_raises():
+    """`dials: []` was previously schema-valid (no `min_length`) — an amp
+    settings card with no dials has no settings at all.
+    """
+    with pytest.raises(ValidationError):
+        validate_spec("amp_settings", {"amp": "Fender Twin", "dials": []})
+
+
+def test_validate_tone_recipe_blank_required_fields_raises():
+    """`guitar`/`amp`/`chain` are required `str` fields, but `""` satisfies
+    "is a string" fine — a tone recipe with blank core settings is exactly
+    the "succeeded but contains nothing" lie this task targets.
+    """
+    spec = {"guitar": "  ", "amp": "Fender Twin Reverb", "chain": "guitar -> amp"}
+    with pytest.raises(ValidationError):
+        validate_spec("tone_recipe", spec)
+
+
+def test_validate_gear_card_empty_specs_raises():
+    """`specs: []` was previously schema-valid (no `min_length`) — a gear
+    card with no spec rows has nothing to show.
+    """
+    with pytest.raises(ValidationError):
+        validate_spec("gear_card", {"name": "Fender Twin Reverb", "kind": "amp", "specs": []})
+
+
+def test_validate_gear_card_real_specs_accepts():
+    spec = {
+        "name": "Fender Twin Reverb", "kind": "amp",
+        "specs": [{"k": "Wattage", "v": "85W"}],
+    }
+    out = validate_spec("gear_card", spec)
+    assert out["specs"] == [{"k": "Wattage", "v": "85W"}]
+
+
 def test_specs_registry_has_all_seven_kinds():
     assert set(SPECS) == {
         "chord_diagram", "scale_diagram", "tab", "signal_chain",

@@ -59,6 +59,22 @@ instead of executing them:
     without ever leaving more than one tool_call unanswered in `messages`
     (protocol integrity — see the dispatch loop's own comment).
 
+Plan 12 Task 5 (G5) adds a PRE-model short-circuit, same shape as C1's
+forced-retrieval pre-hop but even earlier: on a fresh user turn, if
+`app.agent.guards.looks_like_named_song_request` trips (Chris's OTHER live
+bug — asked for the "Smells Like Teen Spirit" riff, got a real
+`generate_artifact` tab back with one note repeated seven times, because the
+model cannot actually recall a specific copyrighted recording and invents
+instead), the turn is answered immediately with `NAMED_SONG_DECLINE_MESSAGE`
+and the model is NEVER called. This has to happen before the model sees the
+request at all — there is no reliable way to make the model itself decline,
+since it is the very thing that fabricates when asked. See `guards.py`'s own
+docstring for the full "why not a hardcoded song list" detection rationale
+and its false-positive analysis. Runs BEFORE the C1 grounding pre-hop below
+(no point searching the library for a request that's about to be declined
+outright) and returns straight away, same "short-circuit before the loop
+proper starts" shape.
+
 Plan 11 Task 2 (C3) adds a POST-TURN guard on top of all of the above: when a
 turn ends with a plain answer (no tool_calls), and that answer's `content`
 trips `app.agent.guards.looks_like_tablature` (a free-typed ASCII tab —
@@ -81,7 +97,11 @@ import re
 from dataclasses import dataclass, field
 from typing import Iterator
 
-from app.agent.guards import looks_like_tablature
+from app.agent.guards import (
+    NAMED_SONG_DECLINE_MESSAGE,
+    looks_like_named_song_request,
+    looks_like_tablature,
+)
 from app.agent.prompts import SYSTEM_PROMPT
 from app.agent.tools import TOOLS
 from app.brain.retrieve import search
@@ -443,6 +463,18 @@ def run_agent_turn(db, messages: list[dict], *, max_steps: int = 6) -> AgentResu
     last_content: str | None = None
     citations: list[dict] = []
 
+    # --- G5: named-song decline pre-model short-circuit ---------------------
+    # Must run BEFORE the model is ever called (see this module's own
+    # docstring above) — a named-song tab/riff/solo request gets an honest,
+    # deterministic decline instead of a chance to fabricate.
+    last = messages[-1]
+    if last.get("role") == "user" and looks_like_named_song_request(last.get("content") or ""):
+        messages.append({"role": "assistant", "content": NAMED_SONG_DECLINE_MESSAGE})
+        return AgentResult(
+            status="answer", content=NAMED_SONG_DECLINE_MESSAGE,
+            messages=messages, citations=citations,
+        )
+
     # --- C1: forced retrieval pre-hop ---------------------------------------
     # Fires ONLY when the newest message in the transcript is a fresh user
     # turn (i.e. `messages[-1]["role"] == "user"`) — a resumed turn after an
@@ -465,8 +497,8 @@ def run_agent_turn(db, messages: list[dict], *, max_steps: int = 6) -> AgentResu
     # (`_new_tail`) to compute what to persist. An in-place mutation would
     # retroactively rewrite `prior_wire`'s own last entry too, corrupting
     # that diff; reassigning the slot only ever changes what THIS function's
-    # local list points to.
-    last = messages[-1]
+    # local list points to. `last` is still `messages[-1]` from the G5 check
+    # above (unchanged — this function returned already if it had matched).
     if last.get("role") == "user" and _is_content_bearing(last.get("content") or ""):
         raw_hits = search(db, last["content"], k=5)
         hits = [hit for hit in raw_hits if hit.score >= _RELEVANCE_FLOOR]
@@ -648,13 +680,27 @@ def stream_plain_turn(db, messages: list[dict]) -> Iterator[dict]:
     provider = get_provider()
     citations: list[dict] = []
 
+    # Same G5 pre-model short-circuit as `run_agent_turn` — see that
+    # function's own comment and this module's top-level docstring for the
+    # full rationale. Emitted as a plain "done" (not a "fallback"): there is
+    # nothing for the REST path to redo here, the decline itself IS the
+    # final answer, same as `run_agent_turn`'s equivalent branch returns it
+    # directly rather than falling back.
+    last = messages[-1]
+    if last.get("role") == "user" and looks_like_named_song_request(last.get("content") or ""):
+        messages.append({"role": "assistant", "content": NAMED_SONG_DECLINE_MESSAGE})
+        yield {
+            "event": "done", "content": NAMED_SONG_DECLINE_MESSAGE,
+            "citations": citations, "messages": messages,
+        }
+        return
+
     # Same pre-hop as `run_agent_turn` — see that function's own extensive
     # comment for the full rationale; duplicated here (not extracted into a
     # shared helper) because it's genuinely small and this module already
     # follows the "small deliberate duplication over a cross-call shared
     # helper with more parameters than callers" precedent (e.g. `_stringify`
     # in `app/routers/chat.py`).
-    last = messages[-1]
     if last.get("role") == "user" and _is_content_bearing(last.get("content") or ""):
         raw_hits = search(db, last["content"], k=5)
         hits = [hit for hit in raw_hits if hit.score >= _RELEVANCE_FLOOR]

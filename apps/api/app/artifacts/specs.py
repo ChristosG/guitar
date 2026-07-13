@@ -15,11 +15,37 @@ should use:
     uncaught (it is itself a `ValueError` subclass)
 Both are left for callers to map to HTTP 422; that mapping is not this
 module's concern.
+
+PLAN 12 TASK 5 (G6) — "substantively empty" specs must fail loudly, not
+persist. Chris: "it generated nothing i could only see a 'TAB' component."
+Plan 11 already closed the `TabSpec.alphaTex` case (a plain-English label
+passes "non-empty string" but is musically nothing — see
+`_ALPHATEX_NOTE_RE` below). This task closes the SAME class of bug for every
+OTHER kind that can go schema-valid (every field present, every type/range
+check passes) but carry no actual content for the tutor to use:
+  - `ChordDiagramSpec`: `frets` all `-1` (every string muted) is 6
+    schema-valid ints but describes no chord at all.
+  - `ScaleDiagramSpec`: `positions` had no `min_length` — an empty list is
+    schema-valid but draws nothing on the fretboard.
+  - `SignalChainSpec`: `nodes` already required >=1 entry, but every node's
+    `label` could still be blank (`""`/whitespace is a valid `str`) —
+    nothing to actually show in the chain diagram.
+  - `AmpSettingsSpec`: `dials` had no `min_length` — no dials is no settings
+    at all.
+  - `ToneRecipeSpec`: `guitar`/`amp`/`chain` are required `str` fields, but
+    `""` satisfies "is a string" fine — blank core settings is exactly the
+    "succeeded but contains nothing" case.
+  - `GearCardSpec`: `specs` had no `min_length` — no spec rows is nothing to
+    show.
+Each failure raises `pydantic.ValidationError` (a `ValueError`), the exact
+same path `generate_artifact`'s one-shot repair retry and the routers'
+422 mapping already handle — no new error-handling machinery needed, only
+tighter validation of what already flows through it.
 """
 import re
 from typing import Annotated
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # A real alphaTex note is `fret.string[.duration]` (e.g. `3.6.4` = fret 3,
 # string 6, quarter note) — confirmed against the vendored AlphaTab build
@@ -60,6 +86,19 @@ class ChordDiagramSpec(BaseModel):
     # artifact the client can't render.
     baseFret: int = Field(default=1, ge=1)
 
+    @model_validator(mode="after")
+    def _not_entirely_muted(self) -> "ChordDiagramSpec":
+        # G6: `frets` all `-1` is 6 schema-valid ints (each satisfies
+        # `ge=-1`) but describes NO chord at all — nothing sounds, nothing
+        # for the tutor to play. A real chord always has at least one
+        # sounded (non-muted) string.
+        if all(f == -1 for f in self.frets):
+            raise ValueError(
+                "chord_diagram frets are all -1 (every string muted) — "
+                "not a real chord, at least one string must be played"
+            )
+        return self
+
 
 class PositionSpec(BaseModel):
     string: int = Field(ge=1, le=6)
@@ -70,7 +109,10 @@ class PositionSpec(BaseModel):
 class ScaleDiagramSpec(BaseModel):
     name: str
     root: str
-    positions: list[PositionSpec]
+    # G6: min_length=1 — an empty list was previously schema-valid but draws
+    # nothing on the fretboard (same "schema-valid but substantively empty"
+    # class as every other guard in this module).
+    positions: list[PositionSpec] = Field(min_length=1)
 
 
 class TabSpec(BaseModel):
@@ -103,6 +145,19 @@ class NodeSpec(BaseModel):
 class SignalChainSpec(BaseModel):
     nodes: list[NodeSpec] = Field(min_length=1)  # ordered guitar -> ... -> amp
 
+    @model_validator(mode="after")
+    def _at_least_one_real_label(self) -> "SignalChainSpec":
+        # G6: `nodes` non-empty (the existing `min_length=1`) is not enough
+        # on its own — every node's `label` is a plain `str`, and `""`/
+        # whitespace-only satisfies that fine while showing nothing in the
+        # rendered chain. At least one node must carry real content.
+        if not any(n.label.strip() for n in self.nodes):
+            raise ValueError(
+                "signal_chain nodes all have a blank label — nothing to "
+                "show in the chain diagram"
+            )
+        return self
+
 
 class DialSpec(BaseModel):
     label: str
@@ -111,7 +166,9 @@ class DialSpec(BaseModel):
 
 class AmpSettingsSpec(BaseModel):
     amp: str | None = None
-    dials: list[DialSpec]
+    # G6: min_length=1 — an empty list was previously schema-valid but is no
+    # settings at all (same class as ScaleDiagramSpec.positions above).
+    dials: list[DialSpec] = Field(min_length=1)
 
 
 class ToneRecipeSpec(BaseModel):
@@ -124,6 +181,17 @@ class ToneRecipeSpec(BaseModel):
     hands: str | None = None
     listen: list[str] = []
 
+    @field_validator("guitar", "amp", "chain")
+    @classmethod
+    def _not_blank(cls, v: str, info) -> str:
+        # G6: these three are required `str` fields, but `""`/whitespace
+        # satisfies "is a string" fine — a tone recipe with blank core
+        # settings is exactly the "succeeded but contains nothing" case this
+        # task exists to catch.
+        if not v.strip():
+            raise ValueError(f"tone_recipe {info.field_name!r} must not be blank")
+        return v
+
 
 class KVSpec(BaseModel):
     k: str
@@ -133,7 +201,9 @@ class KVSpec(BaseModel):
 class GearCardSpec(BaseModel):
     name: str
     kind: str
-    specs: list[KVSpec]
+    # G6: min_length=1 — an empty list was previously schema-valid but is
+    # nothing to show (same class as the other list-emptiness guards above).
+    specs: list[KVSpec] = Field(min_length=1)
 
 
 SPECS: dict[str, type[BaseModel]] = {

@@ -40,6 +40,19 @@ instead. Belt-and-suspenders, not the only defence: `app/agent/guards.py`'s
 this sentence anyway (see `loop.py`'s post-turn guard) — the prompt sentence
 lowers how often the model needs catching, the code guard is what makes it
 not matter when it does.
+
+Plan 12 Task 5 (G5) added ONE more sentence again, same register: Chris's
+OTHER live bug, asking for the "Smells Like Teen Spirit" riff and getting one
+note repeated seven times, because the model cannot actually recall a
+specific copyrighted recording and invents when asked anyway. The new
+sentence tells it to say so honestly and offer a real alternative instead,
+rather than fabricate. Belt-and-suspenders again, same split as C3's: the
+REAL enforcement is `app/agent/guards.py`'s `looks_like_named_song_request`,
+a PRE-model short-circuit in `loop.py` that answers a detected named-song ask
+without ever calling the model at all (there is no reliable way to make the
+model itself decline — it's the very thing that fabricates) — this sentence
+only helps for the phrasings the code guard's generic-vocabulary detector
+doesn't catch, it is not what the task's acceptance rests on.
 """
 
 SYSTEM_PROMPT = (
@@ -56,5 +69,8 @@ SYSTEM_PROMPT = (
     "that. Call tools silently — never describe a tool call as prose "
     "instead of making it. Never write tablature or chord diagrams as "
     "text — always call generate_artifact so it renders as a real, "
-    "playable artifact."
+    "playable artifact. You cannot recall a specific copyrighted "
+    "recording's exact tab/riff/solo from memory, so never invent one — say "
+    "so honestly and offer a real alternative instead (the chord "
+    "progression in that style, a scale, or a technique exercise)."
 )

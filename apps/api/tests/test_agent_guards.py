@@ -14,14 +14,27 @@ identical duplication and `routers/artifacts.py`'s `_get_block_or_404`
 docstring for why).
   - a live-LLM check (`@pytest.mark.integration`): what the REAL model
     actually does now when asked Chris's exact question.
+
+Plan 12 Task 5 (G5) adds tests for `app.agent.guards.
+looks_like_named_song_request` — Chris's OTHER bug: asked for the "Smells
+Like Teen Spirit" riff and got one note repeated seven times, because the
+model cannot actually recall a specific copyrighted recording and invents
+instead. `run_agent_turn` wires this in as a PRE-model short-circuit (mirrors
+C1's forced-retrieval pre-hop shape): a named-song tab/riff/solo request
+never even reaches the model — it gets an honest decline that names a real
+alternative, straight away.
 """
 import pytest
 
 import app.agent.loop as agent_loop
-from app.agent.guards import looks_like_tablature
+from app.agent.guards import (
+    NAMED_SONG_DECLINE_MESSAGE,
+    looks_like_named_song_request,
+    looks_like_tablature,
+)
 from app.agent.loop import AgentResult, run_agent_turn
 from app.agent.tools import TOOLS
-from app.llm.tools_types import AssistantTurn
+from app.llm.tools_types import AssistantTurn, ToolCall
 from app.models.block import Block
 
 # Chris's exact bluff (from the live chat, pasted into the brief verbatim) —
@@ -158,6 +171,133 @@ def test_the_bluff_gets_a_bounded_re_prompt_not_an_unbounded_retry(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Plan 12 Task 5 (G5): looks_like_named_song_request
+# ---------------------------------------------------------------------------
+#
+# THE DETECTOR: NOT a hardcoded song list (useless — misses every song not on
+# it). Instead, an inverted, closed vocabulary of GENERIC music terms (note
+# names, scale/mode names, chord/progression words, technique words, generic
+# genre words, plus stopwords) — see `guards.py`'s own docstring for the
+# full list and rationale. A request only trips this detector when it BOTH
+# (a) names a riff/solo/lick/tab/intro/outro/chorus/bridge/verse — i.e. it's
+# actually asking for a piece of music, not e.g. "an exercise" alone — AND
+# (b) contains at least one word that ISN'T in that generic vocabulary — a
+# word that can only be naming something specific (a song, a band, a title),
+# since every legitimate generic music-theory word is already in the list.
+
+_DECLINE_EXAMPLES = [
+    "smells like teen spirit riff tabs",
+    "tab out the intro to Stairway to Heaven",
+    "the solo from Comfortably Numb",
+]
+
+_WORKS_EXAMPLES = [
+    "give me a G major scale tab",
+    "a blues shuffle in E",
+    "a 12-bar blues progression",
+    "an exercise for alternate picking",
+]
+
+
+@pytest.mark.parametrize("text", _DECLINE_EXAMPLES)
+def test_looks_like_named_song_request_detects_named_song_asks(text):
+    assert looks_like_named_song_request(text)
+
+
+@pytest.mark.parametrize("text", _WORKS_EXAMPLES)
+def test_looks_like_named_song_request_does_not_false_positive_on_generic_asks(text):
+    assert not looks_like_named_song_request(text)
+
+
+def test_looks_like_named_song_request_empty_and_none_are_falsy():
+    assert not looks_like_named_song_request("")
+    assert not looks_like_named_song_request(None)
+
+
+def test_looks_like_named_song_request_does_not_flag_an_unrelated_clause():
+    """Regression: a compound instruction can chain an unrelated command
+    (containing words that are neither generic-music-term NOR song-name
+    evidence, e.g. "students") onto a genuinely generic tab request in the
+    SAME turn — `test_agent_hitl.py`'s own
+    `test_read_and_mutation_in_the_same_turn_...` test drives exactly this
+    phrase through the loop and expects the mutation to actually reach the
+    model. Clause-splitting (this module's own docstring) is what keeps the
+    word-check scoped to the clause that actually names the request.
+    """
+    assert not looks_like_named_song_request("list students and make a tab")
+
+
+def test_named_song_decline_message_offers_a_real_alternative():
+    """The brief's own explicit requirement: "do not just say no — a tutor
+    asked for something and deserves a useful alternative." Pins that the
+    decline names concrete things the agent CAN actually do (a chord
+    progression, a scale, a technique exercise, the riff's rhythmic shape) —
+    not a bare refusal.
+    """
+    lowered = NAMED_SONG_DECLINE_MESSAGE.lower()
+    assert "chord progression" in lowered
+    assert "scale" in lowered
+    assert "exercise" in lowered
+    # Also honest about WHY, not just WHAT it can't do.
+    assert "copyright" in lowered or "recording" in lowered or "memorized" in lowered
+
+
+# ---------------------------------------------------------------------------
+# Plan 12 Task 5 (G5): the loop's pre-model short-circuit
+# ---------------------------------------------------------------------------
+
+class _ProviderThatMustNotBeCalled:
+    """A named-song decline must short-circuit BEFORE the model is ever
+    called — there is no reliable way to make the model itself decline
+    (it's the very thing that fabricates), so the guard must intercept the
+    user's own turn, the same "pre-hop, not a post-hoc check" shape C1's
+    forced-retrieval already established. Any call here is a hard failure.
+    """
+
+    def chat_tools(self, messages, tools, *, tool_choice="auto", temperature=0.3):
+        raise AssertionError("the model must never be called for a named-song request")
+
+
+@pytest.mark.parametrize("text", _DECLINE_EXAMPLES)
+def test_run_agent_turn_declines_a_named_song_request_without_calling_the_model(text, monkeypatch):
+    monkeypatch.setattr(agent_loop, "get_provider", lambda: _ProviderThatMustNotBeCalled())
+
+    messages = [{"role": "user", "content": text}]
+    result = run_agent_turn(None, messages)
+
+    assert result.status == "answer"
+    assert result.content == NAMED_SONG_DECLINE_MESSAGE
+    assert "chord progression" in result.content.lower()
+    # The decline is recorded in history too (Task 4's router persists
+    # `messages`, not just `content`).
+    assert result.messages[-1]["content"] == NAMED_SONG_DECLINE_MESSAGE
+
+
+@pytest.mark.parametrize("text", _WORKS_EXAMPLES)
+def test_run_agent_turn_still_calls_generate_artifact_for_generic_requests(text, monkeypatch):
+    """FALSE POSITIVES ARE THEIR OWN BUG (the brief's own words). Each of
+    these generic musical-object requests must still reach the model and
+    still be able to propose `generate_artifact` — proving the G5 guard
+    doesn't collaterally suppress the exact legitimate case Plan 11 already
+    fixed (a real scale/chord/exercise tab).
+    """
+    call = ToolCall(
+        id="call_1", name="generate_artifact",
+        arguments={"kind": "tab", "prompt": text},
+    )
+    turn = AssistantTurn(content=None, tool_calls=[call])
+    fake_provider = _FakeProvider([turn])
+    monkeypatch.setattr(agent_loop, "get_provider", lambda: fake_provider)
+
+    messages = [{"role": "user", "content": text}]
+    result = run_agent_turn(None, messages)
+
+    assert result.status == "awaiting_approval"
+    assert result.pending_tool["name"] == "generate_artifact"
+    assert len(fake_provider.calls) == 1  # the model WAS called — no short-circuit
+
+
+# ---------------------------------------------------------------------------
 # find_lesson (C5)
 # ---------------------------------------------------------------------------
 
@@ -252,6 +392,51 @@ def test_live_model_asked_chris_exact_question_g_major_scale_tab(db):
             "reprompt got a real generate_artifact call on retry, or the "
             "honest fallback had to be substituted."
         )
+
+    for m in result.messages:
+        if m.get("role") == "assistant":
+            assert not looks_like_tablature(m.get("content") or ""), (
+                f"a hand-typed tab reached the transcript uncaught: {m!r}"
+            )
+
+
+@pytest.mark.integration
+def test_live_model_asked_chris_exact_question_teen_spirit_riff(db):
+    """Drives Chris's EXACT other bug through the real system: "generate me
+    smells like teen spirit riff TABS". Unlike the G-major-scale-tab live
+    check above, this one does NOT actually need to reach the live model to
+    pass — the whole point of the G5 fix is that `run_agent_turn`'s new
+    pre-model short-circuit (`looks_like_named_song_request`) intercepts a
+    named-song ask BEFORE the model ever sees it, so no scripted/mocked
+    provider is needed for this to be a genuine "what does the real system
+    do now" check: `get_provider()` is deliberately left un-monkeypatched
+    (same posture as the sibling test above) so that if the guard's
+    detection regex is ever loosened to miss this exact phrase, this test
+    would fall through to the REAL model and could then reproduce Chris's
+    actual bug (a fabricated, degenerate tab) instead of silently passing.
+
+    HARD-asserts the product-level invariant this task exists for: Chris's
+    exact phrasing gets an honest decline that names a real alternative, and
+    — belt and suspenders with the G-major-scale-tab check above — no
+    assistant message anywhere in the transcript can read as a fabricated
+    hand-typed tab.
+    """
+    messages = [{"role": "user", "content": "generate me smells like teen spirit riff TABS"}]
+    result = run_agent_turn(db, messages)
+
+    print(
+        f"\n[live-llm teen-spirit-riff] status={result.status!r} "
+        f"pending_tool={result.pending_tool!r} content={result.content!r}"
+    )
+
+    assert result.status == "answer"
+    assert result.content == NAMED_SONG_DECLINE_MESSAGE
+    print(
+        "[live-llm teen-spirit-riff] FINDING: the G5 pre-model guard "
+        "intercepted this request before the model was ever called — an "
+        "honest, deterministic decline naming a real alternative, instead "
+        "of the one-note-repeated fabrication Chris got live."
+    )
 
     for m in result.messages:
         if m.get("role") == "assistant":

@@ -50,6 +50,47 @@ that suppresses a legitimate answer is its own bug") — see
     line of bare dashes alone (e.g. a markdown `---` horizontal rule) is not
     a tab and does not count toward either shape's >=2 threshold.
   - Ordinary prose (no `|`, no fence) never reaches either regex at all.
+
+PLAN 12 TASK 5 (G5) adds a SECOND, independent guard: `looks_like_named_song_
+request`, for Chris's OTHER live bug — he asked for the "Smells Like Teen
+Spirit" riff and got a real `generate_artifact` tab back (so `looks_like_
+tablature` above never even fired), but its `alphaTex` was one note repeated
+seven times. The model cannot actually recall a specific copyrighted
+recording note-for-note; asked to produce one anyway, it invents — and a
+confidently WRONG tab is worse than an honest "I can't do that". This is also
+the right call on copyright: fabricating a transcription of a real, specific
+recording is not something to paper over either.
+
+THE DETECTOR, AND WHY IT'S NOT A SONG LIST: a hardcoded list of song titles
+would be useless — it misses every song not already on it, which is to say
+nearly every song. Instead this INVERTS the problem: `_GENERIC_MUSIC_TERMS`
+is a closed, curated vocabulary of GENERIC musical language — note names,
+scale/mode names, chord/progression words, technique words, generic genre
+words, plus ordinary stopwords/connectives. Every one of the brief's WORKS
+examples ("give me a G major scale tab", "a blues shuffle in E", "a 12-bar
+blues progression", "an exercise for alternate picking") is made ENTIRELY of
+words from this vocabulary. A request only trips the detector when it BOTH:
+  1. names a `_TRIGGER_WORDS` term (riff/solo/lick/tab(s)/intro/outro/
+     chorus/bridge/verse) — i.e. it's actually asking for a piece of music,
+     not e.g. a bare theory/technique question that never reaches this guard
+     at all; AND
+  2. contains at least one word NOT in `_GENERIC_MUSIC_TERMS` — a word that
+     can only be naming something SPECIFIC (a song title, a band), since
+     every legitimate generic music-theory/style word one could genuinely
+     need for an artifact request is already in that vocabulary.
+
+This is deliberately biased toward over-declining (the brief's own words:
+"an occasional over-decline that offers a real alternative is far less
+harmful than a confidently fabricated tab") — a request naming an artist by
+name ("in the style of Hendrix") also trips it, since "Hendrix" is no more
+in the generic vocabulary than "Nirvana" is. That is an intentional,
+accepted false-positive: an honest decline with a real alternative offered
+is still a useful answer, unlike a confidently wrong one.
+
+Checked against the FULL message text, not just the words immediately
+around the trigger — these requests are short (a sentence, not a paragraph),
+so there is no meaningful difference in practice, and scanning the whole
+message avoids having to define "immediately around" as its own fuzzy rule.
 """
 import re
 
@@ -89,3 +130,110 @@ def looks_like_tablature(text: str) -> bool:
             return True
 
     return False
+
+
+# ---------------------------------------------------------------------------
+# Plan 12 Task 5 (G5): looks_like_named_song_request
+# ---------------------------------------------------------------------------
+
+# A request only trips the detector if it names one of these — i.e. it's
+# actually asking for a piece of music (a riff/solo/lick/tab, or a named
+# song SECTION), not a bare theory/technique question. These are also
+# included in `_GENERIC_MUSIC_TERMS` below so the trigger word itself is
+# never counted as the "specific" word that flags a request.
+_TRIGGER_WORDS = {
+    "riff", "riffs", "solo", "solos", "lick", "licks", "tab", "tabs",
+    "intro", "outro", "chorus", "bridge", "verse",
+}
+
+# The closed, curated GENERIC vocabulary — see this module's own top-level
+# docstring for the full "why not a song list" rationale. Anything a
+# legitimate generic musical-object request needs (a scale, a chord
+# progression, a technique exercise, a generic style/genre) is a word in
+# this set; anything else surviving in the request text is, definitionally,
+# naming something SPECIFIC (a song, a band).
+_GENERIC_MUSIC_TERMS = {
+    # stopwords / connectives / imperative verbs
+    "a", "an", "the", "of", "in", "on", "to", "for", "me", "my", "please",
+    "give", "generate", "create", "make", "write", "play", "some", "this",
+    "that", "out", "up", "with", "style", "styled", "like", "sounding",
+    "one", "song", "piece", "tune", "using", "based", "and", "or",
+    "from", "by", "as", "is", "it", "its", "you", "your",
+    # note letters and qualities (single-letter note names are handled
+    # separately below, but the words are listed here too for clarity)
+    "sharp", "flat", "natural", "major", "minor",
+    # scales / modes
+    "scale", "scales", "pentatonic", "blues", "mode", "modes", "dorian",
+    "mixolydian", "lydian", "phrygian", "locrian", "ionian", "aeolian",
+    "harmonic", "melodic", "chromatic", "diminished", "augmented",
+    # chords / progressions
+    "chord", "chords", "progression", "progressions", "arpeggio",
+    "arpeggios", "triad", "triads", "bar", "bars", "12-bar", "8-bar",
+    "16-bar", "turnaround", "cadence", "shuffle",
+    # techniques
+    "exercise", "exercises", "technique", "techniques", "alternate",
+    "picking", "hammer-on", "hammer", "pull-off", "pull", "slide",
+    "sliding", "bend", "bends", "bending", "vibrato", "sweep", "tapping",
+    "legato", "warm-up", "warmup", "fingerstyle", "strumming", "rhythm",
+    "lead", "improvisation", "improv", "riffing",
+    # generic genres/styles — NOT artist/band/song names
+    "rock", "jazz", "funk", "country", "metal", "folk", "pop", "reggae",
+    "punk", "ambient", "acoustic", "electric",
+    # the trigger words themselves are neutral in context
+    *_TRIGGER_WORDS,
+}
+
+# Word tokens: letters plus internal hyphens/apostrophes (so "hammer-on",
+# "12-bar", "warm-up" tokenize as one word each, matching the multi-word
+# entries above once digits are allowed too).
+_WORD_RE = re.compile(r"[a-z0-9][a-z0-9'-]*")
+
+
+
+# CLAUSE boundaries: a compound instruction ("list students and make a tab")
+# can legitimately contain words far from the trigger that are irrelevant to
+# music entirely (e.g. "students") rather than either generic-music-term OR
+# song-name evidence — the whole-message word scan would otherwise treat
+# "students" as "specific" and wrongly decline a request that has nothing to
+# do with a named song at all. Splitting on clause boundaries first and only
+# scanning the clause that actually contains the trigger word keeps the
+# check scoped to the part of the message that's actually naming a piece of
+# music, not an unrelated command chained onto the same turn.
+_CLAUSE_SPLIT_RE = re.compile(r"[.,;]+|\band\b|\bbut\b|\bthen\b", re.IGNORECASE)
+
+
+def looks_like_named_song_request(text: str) -> bool:
+    """True iff `text` plausibly asks for a NAMED SONG's tab/riff/solo — see
+    this module's top-level docstring for the full detection rationale.
+    Used by `app/agent/loop.py` as a PRE-model short-circuit (mirrors Plan 11
+    Task 1's forced-retrieval pre-hop shape): a positive here means the turn
+    is answered with `NAMED_SONG_DECLINE_MESSAGE` WITHOUT ever calling the
+    model — there is no reliable way to make the model itself decline (it is
+    the very thing that fabricates when asked), so the interception has to
+    happen before it ever sees the request.
+    """
+    if not text:
+        return False
+    for clause in _CLAUSE_SPLIT_RE.split(text.lower()):
+        words = _WORD_RE.findall(clause)
+        if not any(w in _TRIGGER_WORDS for w in words):
+            continue
+        # Single-character words (almost always a bare note name — "E",
+        # "A", ...) are never treated as "specific" on their own; only
+        # length>=2 tokens outside the generic vocabulary count as evidence
+        # of a named song.
+        specific_words = [w for w in words if len(w) > 1 and w not in _GENERIC_MUSIC_TERMS]
+        if specific_words:
+            return True
+    return False
+
+
+NAMED_SONG_DECLINE_MESSAGE = (
+    "I can't reproduce a specific recording's tab note-for-note — I don't "
+    "actually have it memorized, and guessing would just invent a "
+    "confidently wrong (and possibly copyrighted) transcription instead of "
+    "an honest answer. What I CAN generate for you: the chord progression "
+    "in that style, a scale or technique exercise it draws on, or the "
+    "riff's rhythmic shape as a generic pattern — just ask for one of those "
+    "and I'll generate it as a real artifact."
+)
