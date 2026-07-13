@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useLocale, useTranslations } from "next-intl";
-import { GenerateDialog } from "@/components/curriculum/generate-dialog";
+import { InterviewDialog } from "@/components/curriculum/interview-dialog";
 import { TreeBoard } from "@/components/curriculum/tree-board";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -87,7 +87,7 @@ export default function CurriculaPage() {
           </h1>
           <p className="text-sm text-muted-foreground">{t("subheading")}</p>
         </div>
-        <GenerateDialog locale={locale} onGenerated={handleGenerated} />
+        <InterviewDialog locale={locale} onGenerated={handleGenerated} />
       </div>
 
       <div className="flex flex-col gap-2">

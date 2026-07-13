@@ -163,25 +163,6 @@
     "boardEmpty": "Generate a curriculum or select a template to see its tree.",
     "boardLoading": "Loading curriculum…",
     "boardError": "Could not load this curriculum.",
-    "generateDialog": {
-      "trigger": "Generate curriculum",
-      "heading": "Generate a curriculum",
-      "description": "The tutor drafts a grounded course tree from your Knowledge base. This calls the model and can take a minute or two.",
-      "title": "Title",
-      "titlePlaceholder": "e.g. Tone Shaping Fundamentals",
-      "domain": "Domain",
-      "domainPlaceholder": "tone, technique, theory…",
-      "level": "Level",
-      "levelPlaceholder": "beginner, intermediate, advanced",
-      "language": "Language",
-      "targetHours": "Target hours",
-      "targetHoursPlaceholder": "e.g. 10",
-      "cancel": "Cancel",
-      "submit": "Generate",
-      "generating": "Generating your curriculum — this can take a minute…",
-      "stillGenerating": "Still generating — reopen this dialog later to check on it.",
-      "error": "Could not generate the curriculum."
-    },
     "tree": {
       "estMinutes": "{count} min",
       "editTitlePlaceholder": "Block title",
@@ -231,6 +212,57 @@
       "submit": "Attach",
       "generating": "Generating…",
       "error": "Could not generate the artifact."
+    },
+    "interview": {
+      "trigger": "Generate curriculum",
+      "dialogHeading": "Build a curriculum together",
+      "introDescription": "Tell me the course title, and I'll guide you through the rest — one question at a time.",
+      "titleLabel": "Course title",
+      "titlePlaceholder": "e.g. Getting a Great Guitar Tone",
+      "domainLabel": "Domain (optional)",
+      "domainPlaceholder": "tone, technique, theory…",
+      "startSubmit": "Start",
+      "startError": "Could not start the interview.",
+      "answerError": "Could not save that answer.",
+      "continue": "Continue",
+      "cancel": "Cancel",
+      "steps": {
+        "who": {
+          "heading": "Who is this curriculum for?",
+          "newStudentToggle": "Someone new",
+          "namePlaceholder": "Student's name",
+          "levelPlaceholder": "Level (optional)",
+          "languagePlaceholder": "Language code (optional)"
+        },
+        "duration": {
+          "heading": "How long should this run?",
+          "weeksLabel": "Weeks",
+          "minutesLabel": "Minutes per session"
+        },
+        "sources": {
+          "heading": "Which of your library sources should this draw on?",
+          "hint": "Shown with type and character count so you can tell real material from filler — nothing is pre-excluded.",
+          "empty": "Your library is empty — proceeding will draw on general knowledge only.",
+          "charCount": "{count} chars"
+        },
+        "preview": {
+          "heading": "Here's what your library actually supports",
+          "gapCountZero": "Every module is grounded in your library.",
+          "gapSummary": "{count} of {total} modules have nothing in your library.",
+          "gapLabel": "Nothing in your library for this module.",
+          "citation": "{source}, p.{page}",
+          "proceed": "Looks good — continue"
+        },
+        "confirm": {
+          "heading": "Ready to generate \"{title}\"?",
+          "allowGeneralLabel": "Fill gap modules from general knowledge (clearly labelled as not from your material)",
+          "approve": "Generate curriculum",
+          "generating": "Generating your curriculum — this can take a minute…",
+          "stillGenerating": "Still generating — reopen this dialog later to check on it.",
+          "error": "Could not generate the curriculum.",
+          "startOver": "Start a new interview"
+        }
+      }
     }
   },
   "library": {

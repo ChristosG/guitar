@@ -335,19 +335,28 @@ function makeTreeWithSegment(segmentId: string, title: string, language: string)
   };
 }
 
-/** A trimmed `/curricula` + `/curricula/generate` + `/jobs/{id}` mock — just
- * enough to get a fixed tree (with a known segment id) onto the board, for
- * the segment-artifact test below. Mirrors the async generate-then-poll
- * contract `cockpit.spec.ts`'s own `mockCurriculaApi` covers in full (Plan 8
- * Task 4) — `POST /curricula/generate` returns a 202 `{job_id, status:
- * "pending"}`, `GET /jobs/{id}` resolves "succeeded" on its very first poll
- * (this test isn't exercising the loading state, so there's no need to make
- * it wait through a real pending-then-succeeded cycle) with `result_root_id`
- * set to the fixed tree's own id, and `GET /curricula/{id}` then serves that
- * tree. Same predicate-route reasoning as `mockArtifactsApi` above (kept
- * local to this file rather than imported from `cockpit.spec.ts`, matching
- * this test suite's existing per-file self-containment convention). */
+/** A trimmed `/curricula` + the guided interview (`/curricula/interview...`,
+ * Plan 12 Task 3 / G2 — the entry point that replaced the old one-shot
+ * `POST /curricula/generate` form) + `/jobs/{id}` mock — just enough to get
+ * a fixed tree (with a known segment id) onto the board, for the
+ * segment-artifact test below. Mirrors the async enqueue-then-poll contract
+ * `cockpit.spec.ts`'s own `mockCurriculaApi` covers in full (Plan 8 Task 4)
+ * — the interview's final "confirm" step answer returns a 202 `{job_id,
+ * status: "pending"}` (mirrors `answer_curriculum_interview`'s two-shape
+ * response on the API side), `GET /jobs/{id}` resolves "succeeded" on its
+ * very first poll (this test isn't exercising the loading state, so there's
+ * no need to make it wait through a real pending-then-succeeded cycle) with
+ * `result_root_id` set to the fixed tree's own id, and `GET /curricula/{id}`
+ * then serves that tree. Same predicate-route reasoning as
+ * `mockArtifactsApi` above (kept local to this file rather than imported
+ * from `cockpit.spec.ts`, matching this test suite's existing
+ * per-file self-containment convention). Every other step
+ * (who/duration/sources/preview) is answered with the barest valid shape —
+ * this mock only cares about reaching "confirm". */
 async function mockCurriculaForSegmentTest(page: Page, tree: FixtureBlockNode) {
+  const interviewId = randomUUID();
+  let step = "who";
+
   async function handler(route: Route) {
     const req = route.request();
     const method = req.method();
@@ -366,7 +375,39 @@ async function mockCurriculaForSegmentTest(page: Page, tree: FixtureBlockNode) {
       });
       return;
     }
-    if (pathname === "/curricula/generate" && method === "POST") {
+    if (pathname === "/curricula/interview" && method === "POST") {
+      step = "who";
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        headers: CORS_HEADERS,
+        body: JSON.stringify({
+          interview_id: interviewId, step: "who", question: "Who is this for?",
+          options: [], findings: null, error: null,
+        }),
+      });
+      return;
+    }
+    const answerMatch = pathname.match(/^\/curricula\/interview\/([^/]+)\/answer$/);
+    if (answerMatch && method === "POST") {
+      const NEXT: Record<string, string> = {
+        who: "duration", duration: "sources", sources: "preview", preview: "confirm",
+      };
+      if (step !== "confirm") {
+        const nextStep = NEXT[step];
+        step = nextStep;
+        await route.fulfill({
+          status: 200, contentType: "application/json", headers: CORS_HEADERS,
+          body: JSON.stringify({
+            interview_id: interviewId, step: nextStep, question: "...", options: [],
+            findings: nextStep === "preview" || nextStep === "confirm"
+              ? { course_title: tree.title, modules: [], gap_count: 0 }
+              : null,
+            error: null,
+          }),
+        });
+        return;
+      }
       await route.fulfill({
         status: 202,
         contentType: "application/json",
@@ -577,9 +618,18 @@ test.describe("curriculum board segment artifacts (mocked API)", () => {
     await expect(page).toHaveURL(/\/en\/curricula$/);
 
     await page.getByTestId("curricula-generate-button").click();
-    await page.getByTestId("generate-title").fill("Open Chords Basics");
-    await page.getByTestId("generate-submit").click();
-    await expect(page.getByTestId("generate-dialog")).toBeHidden({ timeout: 10_000 });
+    await page.getByTestId("interview-title").fill("Open Chords Basics");
+    await page.getByTestId("interview-start-submit").click();
+    await page.getByTestId("interview-who-new-toggle").click();
+    await page.getByTestId("interview-who-name").fill("Nikos");
+    await page.getByTestId("interview-answer-submit").click();
+    await page.getByTestId("interview-duration-weeks").fill("6");
+    await page.getByTestId("interview-duration-minutes").fill("30");
+    await page.getByTestId("interview-answer-submit").click();
+    await page.getByTestId("interview-answer-submit").click(); // sources
+    await page.getByTestId("interview-answer-submit").click(); // preview
+    await page.getByTestId("interview-confirm-submit").click();
+    await expect(page.getByTestId("interview-dialog")).toBeHidden({ timeout: 10_000 });
 
     // The segment leaf (only "segment"-kind nodes get this affordance) shows
     // its pre-attached chord diagram inline, fetched automatically on mount

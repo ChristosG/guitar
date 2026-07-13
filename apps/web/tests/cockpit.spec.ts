@@ -207,23 +207,23 @@ interface CurriculumListItemFixture {
 const JOB_FAILURE_MESSAGE =
   "Curriculum generation failed (model returned invalid/truncated output). Try again.";
 
-/** Mocks `/curricula`, `/curricula/generate`, `/jobs/{id}` and
- * `/curricula/{id}`/`/blocks/{id}` (PATCH) — the full async
- * generate-then-poll contract (Plan 8 Task 4): `POST /curricula/generate`
- * returns a 202 `{job_id, status: "pending"}` immediately (no tree body any
- * more — see `lib/api.ts`'s `startCurriculumGeneration`); `GET /jobs/{id}`
- * answers "pending" for `pendingPolls` calls, then a terminal status. This
- * is what makes the "non-frozen loading state" assertions below genuine
- * rather than raced past: the dialog's own poll loop waits ~2s between
- * calls (`generate-dialog.tsx`), so with the default `pendingPolls: 1` the
- * loading state is provably visible across a real wait, not just a
- * synchronous tick.
+/** Mocks `/curricula`, the guided interview (`/curricula/interview...`,
+ * Plan 12 Task 3 / G2 — the new entry point that replaced the old one-shot
+ * `POST /curricula/generate` form), `/jobs/{id}` and `/curricula/{id}`/
+ * `/blocks/{id}` (PATCH). Drives the SAME async enqueue-then-poll contract
+ * the old direct form used (Plan 8 Task 4) — the interview's own final
+ * "confirm" step answer is what returns a 202 `{job_id, status: "pending"}`
+ * (mirrors `answer_curriculum_interview`'s two-shape response on the API
+ * side); `GET /jobs/{id}` answers "pending" for `pendingPolls` calls, then a
+ * terminal status — same "provably visible across a real wait, not just a
+ * synchronous tick" reasoning the old mock's own docstring gave, since
+ * `InterviewDialog`'s poll loop reuses the exact same `POLL_INTERVAL_MS`/
+ * `MAX_POLLS` cadence `generate-dialog.tsx` used.
  *
  * `jobOutcome: "succeeded"` (default) resolves with `result_root_id` set to
  * the generated tree's root id, fetchable via the `GET /curricula/{id}`
  * handler below — and only THEN is the new template added to the
- * `/curricula` list, mirroring `run_curriculum_job`'s real behavior (the row
- * is persisted inside the background job, not at enqueue time).
+ * `/curricula` list, mirroring `run_curriculum_job`'s real behavior.
  * `jobOutcome: "failed"` resolves with `error`/`error_kind` set and no
  * `result_root_id` — nothing is added to `templates`. */
 async function mockCurriculaApi(
@@ -234,10 +234,15 @@ async function mockCurriculaApi(
     jobOutcome = "succeeded" as "succeeded" | "failed",
   } = {},
 ) {
+  const interviewId = randomUUID();
+  let interviewStep = "who";
+  let courseTitle = "";
+  let courseLanguage = "en";
   let currentTree: FixtureBlock | null = null;
   let jobPolls = 0;
-  const calls = { list: 0, generate: 0, job: 0, get: 0, patch: 0 };
-  const lastBody: { generate?: unknown; patch?: unknown } = {};
+  const calls = { list: 0, interviewStart: 0, answer: 0, job: 0, get: 0, patch: 0 };
+  const answerBodies: unknown[] = [];
+  const lastBody: { patch?: unknown } = {};
   const unexpected: string[] = [];
 
   async function handler(route: Route) {
@@ -259,11 +264,84 @@ async function mockCurriculaApi(
       });
       return;
     }
-    if (pathname === "/curricula/generate" && method === "POST") {
-      calls.generate++;
-      const payload = req.postDataJSON() as { title: string; language: string };
-      lastBody.generate = payload;
-      currentTree = makeGeneratedTree(payload.title, payload.language);
+    if (pathname === "/curricula/interview" && method === "POST") {
+      calls.interviewStart++;
+      const payload = req.postDataJSON() as { title: string; domain?: string | null };
+      courseTitle = payload.title;
+      interviewStep = "who";
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        headers: CORS_HEADERS,
+        body: JSON.stringify({
+          interview_id: interviewId,
+          step: "who",
+          question: "Who is this curriculum for?",
+          options: [],
+          findings: null,
+          error: null,
+        }),
+      });
+      return;
+    }
+    const answerMatch = pathname.match(/^\/curricula\/interview\/([^/]+)\/answer$/);
+    if (answerMatch && method === "POST") {
+      calls.answer++;
+      const payload = req.postDataJSON() as { answer: { language?: string } };
+      answerBodies.push(payload.answer);
+
+      if (interviewStep === "who") {
+        courseLanguage = payload.answer.language || "en";
+        interviewStep = "duration";
+        await route.fulfill({
+          status: 200, contentType: "application/json", headers: CORS_HEADERS,
+          body: JSON.stringify({
+            interview_id: interviewId, step: "duration",
+            question: "How many weeks, and minutes per session?",
+            options: null, findings: null, error: null,
+          }),
+        });
+        return;
+      }
+      if (interviewStep === "duration") {
+        interviewStep = "sources";
+        await route.fulfill({
+          status: 200, contentType: "application/json", headers: CORS_HEADERS,
+          body: JSON.stringify({
+            interview_id: interviewId, step: "sources",
+            question: "Which sources?", options: [], findings: null, error: null,
+          }),
+        });
+        return;
+      }
+      if (interviewStep === "sources") {
+        interviewStep = "preview";
+        currentTree = makeGeneratedTree(courseTitle, courseLanguage);
+        await route.fulfill({
+          status: 200, contentType: "application/json", headers: CORS_HEADERS,
+          body: JSON.stringify({
+            interview_id: interviewId, step: "preview",
+            question: "Here's what your library supports.", options: null,
+            findings: { course_title: courseTitle, modules: [], gap_count: 0 },
+            error: null,
+          }),
+        });
+        return;
+      }
+      if (interviewStep === "preview") {
+        interviewStep = "confirm";
+        await route.fulfill({
+          status: 200, contentType: "application/json", headers: CORS_HEADERS,
+          body: JSON.stringify({
+            interview_id: interviewId, step: "confirm",
+            question: "Ready to generate?", options: null,
+            findings: { course_title: courseTitle, modules: [], gap_count: 0 },
+            error: null,
+          }),
+        });
+        return;
+      }
+      // interviewStep === "confirm"
       jobPolls = 0;
       await route.fulfill({
         status: 202,
@@ -392,7 +470,7 @@ async function mockCurriculaApi(
   await page.route(`${API_ORIGIN}/blocks/**`, handler);
   await page.route(`${API_ORIGIN}/jobs/**`, handler);
 
-  return { calls, lastBody, unexpected };
+  return { calls, answerBodies, lastBody, unexpected };
 }
 
 test.describe("cockpit shell", () => {
@@ -468,27 +546,47 @@ test.describe("curricula (mocked API)", () => {
     await expect(page.getByTestId("board-empty")).toBeVisible();
 
     await page.getByTestId("curricula-generate-button").click();
-    await expect(page.getByTestId("generate-dialog")).toBeVisible();
+    await expect(page.getByTestId("interview-dialog")).toBeVisible();
 
-    await page.getByTestId("generate-title").fill("Tone Shaping Fundamentals");
-    await page.getByTestId("generate-domain").fill("tone");
-    await page.getByTestId("generate-level").fill("beginner");
-    await page.getByTestId("generate-language").fill("en");
-    await page.getByTestId("generate-hours").fill("6");
-    await page.getByTestId("generate-submit").click();
+    await page.getByTestId("interview-title").fill("Tone Shaping Fundamentals");
+    await page.getByTestId("interview-domain").fill("tone");
+    await page.getByTestId("interview-start-submit").click();
+
+    // "who": a brand-new student, with a level + language (the interview's
+    // replacement for the old form's `level`/`language` fields).
+    await page.getByTestId("interview-who-new-toggle").click();
+    await page.getByTestId("interview-who-name").fill("Nikos");
+    await page.getByTestId("interview-who-level").fill("beginner");
+    await page.getByTestId("interview-who-language").fill("en");
+    await page.getByTestId("interview-answer-submit").click();
+
+    // "duration": weeks + minutes/session (the old form's single "target
+    // hours" field, now asked as two real numbers).
+    await page.getByTestId("interview-duration-weeks").fill("6");
+    await page.getByTestId("interview-duration-minutes").fill("60");
+    await page.getByTestId("interview-answer-submit").click();
+
+    // "sources": accept the (empty, in this mock) default selection.
+    await page.getByTestId("interview-answer-submit").click();
+
+    // "preview": nothing to review in this trimmed mock — proceed.
+    await page.getByTestId("interview-answer-submit").click();
+
+    // "confirm": approve — this is what actually enqueues the job.
+    await expect(page.getByTestId("interview-dialog")).toContainText(/ready to generate/i);
+    await page.getByTestId("interview-confirm-submit").click();
 
     // Clear, non-frozen loading state while the job is enqueued and polled
     // (the mock answers "pending" once, then "succeeded" — see
-    // `mockCurriculaApi`'s docstring) — this is the brief's core requirement.
-    await expect(page.getByTestId("generate-loading")).toBeVisible();
-    await expect(page.getByTestId("generate-submit")).toBeDisabled();
-    await expect(page.getByTestId("generate-title")).toBeDisabled();
+    // `mockCurriculaApi`'s docstring) — this is the brief's core requirement,
+    // now reached via the interview's own job-poll phase.
+    await expect(page.getByTestId("interview-job-loading")).toBeVisible();
 
     // The dialog must not be dismissible mid-flight (Escape is a no-op).
     await page.keyboard.press("Escape");
-    await expect(page.getByTestId("generate-dialog")).toBeVisible();
+    await expect(page.getByTestId("interview-dialog")).toBeVisible();
 
-    await expect(page.getByTestId("generate-dialog")).toBeHidden({ timeout: 10_000 });
+    await expect(page.getByTestId("interview-dialog")).toBeHidden({ timeout: 10_000 });
 
     // course + module + 2 lessons. Nested BlockCards render *inside* their
     // parent's DOM subtree (that's what makes the indentation work), so a
@@ -503,22 +601,16 @@ test.describe("curricula (mocked API)", () => {
     await expect(page.getByTestId("block-card-title").filter({ hasText: "Pickups and Tone" })).toBeVisible();
     await expect(page.getByTestId("block-card-title").filter({ hasText: "Cables and Signal Integrity" })).toBeVisible();
 
-    expect(mock.calls.generate).toBe(1);
+    expect(mock.calls.interviewStart).toBe(1);
     // Exactly 2 polls: the mock's default `pendingPolls: 1` answers "pending"
     // once, then "succeeded" — proving the dialog actually polled `GET
     // /jobs/{id}` rather than trusting the enqueue response alone.
     expect(mock.calls.job).toBe(2);
-    const genBody = mock.lastBody.generate as {
-      title: string;
-      language: string;
-      domain?: string;
-      profile: Record<string, unknown>;
-      target_minutes_total?: number;
-    };
-    expect(genBody.title).toBe("Tone Shaping Fundamentals");
-    expect(genBody.domain).toBe("tone");
-    expect(genBody.profile).toEqual({ level: "beginner" });
-    expect(genBody.target_minutes_total).toBe(360);
+    // 5 answers: who, duration, sources, preview, confirm.
+    expect(mock.answerBodies).toHaveLength(5);
+    expect(mock.answerBodies[0]).toEqual({ name: "Nikos", level: "beginner", language: "en" });
+    expect(mock.answerBodies[1]).toEqual({ weeks: 6, minutes_per_session: 60 });
+    expect(mock.answerBodies[4]).toEqual({ approved: true, allow_general: false });
 
     // Inline-edit the course (root) card's title -> PATCH /blocks/{id}.
     const courseTitle = page.getByTestId("block-card-title").filter({ hasText: "Tone Shaping Fundamentals" });
@@ -544,17 +636,28 @@ test.describe("curricula (mocked API)", () => {
     await expect(page).toHaveURL(/\/en\/curricula$/);
 
     await page.getByTestId("curricula-generate-button").click();
-    await page.getByTestId("generate-title").fill("Broken Curriculum");
-    await page.getByTestId("generate-language").fill("en");
-    await page.getByTestId("generate-submit").click();
+    await page.getByTestId("interview-title").fill("Broken Curriculum");
+    await page.getByTestId("interview-start-submit").click();
 
-    await expect(page.getByTestId("generate-loading")).toBeVisible();
-    await expect(page.getByTestId("generate-error")).toHaveText(JOB_FAILURE_MESSAGE, { timeout: 10_000 });
+    await page.getByTestId("interview-who-new-toggle").click();
+    await page.getByTestId("interview-who-name").fill("Nikos");
+    await page.getByTestId("interview-answer-submit").click();
+    await page.getByTestId("interview-duration-weeks").fill("6");
+    await page.getByTestId("interview-duration-minutes").fill("60");
+    await page.getByTestId("interview-answer-submit").click();
+    await page.getByTestId("interview-answer-submit").click(); // sources
+    await page.getByTestId("interview-answer-submit").click(); // preview
+    await page.getByTestId("interview-confirm-submit").click();
 
-    // NOT the success handoff: the dialog stays open and re-submittable.
-    await expect(page.getByTestId("generate-dialog")).toBeVisible();
-    await expect(page.getByTestId("generate-submit")).toBeEnabled();
-    expect(mock.calls.generate).toBe(1);
+    await expect(page.getByTestId("interview-job-loading")).toBeVisible();
+    await expect(page.getByTestId("interview-job-error")).toHaveText(JOB_FAILURE_MESSAGE, { timeout: 10_000 });
+
+    // NOT the success handoff: the dialog stays open (with a "start over"
+    // action — the spent interview itself can't be resubmitted, since the
+    // server already advanced it to "done" the moment it was approved).
+    await expect(page.getByTestId("interview-dialog")).toBeVisible();
+    await expect(page.getByTestId("interview-start-over")).toBeEnabled();
+    expect(mock.calls.interviewStart).toBe(1);
     expect(mock.calls.job).toBe(2); // pending, then failed
 
     // Nothing was generated: board and template list are untouched.

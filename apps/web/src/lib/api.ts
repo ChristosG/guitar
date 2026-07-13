@@ -326,6 +326,138 @@ export function listCurricula(): Promise<CurriculumListItem[]> {
   return request<CurriculumListItem[]>("/curricula");
 }
 
+/**
+ * Typed fetch helpers for the guided curriculum-authoring interview
+ * (`routers/curriculum.py`'s `/curricula/interview...` routes, Plan 12 Task
+ * 3 / G2) — mirrors `apps/api/app/schemas/interview.py` field-for-field.
+ * Chris: "maybe llm can act as an assistant there bro, guiding him, and
+ * asking him questions or corrections throughout the process." The state
+ * machine itself lives entirely server-side (`app.curriculum.interview`'s
+ * own docstring: the model never tracks `step`); this client is just a thin
+ * typed wrapper around start/answer/get, same direct-from-browser
+ * convention as every other section of this file.
+ */
+
+/** One `options[]` entry on the "who"/"sources" steps. `type`/`char_count`/
+ * `default_selected` are only ever populated for "sources" (every source's
+ * title/type/char_count so the tutor can tell real material from a
+ * synthetic filler source apart — see `InterviewDialog`'s own docstring);
+ * "who"'s student options never set them. All optional here (not a
+ * discriminated union) since both step's options share this one shape on
+ * the wire (`describe_step`'s two `options=[...]` list comprehensions in
+ * `app.curriculum.interview`). */
+export interface InterviewOption {
+  value: string;
+  label: string;
+  type?: string;
+  char_count?: number | null;
+  default_selected?: boolean;
+}
+
+/** One grounding passage the "preview" step's `ground_topic` retrieval
+ * actually found for a module — deliberately carries `source_title`, NOT
+ * `source_id` (`_compute_preview` in `app.curriculum.interview` only ever
+ * serializes `source_title`/`page_no`/`score` onto the wire). A citation
+ * link into the Reader (`/library/{source_id}?page={page_no}`) therefore
+ * has to resolve `source_id` client-side, by matching `source_title`
+ * against the source catalog the "sources" step's own `options` already
+ * handed this dialog — see `InterviewPreviewStep`'s `sourceIdByTitle` map. */
+export interface InterviewPassage {
+  source_title: string;
+  page_no: number | null;
+  score: number;
+}
+
+/** One planned module of the "preview" step's findings. `gap: true` means
+ * `ground_topic` found nothing above the relevance floor for this module in
+ * the sources the tutor chose — an honest gap, never silently hidden (see
+ * `app.curriculum.ground`'s module docstring on the floor itself). */
+export interface InterviewModule {
+  title: string;
+  objective: string;
+  gap: boolean;
+  passages: InterviewPassage[];
+}
+
+/** `interview.preview` on the wire — mirrors `_compute_preview`'s return
+ * shape. Rendered by both the "preview" step (to review) and the "confirm"
+ * step (the same cached findings, per `describe_step`'s "confirm" branch —
+ * `_compute_preview` never runs twice for one interview). */
+export interface InterviewPreview {
+  course_title: string;
+  modules: InterviewModule[];
+  gap_count: number;
+}
+
+/** The `{interview_id, step, question, options?, findings?, error?}` envelope
+ * every interview route returns (mirrors `schemas/interview.py`'s
+ * `InterviewStateOut`). `step` is one of `STEP_ORDER` ("who" | "duration" |
+ * "sources" | "preview" | "confirm") or the terminal "done" — kept as a
+ * plain `string` here (not a union), same "an unrecognized future step
+ * still round-trips" reasoning as `BlockNode.kind`/`JobOut.status`
+ * elsewhere in this file. `error` is set only when the previous answer was
+ * invalid and this response is re-asking the same step's question. */
+export interface InterviewStateOut {
+  interview_id: string;
+  step: string;
+  question: string;
+  options: InterviewOption[] | null;
+  findings: InterviewPreview | null;
+  error: string | null;
+}
+
+export interface InterviewStartInput {
+  title: string;
+  domain?: string | null;
+}
+
+/** Starts a brand-new interview at its first ("who") step. */
+export function startInterview(input: InterviewStartInput): Promise<InterviewStateOut> {
+  return request<InterviewStateOut>("/curricula/interview", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+/** Current state of an in-progress interview — refresh-safe (`GET
+ * .../{id}` never recomputes the cached "preview" findings, per
+ * `app.curriculum.interview.render_state`'s own docstring). Exposed for
+ * completeness; `InterviewDialog` keeps its own in-memory state across
+ * steps and doesn't need to re-fetch mid-flow, same "not yet called, here
+ * for future resume support" posture as `getChatHistory` elsewhere in this
+ * file. */
+export function getInterview(interviewId: string): Promise<InterviewStateOut> {
+  return request<InterviewStateOut>(`/curricula/interview/${interviewId}`);
+}
+
+/** Advances one step of the interview. The response is EITHER the next
+ * `InterviewStateOut` (a non-final step, or a re-ask with `.error` set on an
+ * invalid answer) OR, on the final "confirm" step once approved, a 202
+ * `JobAccepted` — mirrors `answer_curriculum_interview`'s own two-shape
+ * response on the API side exactly (see that route's docstring: "or — on
+ * the final 'confirm' step, once approved — enqueue the REAL grounded
+ * generation job and return 202 {job_id, status}"). Callers MUST
+ * discriminate the result themselves (`isJobAccepted` below) rather than
+ * assuming one shape — this is not a discriminated union on a shared `kind`
+ * field, since neither shape carries one. */
+export function answerInterview(
+  interviewId: string,
+  answer: unknown,
+): Promise<InterviewStateOut | JobAccepted> {
+  return request<InterviewStateOut | JobAccepted>(`/curricula/interview/${interviewId}/answer`, {
+    method: "POST",
+    body: JSON.stringify({ answer }),
+  });
+}
+
+/** Discriminates `answerInterview`'s two possible response shapes — a
+ * `JobAccepted` always has `job_id`, an `InterviewStateOut` never does. */
+export function isJobAccepted(
+  result: InterviewStateOut | JobAccepted,
+): result is JobAccepted {
+  return typeof (result as JobAccepted).job_id === "string";
+}
+
 /** Enqueues curriculum generation (Plan 8 Task 3/4): `generate_curriculum`
  * itself is still the same SLOW guided-JSON LLM call measured at
  * 49-179s/call, but that work now runs off the request path — this call
