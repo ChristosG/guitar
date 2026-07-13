@@ -41,10 +41,21 @@ a grounded module records `target_profile["provenance"] = {"passages":
 [{"source_id", "source_title", "page_no"}, ...]}` on its own Block row.
 """
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 from app.curriculum.ground import Passage, ground_topic
 from app.llm.factory import get_provider
 from app.models.block import Block
+
+# Review fix (PERFORMANCE): a 5-module curriculum was measured at 267.8s
+# (~4m28s) — 6 sequential guided_json calls (~45s each), one plan + one per
+# module. Module drafts (Phase 2 below) don't depend on each other at all,
+# so they run through a bounded thread pool instead of one at a time.
+# Bounded (not "one thread per module"): the GPU serving both the LLM and
+# the embed server is shared with Chris's other apps — an unbounded fan-out
+# would stampede it. 4 is a deliberately modest starting bound, not a
+# measured ceiling.
+_MAX_CONCURRENT_MODULE_DRAFTS = 4
 
 # Phase 1 output shape: the module OUTLINE only (titles + objectives) — no
 # lesson/segment content yet, that's Phase 2, drafted per-module FROM its own
@@ -279,18 +290,34 @@ def generate_curriculum(
     domain: str | None = None, target_minutes_total: int | None = None,
     source_ids: list[uuid.UUID] | None = None, allow_general: bool = False,
 ) -> uuid.UUID:
-    """Two-phase, retrieval-augmented curriculum generation (G1/G3):
+    """Retrieval-augmented curriculum generation (G1/G3), FOUR phases (review
+    fix split Phase 2 in two — grounding and drafting used to be a single
+    per-module step, interleaved with this Session's own writes; see the
+    PERFORMANCE note on the SAFE SHAPE below):
 
-      Phase 1 — PLAN the module outline (titles + objectives), one
-        guided-JSON call, no library access yet.
-      Phase 2 — for EACH planned module, ground it in the tutor's own
-        library (`app.curriculum.ground.ground_topic`, optionally scoped to
-        `source_ids`) and draft that module's lessons/segments FROM the
-        retrieved passages, one guided-JSON call per module. A module with
-        no passages above the relevance floor is a GAP: left unfilled
-        (honest body, `target_profile["gap"] = True`) unless
-        `allow_general=True`, in which case it's filled from general
+      Phase 1 (sequential) — PLAN the module outline (titles + objectives),
+        one guided-JSON call, no library access yet.
+      Phase 2 (sequential, cheap DB reads) — for EACH planned module, ground
+        it in the tutor's own library (`app.curriculum.ground.ground_topic`,
+        optionally scoped to `source_ids`/`domain`). Kept on this one
+        Session, one module at a time — `ground_topic` reads via `db`, and
+        SQLAlchemy Sessions are not thread-safe.
+      Phase 3 (PARALLEL, no DB) — draft each module's lessons/segments FROM
+        its own already-retrieved passages, one guided-JSON call per module.
+        Pure LLM I/O, no Session access at all, so this phase runs through a
+        bounded `ThreadPoolExecutor` (`_MAX_CONCURRENT_MODULE_DRAFTS`) —
+        SAFE SHAPE, the reviewer's explicit caution: naively parallelizing
+        the OLD single per-module loop would have shared this Session across
+        concurrent tasks (it read AND wrote through it in the same
+        iteration as the LLM call) — SQLAlchemy does not support that and it
+        would corrupt or crash. Splitting grounding (Session-owning) from
+        drafting (Session-free) is what makes parallelizing safe. A module
+        with no passages above the relevance floor is a GAP: left unfilled
+        (honest body, `target_profile["gap"] = True`, no draft call at all)
+        unless `allow_general=True`, in which case it's filled from general
         knowledge but its body is labelled as such.
+      Phase 4 (sequential) — persist every module's tree onto this one
+        Session, in planned order, from the Phase 3 results collected above.
 
     Persists the result as a `Block` hierarchy (course -> module -> lesson ->
     segment) — same tree shape the board UI already renders; only NEW
@@ -323,19 +350,56 @@ def generate_curriculum(
     db.add(course)
     db.flush()
 
-    for m_i, module in enumerate(plan.get("modules") or []):
+    modules_plan = plan.get("modules") or []
+
+    # Phase 2 (sequential, cheap): ground every module's topic against the
+    # tutor's library — DB reads only, kept on this one shared Session.
+    grounded_modules = []
+    for module in modules_plan:
         module_title = module["title"]
         objective = module.get("objective") or ""
+        query = f"{module_title} {objective}"
+        passages = ground_topic(db, query, source_ids=source_ids, k=5, domain=domain)
+        grounded_modules.append(
+            {"title": module_title, "objective": objective, "passages": passages}
+        )
 
-        query = f"{module_title} {objective} {domain}" if domain else f"{module_title} {objective}"
-        passages = ground_topic(db, query, source_ids=source_ids, k=5)
-
+    # Phase 3 (PARALLEL, no DB): one guided_json draft call per module. See
+    # this function's own docstring for why this is safe only BECAUSE Phase
+    # 2's Session-owning work already happened above, sequentially.
+    def _draft_one(entry: dict) -> dict | None:
+        passages = entry["passages"]
         if passages:
             draft_messages = _build_module_draft_messages(
-                module_title=module_title, objective=objective, language=language,
-                passages=passages,
+                module_title=entry["title"], objective=entry["objective"],
+                language=language, passages=passages,
             )
-            draft = get_provider().guided_json(draft_messages, MODULE_SCHEMA)
+            return get_provider().guided_json(draft_messages, MODULE_SCHEMA)
+        elif allow_general:
+            draft_messages = _build_general_module_messages(
+                module_title=entry["title"], objective=entry["objective"], language=language,
+            )
+            return get_provider().guided_json(draft_messages, MODULE_SCHEMA)
+        else:
+            return None  # unfilled gap — no draft call needed
+
+    drafts: list[dict | None] = [None] * len(grounded_modules)
+    if grounded_modules:
+        workers = min(_MAX_CONCURRENT_MODULE_DRAFTS, len(grounded_modules))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(_draft_one, entry): i for i, entry in enumerate(grounded_modules)
+            }
+            for future, i in futures.items():
+                drafts[i] = future.result()  # re-raises here if _draft_one raised
+
+    # Phase 4 (sequential): persist every module's tree from the Phase 2/3
+    # results collected above, in the planned order.
+    for m_i, (entry, draft) in enumerate(zip(grounded_modules, drafts)):
+        passages: list[Passage] = entry["passages"]
+        objective = entry["objective"]
+
+        if passages:
             lessons = draft.get("lessons") or []
             body = objective
             target_profile = {
@@ -351,10 +415,6 @@ def generate_curriculum(
                 },
             }
         elif allow_general:
-            draft_messages = _build_general_module_messages(
-                module_title=module_title, objective=objective, language=language,
-            )
-            draft = get_provider().guided_json(draft_messages, MODULE_SCHEMA)
             lessons = draft.get("lessons") or []
             body = _GENERAL_KNOWLEDGE_PREFIX + objective
             target_profile = {"gap": True, "general_knowledge": True}
@@ -364,7 +424,7 @@ def generate_curriculum(
             target_profile = {"gap": True}
 
         module_block = Block(
-            kind="module", title=module_title, body=body,
+            kind="module", title=entry["title"], body=body,
             order=m_i, parent_id=course.id, language=language,
             target_profile=target_profile,
         )

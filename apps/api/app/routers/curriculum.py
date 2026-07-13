@@ -125,7 +125,15 @@ def generate_curriculum_endpoint(
     # identical to the pre-Task-2 shape for callers that don't use them (see
     # test_curriculum_generate_enqueue.py's
     # ..._persists_request_params_verbatim_on_the_job).
-    if payload.source_ids:
+    #
+    # `is not None`, NOT truthiness (review fix, MINOR): `payload.source_ids`
+    # defaults to `None` (key omitted -> old/back-compat behaviour, unscoped
+    # retrieval) but an explicitly-passed `[]` means "ground in nothing" —
+    # `if payload.source_ids:` is falsy for BOTH, so it used to silently drop
+    # an explicit `[]` from `params` entirely, and `generate_curriculum` would
+    # then see its own `source_ids=None` default and fall back to whole-
+    # library retrieval — the opposite of what an explicit `[]` asked for.
+    if payload.source_ids is not None:
         params["source_ids"] = [str(s) for s in payload.source_ids]
     if payload.allow_general:
         params["allow_general"] = payload.allow_general

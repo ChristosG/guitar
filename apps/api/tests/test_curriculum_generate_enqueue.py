@@ -110,3 +110,32 @@ def test_generate_curriculum_endpoint_persists_request_params_verbatim_on_the_jo
         assert job.params == _PAYLOAD
     finally:
         db.close()
+
+
+def test_generate_curriculum_endpoint_persists_an_explicit_empty_source_ids_list(monkeypatch):
+    """Review finding (MINOR, routers/curriculum.py): `if payload.source_ids:`
+    is falsy for an explicitly-passed empty list `[]`, so it used to be
+    silently DROPPED from `params` — `generate_curriculum` would then see
+    `source_ids=None` (its own default) and fall back to whole-library
+    retrieval, the opposite of "ground in nothing" the tutor asked for by
+    sending `[]`. The router must distinguish "key omitted" (None — no
+    scoping requested, old/back-compat behaviour) from "key explicitly []"
+    (ground in nothing) via `is not None`, not truthiness.
+    """
+    monkeypatch.setattr(curriculum_router, "run_curriculum_job", lambda job_id: None)
+
+    payload = {**_PAYLOAD, "source_ids": []}
+    r = client.post("/curricula/generate", json=payload)
+    assert r.status_code == 202, r.text
+    job_id = uuid.UUID(r.json()["job_id"])
+
+    db = SessionLocal()
+    try:
+        job = db.get(GenerationJob, job_id)
+        assert job is not None
+        assert "source_ids" in job.params, (
+            "an explicit [] must be persisted, not silently dropped"
+        )
+        assert job.params["source_ids"] == []
+    finally:
+        db.close()

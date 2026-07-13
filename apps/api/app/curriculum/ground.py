@@ -99,10 +99,11 @@ class Passage:
 
 def ground_topic(
     db, topic: str, *, source_ids: list[uuid.UUID] | None = None, k: int = 5,
+    domain: str | None = None,
 ) -> list[Passage]:
     """Top-`k` grounding passages for `topic`, above the relevance floor
     (see module docstring), optionally scoped to `source_ids` (the sources
-    the tutor chose to build this curriculum from).
+    the tutor chose to build this curriculum from) and/or `domain`.
 
     Wraps `app.brain.retrieve.search` — does not reimplement retrieval.
     `source_ids`, when given, filters `search`'s own hits down to those
@@ -114,9 +115,20 @@ def ground_topic(
     over-fetched (see `_OVERFETCH`) precisely because this post-filter (and
     the relevance floor below) can only shrink the candidate set, never grow
     it.
+
+    `domain`, unlike `source_ids`, IS pushed straight into `search()`'s own
+    `domain=` kwarg — a HARD SQL filter on `KnowledgeSource.domain` at the
+    query stage (review fix, IMPORTANT: the old single-phase generator did
+    exactly this, `search(db, query, k=12, domain=domain)`; the two-phase
+    rewrite dropped it and instead mashed `domain` into the free-text query
+    in `generate.py`, downgrading it from a hard filter to a soft semantic
+    hint — a "theory" curriculum could then cite a well-scoring "tone"
+    passage). `search`'s own `domain` filter already exists and does exactly
+    this job, so this is restoring behaviour, not adding a new filter
+    dimension.
     """
     raw_k = max(k * _OVERFETCH, k)
-    hits = search(db, topic, k=raw_k)
+    hits = search(db, topic, k=raw_k, domain=domain)
 
     if source_ids is not None:
         allowed = set(source_ids)

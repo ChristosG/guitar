@@ -75,6 +75,26 @@ def run_curriculum_job(job_id: uuid.UUID) -> None:
         try:
             root_id = generate_curriculum(db, **job.params)
         except GuidedJSONError:
+            # rollback FIRST (review fix, CRITICAL): generation flushes each
+            # already-drafted module's Blocks onto this Session as it goes
+            # (the multi-phase plan-then-ground-then-draft-then-persist
+            # shape), so a GuidedJSONError raised while drafting a LATER
+            # module can reach this branch with an EARLIER module's Blocks —
+            # a half-built course — still sitting flushed-but-uncommitted in
+            # this Session's pending transaction. Without a rollback here,
+            # the failure-recording commit right below would sweep that
+            # fragment into the DB alongside the failed status — a
+            # tutor-visible, truncated "curriculum" with no indication it's
+            # the wreckage of a failed run. Mirrors the generic `except
+            # Exception` branch's own rollback+re-fetch below (rollback
+            # expires this Session's identity map, including `job` itself,
+            # so it must be re-fetched before being mutated again).
+            db.rollback()
+            job = db.get(GenerationJob, job_id)
+            if job is None:
+                log.warning(
+                    "run_curriculum_job: job_id=%s gone during failure recovery", job_id)
+                return
             job.status = "failed"
             job.error_kind = "upstream"
             job.error = (
@@ -82,6 +102,16 @@ def run_curriculum_job(job_id: uuid.UUID) -> None:
             )
             db.commit()
         except (openai.APIConnectionError, httpx.TransportError):
+            # Same rollback-before-recording reasoning as the GuidedJSONError
+            # branch just above — a transport error on module N's draft call
+            # can equally strand modules 1..N-1's already-flushed writes in
+            # this Session's pending transaction.
+            db.rollback()
+            job = db.get(GenerationJob, job_id)
+            if job is None:
+                log.warning(
+                    "run_curriculum_job: job_id=%s gone during failure recovery", job_id)
+                return
             job.status = "failed"
             job.error_kind = "timeout"
             job.error = "Curriculum generation timed out. Try again."

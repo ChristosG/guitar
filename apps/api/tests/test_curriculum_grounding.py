@@ -35,6 +35,7 @@ import app.curriculum.ground as ground_mod
 import app.jobs.runner as runner_mod
 from app.curriculum.generate import generate_curriculum
 from app.curriculum.ground import Passage, ground_topic
+from app.llm.errors import GuidedJSONError
 from app.models.block import Block
 from app.models.generation_job import GenerationJob
 
@@ -159,6 +160,55 @@ def test_phase_1_plan_call_carries_no_passage_context(db, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# PERFORMANCE — module drafts are embarrassingly parallel; must actually run
+# concurrently, not one-at-a-time behind a single shared DB Session.
+# ---------------------------------------------------------------------------
+
+def test_module_drafts_run_concurrently_not_sequentially(db, monkeypatch):
+    """Measured baseline: 267.8s for a 5-module curriculum, 6 sequential
+    model calls (~45s each) — the tutor watches a 4.5-minute spinner. Module
+    drafts (Phase 2, one guided_json call per planned module) have no
+    dependency on each other and must run in parallel.
+
+    Distinguishes the Phase 1 plan call from a Phase 2 module-draft call by
+    inspecting the system message text (`_build_plan_messages` says "module
+    outline"; `_build_module_draft_messages`/`_build_general_module_messages`
+    both say "module content") rather than counting calls — counting would
+    race against the very concurrency this test is proving exists.
+    """
+    import time
+
+    plan_four_modules = {
+        "title": "Tone Fundamentals",
+        "modules": [{"title": f"Module {i}", "objective": "obj"} for i in range(4)],
+    }
+    sleep_seconds = 0.3
+
+    class _SlowFakeProvider:
+        def guided_json(self, messages, schema, *, temperature=0.2):
+            system = messages[0]["content"]
+            if "module outline" in system:
+                return plan_four_modules
+            time.sleep(sleep_seconds)
+            return _MODULE_DRAFT
+
+    monkeypatch.setattr(generate_mod, "get_provider", lambda: _SlowFakeProvider())
+    monkeypatch.setattr(generate_mod, "ground_topic", lambda *a, **k: [_passage()])
+
+    start = time.monotonic()
+    generate_curriculum(db, title="Tone Fundamentals", language="en", profile={"level": "beginner"})
+    elapsed = time.monotonic() - start
+
+    # 4 module drafts run sequentially would take >= 4 * 0.3s = 1.2s; run
+    # concurrently (bounded pool, width >= 4) they should all overlap and
+    # finish close to ONE sleep, comfortably under 3x one sleep.
+    assert elapsed < 3 * sleep_seconds, (
+        f"4 module drafts took {elapsed:.2f}s — expected them to run concurrently, "
+        f"not sequentially (sequential would be >= {4 * sleep_seconds:.2f}s)"
+    )
+
+
+# ---------------------------------------------------------------------------
 # G3 — gaps are never silently filled
 # ---------------------------------------------------------------------------
 
@@ -244,6 +294,43 @@ def test_a_real_passage_above_both_floors_is_kept(db, monkeypatch):
     assert result[0].score == 0.65
 
 
+def test_domain_scopes_ground_topic_to_the_hard_sql_filter_not_a_soft_hint(db, monkeypatch):
+    """Review finding (IMPORTANT): the OLD generator called
+    `search(db, query, k=12, domain=domain)` — a HARD SQL filter on
+    `KnowledgeSource.domain`. `ground_topic` must restore that behaviour by
+    passing `domain` straight through to `search()` as a hard filter, not by
+    leaving `generate.py` to mash it into the free-text query as a soft
+    semantic hint (which lets an off-domain passage that merely scores well
+    slip through). Proven here against the REAL `search()` (not a fake), via
+    a fake `KnowledgeSource.domain` filter's own SQL WHERE clause: seed one
+    "theory"-domain chunk and one "tone"-domain chunk, both about the exact
+    same content, and confirm a domain="theory" grounding call NEVER returns
+    the "tone" chunk, however well it would otherwise score.
+    """
+    from app.brain.ingest import IngestPayload, ingest_source
+    from app.models.knowledge import KnowledgeSource
+
+    text = (
+        "Chord voicings and scale theory: the major scale, its intervals, "
+        "and how triads are built from stacked thirds within it." * 4
+    )
+    theory_source = KnowledgeSource(type="text", title="Theory Source", language="en", domain="theory")
+    tone_source = KnowledgeSource(type="text", title="Tone Source", language="en", domain="tone")
+    db.add_all([theory_source, tone_source])
+    db.commit()
+    ingest_source(db, theory_source.id, IngestPayload(kind="text", text=text))
+    ingest_source(db, tone_source.id, IngestPayload(kind="text", text=text))
+    db.commit()
+
+    passages = ground_topic(db, "chord voicings and scale theory", domain="theory", k=10)
+
+    assert passages, "expected at least the theory-domain passage to ground"
+    assert all(p.source_title == "Theory Source" for p in passages), (
+        f"domain='theory' must hard-filter out the tone-domain source, got: "
+        f"{[p.source_title for p in passages]}"
+    )
+
+
 def test_source_ids_scopes_retrieval_to_the_tutors_chosen_sources(db, monkeypatch):
     wanted_source = uuid.uuid4()
     other_source = uuid.uuid4()
@@ -291,6 +378,58 @@ def test_the_async_curriculum_job_still_succeeds_with_the_two_phase_generator(db
     assert root.kind == "course"
     module = _modules(db, root.id)[0]
     assert module.target_profile["provenance"]["passages"]
+
+
+_PLAN_TWO_MODULES = {
+    "title": "Tone Fundamentals",
+    "modules": [
+        {"title": "Pickups and Tone", "objective": "Understand pickup types."},
+        {"title": "Amp Gain Staging", "objective": "Understand amp gain."},
+    ],
+}
+
+
+def test_a_failed_second_module_draft_leaves_no_curriculum_visible_to_the_tutor(
+    db, monkeypatch, client,
+):
+    """Reviewer-reproduced CRITICAL finding: a failure on module 2's draft
+    call used to leave a committed course Block with only module 1 attached
+    — `GET /curricula` listed it as a real, selectable curriculum with no
+    indication it was a truncated fragment of a failed run. The invariant: a
+    failed curriculum job leaves NO curriculum visible to the tutor at all,
+    same as every other failure path in this job.
+    """
+    fake_provider = _FakeProvider([
+        _PLAN_TWO_MODULES,
+        _MODULE_DRAFT,  # module 1's draft succeeds and gets persisted
+        GuidedJSONError("guided_json: response truncated (finish_reason='length')"),
+    ])
+    monkeypatch.setattr(generate_mod, "get_provider", lambda: fake_provider)
+    monkeypatch.setattr(generate_mod, "ground_topic", lambda *a, **k: [_passage()])
+
+    job = GenerationJob(
+        kind="curriculum", status="pending",
+        params={"title": "Tone Fundamentals", "language": "en", "profile": {"level": "beginner"}},
+    )
+    db.add(job)
+    db.commit()
+    job_id = job.id
+
+    runner_mod.run_curriculum_job(job_id)
+
+    db.expire_all()
+    finished = db.get(GenerationJob, job_id)
+    assert finished.status == "failed"
+    assert finished.error_kind == "upstream"
+
+    # (b) NO course Block exists at all — not even the half-built one from
+    # module 1, which was already flushed to the DB before module 2 blew up.
+    courses = db.scalars(select(Block).where(Block.kind == "course")).all()
+    assert courses == [], f"expected no course Block, found {[c.title for c in courses]}"
+
+    r = client.get("/curricula")
+    assert r.status_code == 200, r.text
+    assert r.json() == [], "GET /curricula must not list a fragment of a failed run"
 
 
 # ---------------------------------------------------------------------------
