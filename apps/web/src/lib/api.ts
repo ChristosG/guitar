@@ -621,6 +621,21 @@ export function deleteArtifact(id: string): Promise<void> {
 
 export type ChatTurnStatus = "answer" | "awaiting_approval" | "job_pending";
 
+/** One entry of a grounded turn's `citations` (Plan 11 Task 1, C1/C2, mirrors
+ * `app.agent.loop._to_citation`'s exact shape) — what lets the chat UI render
+ * a chip that deep-links into the Reader (Plan 9) at the real scanned page a
+ * grounded answer actually came from. `page_no`/`page_id` are `null` when the
+ * underlying chunk predates page-addressable ingest; `message-list.tsx` only
+ * renders a chip when `page_no` is set (a chip with nowhere real to link
+ * would be worse than no chip). */
+export interface ChatCitation {
+  source_id: string;
+  source_title: string;
+  page_no: number | null;
+  page_id: string | null;
+  snippet: string;
+}
+
 /** Mirrors `schemas/chat.py`'s `ChatTurnOut` — the response shape for both
  * `sendChatMessage` and `resolveApproval`. Which fields are populated
  * depends on `status`: "answer" -> `content`; "awaiting_approval" ->
@@ -628,7 +643,9 @@ export type ChatTurnStatus = "answer" | "awaiting_approval" | "job_pending";
  * (resolve only) -> `job_id`. `status` keeps the same "soft union" shape as
  * `SourceOut.status`/`JobOut.status` above (a plain API-side `str`, not a
  * `Literal`) — an unrecognized future status should still round-trip
- * instead of failing a type check. */
+ * instead of failing a type check. `citations` (Plan 11 Task 1/3) is set on
+ * an "answer"/"awaiting_approval" turn that had something to cite, `null`/
+ * omitted otherwise. */
 export interface ChatTurnOut {
   status: ChatTurnStatus | (string & {});
   content?: string | null;
@@ -637,6 +654,7 @@ export interface ChatTurnOut {
   tool_args?: Record<string, unknown> | null;
   description?: string | null;
   job_id?: string | null;
+  citations?: ChatCitation[] | null;
 }
 
 /** One row of `getChatHistory`'s response — mirrors `schemas/chat.py`'s
@@ -647,6 +665,7 @@ export interface ChatMessageOut {
   role: string;
   content: string | null;
   created_at: string;
+  citations?: ChatCitation[] | null;
 }
 
 /** Mirrors `schemas/chat.py`'s `PendingApprovalOut` — `GET
@@ -692,6 +711,125 @@ export function sendChatMessage(sessionId: string, content: string): Promise<Cha
     method: "POST",
     body: JSON.stringify({ content }),
   });
+}
+
+/** Terminal outcome of `streamChatMessage` (Plan 11 Task 3, C4): "done" is a
+ * genuine, now-persisted plain answer (mirrors `ChatTurnOut`'s "answer"
+ * case, `citations` included); "fallback" means the SSE endpoint declined to
+ * stream this turn (a tool/mutation call, a post-turn guard trip, or a mid-
+ * stream error — see `app/routers/chat.py`'s `post_message_stream` docstring
+ * for the exact reasons) and persisted NOTHING — the caller MUST resend the
+ * same `content` through the existing `sendChatMessage` REST call to get an
+ * authoritative response (that call is what actually runs the full ReAct
+ * loop, the HITL suspend, and the C3 tablature guard; this stream endpoint
+ * only ever handles the safe common case). */
+export type ChatStreamOutcome =
+  | { status: "done"; citations: ChatCitation[] | null }
+  | { status: "fallback"; reason: string };
+
+/** One parsed `event: <name>\ndata: <json>\n\n` block off the stream — see
+ * `app/routers/chat.py`'s `post_message_stream` for the exact 3 event names
+ * this ever emits ("delta"/"done"/"fallback"). Returns `null` for a block
+ * this client doesn't recognize (forward-compatible: an unrecognized event
+ * is just skipped, not a parse error) or one with unparseable JSON `data`. */
+function parseSseBlock(block: string): { event: string; data: unknown } | null {
+  let eventName: string | null = null;
+  let dataLine: string | null = null;
+  for (const line of block.split("\n")) {
+    if (line.startsWith("event:")) eventName = line.slice("event:".length).trim();
+    else if (line.startsWith("data:")) dataLine = line.slice("data:".length).trim();
+  }
+  if (!eventName || dataLine == null) return null;
+  try {
+    return { event: eventName, data: JSON.parse(dataLine) };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * SSE token streaming for the plain-answer path (Plan 11 Task 3, C4: `POST
+ * /chat/{session_id}/messages/stream`, `text/event-stream`). Calls `onDelta`
+ * with each text chunk AS IT ARRIVES (so a caller can append it to a live
+ * transcript bubble), then resolves to the stream's terminal outcome — see
+ * `ChatStreamOutcome`'s own docstring for what "done" vs "fallback" means
+ * and what a caller MUST do on "fallback".
+ *
+ * A network/parse failure (fetch rejects, a non-2xx status, the body ends
+ * without ever reaching a terminal event) resolves to `{status:
+ * "fallback", reason: "error"}` rather than throwing — same posture as the
+ * server's own "the safe path never persists a half-formed turn" contract;
+ * callers don't need a separate try/catch just to reach the same REST
+ * fallback a `"fallback"` outcome already tells them to take.
+ *
+ * Deliberately `fetch` + a manual `ReadableStream` reader, NOT the browser's
+ * `EventSource` — `EventSource` only supports a bare `GET` with no request
+ * body, and this call needs to POST the user's `content`.
+ *
+ * Each parsed event is followed by a `setTimeout(0)` yield before the next
+ * one is processed — even when several arrive in the same underlying network
+ * chunk (plausible for a small/local response) — so the caller's `onDelta`-
+ * driven UI updates land as SEPARATE renders instead of one micro-batched
+ * swap. This is deliberate smoothing (the same idea real streaming chat UIs
+ * apply regardless of network chunking), not a workaround for a bug: without
+ * it, "streamed" text could legitimately still LOOK like a single swap on a
+ * fast/local connection, defeating the entire point of streaming (Chris's
+ * complaint was the dead pause, not the byte-level transport).
+ */
+export async function streamChatMessage(
+  sessionId: string,
+  content: string,
+  onDelta: (text: string) => void,
+): Promise<ChatStreamOutcome> {
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}/chat/${sessionId}/messages/stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content }),
+    });
+  } catch {
+    return { status: "fallback", reason: "error" };
+  }
+  if (!res.ok || !res.body) {
+    return { status: "fallback", reason: "error" };
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let boundary: number;
+      while ((boundary = buffer.indexOf("\n\n")) !== -1) {
+        const block = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        const parsed = parseSseBlock(block);
+        if (!parsed) continue;
+
+        if (parsed.event === "delta") {
+          const text = (parsed.data as { text?: string }).text;
+          if (text) onDelta(text);
+        } else if (parsed.event === "done") {
+          const citations = (parsed.data as { citations?: ChatCitation[] | null }).citations ?? null;
+          return { status: "done", citations };
+        } else if (parsed.event === "fallback") {
+          const reason = (parsed.data as { reason?: string }).reason ?? "unknown";
+          return { status: "fallback", reason };
+        }
+        // Deliberate yield — see this function's own docstring.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+    }
+  } catch {
+    return { status: "fallback", reason: "error" };
+  }
+  // The body ended without a "done"/"fallback" event — treat as a fallback
+  // rather than silently returning nothing.
+  return { status: "fallback", reason: "error" };
 }
 
 /** Resolves one pending approval: reject narrates the refusal and hands

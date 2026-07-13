@@ -25,10 +25,11 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.agent.loop import AgentResult, run_agent_turn
+from app.agent.loop import AgentResult, run_agent_turn, stream_plain_turn
 from app.agent.tools import TOOLS
 from app.agent.transcript import messages_to_wire, persist_new_messages
 from app.db import get_db
@@ -271,6 +272,79 @@ def post_message(session_id: UUID, payload: ChatMessageIn, db: Session = Depends
     result = run_agent_turn(db, wire)
 
     return _respond_to_turn(db, session_id, wire, result)
+
+
+@router.post("/chat/{session_id}/messages/stream")
+def post_message_stream(session_id: UUID, payload: ChatMessageIn, db: Session = Depends(get_db)) -> StreamingResponse:
+    """SSE token streaming for the plain-answer path (Plan 11 Task 3, C4) —
+    Chris's second complaint ("no stream"): tokens now appear as the model
+    writes them instead of after ~15s of nothing. A SEPARATE endpoint from
+    `post_message` above, which is UNCHANGED and stays the single source of
+    truth for every turn this one can't handle — see `app.agent.loop.
+    stream_plain_turn`'s own module-level comment for the full "honest
+    simplification" rationale: only a plain, tool-free, tablature-free
+    answer ever streams here; a tool/mutation call, a C3 guard trip, or any
+    error yields an SSE `fallback` event and this endpoint persists NOTHING
+    for the turn — the browser is expected to resend the same `content`
+    through the existing `POST .../messages` for an authoritative response
+    (the full ReAct loop, the HITL suspend gate, and the C3 re-prompt all
+    still apply there, unchanged). `apps/web/src/lib/api.ts`'s
+    `streamChatMessage` is the one caller that drives this contract.
+
+    Same 409 "an approval is pending" guard as `post_message`, checked the
+    same way and for the same reason (see that route's own comment) — both
+    endpoints gate a new turn on an open approval identically; this one is
+    not a side door around that guard.
+
+    Persistence happens ONLY once the underlying `stream_plain_turn`
+    generator reaches its `"done"` event, and then ATOMICALLY from the
+    caller's perspective — the user turn (`payload.content`, verbatim — same
+    "persist the RAW text, ground only in memory" contract `post_message`
+    follows) and the model's final assistant turn are written in the SAME
+    `persist_new_messages` call. Nothing is ever written on a `"fallback"`,
+    which is exactly what makes resending via REST always safe: there is
+    never a stray persisted user message left with no answer for the loop to
+    choke on next turn.
+    """
+    _get_session_or_404(db, session_id)
+
+    # Same guard, same reasoning, as `post_message` above.
+    if _open_pending_approval(db, session_id) is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="an approval is pending — resolve it before sending a new message",
+        )
+
+    prior_wire = messages_to_wire(_ordered_messages(db, session_id))
+    user_wire = {"role": "user", "content": payload.content}
+    wire = prior_wire + [user_wire]
+
+    def event_stream():
+        try:
+            for event in stream_plain_turn(db, wire):
+                if event["event"] == "delta":
+                    yield f"event: delta\ndata: {json.dumps({'text': event['text']})}\n\n"
+                elif event["event"] == "fallback":
+                    yield f"event: fallback\ndata: {json.dumps({'reason': event['reason']})}\n\n"
+                    return
+                elif event["event"] == "done":
+                    persist_new_messages(
+                        db, session_id,
+                        [user_wire, event["messages"][-1]],
+                        citations=event["citations"] or None,
+                    )
+                    yield f"event: done\ndata: {json.dumps({'citations': event['citations']})}\n\n"
+                    return
+        except Exception:
+            # Never let an unhandled exception mid-generator surface as a
+            # bare closed connection — an already-started SSE response can't
+            # switch to a 500 status at this point (headers are long sent),
+            # so the only honest thing left to do is tell the client to fall
+            # back, same as `stream_plain_turn`'s own internal guard does.
+            log.exception("post_message_stream: unhandled error mid-stream (session_id=%s)", session_id)
+            yield f"event: fallback\ndata: {json.dumps({'reason': 'error'})}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @router.post("/chat/{session_id}/approvals/{approval_id}/resolve", response_model=ChatTurnOut)

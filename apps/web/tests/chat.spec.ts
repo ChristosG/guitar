@@ -27,20 +27,43 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Headers": "content-type",
 };
 
+/** Encodes a list of `{event, data}` pairs as an SSE response body — the
+ * exact wire shape `app/routers/chat.py`'s `POST .../messages/stream`
+ * produces (see that module's docstring): one `event: <name>\ndata:
+ * <json>\n\n` block per server-sent event, in order. */
+function sseBody(events: Array<{ event: string; data: unknown }>): string {
+  return events.map((e) => `event: ${e.event}\ndata: ${JSON.stringify(e.data)}\n\n`).join("");
+}
+
 /** Wires up an in-memory mock of the Chat API (`POST /chat`, `POST
- * /chat/{id}/messages`, `POST /chat/{id}/approvals/{id}/resolve`, plus the
- * history/pending GETs for completeness even though this page's current
- * flow never calls them itself — see `lib/api.ts`'s own docstring on
- * `getChatHistory`/`getPendingApproval`). Each write endpoint's NEXT
- * response is queued explicitly by the test right before the action that
- * triggers it (`setNextMessage`/`setNextResolve`) — simpler than modeling
- * the real agent loop, and every test here only ever sends/resolves once. */
+ * /chat/{id}/messages`, `POST /chat/{id}/messages/stream`, `POST
+ * /chat/{id}/approvals/{id}/resolve`, plus the history/pending GETs for
+ * completeness even though this page's current flow never calls them itself
+ * — see `lib/api.ts`'s own docstring on `getChatHistory`/
+ * `getPendingApproval`). Each write endpoint's NEXT response is queued
+ * explicitly by the test right before the action that triggers it
+ * (`setNextMessage`/`setNextResolve`/`setNextStream`) — simpler than
+ * modeling the real agent loop, and every test here only ever sends/resolves
+ * once.
+ *
+ * The stream endpoint defaults to a single `event: fallback` SSE response
+ * (mirroring the real API's own honest-simplification contract — Plan 11
+ * Task 3, C4: the streaming endpoint only ever succeeds for a genuine
+ * plain-answer turn and falls back to nothing otherwise, leaving the CLIENT
+ * to retry via the existing REST `.../messages` endpoint) so every EXISTING
+ * test in this file (written before streaming existed) still exercises the
+ * exact same REST approve/reject/job flow it always did, with zero changes
+ * to those tests' own bodies — `chat-panel.tsx` always attempts the stream
+ * first, and a `fallback` event is this mock's default, deliberately, so
+ * that attempt is a harmless no-op ahead of the REST call those tests
+ * already script via `setNextMessage`. */
 async function mockChatApi(page: Page) {
-  const calls = { create: 0, message: 0, resolve: 0, history: 0, pending: 0 };
-  const lastBody: { message?: unknown; resolve?: unknown } = {};
+  const calls = { create: 0, message: 0, resolve: 0, history: 0, pending: 0, stream: 0 };
+  const lastBody: { message?: unknown; resolve?: unknown; stream?: unknown } = {};
   const unexpected: string[] = [];
   let nextMessage: unknown = { status: "answer", content: "OK." };
   let nextResolve: unknown = { status: "answer", content: "OK." };
+  let nextStream: string = sseBody([{ event: "fallback", data: { reason: "tool_call" } }]);
 
   async function handler(route: Route) {
     const req = route.request();
@@ -59,6 +82,19 @@ async function mockChatApi(page: Page) {
         contentType: "application/json",
         headers: CORS_HEADERS,
         body: JSON.stringify({ session_id: randomUUID() }),
+      });
+      return;
+    }
+
+    const streamMatch = pathname.match(/^\/chat\/([^/]+)\/messages\/stream$/);
+    if (streamMatch && method === "POST") {
+      calls.stream++;
+      lastBody.stream = req.postDataJSON();
+      await route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        headers: CORS_HEADERS,
+        body: nextStream,
       });
       return;
     }
@@ -124,6 +160,13 @@ async function mockChatApi(page: Page) {
     },
     setNextResolve(value: unknown) {
       nextResolve = value;
+    },
+    /** Queues the raw SSE body the NEXT `.../messages/stream` call answers
+     * with — build it with `sseBody` (exported alongside this helper isn't
+     * needed; tests in this file call it directly). Overrides the
+     * fallback-by-default body documented on `mockChatApi` above. */
+    setNextStream(value: string) {
+      nextStream = value;
     },
   };
 }
@@ -334,6 +377,168 @@ test.describe("chat cockpit (mocked API)", () => {
     await expect(page.getByTestId("chat-input")).toBeEnabled();
 
     expect(jobs.calls.job).toBe(2);
+    expect(mock.unexpected).toEqual([]);
+  });
+
+  // Plan 11 Task 3 (C4): the answer arrives as real markdown (not a raw
+  // asterisk-riddled string in a bubble) and a grounded answer's citations
+  // render as chips that deep-link into the Reader at the cited page — the
+  // whole payoff of Plans 9-11's forced-retrieval work actually reaching the
+  // chat UI. Goes through the default stream-falls-back-to-REST mock (see
+  // `mockChatApi`'s own docstring) — this test's concern is RENDERING a
+  // `ChatTurnOut` with markdown content + citations, not which transport
+  // produced it; the dedicated streaming test below covers the SSE path.
+  test("renders assistant markdown and a citation chip linking to the real scanned page", async ({ page }) => {
+    const mock = await mockChatApi(page);
+    await page.goto("/en/chat");
+    await expect(page.getByTestId("chat-input")).toBeEnabled();
+
+    const sourceId = randomUUID();
+    mock.setNextMessage({
+      status: "answer",
+      content:
+        "## Pick thickness\n\nA **thicker** pick gives you:\n\n" +
+        "- more attack\n- less pick noise\n\n```\nexample\n```",
+      citations: [
+        {
+          source_id: sourceId,
+          source_title: "Getting Great Guitar Sounds",
+          page_no: 21,
+          page_id: randomUUID(),
+          snippet: "A thicker pick gives a rounder tone…",
+        },
+      ],
+    });
+
+    await page.getByTestId("chat-input").fill("What does pick thickness do to my tone?");
+    await page.getByTestId("chat-send").click();
+
+    const assistantBubble = page.getByTestId("chat-message").last();
+    await expect(assistantBubble).toBeVisible();
+    // Real markdown elements, not a literal "**thicker**"/"##" wall of text.
+    await expect(assistantBubble.locator("h2")).toHaveText("Pick thickness");
+    await expect(assistantBubble.locator("strong")).toHaveText("thicker");
+    await expect(assistantBubble.locator("li")).toHaveCount(2);
+    await expect(assistantBubble.locator("code")).toHaveText("example\n");
+
+    // The citation chip: readable label, and — the actual payoff — a real
+    // href into the Reader at the cited page.
+    const chip = assistantBubble.getByTestId("citation-chip");
+    await expect(chip).toBeVisible();
+    await expect(chip).toContainText("Getting Great Guitar Sounds");
+    await expect(chip).toContainText("21");
+    await expect(chip).toHaveAttribute("href", `/en/library/${sourceId}?page=21`);
+
+    expect(mock.unexpected).toEqual([]);
+  });
+
+  // Plan 11 Task 3 (C4): SSE token streaming for the plain-answer path — the
+  // fix for "the 15s dead pause is what makes it feel broken even when it
+  // works". Scripts a REAL multi-chunk SSE body (several `delta` events then
+  // `done`) so this proves the client renders text PROGRESSIVELY (not just a
+  // single swap once the whole response function returns), and that a
+  // successful stream never falls back to the REST endpoint.
+  test("streams tokens progressively over SSE and never falls back to REST", async ({ page }) => {
+    const mock = await mockChatApi(page);
+    await page.goto("/en/chat");
+    await expect(page.getByTestId("chat-input")).toBeEnabled();
+
+    const sourceId = randomUUID();
+    mock.setNextStream(
+      sseBody([
+        { event: "delta", data: { text: "Thicker " } },
+        { event: "delta", data: { text: "picks **grip** better " } },
+        { event: "delta", data: { text: "and cut through the mix." } },
+        {
+          event: "done",
+          data: {
+            citations: [
+              {
+                source_id: sourceId,
+                source_title: "Getting Great Guitar Sounds",
+                page_no: 21,
+                page_id: randomUUID(),
+                snippet: "A thicker pick…",
+              },
+            ],
+          },
+        },
+      ]),
+    );
+
+    // Install a MutationObserver on the transcript BEFORE sending, so it
+    // captures every intermediate paint of the streaming bubble's text —
+    // the only reliable way to prove "appended progressively" rather than
+    // "swapped once at the end" regardless of how the mocked response's
+    // bytes happen to be chunked over the wire.
+    // Observes `document.body` (not `[data-testid="message-list"]` — that
+    // container doesn't exist yet pre-send; `MessageList` renders the
+    // `chat-empty` placeholder instead until the first message lands) so the
+    // observer is live from before the very first mutation that matters.
+    await page.evaluate(() => {
+      const w = window as unknown as { __chatSnapshots: string[] };
+      w.__chatSnapshots = [];
+      const observer = new MutationObserver(() => {
+        const bubbles = document.querySelectorAll('[data-testid="chat-message"][data-role="assistant"]');
+        const last = bubbles[bubbles.length - 1];
+        if (last) w.__chatSnapshots.push(last.textContent ?? "");
+      });
+      observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    });
+
+    await page.getByTestId("chat-input").fill("What does pick thickness do to my tone?");
+    await page.getByTestId("chat-send").click();
+
+    const assistantBubble = page.getByTestId("chat-message").last();
+    await expect(assistantBubble).toContainText("cut through the mix");
+    await expect(assistantBubble.getByTestId("citation-chip")).toHaveAttribute(
+      "href",
+      `/en/library/${sourceId}?page=21`,
+    );
+
+    const snapshots = await page.evaluate(() => (window as unknown as { __chatSnapshots: string[] }).__chatSnapshots);
+    const distinctNonEmpty = [...new Set(snapshots.filter((s) => s.length > 0))];
+    // Several distinct, growing states were rendered — not one final swap.
+    expect(distinctNonEmpty.length).toBeGreaterThan(1);
+    expect(distinctNonEmpty[0].length).toBeLessThan(distinctNonEmpty[distinctNonEmpty.length - 1].length);
+
+    // A successful stream must never fall back to the REST turn endpoint.
+    expect(mock.calls.stream).toBe(1);
+    expect(mock.calls.message).toBe(0);
+    expect(mock.unexpected).toEqual([]);
+  });
+
+  // Plan 11 Task 3 (C4) REGRESSION: streaming must never weaken the HITL
+  // gate. When the stream endpoint reports a `fallback` (the honest
+  // simplification — a tool/mutation turn always defers to the existing,
+  // airtight REST flow), the approval card must still appear and still gate
+  // the mutation exactly as it did before streaming existed.
+  test("a mutation turn still falls back to REST and the approval card still gates it", async ({ page }) => {
+    const mock = await mockChatApi(page);
+    // Default stream mock is already `event: fallback` (see `mockChatApi`'s
+    // docstring) — asserted explicitly here so this test fails loudly if
+    // that default ever changes out from under it.
+    await page.goto("/en/chat");
+    await expect(page.getByTestId("chat-input")).toBeEnabled();
+
+    const approvalId = randomUUID();
+    mock.setNextMessage({
+      status: "awaiting_approval",
+      approval_id: approvalId,
+      tool_name: "create_student",
+      tool_args: { name: "Maria Ioannou", level: "beginner" },
+      description: "I'll add Maria Ioannou as a new student.",
+    });
+
+    await page.getByTestId("chat-input").fill("Add a student named Maria Ioannou, beginner level");
+    await page.getByTestId("chat-send").click();
+
+    await expect(page.getByTestId("approval-card")).toBeVisible();
+    await expect(page.getByTestId("approval-tool-name")).toHaveText("create_student");
+    await expect(page.getByTestId("chat-input")).toBeDisabled();
+
+    expect(mock.calls.stream).toBe(1);
+    expect(mock.calls.message).toBe(1);
     expect(mock.unexpected).toEqual([]);
   });
 });

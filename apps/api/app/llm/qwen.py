@@ -118,6 +118,76 @@ class QwenVLLM(LLMProvider):
             tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=arguments))
         return AssistantTurn(content=msg.content, tool_calls=tool_calls)
 
+    def chat_tools_stream(self, messages, tools, *, tool_choice="auto", temperature=0.3):
+        """Streaming counterpart of `chat_tools` above (Plan 11 Task 3, C4) —
+        the ONE piece of real token-level streaming this app has: plain
+        OpenAI-protocol `stream=True` on the exact same tool-calling call
+        `chat_tools` makes (same `tools=`/`tool_choice=`/`enable_thinking:
+        False` — this is not a different code path against the model, only a
+        different response mode of the identical request).
+
+        Yields `{"type": "content", "text": ...}` for each content delta AS
+        THE SERVER SENDS IT (this is what actually eliminates the dead pause
+        — the caller can forward each chunk to the browser the instant it
+        arrives, unlike `chat_tools`, which blocks until the whole
+        completion is done). Tool-call deltas arrive fragmented too (a
+        `function.arguments` JSON string built up incrementally, `index`-
+        keyed per the OpenAI streaming tool-call shape) — these are
+        accumulated silently, NOT yielded incrementally: a caller has no use
+        for a half-written tool-call JSON string, and streaming loose
+        `text` deltas file `content` for a turn that turns out to be a tool
+        call would ask a caller to distinguish something that's showable
+        from something that isn't. The loop always ends with exactly ONE
+        terminal `{"type": "done", "content": ..., "tool_calls": [...]}` —
+        `content` mirrors `chat_tools`'s own `AssistantTurn.content` contract
+        (`None` when nothing was written, never `""`); `tool_calls` is
+        always a list, same as `AssistantTurn.tool_calls`.
+
+        Malformed tool-call-arguments JSON raises `ToolArgsError` (same as
+        `chat_tools`), from the ACCUMULATED string once the stream ends —
+        there is no meaningful way to detect "malformed" from a partial
+        fragment mid-stream.
+        """
+        stream = self._client.chat.completions.create(
+            model=settings.llm_model,
+            messages=messages,
+            tools=tools,
+            tool_choice=tool_choice,
+            temperature=temperature,
+            stream=True,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        content_parts: list[str] = []
+        pending_calls: dict[int, dict] = {}
+        for chunk in stream:
+            if not chunk.choices:
+                continue  # some streamed chunks (e.g. a trailing usage-only chunk) carry no choice
+            delta = chunk.choices[0].delta
+            if delta.content:
+                content_parts.append(delta.content)
+                yield {"type": "content", "text": delta.content}
+            for tc in delta.tool_calls or []:
+                slot = pending_calls.setdefault(tc.index, {"id": None, "name": None, "arguments": ""})
+                if tc.id:
+                    slot["id"] = tc.id
+                if tc.function is not None:
+                    if tc.function.name:
+                        slot["name"] = tc.function.name
+                    if tc.function.arguments:
+                        slot["arguments"] += tc.function.arguments
+
+        tool_calls: list[ToolCall] = []
+        for index in sorted(pending_calls):
+            slot = pending_calls[index]
+            raw = slot["arguments"]
+            try:
+                arguments = json.loads(raw) if raw else {}
+            except json.JSONDecodeError as e:
+                raise ToolArgsError(tool_name=slot["name"] or "?", raw=raw) from e
+            tool_calls.append(ToolCall(id=slot["id"], name=slot["name"], arguments=arguments))
+
+        yield {"type": "done", "content": "".join(content_parts) or None, "tool_calls": tool_calls}
+
     def embed(self, texts, *, is_query=False) -> list[list[float]]:
         inputs = [query_instruct(t) for t in texts] if is_query else list(texts)
         vectors: list[list[float]] = []

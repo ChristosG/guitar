@@ -423,6 +423,9 @@
     "empty": "Say hello to get started — the copilot can look things up or, with your approval, make changes.",
     "sessionError": "Could not start a chat session.",
     "error": "Could not send that message.",
+    "citations": {
+      "pageLabel": "p. {page}"
+    },
     "approval": {
       "heading": "Approval needed",
       "approve": "Approve",

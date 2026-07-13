@@ -79,6 +79,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
+from typing import Iterator
 
 from app.agent.guards import looks_like_tablature
 from app.agent.prompts import SYSTEM_PROMPT
@@ -593,3 +594,112 @@ def run_agent_turn(db, messages: list[dict], *, max_steps: int = 6) -> AgentResu
         messages.append({"role": "assistant", "content": _MAX_STEPS_MESSAGE})
         return AgentResult(status="answer", content=_MAX_STEPS_MESSAGE, messages=messages, citations=citations)
     return AgentResult(status="answer", content=last_content, messages=messages, citations=citations)
+
+
+# ---------------------------------------------------------------------------
+# Plan 11 Task 3 (C4): SSE token streaming — the plain-answer path only
+# ---------------------------------------------------------------------------
+#
+# `stream_plain_turn` is deliberately NOT a streaming version of the full
+# `run_agent_turn` ReAct loop above. It handles exactly one case — a fresh,
+# content-bearing user turn that resolves in a SINGLE model call with no
+# tool_calls and no C3 tablature bluff — and yields text deltas as the model
+# writes them for that case. Every other outcome (a tool/mutation call was
+# proposed, the model bluffed a hand-typed tab, the call raised, the
+# provider doesn't support streaming at all) yields a `"fallback"` event and
+# returns WITHOUT ever yielding `"done"`.
+#
+# THE HONEST SIMPLIFICATION (the task brief explicitly blesses this): the
+# ReAct dispatch loop, the HITL mutation-suspend gate (C6 — reviewed as
+# airtight three times), and the C3 post-turn guard's bounded re-prompt are
+# NOT reimplemented here. Reimplementing them against a streaming transport
+# would mean two independent copies of the single most safety-critical piece
+# of this app (the approval gate) that could drift apart — for a feature
+# whose entire point is a nicer wait, not a new capability. Instead: this
+# function only ever emits `"done"` for a turn simple enough to never need
+# any of that machinery, and defers to the EXISTING, unchanged
+# `run_agent_turn` (via the REST turn endpoint) for literally everything
+# else. `app/routers/chat.py`'s streaming endpoint persists NOTHING on a
+# `"fallback"` — the caller (the browser) resends the same content through
+# `POST .../messages`, which runs the full loop from a clean slate, so a
+# fallback can never leave a half-persisted, protocol-inconsistent
+# transcript behind.
+#
+# Runs the EXACT SAME forced-retrieval pre-hop as `run_agent_turn` (C1/C2 —
+# same `_is_content_bearing` gate, same `_RELEVANCE_FLOOR`, same
+# `_grounding_block`) so a streamed answer is grounded identically to a REST
+# one; only the model-call transport differs.
+def stream_plain_turn(db, messages: list[dict]) -> Iterator[dict]:
+    """Yields, in order:
+      - zero or more `{"event": "delta", "text": ...}` as content streams in.
+      - exactly one terminal event, one of:
+        - `{"event": "done", "content": str, "citations": list[dict],
+           "messages": list[dict]}` — `messages` is the input transcript
+          (system-prompted + grounded, same as `run_agent_turn` builds) with
+          the final assistant turn appended, ready to hand to
+          `persist_new_messages` exactly like `AgentResult.messages` is.
+        - `{"event": "fallback", "reason": "tool_call" | "tablature" |
+           "error"}` — see this module's own comment block above for what
+          each reason means and what the caller must do (never persist;
+          resend via the REST turn endpoint instead).
+    """
+    messages = _ensure_system_prompt(list(messages))
+    tools = _tool_schemas()
+    provider = get_provider()
+    citations: list[dict] = []
+
+    # Same pre-hop as `run_agent_turn` — see that function's own extensive
+    # comment for the full rationale; duplicated here (not extracted into a
+    # shared helper) because it's genuinely small and this module already
+    # follows the "small deliberate duplication over a cross-call shared
+    # helper with more parameters than callers" precedent (e.g. `_stringify`
+    # in `app/routers/chat.py`).
+    last = messages[-1]
+    if last.get("role") == "user" and _is_content_bearing(last.get("content") or ""):
+        raw_hits = search(db, last["content"], k=5)
+        hits = [hit for hit in raw_hits if hit.score >= _RELEVANCE_FLOOR]
+        citations = [_to_citation(hit) for hit in hits]
+        grounded_content = f"{last['content']}\n\n{_grounding_block(hits)}"
+        messages[-1] = {**last, "content": grounded_content}
+
+    final_content: str | None = None
+    tool_calls: list = []
+    try:
+        for event in provider.chat_tools_stream(messages, tools, tool_choice="auto", temperature=0.3):
+            if event["type"] == "content":
+                yield {"event": "delta", "text": event["text"]}
+            elif event["type"] == "done":
+                final_content = event["content"]
+                tool_calls = event["tool_calls"]
+    except Exception:
+        # Broad on purpose: a malformed tool-call JSON (`ToolArgsError`), a
+        # provider without a real streaming implementation
+        # (`NotImplementedError`, the base class's default), or any transport
+        # error mid-stream must never leak as a raw 500 out of an
+        # already-started SSE response — it must become an honest fallback
+        # instead, same posture as every other guard in this loop.
+        log.warning("stream_plain_turn: stream failed; falling back to REST", exc_info=True)
+        yield {"event": "fallback", "reason": "error"}
+        return
+
+    if tool_calls:
+        # A tool/mutation call was proposed — including possibly a genuine
+        # mutation that would need the HITL gate. NEVER dispatched here (see
+        # this module's comment block above for why); the REST endpoint's
+        # full `run_agent_turn` is what may act on it.
+        yield {"event": "fallback", "reason": "tool_call"}
+        return
+
+    if final_content and looks_like_tablature(final_content):
+        # C3: same guard `run_agent_turn` applies — a hand-typed tab must
+        # never reach the tutor. This function does not attempt the bounded
+        # re-prompt/fallback recovery `run_agent_turn` does (that recovery
+        # itself makes another model call, which would need to stream too,
+        # compounding exactly the complexity this function exists to avoid);
+        # it simply refuses to emit the bluff and defers to the REST path,
+        # which already re-prompts correctly.
+        yield {"event": "fallback", "reason": "tablature"}
+        return
+
+    messages.append(_wire_assistant_message(final_content, []))
+    yield {"event": "done", "content": final_content, "citations": citations, "messages": messages}

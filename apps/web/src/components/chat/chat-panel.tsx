@@ -13,6 +13,8 @@ import {
   getJob,
   resolveApproval,
   sendChatMessage,
+  streamChatMessage,
+  type ChatCitation,
   type ChatTurnOut,
 } from "@/lib/api";
 
@@ -101,8 +103,13 @@ export function ChatPanel() {
     startSession();
   }, [startSession]);
 
-  function appendMessage(role: "user" | "assistant", content: string, link?: ChatDisplayMessage["link"]) {
-    setMessages((prev) => [...prev, { id: crypto.randomUUID(), role, content, link }]);
+  function appendMessage(
+    role: "user" | "assistant",
+    content: string,
+    link?: ChatDisplayMessage["link"],
+    citations?: ChatCitation[] | null,
+  ) {
+    setMessages((prev) => [...prev, { id: crypto.randomUUID(), role, content, link, citations }]);
   }
 
   // Shared reaction to a `ChatTurnOut`, whatever produced it (the initial
@@ -126,7 +133,7 @@ export function ChatPanel() {
       return;
     }
     // "answer" (or, defensively, anything else): narrate if there's content.
-    if (turn.content) appendMessage("assistant", turn.content);
+    if (turn.content) appendMessage("assistant", turn.content, undefined, turn.citations);
   }
 
   async function pollJob(jobId: string) {
@@ -167,6 +174,17 @@ export function ChatPanel() {
 
   const composerDisabled = !sessionId || sending || pendingApproval != null || jobPending;
 
+  // Plan 11 Task 3 (C4): streams the plain-answer path token-by-token via
+  // `streamChatMessage`, with the existing REST `sendChatMessage` as an
+  // HONEST FALLBACK for everything that stream endpoint doesn't handle (a
+  // tool/mutation call, a post-turn guard trip, a mid-stream error — see
+  // `lib/api.ts`'s `ChatStreamOutcome` docstring). A placeholder assistant
+  // bubble (`streamId`) is appended up front and grown in place as `onDelta`
+  // fires; on a "fallback" outcome that placeholder is REMOVED (never shown
+  // half-formed) and this falls through to the exact same `sendChatMessage`
+  // + `applyTurn` call the pre-streaming version of this function always
+  // made — so the HITL approval-card flow is reached through an UNCHANGED
+  // code path no matter which branch got it there.
   async function handleSend(e: FormEvent) {
     e.preventDefault();
     const content = draft.trim();
@@ -176,10 +194,35 @@ export function ChatPanel() {
     appendMessage("user", content);
     setSending(true);
     setComposerError(null);
+
+    const streamId = crypto.randomUUID();
+    setMessages((prev) => [...prev, { id: streamId, role: "assistant", content: "" }]);
+    let streamedAnything = false;
+
     try {
+      const outcome = await streamChatMessage(sessionId, content, (text) => {
+        streamedAnything = true;
+        setMessages((prev) =>
+          prev.map((m) => (m.id === streamId ? { ...m, content: m.content + text } : m)),
+        );
+      });
+
+      if (outcome.status === "done") {
+        setMessages((prev) =>
+          prev.map((m) => (m.id === streamId ? { ...m, citations: outcome.citations } : m)),
+        );
+        return;
+      }
+
+      // "fallback": drop the (possibly partial) streamed placeholder — it
+      // was never persisted server-side either (see `streamChatMessage`'s
+      // docstring) — and resolve this turn the exact same way this
+      // component always did, pre-streaming.
+      setMessages((prev) => prev.filter((m) => m.id !== streamId));
       const turn = await sendChatMessage(sessionId, content);
       applyTurn(turn);
     } catch (err) {
+      if (!streamedAnything) setMessages((prev) => prev.filter((m) => m.id !== streamId));
       setComposerError(err instanceof ApiError ? err.detail : t("error"));
     } finally {
       setSending(false);
