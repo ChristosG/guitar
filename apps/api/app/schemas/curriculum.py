@@ -18,6 +18,13 @@ class CurriculumGenerateRequest(BaseModel):
     profile: dict
     domain: str | None = None
     target_minutes_total: int | None = Field(default=None, gt=0)
+    # Plan 12 Task 2 (G1): scope generation to the sources the tutor picked
+    # in the library, instead of the model's general knowledge. Both fields
+    # default to their pre-existing behaviour (unscoped search / gaps left
+    # unfilled) so an old request body — with neither key present — produces
+    # the exact same `generate_curriculum` call as before this task.
+    source_ids: list[UUID] | None = None
+    allow_general: bool = False
 
 
 class CurriculumListItem(BaseModel):

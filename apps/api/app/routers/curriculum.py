@@ -121,6 +121,14 @@ def generate_curriculum_endpoint(
         "domain": payload.domain,
         "target_minutes_total": payload.target_minutes_total,
     }
+    # Only added when actually requested — keeps `params` byte-for-byte
+    # identical to the pre-Task-2 shape for callers that don't use them (see
+    # test_curriculum_generate_enqueue.py's
+    # ..._persists_request_params_verbatim_on_the_job).
+    if payload.source_ids:
+        params["source_ids"] = [str(s) for s in payload.source_ids]
+    if payload.allow_general:
+        params["allow_general"] = payload.allow_general
     job = GenerationJob(kind="curriculum", status="pending", params=params)
     db.add(job)
     db.commit()

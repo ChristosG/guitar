@@ -9,8 +9,8 @@ class GuidedJSONError(Exception):
     used as the requested structured JSON: the model refused (`message.
     content is None`), the response was cut off before the JSON closed
     (`finish_reason == "length"`), or — as a last-resort guard, even though
-    vLLM's guided decoding is verified (see `generate.py`'s CURRICULUM_SCHEMA
-    comment) to constrain output to schema-valid JSON in the normal case —
+    vLLM's guided decoding is verified (see `generate.py`'s PLAN_SCHEMA/
+    MODULE_SCHEMA comments) to constrain output to schema-valid JSON in the normal case —
     `json.loads` still raised.
 
     Distinguishing this from a transport-level error (timeout/connection —

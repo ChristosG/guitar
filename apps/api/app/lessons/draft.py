@@ -35,7 +35,7 @@ from app.models.block import Block
 from app.models.knowledge import KnowledgeSource
 
 # guided-JSON schema for {title, sessions:[{title, est_minutes,
-# items:[{title, body}]}]}. Mirrors CURRICULUM_SCHEMA's shape/verified
+# items:[{title, body}]}]}. Mirrors MODULE_SCHEMA's (app.curriculum.generate) shape/verified
 # keywords (`app.curriculum.generate`): `est_minutes` carries `"minimum": 1`
 # (live A/B-verified there to be actually enforced, not just accepted).
 LESSON_SCHEMA = {
