@@ -14,9 +14,11 @@ Cloudflare for a single user.
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.curriculum import interview as interview_service
 from app.curriculum.assign import clone_content_subtree
 from app.curriculum.segment import segment_block
 from app.db import get_db
@@ -24,6 +26,7 @@ from app.jobs.runner import run_curriculum_job
 from app.models.block import Block
 from app.models.curriculum import Assignment
 from app.models.generation_job import GenerationJob
+from app.models.interview import CurriculumInterview
 from app.models.student import Student
 from app.schemas.curriculum import (
     AssignRequest,
@@ -33,6 +36,7 @@ from app.schemas.curriculum import (
     CurriculumListItem,
     SegmentRequest,
 )
+from app.schemas.interview import InterviewAnswerRequest, InterviewStartRequest, InterviewStateOut
 from app.schemas.jobs import JobAccepted
 
 router = APIRouter(tags=["curriculum"])
@@ -75,6 +79,13 @@ def _get_block_or_404(db: Session, block_id: UUID) -> Block:
     return block
 
 
+def _get_interview_or_404(db: Session, interview_id: UUID) -> CurriculumInterview:
+    interview = db.get(CurriculumInterview, interview_id)
+    if interview is None:
+        raise HTTPException(status_code=404, detail="interview not found")
+    return interview
+
+
 @router.get("/curricula", response_model=list[CurriculumListItem])
 def list_curricula(db: Session = Depends(get_db)) -> list[CurriculumListItem]:
     roots = db.scalars(
@@ -83,6 +94,83 @@ def list_curricula(db: Session = Depends(get_db)) -> list[CurriculumListItem]:
         .order_by(Block.created_at.desc())
     ).all()
     return [CurriculumListItem.model_validate(b, from_attributes=True) for b in roots]
+
+
+@router.post("/curricula/interview", response_model=InterviewStateOut, status_code=201)
+def start_curriculum_interview(
+    payload: InterviewStartRequest, db: Session = Depends(get_db)
+) -> dict:
+    """Start the guided curriculum interview (Plan 12 Task 3, G2) — the
+    first of its five code-driven steps ("who"). See
+    `app.curriculum.interview`'s module docstring for why this whole flow
+    is a state machine in code, not a free-form chat.
+    """
+    interview = interview_service.start_interview(db, title=payload.title, domain=payload.domain)
+    return interview_service.render_state(db, interview)
+
+
+@router.get("/curricula/interview/{interview_id}", response_model=InterviewStateOut)
+def get_curriculum_interview(interview_id: UUID, db: Session = Depends(get_db)) -> dict:
+    """Current state of an in-progress interview — a page refresh (or a
+    lost connection) never loses progress, and never re-runs the "preview"
+    step's LLM/retrieval calls: `render_state` only ever READS the cached
+    `CurriculumInterview.preview` column, it never recomputes it.
+    """
+    interview = _get_interview_or_404(db, interview_id)
+    return interview_service.render_state(db, interview)
+
+
+@router.post("/curricula/interview/{interview_id}/answer", response_model=None)
+def answer_curriculum_interview(
+    interview_id: UUID,
+    payload: InterviewAnswerRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """Advance one step of the interview, or — on the final "confirm" step,
+    once approved — enqueue the REAL grounded generation job and return
+    `202 {job_id, status}` (mirrors `generate_curriculum_endpoint` below
+    exactly: same `GenerationJob` row shape, same `BackgroundTasks.add_task
+    (run_curriculum_job, job.id)` scheduling, same reason `run_curriculum_job`
+    is imported at module level — so tests can monkeypatch
+    `app.routers.curriculum.run_curriculum_job`; Starlette's `TestClient`
+    runs `BackgroundTasks` in-process AFTER the response, so an unpatched
+    test here would trigger a real generation run).
+
+    A bad/blank/invalid answer (`app.curriculum.interview.answer_interview`
+    returning `ok=False`) re-asks the SAME step's question with `error` set
+    — `interview.step` never advances and this never raises. `db.commit()`
+    happens unconditionally right after `answer_interview` returns, whether
+    the answer was accepted or not: on an invalid answer nothing about the
+    row actually changed (`step` is untouched), so the commit is a no-op;
+    keeping it unconditional (rather than branching on `result["ok"]`)
+    avoids two separate commit call sites for what is, either way, "this
+    request is done touching the DB."
+    """
+    interview = _get_interview_or_404(db, interview_id)
+    result = interview_service.answer_interview(db, interview, payload.answer)
+    db.commit()
+
+    if not result["ok"]:
+        return interview_service.render_state(db, interview, error=result["error"])
+
+    if result["done"]:
+        job = GenerationJob(kind="curriculum", status="pending", params=result["params"])
+        db.add(job)
+        # `job.id`'s `default=uuid.uuid4` is a client-side default that
+        # SQLAlchemy only actually generates at flush time — reading
+        # `job.id` any earlier returns `None` (bug caught by this task's own
+        # test: `interview.job_id` came back `None` after commit). Flush
+        # BEFORE reading `job.id`, so the id `interview.job_id` records
+        # below is the real one, not `None`.
+        db.flush()
+        interview.job_id = job.id
+        db.commit()
+        db.refresh(job)
+        background_tasks.add_task(run_curriculum_job, job.id)
+        return JSONResponse(status_code=202, content={"job_id": str(job.id), "status": job.status})
+
+    return interview_service.render_state(db, interview)
 
 
 @router.post("/curricula/generate", response_model=JobAccepted, status_code=202)

@@ -6,3 +6,4 @@ from app.models.artifact import Artifact        # noqa: F401
 from app.models.generation_job import GenerationJob  # noqa: F401
 from app.models.chat import ChatSession, Message, ApprovalRequest  # noqa: F401
 from app.models.note import Note                # noqa: F401
+from app.models.interview import CurriculumInterview  # noqa: F401
