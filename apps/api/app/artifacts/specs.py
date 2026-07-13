@@ -16,9 +16,23 @@ should use:
 Both are left for callers to map to HTTP 422; that mapping is not this
 module's concern.
 """
+import re
 from typing import Annotated
 
 from pydantic import BaseModel, Field, field_validator
+
+# A real alphaTex note is `fret.string[.duration]` (e.g. `3.6.4` = fret 3,
+# string 6, quarter note) — confirmed against the vendored AlphaTab build
+# (apps/web/public/alphatab) by rendering a worked example live in a
+# browser (see this task's report). At minimum every genuine alphaTex
+# string contains one `<digits>.<digits>` note token; a plain-English label
+# like "G Major Scale Tab" (Plan 11's live-acceptance bug — the model filled
+# `alphaTex` with a description instead of notation) contains no digits at
+# all and never matches. This is deliberately a low bar (real generations
+# will have many such tokens) rather than a full alphaTex grammar check —
+# just enough to catch "not notation at all" before it reaches AlphaTab and
+# throws "No alphaTex data found" client-side.
+_ALPHATEX_NOTE_RE = re.compile(r"\d+\.\d+")
 
 
 class BarreSpec(BaseModel):
@@ -65,9 +79,19 @@ class TabSpec(BaseModel):
 
     @field_validator("alphaTex")
     @classmethod
-    def _alphatex_non_empty(cls, v: str) -> str:
+    def _alphatex_looks_like_notation(cls, v: str) -> str:
         if not v.strip():
             raise ValueError("alphaTex must be non-empty")
+        # Guards against a schema-valid but musically-empty spec: a plain
+        # English sentence passes "non-empty string" fine but throws "No
+        # alphaTex data found" in AlphaTab client-side (see module-level
+        # `_ALPHATEX_NOTE_RE` docstring for how this rule was derived).
+        if not _ALPHATEX_NOTE_RE.search(v):
+            raise ValueError(
+                "alphaTex must be real alphaTex notation (fret.string.duration "
+                "note tokens, e.g. '3.6.4 5.6.4 | 2.5.4 3.5.4'), not a "
+                "plain-English description"
+            )
         return v
 
 

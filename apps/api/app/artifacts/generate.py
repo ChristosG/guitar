@@ -22,6 +22,32 @@ from app.models.artifact import Artifact
 
 log = logging.getLogger(__name__)
 
+# Per-kind extra guidance folded into the system prompt (Plan 11 Task 5).
+# Every other field in every other kind is either a plain label/number the
+# model already handles fine, or a bounded enum-ish shape guided_json's
+# schema constraint already pins down — but `TabSpec.alphaTex` is a free-text
+# string field the model has to fill with an entirely different mini-syntax
+# (AlphaTab's alphaTex) that it has no other way of knowing. Without a worked
+# example the observed failure (Plan 11's live acceptance walk) was the model
+# filling `alphaTex` with a plain-English label ("G Major Scale Tab") instead
+# of notation — schema-valid, but AlphaTab throws "No alphaTex data found"
+# rendering it. The example below was verified to actually render (2 bars,
+# real notation + tab) against the vendored AlphaTab build before being
+# baked in here — see this task's report for how.
+_KIND_PROMPT_GUIDANCE: dict[str, str] = {
+    "tab": (
+        "`alphaTex` MUST be real alphaTab notation syntax, never a "
+        "plain-English label or description. Each note is written "
+        "`fret.string.duration` — string 1 is high E, string 6 is low E; "
+        "duration 4 = quarter note, 8 = eighth note, etc. Notes are "
+        "separated by spaces; bars are separated by `|`. Worked example "
+        "(a two-bar G major scale run):\n"
+        "3.6.4 5.6.4 2.5.4 3.5.4 | 5.5.4 2.4.4 4.4.4 5.4.4\n"
+        "Do NOT write something like \"G Major Scale Tab\" in `alphaTex` — "
+        "that is a label, not notation, and will be rejected."
+    ),
+}
+
 # Artifact.title column cap (String(300)). Not `_`-prefixed — unlike this
 # module's other internals — because routers.artifacts.create_artifact
 # imports it too, to clamp a client-supplied title the same way derive_title
@@ -50,11 +76,21 @@ def _build_messages(
     given (the one-retry repair path — see `generate_artifact`), appends the
     previous attempt's Pydantic validation error so the retry can actually
     fix the specific problem instead of blindly repeating it.
+
+    Exception to "short, no rambling": `kind`s in `_KIND_PROMPT_GUIDANCE`
+    (currently only `tab`) get an extra worked-example block appended to the
+    system prompt. This isn't the same kind of guidance the rest of this
+    docstring argues is unnecessary — it's not restating what guided_json's
+    schema already constrains, it's teaching the model a field's *content*
+    syntax (AlphaTab's alphaTex mini-language) the schema can't express at
+    all (`alphaTex` is just `str` — see `app.artifacts.specs.TabSpec`).
     """
     system = (
         f"You generate ONLY the JSON spec for a {kind}, matching the given "
         "schema — no prose, no markdown, no commentary outside the JSON object."
     )
+    if kind in _KIND_PROMPT_GUIDANCE:
+        system += "\n\n" + _KIND_PROMPT_GUIDANCE[kind]
     if hits:
         context = "\n\n".join(f"[{i}] {hit.text}" for i, hit in enumerate(hits, start=1))
         user = f"{prompt}\n\nCONTEXT:\n{context}"

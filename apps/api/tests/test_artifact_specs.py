@@ -103,6 +103,29 @@ def test_validate_tab_empty_alphatex_raises():
         validate_spec("tab", {"alphaTex": "   "})
 
 
+def test_validate_tab_plain_english_label_raises():
+    """The exact Plan 11 live-acceptance bug: the model filled `alphaTex`
+    with a plain-English LABEL ("G Major Scale Tab") instead of real
+    alphaTex notation. This was schema-valid under the old "non-empty
+    string" validator and reached AlphaTab client-side, which throws "No
+    alphaTex data found" — a schema-valid but musically-empty artifact the
+    tutor clicks into and sees broken. Must be rejected here instead.
+    """
+    with pytest.raises(ValidationError):
+        validate_spec("tab", {"alphaTex": "G Major Scale Tab"})
+
+
+def test_validate_tab_real_alphatex_accepts():
+    """Confirmed-renders alphaTex (verified live against the vendored
+    AlphaTab build — 2 bars, real notation + tab — see this task's report):
+    a G major scale run, `fret.string.duration` note tokens separated by
+    spaces, bars separated by `|`.
+    """
+    real_alphatex = "3.6.4 5.6.4 2.5.4 3.5.4 | 5.5.4 2.4.4 4.4.4 5.4.4"
+    out = validate_spec("tab", {"alphaTex": real_alphatex})
+    assert out["alphaTex"] == real_alphatex
+
+
 def test_validate_signal_chain_requires_at_least_one_node():
     with pytest.raises(ValidationError):
         validate_spec("signal_chain", {"nodes": []})

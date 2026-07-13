@@ -168,7 +168,11 @@ def test_list_artifacts_filters_by_kind():
         "kind": "chord_diagram", "spec": _VALID_CHORD_SPEC, "title": chord_title,
     })
     r2 = client.post("/artifacts", json={
-        "kind": "tab", "spec": {"alphaTex": "."}, "title": tab_title,
+        # Real alphaTex note token (fret.string.duration), not the bare "."
+        # placeholder this used to use — TabSpec now rejects anything that
+        # doesn't look like real notation (Plan 11 Task 5), so a spec
+        # posted through this endpoint has to satisfy that too.
+        "kind": "tab", "spec": {"alphaTex": "3.6.4"}, "title": tab_title,
     })
     assert r1.status_code == 200 and r2.status_code == 200
 

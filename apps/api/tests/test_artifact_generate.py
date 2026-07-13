@@ -70,6 +70,27 @@ def test_build_messages_with_hits_folds_in_numbered_context():
     assert "[2] single coils sound bright" in user
 
 
+def test_build_messages_tab_includes_a_real_worked_alphatex_example():
+    """Plan 11 Task 5's prompt half of the fix: without a concrete example of
+    real alphaTex syntax, the model has no way to know `alphaTex` wants
+    `fret.string.duration` note tokens rather than a plain-English label
+    (the exact bug — see `test_artifact_specs.
+    test_validate_tab_plain_english_label_raises`). This pins that the
+    worked example (verified to actually render — see this task's report)
+    reaches the system prompt for kind="tab" specifically.
+    """
+    messages = _build_messages(kind="tab", prompt="G major scale", hits=[])
+    system = messages[0]["content"]
+    assert "fret.string.duration" in system
+    assert "3.6.4" in system  # the concrete worked example, not just prose
+
+
+def test_build_messages_other_kinds_do_not_get_the_tab_example():
+    messages = _build_messages(kind="chord_diagram", prompt="G major open chord", hits=[])
+    system = messages[0]["content"]
+    assert "fret.string.duration" not in system
+
+
 def test_build_messages_repair_error_appends_previous_failure():
     messages = _build_messages(
         kind="chord_diagram", prompt="G major open chord", hits=[],
@@ -192,6 +213,74 @@ def test_generate_artifact_raises_after_repair_also_fails(monkeypatch):
     finally:
         db.close()
 
+    assert len(fake.calls) == 2  # one initial attempt + one repair, no more
+
+
+_TAB_PLAIN_ENGLISH_LABEL = {"alphaTex": "G Major Scale Tab"}  # the exact Plan 11 bug
+_TAB_REAL_ALPHATEX = {
+    "alphaTex": "3.6.4 5.6.4 2.5.4 3.5.4 | 5.5.4 2.4.4 4.4.4 5.4.4",
+    "title": "G major scale",
+}
+
+
+def test_generate_artifact_tab_persists_a_real_alphatex_spec(monkeypatch):
+    fake = _FakeProvider([_TAB_REAL_ALPHATEX])
+    monkeypatch.setattr(artifact_generate, "get_provider", lambda: fake)
+
+    db = SessionLocal()
+    try:
+        artifact = generate_artifact(db, kind="tab", prompt="G major scale")
+        assert artifact.spec["alphaTex"] == _TAB_REAL_ALPHATEX["alphaTex"]
+    finally:
+        db.close()
+
+
+def test_generate_artifact_tab_repairs_a_plain_english_label_into_real_alphatex(monkeypatch):
+    """The repair-retry path (already exercised generically by
+    `test_generate_artifact_repairs_an_invalid_first_attempt` above) applies
+    just as well to a tab whose first attempt is a plain-English label
+    instead of notation: `validate_spec` rejects it, one repair retry is
+    made with the validation error folded back in, and a valid second
+    attempt is what actually gets persisted.
+    """
+    fake = _FakeProvider([_TAB_PLAIN_ENGLISH_LABEL, _TAB_REAL_ALPHATEX])
+    monkeypatch.setattr(artifact_generate, "get_provider", lambda: fake)
+
+    db = SessionLocal()
+    try:
+        artifact = generate_artifact(db, kind="tab", prompt="G major scale")
+        assert artifact.spec["alphaTex"] == _TAB_REAL_ALPHATEX["alphaTex"]
+    finally:
+        db.close()
+
+    assert len(fake.calls) == 2
+    repair_user_message = fake.calls[1][1]["content"]
+    assert "invalid" in repair_user_message.lower()
+
+
+def test_generate_artifact_tab_never_persists_a_broken_artifact_when_both_attempts_fail(monkeypatch):
+    """THE bug this task fixes: a `generate_artifact(kind="tab")` call whose
+    model output never becomes real notation (both the first attempt AND the
+    repair retry are plain-English labels) must FAIL LOUDLY — raise, and
+    persist NOTHING — rather than silently commit a schema-valid but
+    musically-empty Artifact the tutor would click into and see AlphaTab's
+    "No alphaTex data found" error. Worse than the old free-typed-ASCII bug
+    in exactly the way the task brief describes: it would otherwise look
+    like it worked.
+    """
+    fake = _FakeProvider([_TAB_PLAIN_ENGLISH_LABEL, _TAB_PLAIN_ENGLISH_LABEL])
+    monkeypatch.setattr(artifact_generate, "get_provider", lambda: fake)
+
+    db = SessionLocal()
+    try:
+        count_before = db.query(Artifact).count()
+        with pytest.raises(ValidationError):
+            generate_artifact(db, kind="tab", prompt="G major scale")
+        count_after = db.query(Artifact).count()
+    finally:
+        db.close()
+
+    assert count_after == count_before  # nothing persisted
     assert len(fake.calls) == 2  # one initial attempt + one repair, no more
 
 
