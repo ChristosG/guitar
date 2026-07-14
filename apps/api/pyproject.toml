@@ -11,10 +11,18 @@ dependencies = [
   "alembic>=1.13",
   "pgvector>=0.3",
   "openai>=1.54",
+  "anthropic>=0.69",
   "httpx>=0.27",
   "pymupdf>=1.24",
   "trafilatura>=1.8",
   "python-multipart>=0.0.9",
+  # Local CPU embeddings (multilingual-e5-small, 384-dim). NOT torch: the ONNX
+  # runtime plus the tokenizer is ~60MB of wheel against torch's ~800MB, and the
+  # end state is a bundled desktop app. Weights are baked into the image at
+  # build time (see Dockerfile) — never downloaded at first run.
+  "onnxruntime>=1.19",
+  "tokenizers>=0.20",
+  "numpy>=2.0",
 ]
 
 [project.optional-dependencies]

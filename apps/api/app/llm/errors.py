@@ -4,22 +4,70 @@ try/except) don't need to import the abstract provider interface too.
 """
 
 
-class GuidedJSONError(Exception):
+class LLMError(Exception):
+    """One transport/auth-level failure type for ALL providers, carrying the
+    classification the caller actually branches on.
+
+    Before Plan 13 the catch sites named the VENDOR: `except
+    (openai.APIConnectionError, httpx.TransportError)`, in five places, with
+    `import openai` at the top of `jobs/runner.py` and `routers/artifacts.py` —
+    i.e. two modules far above the LLM seam knew which SDK was underneath. That
+    is exactly the coupling `LLMProvider` exists to prevent, and it means adding
+    Claude would otherwise mean adding `anthropic.APIConnectionError` to five
+    tuples and hoping none was missed. A missed one is not a crash: it falls to
+    the generic `except Exception` and the job is recorded as `internal`, i.e.
+    "our bug", when it was really "your key expired".
+
+    `kind` is the whole point:
+
+      "auth"       -> the tutor's Anthropic key is missing, invalid, or out of
+                      credit. THE ONE ERROR HE CAN ACTUALLY FIX. Maps to HTTP
+                      424 and the message "open Settings". Everything else in
+                      this taxonomy is "shrug, retry"; this one is a door.
+      "rate_limit" -> 429. Recoverable by waiting. A lesson draft that hits this
+                      must go back to `queued`, NOT `failed`, or half a
+                      curriculum dies because the tutor generated it too fast.
+      "timeout"    -> the network/model didn't answer in time. 504.
+      "upstream"   -> the model answered with something unusable. 502.
+    """
+
+    def __init__(self, kind: str, message: str = "") -> None:
+        self.kind = kind
+        super().__init__(message or kind)
+
+
+class GuidedJSONError(LLMError):
     """Raised by `LLMProvider.guided_json` when the model's response can't be
     used as the requested structured JSON: the model refused (`message.
     content is None`), the response was cut off before the JSON closed
-    (`finish_reason == "length"`), or — as a last-resort guard, even though
-    vLLM's guided decoding is verified (see `generate.py`'s PLAN_SCHEMA/
-    MODULE_SCHEMA comments) to constrain output to schema-valid JSON in the normal case —
-    `json.loads` still raised.
+    (`finish_reason == "length"` / `stop_reason == "max_tokens"`), or — as a
+    last-resort guard — `json.loads` still raised.
 
-    Distinguishing this from a transport-level error (timeout/connection —
-    `openai.APIConnectionError`/`httpx.TransportError`) matters to callers:
-    `routers/curriculum.py`'s generate endpoint maps this to a 502 ("the
-    model gave us unusable output, retry") and a transport error to a 504
-    ("we/the network didn't get a response in time, retry") — both distinct
-    from an actual unhandled 500.
+    Distinguishing this from a transport-level error (timeout/connection)
+    matters to callers: `routers/curriculum.py`'s generate endpoint maps this
+    to a 502 ("the model gave us unusable output, retry") and a transport error
+    to a 504 ("we/the network didn't get a response in time, retry") — both
+    distinct from an actual unhandled 500.
+
+    Subclasses `LLMError` with `kind="upstream"` and keeps its single-argument
+    `(message)` signature, so the two existing `raise GuidedJSONError("...")`
+    sites in `qwen.py` — and every `except GuidedJSONError` in `jobs/runner.py`,
+    `routers/artifacts.py` and `routers/curriculum.py` — continue to mean
+    exactly what they meant before. The taxonomy is additive, not a rewrite.
+
+    TRUNCATION IS THE ONE TO WATCH under Claude. Greek costs ~2-3x the tokens of
+    English per word, and Sonnet 5's tokenizer emits more of them than its
+    predecessors — so a lesson draft that fit comfortably under Qwen can hit
+    `max_tokens` here. A truncated JSON body surfaces as a *parse* failure, and
+    a parse failure gets debugged as "the model produced bad JSON" when the real
+    cause is "we didn't give it room to finish". Every `guided_json`
+    implementation must therefore check the stop reason FIRST and raise this
+    with an explicit truncation message, never let a `JSONDecodeError` stand in
+    for it.
     """
+
+    def __init__(self, message: str = "") -> None:
+        super().__init__("upstream", message)
 
 
 class ToolArgsError(Exception):
