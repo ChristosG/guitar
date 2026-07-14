@@ -54,6 +54,30 @@ def _truncate_all_tables(_test_database):
             conn.execute(text(f"TRUNCATE TABLE {table_names} RESTART IDENTITY CASCADE"))
 
 
+@pytest.fixture(autouse=True)
+def _no_live_retrieval(monkeypatch):
+    """Unit tests must not reach the live embedding server.
+
+    Plan 13 INVERTED the forced-retrieval gate (`agent/loop.py::
+    _is_content_bearing`): it used to require a positive "this looks like a
+    question" match before grounding, and now it grounds by DEFAULT, skipping
+    only obvious small talk and obvious entity commands. That is the right
+    product behaviour — the old rule failed OPEN, silently answering every Greek
+    question ungrounded — but it means the pre-hop now fires on nearly every turn
+    a test drives, where before it fired on almost none.
+
+    Sixteen loop/router unit tests, all using fake LLM providers, therefore
+    started calling the real `search()` -> the real embedder -> a vLLM hostname
+    that only resolves inside the compose network. They were never *meant* to do
+    live retrieval; the narrow old gate was accidentally hiding that.
+
+    So: retrieval returns nothing by default, and a test that actually cares
+    about grounding patches `search` itself — its `monkeypatch.setattr` runs
+    after this fixture and wins (see `test_agent_grounding.py`).
+    """
+    monkeypatch.setattr("app.agent.loop.search", lambda *a, **k: [], raising=False)
+
+
 @pytest.fixture
 def db():
     """Plain SQLAlchemy session for model-level tests (e.g. test_library_models.py).
