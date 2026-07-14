@@ -4,12 +4,21 @@ from typing import Iterator
 from app.llm.tools_types import AssistantTurn
 
 class LLMProvider(ABC):
+    """The CHAT/vision seam. Embeddings deliberately do NOT live here.
+
+    `embed()` used to be an `@abstractmethod` on this class. It was moved to its
+    own `app.llm.embedder.EmbeddingProvider` in Plan 13 Task 1.1 for a concrete
+    reason, not for tidiness: **Anthropic has no embeddings endpoint**, so a
+    `ClaudeProvider` could not satisfy this ABC at all — Python would raise
+    `TypeError: Can't instantiate abstract class ClaudeProvider with abstract
+    method embed` at construction, and the app would die at import rather than
+    at the first query. Chat providers and embedding providers vary
+    independently; the type system now says so.
+    """
+
     @abstractmethod
     def chat(self, messages: list[dict], *, temperature: float = 0.3,
              enable_thinking: bool = False) -> str: ...
-
-    @abstractmethod
-    def embed(self, texts: list[str], *, is_query: bool = False) -> list[list[float]]: ...
 
     @abstractmethod
     def guided_json(self, messages: list[dict], schema: dict, *,

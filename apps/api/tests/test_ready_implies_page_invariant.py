@@ -30,7 +30,7 @@ class _Provider:
 
 
 def test_ready_text_source_always_has_at_least_one_page(db, monkeypatch):
-    monkeypatch.setattr("app.brain.ingest.get_provider", lambda: _Provider())
+    monkeypatch.setattr("app.brain.ingest.get_embedder", lambda: _Provider())
     src = KnowledgeSource(type="text", title="Notes", status="ingesting")
     db.add(src); db.commit()
 
@@ -43,7 +43,7 @@ def test_ready_text_source_always_has_at_least_one_page(db, monkeypatch):
 
 
 def test_ready_url_source_always_has_at_least_one_page(db, monkeypatch):
-    monkeypatch.setattr("app.brain.ingest.get_provider", lambda: _Provider())
+    monkeypatch.setattr("app.brain.ingest.get_embedder", lambda: _Provider())
     fake_sections = [extract_mod.Section(heading=None, text="Real fetched tone content.", page=1)]
     # paginate_source's single-Page path fetches (its own bound `extract_text`,
     # app.brain.paginate module) — same double-patch precedent as
@@ -66,7 +66,7 @@ def test_ready_pdf_source_with_a_text_layer_always_has_at_least_one_page(db, tmp
     """A PDF page with an existing text layer is taken for free (no OCR job
     needed — see app/brain/paginate.py's `_paginate_pdf`), so this reaches
     "ready" synchronously inside ingest_source itself, same as text/url."""
-    monkeypatch.setattr("app.brain.ingest.get_provider", lambda: _Provider())
+    monkeypatch.setattr("app.brain.ingest.get_embedder", lambda: _Provider())
     monkeypatch.setattr("app.brain.paginate.settings.media_dir", str(tmp_path))
 
     doc = fitz.open()

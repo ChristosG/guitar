@@ -30,6 +30,7 @@ from uuid import UUID
 
 from sqlalchemy import or_, select
 
+from app.llm.embed_factory import get_embedder
 from app.llm.factory import get_provider
 from app.models.knowledge import Chunk, KnowledgeSource, Page
 
@@ -83,7 +84,7 @@ def search(
     domain="theory" when filtering domain="tone") — the filter isn't a
     no-op, it just no longer punishes sources nobody got around to tagging.
     """
-    qv = get_provider().embed([query], is_query=True)[0]
+    qv = get_embedder().embed([query], is_query=True)[0]
     distance = Chunk.embedding.cosine_distance(qv)
 
     # outerjoin, not join: chunks from sources ingested before Plan 9 Task 1

@@ -243,7 +243,7 @@ def test_ingest_caps_total_extracted_text_at_max_ingest_chars(monkeypatch):
         def embed(self, texts, *, is_query=False):
             return [[0.0] * settings.embed_dim for _ in texts]
 
-    monkeypatch.setattr("app.brain.ingest.get_provider", lambda: _ZeroVectorProvider())
+    monkeypatch.setattr("app.brain.ingest.get_embedder", lambda: _ZeroVectorProvider())
 
     db = SessionLocal()
     try:

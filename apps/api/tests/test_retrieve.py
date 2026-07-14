@@ -255,7 +255,7 @@ def test_search_returns_chunks_with_and_without_pages(db, monkeypatch):
         def embed(self, texts, *, is_query=False):
             return [[0.0] * settings.embed_dim for _ in texts]
 
-    monkeypatch.setattr("app.brain.retrieve.get_provider", lambda: _ZeroVectorProvider())
+    monkeypatch.setattr("app.brain.retrieve.get_embedder", lambda: _ZeroVectorProvider())
 
     # Create a source.
     source = KnowledgeSource(type="text", title="Test Source", language="en")

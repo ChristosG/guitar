@@ -127,7 +127,7 @@ def test_get_page_self_heals_a_ready_source_with_chunks_but_no_pages(db, monkeyp
     from app.brain.chunk import chunk_sections
     from app.brain.extract import Section
 
-    monkeypatch.setattr("app.brain.ingest.get_provider", lambda: _Provider())
+    monkeypatch.setattr("app.brain.ingest.get_embedder", lambda: _Provider())
     original = " ".join(f"tone{i:04d}" for i in range(400))  # > target_chars, real overlap
     src = KnowledgeSource(type="text", title="Course Spine", status="ready",
                           char_count=len(original))
@@ -149,7 +149,7 @@ def test_get_page_self_heals_a_ready_source_with_chunks_but_no_pages(db, monkeyp
 
 
 def test_list_pages_self_heals_a_ready_source_with_chunks_but_no_pages(db, monkeypatch):
-    monkeypatch.setattr("app.brain.ingest.get_provider", lambda: _Provider())
+    monkeypatch.setattr("app.brain.ingest.get_embedder", lambda: _Provider())
     src = KnowledgeSource(type="text", title="Course Spine", status="ready", char_count=20)
     db.add(src); db.commit()
     db.add(Chunk(source_id=src.id, text="Sixteen thousand chars of real tone notes.",

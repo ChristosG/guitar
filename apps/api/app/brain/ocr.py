@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from app.brain.chunk import chunk_sections
 from app.brain.extract import Section
 from app.config import settings
+from app.llm.embed_factory import get_embedder
 from app.llm.factory import get_provider
 from app.models.knowledge import Chunk, KnowledgeSource, Page
 
@@ -80,7 +81,11 @@ def ocr_source(db, source_id) -> OcrResult:
         .order_by(Page.page_no)
         .all()
     )
+    # Two seams now, not one: the vision model that READS the page (Claude/Qwen,
+    # remote) and the embedder that INDEXES it (local CPU). They were the same
+    # object while one vLLM box served both; they are not any more.
     provider = get_provider()
+    embedder = get_embedder()
     ready = failed = 0
 
     for page in pages:
@@ -127,7 +132,7 @@ def ocr_source(db, source_id) -> OcrResult:
         # 1-59, and must not silently leave page 60 "ready" with nothing to
         # cite.
         try:
-            n_chunks = _embed_page(db, provider, page)
+            n_chunks = _embed_page(db, embedder, page)
         except Exception as e:
             log.warning("ocr: page %s embed failed", page.page_no, exc_info=True)
             db.rollback()
@@ -224,7 +229,7 @@ def _transcribe_with_retry(provider, page: Page) -> str:
     raise last                                       # type: ignore[misc]
 
 
-def _embed_page(db, provider, page: Page) -> int:
+def _embed_page(db, embedder, page: Page) -> int:
     """Chunk + embed ONE page, deleting any prior chunks for it first so a
     re-run (retry) replaces rather than duplicates. Returns the number of
     chunks created.
@@ -238,7 +243,7 @@ def _embed_page(db, provider, page: Page) -> int:
     drafts = chunk_sections([Section(heading=None, text=page.text, page=page.page_no)])
     if not drafts:
         return 0
-    vectors = provider.embed([d.text for d in drafts], is_query=False)
+    vectors = embedder.embed([d.text for d in drafts], is_query=False)
     for draft, vector in zip(drafts, vectors):
         db.add(Chunk(
             source_id=page.source_id, page_id=page.id, text=draft.text,

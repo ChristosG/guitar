@@ -123,7 +123,7 @@ def test_order_chunk_texts_falls_back_to_input_order_for_unrelated_chunks():
 def test_repair_pageless_text_source_reassembles_chunks_into_a_page(db, monkeypatch):
     """The exact live bug: a `type="text"` source sitting at status="ready"
     with real Chunks but zero Pages (legacy, pre-Page-model data)."""
-    monkeypatch.setattr("app.brain.ingest.get_provider", lambda: _Provider())
+    monkeypatch.setattr("app.brain.ingest.get_embedder", lambda: _Provider())
     src = KnowledgeSource(type="text", title="Course Spine", status="ready",
                           char_count=len(_LONG_DOC))
     db.add(src); db.commit()
@@ -154,7 +154,7 @@ def test_repair_pageless_text_source_does_not_duplicate_the_old_orphaned_chunks(
     there is nothing for that cascade to key off, and a naive repair leaves
     the old orphaned Chunks sitting forever alongside the freshly-ingested
     ones, silently doubling the source's retrieval index."""
-    monkeypatch.setattr("app.brain.ingest.get_provider", lambda: _Provider())
+    monkeypatch.setattr("app.brain.ingest.get_embedder", lambda: _Provider())
     src = KnowledgeSource(type="text", title="Course Spine", status="ready",
                           char_count=len(_LONG_DOC))
     db.add(src); db.commit()
@@ -191,7 +191,7 @@ def test_repair_pageless_url_source_refetches_its_stored_url_instead_of_reassemb
     already does for a *failed* url source. Repair must prefer that over
     reassembling from (possibly stale/partial) chunks, even when some
     chunks happen to be present."""
-    monkeypatch.setattr("app.brain.ingest.get_provider", lambda: _Provider())
+    monkeypatch.setattr("app.brain.ingest.get_embedder", lambda: _Provider())
 
     captured = {}
 

@@ -188,23 +188,6 @@ class QwenVLLM(LLMProvider):
 
         yield {"type": "done", "content": "".join(content_parts) or None, "tool_calls": tool_calls}
 
-    def embed(self, texts, *, is_query=False) -> list[list[float]]:
-        inputs = [query_instruct(t) for t in texts] if is_query else list(texts)
-        vectors: list[list[float]] = []
-        for i in range(0, len(inputs), 16):  # batch 16
-            batch = inputs[i : i + 16]
-            r = httpx.post(
-                f"{settings.embed_base_url}/embeddings",
-                json={"model": settings.embed_model, "input": batch},
-                timeout=60,
-            )
-            r.raise_for_status()
-            # Pair by the response's `index`, not arrival order, so a reordered
-            # batch response can never silently mis-pair text -> vector.
-            ordered = sorted(r.json()["data"], key=lambda d: d["index"])
-            vectors.extend(l2_normalize(d["embedding"]) for d in ordered)
-        return vectors
-
     def vision(self, image_bytes, prompt, *, media_type="image/jpeg") -> str:
         """Transcribe/describe one image. Backs OCR (`app.brain.ocr`).
 
@@ -248,15 +231,19 @@ class QwenVLLM(LLMProvider):
         return resp.choices[0].message.content or ""
 
     def health(self) -> dict:
-        out = {"llm": False, "embed": False}
+        """Chat-server reachability only.
+
+        The `embed` key is NOT produced here any more: embeddings left this ABC
+        in Plan 13 Task 1.1 (see `app/llm/base.py`), so a chat provider no
+        longer knows or cares whether the embedder is alive. `routers/health.py`
+        composes the two probes into the `{db, llm, embed}` contract the
+        `/health/ready` endpoint has always returned — that contract is
+        unchanged, only its authorship is.
+        """
+        out = {"llm": False}
         try:
             httpx.get(f"{settings.llm_base_url}/models", timeout=5).raise_for_status()
             out["llm"] = True
         except Exception:
             log.warning("LLM health probe failed at %s", settings.llm_base_url, exc_info=True)
-        try:
-            httpx.get(f"{settings.embed_base_url}/models", timeout=5).raise_for_status()
-            out["embed"] = True
-        except Exception:
-            log.warning("Embed health probe failed at %s", settings.embed_base_url, exc_info=True)
         return out

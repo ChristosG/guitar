@@ -35,7 +35,7 @@ class _Provider:
 def test_zero_character_ingest_is_empty_never_ready(db, monkeypatch):
     """REGRESSION (spec D6). Three real sources sat 'ready' with 0 chars and
     rendered as healthy — that lie hid a broken knowledge base for two days."""
-    monkeypatch.setattr("app.brain.ingest.get_provider", lambda: _Provider())
+    monkeypatch.setattr("app.brain.ingest.get_embedder", lambda: _Provider())
     src = KnowledgeSource(type="text", title="Nothing", status="ingesting")
     db.add(src)
     db.commit()
@@ -48,7 +48,7 @@ def test_zero_character_ingest_is_empty_never_ready(db, monkeypatch):
 
 
 def test_real_content_still_becomes_ready_with_a_page(db, monkeypatch):
-    monkeypatch.setattr("app.brain.ingest.get_provider", lambda: _Provider())
+    monkeypatch.setattr("app.brain.ingest.get_embedder", lambda: _Provider())
     src = KnowledgeSource(type="text", title="Real", status="ingesting")
     db.add(src)
     db.commit()
@@ -68,7 +68,7 @@ def test_chunks_carry_a_real_page_id_after_ingest(db, monkeypatch):
     chunk ever created. Pin that it is now populated for real."""
     from app.models.knowledge import Chunk
 
-    monkeypatch.setattr("app.brain.ingest.get_provider", lambda: _Provider())
+    monkeypatch.setattr("app.brain.ingest.get_embedder", lambda: _Provider())
     src = KnowledgeSource(type="text", title="Real", status="ingesting")
     db.add(src)
     db.commit()

@@ -3,7 +3,7 @@ status lifecycle.
 
 Orchestrates the Brain pipeline for one already-created ``KnowledgeSource`` row:
 ``paginate_source`` (creates/replaces this source's ``Page`` rows) ->
-``extract_text`` -> ``chunk_sections`` -> ``get_provider().embed(...)`` ->
+``extract_text`` -> ``chunk_sections`` -> ``get_embedder().embed(...)`` ->
 persist ``Chunk`` rows (each linked to its ``Page`` via ``page_id``), using
 the Foundations embedding provider (never re-embedded or re-normalized here —
 the provider already L2-normalizes, index-sorts, and batches internally).
@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from app.brain.chunk import chunk_sections
 from app.brain.extract import Section, extract_text
 from app.brain.paginate import paginate_source
-from app.llm.factory import get_provider
+from app.llm.embed_factory import get_embedder
 from app.models.knowledge import Chunk, KnowledgeSource
 
 log = logging.getLogger(__name__)
@@ -158,7 +158,7 @@ def ingest_source(db, source_id, payload: IngestPayload) -> None:
         texts = [d.text for d in drafts]
         # Skip the call entirely for an empty source rather than asking the
         # provider to embed an empty batch.
-        vectors = get_provider().embed(texts, is_query=False) if texts else []
+        vectors = get_embedder().embed(texts, is_query=False) if texts else []
         if len(vectors) != len(texts):
             raise RuntimeError(f"embed() returned {len(vectors)} vectors for {len(texts)} texts")
 
