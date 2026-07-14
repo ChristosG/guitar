@@ -33,7 +33,7 @@ from __future__ import annotations
 import hmac
 import time
 
-from fastapi import Response
+from fastapi import Request, Response
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 from app.config import settings
@@ -82,28 +82,62 @@ def check_password(candidate: str) -> bool:
     return hmac.compare_digest(candidate.encode(), expected.encode())
 
 
-def _cookie_kwargs() -> dict:
+def _cookie_kwargs(request: Request | None = None) -> dict:
+    """Cookie attributes derived from THE REQUEST, not from a static constant.
+
+    ONE api container serves BOTH `localhost:8791` and (via nginx)
+    `guitar-api.cgrigoriadis.online`. A single hardcoded `COOKIE_DOMAIN`
+    therefore cannot be right for both, and getting it wrong is a silent
+    redirect loop in whichever host it is wrong for:
+
+      - `Domain=.cgrigoriadis.online` on a localhost login -> the browser REJECTS
+        the cookie outright (domain mismatch), and `Secure` alone would reject it
+        anyway over plain http. Login returns 200, the app flashes onto /today,
+        the next navigation carries no cookie, and `proxy.ts` bounces straight
+        back to /login. Which is exactly what happened.
+      - host-only on the deployed site -> the cookie is sent back to
+        `guitar-api.` on every XHR (so the API authorises fine) but is INVISIBLE
+        to the Next.js middleware on `guitar.`, which reads it to decide whether
+        to redirect. Same loop, opposite host.
+
+    So `settings.cookie_domain` is a CANDIDATE, not a command: it is applied only
+    when the request actually arrives on that domain. `Secure` follows the real
+    scheme (honouring `X-Forwarded-Proto`, since nginx terminates TLS), because a
+    `Secure` cookie over http is silently discarded.
+
+    A request-less call (logout during tests) falls back to the configured values.
+    """
+    host = ""
+    scheme = "https" if settings.cookie_secure else "http"
+    if request is not None:
+        host = (request.headers.get("host") or request.url.hostname or "").split(":")[0]
+        scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
+
     kw: dict = {
         "httponly": True,
         "samesite": "lax",
-        "secure": settings.cookie_secure,
+        "secure": scheme == "https",
         "path": "/",
     }
-    if settings.cookie_domain:
+
+    candidate = settings.cookie_domain.lstrip(".")
+    if candidate and host and (host == candidate or host.endswith("." + candidate)):
         kw["domain"] = settings.cookie_domain
+    elif candidate and request is None:
+        kw["domain"] = settings.cookie_domain  # test/logout fallback
     return kw
 
 
-def set_session_cookie(response: Response, token: str) -> None:
+def set_session_cookie(response: Response, token: str, request: Request | None = None) -> None:
     response.set_cookie(
-        SESSION_COOKIE, token, max_age=settings.session_max_age, **_cookie_kwargs()
+        SESSION_COOKIE, token, max_age=settings.session_max_age, **_cookie_kwargs(request)
     )
 
 
-def clear_session_cookie(response: Response) -> None:
+def clear_session_cookie(response: Response, request: Request | None = None) -> None:
     """`delete_cookie` must be given the SAME domain/path the cookie was set
     with, or the browser keeps the original and logout silently does nothing."""
-    kw = _cookie_kwargs()
+    kw = _cookie_kwargs(request)
     response.delete_cookie(
         SESSION_COOKIE, path=kw["path"], domain=kw.get("domain"), samesite="lax",
         httponly=True, secure=kw["secure"],

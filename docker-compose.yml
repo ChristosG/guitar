@@ -45,7 +45,12 @@ services:
     build:
       context: ./apps/web
       args:
-        NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:8791}
+        # EMPTY by default, on purpose. lib/api.ts resolves the API base in the
+        # BROWSER, from window.location — one image works on localhost AND on
+        # guitar.cgrigoriadis.online. Baking a value here pins the bundle to one
+        # of them and silently breaks the other. Set it only for a deployment
+        # whose API is not at guitar-api.<domain>.
+        NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-}
         # Inlined at BUILD time (it is a NEXT_PUBLIC_*), so flipping the gate on
         # is a rebuild of `web`, not a restart. Same as NEXT_PUBLIC_API_BASE.
         NEXT_PUBLIC_AUTH_ENABLED: ${NEXT_PUBLIC_AUTH_ENABLED:-0}

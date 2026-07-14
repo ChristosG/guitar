@@ -92,13 +92,20 @@ async def login(payload: LoginIn, request: Request, response: Response) -> AuthS
     _failures.pop(ip, None)
     from app.auth.session import set_session_cookie
 
-    set_session_cookie(response, issue_token())
+    # `request` is passed so the cookie's Domain/Secure are derived from the host
+    # this login actually arrived on. ONE api container serves both localhost and
+    # guitar-api.cgrigoriadis.online, and a cookie minted for the wrong one is
+    # silently dropped by the browser — a login that returns 200 and then bounces
+    # straight back to /login. See `auth/session.py::_cookie_kwargs`.
+    set_session_cookie(response, issue_token(), request)
     return AuthState(authenticated=True, auth_enabled=settings.auth_enabled)
 
 
 @router.post("/logout", response_model=AuthState)
-def logout(response: Response) -> AuthState:
-    clear_session_cookie(response)
+def logout(request: Request, response: Response) -> AuthState:
+    # Same reasoning: `delete_cookie` must match the Domain the cookie was SET
+    # with, or the browser keeps it and logout silently does nothing.
+    clear_session_cookie(response, request)
     return AuthState(authenticated=False, auth_enabled=settings.auth_enabled)
 
 

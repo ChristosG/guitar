@@ -3,13 +3,54 @@
  *
  * The browser calls the API directly — it does not go through a Next.js
  * proxy/route handler (see `app/main.py`'s CORS middleware, which exists
- * specifically because the browser is the caller). `NEXT_PUBLIC_API_BASE` is
- * inlined at build time (a Docker build ARG in production — see
- * `apps/web/Dockerfile`/`docker-compose.yml`); the fallback below matches
- * `.env.example`'s default for local `next dev`.
+ * specifically because the browser is the caller).
+ *
+ * THE API BASE IS RESOLVED IN THE BROWSER, NOT BAKED AT BUILD TIME.
+ *
+ * It used to be `process.env.NEXT_PUBLIC_API_BASE`, which Next.js inlines into
+ * the client bundle at BUILD time. That is a single constant — and there is only
+ * ONE `web` container, serving BOTH `localhost:8790` and (via nginx)
+ * `guitar.cgrigoriadis.online`. So whichever value was baked, the other
+ * environment broke, and the two failures were hours apart and looked unrelated:
+ *
+ *   baked `http://localhost:8791` -> the DEPLOYED site tells every visitor's
+ *     browser to call the visitor's OWN localhost. Nothing errors server-side;
+ *     the API log is empty because nothing arrives. The user sees "Couldn't
+ *     reach the server."
+ *   baked `https://guitar-api.…`  -> LOCALHOST now calls the public API
+ *     cross-SITE (different eTLD+1), so the SameSite=Lax session cookie is not
+ *     sent on XHR at all. Login succeeds, the app flashes onto /today, and the
+ *     next request is unauthenticated.
+ *
+ * A build-time constant cannot describe a runtime fact. So we read the fact:
+ * the origin the page was actually served from. Localhost talks to localhost;
+ * the deployed host talks to its own API subdomain. One image, both
+ * environments, and no build arg to forget.
+ *
+ * `NEXT_PUBLIC_API_BASE` still wins if set — it is the escape hatch for a
+ * deployment whose API is not at `guitar-api.<domain>`.
  */
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8791";
+function resolveApiBase(): string {
+  // SSR/build: there is no `window`. next-intl renders these pages on the
+  // server, so this branch is real, not defensive.
+  if (typeof window === "undefined") {
+    return process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8791";
+  }
+  if (process.env.NEXT_PUBLIC_API_BASE) return process.env.NEXT_PUBLIC_API_BASE;
+
+  const { protocol, hostname } = window.location;
+  if (hostname === "localhost" || hostname === "127.0.0.1") {
+    // Cookies ignore the PORT, so a host-only cookie set by the API on :8791 is
+    // sent to the app on :8790. Same site, no CORS credential problem.
+    return `${protocol}//${hostname}:8791`;
+  }
+  // `guitar.cgrigoriadis.online` -> `guitar-api.cgrigoriadis.online`. Same
+  // registrable site, so the `.cgrigoriadis.online` cookie covers both.
+  return `${protocol}//guitar-api.${hostname.replace(/^guitar\./, "")}`;
+}
+
+const API_BASE = resolveApiBase();
 
 export type SourceKind = "text" | "url";
 /** Mirrors `app.models.knowledge.SOURCE_STATUSES` (`ingest.py`'s module

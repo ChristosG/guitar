@@ -159,3 +159,69 @@ def test_lifespan_scope_survives_the_middleware():
     lifespan — if the guard is gone, this raises here."""
     with TestClient(app):
         pass
+
+
+# ---------------------------------------------------------------------------
+# The cookie DOMAIN is derived from the request host, not from a constant.
+#
+# ONE api container serves BOTH `localhost:8791` and (via nginx)
+# `guitar-api.cgrigoriadis.online`. A single hardcoded COOKIE_DOMAIN cannot be
+# right for both, and being wrong is a SILENT REDIRECT LOOP in whichever host it
+# is wrong for — the login returns 200, the app flashes onto /today, and the next
+# navigation has no cookie because the browser rejected it.
+#
+# Both directions actually happened, hours apart:
+#   prod broke   — host-only cookie was invisible to the Next middleware on the
+#                  OTHER subdomain, which reads it to decide whether to redirect.
+#   localhost broke — after fixing prod with Domain=.cgrigoriadis.online, the
+#                  browser rejected that cookie on localhost (domain mismatch,
+#                  plus Secure over plain http).
+# ---------------------------------------------------------------------------
+
+def _set_cookie_header(res):
+    return res.headers.get("set-cookie", "")
+
+
+def test_localhost_login_gets_a_host_only_insecure_cookie(gated, monkeypatch):
+    """The dev case. A `Domain=.cgrigoriadis.online` cookie is not settable from
+    localhost at all, and a `Secure` cookie over plain http is silently dropped —
+    either one turns dev login into a bounce back to /login."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "cookie_domain", ".cgrigoriadis.online")
+    monkeypatch.setattr(settings, "cookie_secure", True)
+
+    res = gated.post(
+        "/auth/login",
+        json={"password": "correct horse"},
+        headers={"Host": "localhost:8791"},
+    )
+    assert res.status_code == 200
+    cookie = _set_cookie_header(res)
+    assert "gt_session=" in cookie
+    assert "Domain=" not in cookie, "a prod Domain on a localhost login is rejected by the browser"
+    assert "Secure" not in cookie, "a Secure cookie over plain http is silently dropped"
+    assert "HttpOnly" in cookie and "samesite=lax" in cookie.lower()
+
+
+def test_the_deployed_host_gets_the_shared_parent_domain(gated, monkeypatch):
+    """The prod case. Without the leading-dot Domain, the cookie is invisible to
+    the Next.js middleware on `guitar.` — which reads it to decide whether to
+    bounce to /login — and the tutor loops forever while being, in fact, logged in."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "cookie_domain", ".cgrigoriadis.online")
+    monkeypatch.setattr(settings, "cookie_secure", True)
+
+    res = gated.post(
+        "/auth/login",
+        json={"password": "correct horse"},
+        headers={
+            "Host": "guitar-api.cgrigoriadis.online",
+            "X-Forwarded-Proto": "https",   # nginx terminates TLS
+        },
+    )
+    assert res.status_code == 200
+    cookie = _set_cookie_header(res)
+    assert "Domain=.cgrigoriadis.online" in cookie
+    assert "Secure" in cookie
