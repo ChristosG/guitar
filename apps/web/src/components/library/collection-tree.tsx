@@ -1,11 +1,13 @@
 "use client";
 
+import { useState } from "react";
 import { useTranslations } from "next-intl";
-import { Loader2, Trash2 } from "lucide-react";
+import { Loader2, Pencil, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm";
-import { SourceRow, type OcrProgress } from "@/components/library/source-row";
-import type { SourceOut } from "@/lib/api";
+import { RenameDialog } from "@/components/library/rename-dialog";
+import { SourceRow } from "@/components/library/source-row";
+import { renameCollection, type SourceOut, type SourceProgressOut } from "@/lib/api";
 
 /** One collection's worth of sources, already grouped by the parent page
  * (`library/page.tsx`'s `useMemo`d `groups`) — this component only renders,
@@ -29,7 +31,9 @@ interface CollectionTreeProps {
   groups: SourceGroup[];
   locale: string;
   collectionOptions: { id: string | null; name: string }[];
-  ocrProgress: Record<string, OcrProgress>;
+  /** Server-computed OCR progress, keyed by source id — only ever populated for
+   * sources the API reports as `ocr_active` (see `library/page.tsx`). */
+  progress: Record<string, SourceProgressOut>;
   retryingId: string | null;
   deletingId: string | null;
   deletingCollectionId: string | null;
@@ -38,6 +42,8 @@ interface CollectionTreeProps {
   onDelete: (id: string) => void;
   onDeleteCollection: (id: string) => void;
   onMove: (id: string, collectionId: string | null) => void;
+  /** Re-read the list after a mutation this component owns (a rename). */
+  onChanged: () => void;
 }
 
 /** All collections rendered flat and always-expanded — deliberately no
@@ -50,7 +56,7 @@ export function CollectionTree({
   groups,
   locale,
   collectionOptions,
-  ocrProgress,
+  progress,
   retryingId,
   deletingId,
   deletingCollectionId,
@@ -59,9 +65,14 @@ export function CollectionTree({
   onDelete,
   onDeleteCollection,
   onMove,
+  onChanged,
 }: CollectionTreeProps) {
   const t = useTranslations("library");
   const confirm = useConfirm();
+  // Which folder's rename dialog is open, by id. One dialog per group, mounted
+  // inside the group's own header — a single shared dialog would need the group
+  // hoisted into state anyway, and this keeps the value seeding trivial.
+  const [renamingId, setRenamingId] = useState<string | null>(null);
 
   /** Deleting a folder is the one destructive action here that does NOT lose
    * anything: the FK is `SET NULL`, so its sources land in Unfiled (spec D7).
@@ -93,6 +104,30 @@ export function CollectionTree({
                   type="button"
                   variant="ghost"
                   size="icon-xs"
+                  aria-label={t("renameCollection")}
+                  data-testid={`rename-collection-${group.collectionId}`}
+                  onClick={() => setRenamingId(group.collectionId)}
+                  className="text-muted-foreground hover:text-foreground"
+                >
+                  <Pencil />
+                </Button>
+              )}
+              {group.collectionId && (
+                <RenameDialog
+                  open={renamingId === group.collectionId}
+                  onOpenChange={(open) => setRenamingId(open ? group.collectionId : null)}
+                  value={group.name}
+                  heading={t("renameDialog.collectionHeading")}
+                  description={t("renameDialog.collectionDescription")}
+                  onSubmit={(name) => renameCollection(group.collectionId!, name)}
+                  onRenamed={onChanged}
+                />
+              )}
+              {group.collectionId && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
                   aria-label={t("deleteCollection")}
                   data-testid={`delete-collection-${group.collectionId}`}
                   disabled={deletingCollectionId === group.collectionId}
@@ -117,7 +152,7 @@ export function CollectionTree({
                   key={source.id}
                   source={source}
                   locale={locale}
-                  ocrProgress={ocrProgress[source.id]}
+                  progress={progress[source.id]}
                   retrying={retryingId === source.id}
                   deleting={deletingId === source.id}
                   moving={movingId === source.id}
@@ -125,6 +160,7 @@ export function CollectionTree({
                   onRetry={onRetry}
                   onDelete={onDelete}
                   onMove={onMove}
+                  onChanged={onChanged}
                 />
               ))
             )}

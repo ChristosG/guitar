@@ -197,7 +197,24 @@ def describe_step(db: Session, interview: CurriculumInterview) -> dict:
                 "literally what the model reads."
             ),
             "options": options,
-            "findings": {"shape": shape.describe()} if shape else None,
+            # The NUMBERS, not a sentence. The API does not know the tutor's
+            # locale, and `Shape.describe()` is English — rendering it verbatim
+            # put an English line on a fully Greek page. The frontend holds both
+            # translations; let it format.
+            "findings": (
+                {
+                    "shape": {
+                        "lessons_total": shape.lessons_total,
+                        "modules": shape.modules,
+                        "lessons_per_module": list(shape.lessons_per_module),
+                        "target_words_per_lesson": shape.target_words_per_lesson,
+                        "teaching_minutes": shape.teaching_minutes,
+                        "qa_minutes": shape.qa_minutes,
+                    }
+                }
+                if shape
+                else None
+            ),
         }
 
     if step == "outline":

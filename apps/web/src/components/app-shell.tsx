@@ -14,7 +14,6 @@ import {
   LogOut,
   Menu,
   MessageCircle,
-  Search,
   Settings,
   StickyNote,
   TriangleAlert,
@@ -23,7 +22,6 @@ import {
 } from "lucide-react";
 import { getAuthState, getSettings, logout } from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { LocaleToggle } from "@/components/locale-toggle";
 import { cn } from "@/lib/utils";
@@ -41,8 +39,8 @@ const NAV_ITEMS = [
 
 /** The cockpit's persistent chrome: a left nav rail (studio logo, the
  * section links, GR/EN + theme toggles) plus a slim top bar (current page
- * title, a disabled search stub) over a scrollable content area. Every
- * `(cockpit)/*` page renders inside this via `(cockpit)/layout.tsx`.
+ * title, settings) over a scrollable content area. Every `(cockpit)/*` page
+ * renders inside this via `(cockpit)/layout.tsx`.
  *
  * A client component (not the server `layout.tsx` itself) because active-
  * route highlighting and the current page title both need `usePathname()`,
@@ -186,19 +184,15 @@ export function AppShell({ children }: { children: ReactNode }) {
           <h1 data-testid="page-title" className="truncate text-sm font-semibold">
             {pageTitle}
           </h1>
-          {/* Hidden below `sm`: on a narrow phone viewport there isn't room
-              for a hamburger + title + this stub without squeezing the
-              title down to a couple of letters — the title matters more
-              than a disabled search box there. */}
-          <div className="relative ml-auto hidden w-full max-w-xs sm:block">
-            <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              disabled
-              placeholder={t("searchPlaceholder")}
-              data-testid="topbar-search"
-              className="pl-8"
-            />
-          </div>
+          {/* THE DISABLED SEARCH STUB IS GONE (Stage 8). It sat here, greyed out,
+              promising "coming soon" on every screen of the app. Search now exists
+              — over the hybrid index, on the Library page, where the books are
+              (`components/library/library-search.tsx`) — and a dead box in the top
+              bar of every OTHER page is worse than no box at all. Do not put it
+              back as a global palette: the chat agent is already grounded search
+              with citations, and the one thing the tutor could not do was find a
+              chapter in his own book. That is a Library problem, so it lives in
+              the Library. */}
           <Link
             href={`/${locale}/settings`}
             aria-label={t("settings")}

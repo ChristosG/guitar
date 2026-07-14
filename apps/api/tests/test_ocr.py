@@ -1,5 +1,5 @@
 import pytest
-from app.brain.ocr import OCR_PROMPT, ocr_source
+from app.brain.ocr import MAX_PAGE_ATTEMPTS, OCR_PROMPT, ocr_source
 from app.models.knowledge import EMBED_DIM, Chunk, KnowledgeSource, Page
 
 
@@ -319,9 +319,15 @@ def test_ocr_source_all_pages_blank_leaves_source_empty_never_ready(db, tmp_path
     assert reloaded.char_count == 0
 
 
-def test_ocr_source_partial_success_rolls_up_to_ready_counting_only_ready_pages(
+def test_ocr_source_partial_success_rolls_up_to_PARTIAL_never_green(
     db, tmp_path, monkeypatch
 ):
+    """CHANGED BEHAVIOR (Stage 7.2). This test used to assert `status == "ready"`
+    for a book with a failed page — it pinned the exact lie the stage exists to
+    kill: 74/77 pages read rolled up to a GREEN CHECKMARK with no retry path,
+    forever, while `job.error` already said "3 page(s) unreadable". A source with
+    real text AND failed pages is now `partial` (amber, "retry failed pages").
+    The char_count rule is unchanged: only READY pages' text is countable."""
     src = _src_with_pending_pages(db, 2)
     monkeypatch.setattr("app.brain.ocr.settings.media_dir", str(tmp_path))
     for i in (1, 2):
@@ -338,7 +344,7 @@ def test_ocr_source_partial_success_rolls_up_to_ready_counting_only_ready_pages(
     pages = db.query(Page).filter_by(source_id=src.id).order_by(Page.page_no).all()
     assert pages[0].status == "ready"
     assert pages[1].status == "failed"
-    assert reloaded.status == "ready"
+    assert reloaded.status == "partial"
     assert reloaded.char_count == len(pages[0].text)
 
 
@@ -404,3 +410,168 @@ def test_a_page_stuck_at_ocr_running_is_resumed_on_the_next_run(db, tmp_path, mo
     reloaded = db.get(Page, page.id)
     assert reloaded.status == "ready"
     assert reloaded.text == "Recovered page text, transcribed from the scan and long enough to chunk."
+
+
+# --- Stage 7.2/7.4: the retry policy and the quality gate -------------------
+#
+# What these pin, in one sentence each: an `empty` page was NEVER retried by any
+# path, so one transient "" from the model permanently lost a page of the book;
+# and the gate that fixes that must not be so eager that a genuinely short page
+# ("Chapter 3") turns a healthy book amber.
+
+def _prep(db, monkeypatch, tmp_path, n=1):
+    src = _src_with_pending_pages(db, n)
+    monkeypatch.setattr("app.brain.ocr.settings.media_dir", str(tmp_path))
+    d = tmp_path / str(src.id)
+    d.mkdir(exist_ok=True)
+    for i in range(1, n + 1):
+        (d / f"{i:04d}.jpg").write_bytes(b"jpeg")
+    return src
+
+
+def test_an_empty_page_is_picked_up_again_on_the_next_run(db, tmp_path, monkeypatch):
+    """The permanently-dead-page bug: `empty` was not in the pickup filter, so a
+    page the model returned "" for once was never looked at again by ANY path."""
+    src = _prep(db, monkeypatch, tmp_path)
+    page = db.query(Page).filter_by(source_id=src.id).one()
+    page.status = "empty"
+    db.commit()
+
+    fake = _Vision(["The page was readable the second time, and this is long enough to chunk."])
+    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    result = ocr_source(db, src.id)
+
+    assert result.ready == 1
+    assert db.get(Page, page.id).status == "ready"
+
+
+def test_a_page_that_has_burned_its_attempts_is_left_alone(db, tmp_path, monkeypatch):
+    """The other half of making `empty` retryable: a genuinely blank scan (a real
+    book has several) must not be re-billed to a paid vision model on every retry
+    of the book, forever. Three attempts, then it rests."""
+    src = _prep(db, monkeypatch, tmp_path)
+    page = db.query(Page).filter_by(source_id=src.id).one()
+    page.status = "empty"
+    page.ocr_attempts = MAX_PAGE_ATTEMPTS
+    db.commit()
+
+    fake = _Vision(["never called"])
+    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    result = ocr_source(db, src.id)
+
+    assert (result.total, fake.calls) == (0, 0)
+    assert db.get(Page, page.id).status == "empty"
+
+
+def test_every_pickup_spends_exactly_one_attempt(db, tmp_path, monkeypatch):
+    src = _prep(db, monkeypatch, tmp_path)
+    fake = _Vision(["A page of real transcribed text, long enough for the chunker to keep."])
+    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    ocr_source(db, src.id)
+
+    assert db.query(Page).filter_by(source_id=src.id).one().ocr_attempts == 1
+
+
+def test_the_model_narrating_that_a_page_is_blank_is_EMPTY_not_failed(db, tmp_path, monkeypatch):
+    """A vision model asked to transcribe an unreadable page does not fail — it
+    NARRATES ("There is no visible text on this page."), and that 38-char string
+    got embedded, indexed and cited to the tutor (`retrieve.py`'s floor quotes the
+    same junk chunk). It is an `empty` page — a true fact about the book — so it
+    must NOT count as a failure and must NOT turn the source amber."""
+    src = _prep(db, monkeypatch, tmp_path, n=2)
+    fake = _Vision([
+        "A real page of the tutor's book, with enough text on it to chunk and embed.",
+        "There is no visible text on this page.",
+    ])
+    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    result = ocr_source(db, src.id)
+
+    pages = db.query(Page).filter_by(source_id=src.id).order_by(Page.page_no).all()
+    assert pages[1].status == "empty"
+    assert pages[1].text is None
+    assert result.failed == 0
+    assert db.get(KnowledgeSource, src.id).status == "ready"   # green, correctly
+
+
+def test_a_genuinely_short_page_with_real_content_stays_ready(db, tmp_path, monkeypatch):
+    """THE FALSE-AMBER GUARD. "Chapter 3" is a real page. Failing it would turn a
+    healthy book amber — the specific harm Stage 7.4 was warned about. Short is
+    not the same as unreadable: the sentinel screen is a PATTERN match, and the
+    garbage screen has a length floor beneath which it does not fire at all."""
+    src = _prep(db, monkeypatch, tmp_path)
+    fake = _Vision(["Chapter 3"])
+    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    ocr_source(db, src.id)
+
+    page = db.query(Page).filter_by(source_id=src.id).one()
+    assert page.text == "Chapter 3"
+    assert page.status != "failed"                  # chunkable or not, NEVER failed
+    assert db.get(KnowledgeSource, src.id).status != "partial"
+
+
+def test_a_mojibake_transcription_is_retried_then_failed_never_indexed(db, tmp_path, monkeypatch):
+    """Mostly-not-language output is a decode failure, not a page. It gets the
+    same one-retry-then-`failed` treatment as any other unreadable page — and it
+    never reaches the index, where it would be citable as if it were the book."""
+    src = _prep(db, monkeypatch, tmp_path)
+    garbage = "�▓" * 60
+    fake = _Vision([garbage, garbage])
+    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    result = ocr_source(db, src.id)
+
+    assert (result.ready, result.failed) == (0, 1)
+    assert fake.calls == 2                              # initial + one retry
+    page = db.query(Page).filter_by(source_id=src.id).one()
+    assert page.status == "failed"
+    assert db.query(Chunk).filter_by(page_id=page.id).count() == 0
+
+
+def test_greek_prose_is_not_mistaken_for_garbage(db, tmp_path, monkeypatch):
+    """Greek is a first-class language here. A screen built on `isascii()` would
+    fail an entire Greek corpus — this one is built on unicode categories."""
+    src = _prep(db, monkeypatch, tmp_path)
+    greek = ("Η κιθάρα είναι "
+             "ένα έγχορδο μο"
+             "υσικό όργανο. "
+             "Μιλάμε για τον "
+             "ήχο της κιθάρας. ") * 3
+    fake = _Vision([greek])
+    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    result = ocr_source(db, src.id)
+
+    assert result.ready == 1
+    assert db.query(Page).filter_by(source_id=src.id).one().status == "ready"
+
+
+def test_a_book_with_a_failed_page_is_partial_and_stays_citable(db, tmp_path, monkeypatch):
+    """71/77 is not "Ready". The source rolls up AMBER — and stays fully readable
+    and fully citable, which is what `partial` means and `empty` does not."""
+    src = _prep(db, monkeypatch, tmp_path, n=3)
+    fake = _Vision([
+        "Page one of the book, with plenty of transcribed text on it to chunk.",
+        RuntimeError("vl timeout"), RuntimeError("vl timeout"),
+        "Page three of the book, with plenty of transcribed text on it to chunk.",
+    ])
+    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    ocr_source(db, src.id)
+
+    source = db.get(KnowledgeSource, src.id)
+    assert source.status == "partial"
+    assert source.char_count > 0
+    assert db.query(Chunk).filter_by(source_id=src.id).count() >= 2

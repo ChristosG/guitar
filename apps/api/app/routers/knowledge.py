@@ -23,6 +23,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.brain.ingest import IngestPayload, ingest_source
+from app.brain.media import purge_source_media
+from app.brain.ocr import PageCounts, active_ocr_jobs, page_counts
 from app.brain.reembed import reembed_all
 from app.brain.retrieve import answer as run_answer
 from app.brain.retrieve import search as run_search
@@ -58,8 +60,35 @@ MAX_UPLOAD_BYTES = 30 * 1024 * 1024  # 30 MiB cap for POST /sources/upload
 MAX_TEXT_CHARS = 1_000_000  # cap for kind="text" ingestion via POST /sources
 
 
-def _to_source_out(source: KnowledgeSource) -> SourceOut:
-    return SourceOut.model_validate(source, from_attributes=True)
+def _to_source_out(
+    source: KnowledgeSource,
+    counts: PageCounts | None = None,
+    ocr_active: bool = False,
+) -> SourceOut:
+    """`counts`/`ocr_active` are passed in, never queried here: `list_sources`
+    resolves them for the WHOLE list in two queries (see `_decorate`), and doing
+    it per row would turn one list request into 2N."""
+    out = SourceOut.model_validate(source, from_attributes=True)
+    c = counts or PageCounts()
+    return out.model_copy(update={
+        "pages_total": c.total,
+        "pages_ready": c.ready,
+        "pages_failed": c.failed,
+        "pages_pending": c.pending,
+        "ocr_active": ocr_active,
+    })
+
+
+def _decorate(db: Session, sources: list[KnowledgeSource]) -> list[SourceOut]:
+    """Attach page counts + in-flight-OCR to a list of sources — the two facts
+    that let the Library render an honest row (Stage 7.2) and, after a reload
+    mid-OCR, a LIVE one. Two queries total, regardless of list length."""
+    ids = [s.id for s in sources]
+    counts = page_counts(db, ids)
+    active = active_ocr_jobs(db, ids)
+    return [
+        _to_source_out(s, counts.get(s.id), str(s.id) in active) for s in sources
+    ]
 
 
 @router.post("/sources", response_model=SourceOut)
@@ -95,7 +124,7 @@ def create_source(payload: SourceCreate, db: Session = Depends(get_db)) -> Sourc
     ingest_source(
         db, source.id, IngestPayload(kind=payload.kind, text=payload.text, url=payload.url)
     )
-    return _to_source_out(source)
+    return _decorate(db, [source])[0]
 
 
 # `KnowledgeSource.title` is `String(400)` at the DB level — a derived title
@@ -215,15 +244,15 @@ def upload_source(
     db.commit()
 
     ingest_source(db, source.id, IngestPayload(kind="pdf", data=data))
-    return _to_source_out(source)
+    return _decorate(db, [source])[0]
 
 
 @router.get("/sources", response_model=list[SourceOut])
 def list_sources(db: Session = Depends(get_db)) -> list[SourceOut]:
-    sources = db.scalars(
+    sources = list(db.scalars(
         select(KnowledgeSource).order_by(KnowledgeSource.created_at.desc())
-    ).all()
-    return [_to_source_out(s) for s in sources]
+    ).all())
+    return _decorate(db, sources)
 
 
 @router.get("/sources/{source_id}", response_model=SourceDetailOut)
@@ -239,18 +268,34 @@ def get_source(source_id: UUID, db: Session = Depends(get_db)) -> SourceDetailOu
         .limit(_CHUNK_PREVIEW_LIMIT)
     ).all()
     return SourceDetailOut(
-        **_to_source_out(source).model_dump(),
+        **_decorate(db, [source])[0].model_dump(),
         chunks=[ChunkPreviewOut.model_validate(c, from_attributes=True) for c in chunks],
     )
 
 
 @router.delete("/sources/{source_id}", status_code=204, response_model=None)
 def delete_source(source_id: UUID, db: Session = Depends(get_db)) -> None:
+    """Delete the row AND the scans it rendered (Stage 7.3).
+
+    The scans were leaked, permanently, by every DELETE this app has ever
+    served: `Page`/`Chunk` cascade at the DB level, and nothing anywhere called
+    `os.remove` — so the tutor's 77-page book left ~25MB of JPEGs behind under a
+    directory named after a source id that no longer existed, and re-uploading it
+    (which is exactly what you do after a bad OCR run) leaked another 25MB.
+
+    Ordering is deliberate: COMMIT FIRST, delete files after. The database is the
+    truth about what the tutor has; a file we failed to unlink is a wasted
+    megabyte, but a failed unlink raised BEFORE the commit would abort a deletion
+    the tutor asked for and make the row look undeletable. `purge_source_media`
+    is best-effort and never raises (see `app/brain/media.py`), and the boot-time
+    orphan sweep in `app.main`'s lifespan is the backstop for whatever it missed.
+    """
     source = db.get(KnowledgeSource, source_id)
     if source is None:
         raise HTTPException(status_code=404, detail="source not found")
     db.delete(source)  # chunk.source_id has ON DELETE CASCADE at the DB level
     db.commit()
+    purge_source_media(source_id)
 
 
 @router.post("/reindex")

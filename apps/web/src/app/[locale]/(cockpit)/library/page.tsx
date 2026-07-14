@@ -4,31 +4,29 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocale, useTranslations } from "next-intl";
 import { AddSourceDialog } from "@/components/library/add-source-dialog";
 import { CollectionTree, type SourceGroup } from "@/components/library/collection-tree";
+import { LibrarySearch } from "@/components/library/library-search";
 import { NewCollectionDialog } from "@/components/library/new-collection-dialog";
 import {
   ApiError,
   deleteCollection,
   deleteSource,
-  getJob,
+  getSourceProgress,
   listCollections,
-  listSourcePages,
   listSources,
   moveSource,
   retrySource,
   type CollectionOut,
   type SourceOut,
+  type SourceProgressOut,
 } from "@/lib/api";
-import type { OcrProgress } from "@/components/library/source-row";
 
-/** Poll cadence + cap while this tab is watching an OCR job it just started
- * (see `watchOcr` below) — same convention as `curriculum/generate-dialog.
- * tsx`'s job poll, but a wider cap: OCR runs page-by-page against a vision
- * model, so a real book can take much longer than one guided-JSON call. 300
- * * 2s = 10 minutes; exceeding it doesn't cancel the job (it keeps running
- * server-side) — this tab just stops narrating it live and falls back to
- * whatever `listSources()` reports on the next manual refresh. */
+/** How often to re-ask the server where a running OCR has got to. 2s is the same
+ * cadence as `curriculum/generate-dialog.tsx`'s job poll; there is no cap and no
+ * timeout, because there is nothing to time out — progress is a SERVER fact now
+ * (`GET /knowledge/sources/{id}/progress`), so this loop simply stops when the
+ * server says the job is done, and a tab opened an hour into a 9-minute OCR picks
+ * it up mid-flight exactly as if it had started it. */
 const POLL_INTERVAL_MS = 2000;
-const MAX_POLLS = 300;
 
 // Client component for the same reason as every other cockpit page (see
 // `students/page.tsx`'s docstring): it talks to the API straight from the
@@ -45,7 +43,7 @@ export default function LibraryPage() {
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [deletingCollectionId, setDeletingCollectionId] = useState<string | null>(null);
   const [movingId, setMovingId] = useState<string | null>(null);
-  const [ocrProgress, setOcrProgress] = useState<Record<string, OcrProgress>>({});
+  const [progress, setProgress] = useState<Record<string, SourceProgressOut>>({});
 
   // Same .then/.catch/.finally shape as e.g. `students/page.tsx`'s own
   // `fetchStudents`, for the same reason (every setState call stays
@@ -75,46 +73,68 @@ export default function LibraryPage() {
     return fetchAll();
   }, [fetchAll]);
 
-  /** Polls `GET /jobs/{jobId}` + `GET /knowledge/sources/{id}/pages` until
-   * the job reaches a terminal status (or the cap above is hit), updating
-   * `ocrProgress[sourceId]` on each tick so the row can show "reading page N
-   * of M" live. This is the one place this tab can ever legitimately show an
-   * "ocr_running"-style state — `KnowledgeSource.status` itself never
-   * becomes that (see `lib/api.ts`'s `SourceStatus` docstring), only
-   * `Page.status` does, and only a durable job/poll can see that in
-   * progress rather than at rest. */
-  const watchOcr = useCallback(
-    (sourceId: string, jobId: string) => {
-      async function poll() {
-        for (let i = 0; i < MAX_POLLS; i++) {
-          try {
-            const [job, pages] = await Promise.all([getJob(jobId), listSourcePages(sourceId)]);
-            const ready = pages.filter((p) => p.status === "ready").length;
-            setOcrProgress((prev) => ({ ...prev, [sourceId]: { ready, total: pages.length } }));
-            if (job.status === "succeeded" || job.status === "failed") break;
-          } catch {
-            break; // fail closed — stop watching silently; the next refresh shows the truth
-          }
-          await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
-        }
-        setOcrProgress((prev) => {
-          const next = { ...prev };
-          delete next[sourceId];
-          return next;
-        });
-        refresh();
-      }
-      poll();
-    },
-    [refresh],
+  // Which sources the SERVER says are being read right now. `ocr_active` is an
+  // in-flight `GenerationJob` — not something this tab remembers — so a hard
+  // reload at page 30 of 77 lands here with the same answer the tab that started
+  // the job would get.
+  const activeIds = useMemo(
+    () => sources.filter((s) => s.ocr_active).map((s) => s.id),
+    [sources],
   );
+  // A stable dependency for the poll effect: `activeIds` is a fresh array on every
+  // refresh (and this page refreshes every 2s while a job runs), so depending on
+  // the array itself would tear down and rebuild the interval on every tick.
+  const activeKey = activeIds.join(",");
 
+  /** THE DURABLE PROGRESS LOOP. This replaced a `watchOcr` state machine that
+   * lived entirely in this tab: it started only when THIS tab pressed the button,
+   * and on F5 the row fell back to the source's at-rest status — `empty` — so the
+   * tutor's book showed RED, "nothing was read from this source", WITH A RETRY
+   * BUTTON, during the nine minutes it was actually being read. Pressing that
+   * button enqueued a second job racing the first.
+   *
+   * Now: the server owns the truth, this only asks. When a job finishes, the next
+   * tick reports `active: false` and we re-read the list once (which is what
+   * flips the row to its final green/amber status and stops this loop). */
+  useEffect(() => {
+    if (activeKey === "") return;
+    const ids = activeKey.split(",");
+    let cancelled = false;
+
+    async function tick() {
+      const results = await Promise.all(
+        ids.map((id) => getSourceProgress(id).catch(() => null)),
+      );
+      if (cancelled) return;
+      const next: Record<string, SourceProgressOut> = {};
+      let anyFinished = false;
+      results.forEach((p) => {
+        if (!p) return;
+        if (p.active) next[p.source_id] = p;
+        else anyFinished = true;
+      });
+      setProgress(next);
+      if (anyFinished) refresh();
+    }
+
+    tick();
+    const timer = setInterval(tick, POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [activeKey, refresh]);
+
+  /** Retry / re-read. The SERVER decides whether this starts a job at all: if one
+   * is already in flight it hands back the running job's id and starts nothing
+   * (`routers/library.py::_enqueue_ocr`). So a double-click is one job, and this
+   * handler doesn't need to guess — it just refreshes and lets `ocr_active` tell
+   * it the truth. */
   async function handleRetry(id: string) {
     setRetryingId(id);
     setError(null);
     try {
-      const { job_id } = await retrySource(id);
-      if (job_id) watchOcr(id, job_id);
+      await retrySource(id);
       await refresh();
     } catch (err) {
       setError(err instanceof ApiError ? err.detail : t("retryError"));
@@ -210,9 +230,14 @@ export default function LibraryPage() {
         </div>
         <div className="flex items-center gap-2">
           <NewCollectionDialog onCreated={refresh} />
-          <AddSourceDialog onCreated={refresh} onOcrStarted={watchOcr} />
+          <AddSourceDialog onCreated={refresh} />
         </div>
       </div>
+
+      {/* Search sits ABOVE the shelves, not in the top bar: it searches THIS —
+          the books on this page — and a hit opens the Reader at the page it came
+          from. See `LibrarySearch`. */}
+      {!loading && sources.length > 0 && <LibrarySearch locale={locale} />}
 
       {loading && (
         <p className="text-sm text-muted-foreground" data-testid="library-loading">
@@ -235,7 +260,7 @@ export default function LibraryPage() {
           groups={groups}
           locale={locale}
           collectionOptions={collectionOptions}
-          ocrProgress={ocrProgress}
+          progress={progress}
           retryingId={retryingId}
           deletingId={deletingId}
           deletingCollectionId={deletingCollectionId}
@@ -244,6 +269,7 @@ export default function LibraryPage() {
           onDelete={handleDelete}
           onDeleteCollection={handleDeleteCollection}
           onMove={handleMove}
+          onChanged={refresh}
         />
       )}
     </div>

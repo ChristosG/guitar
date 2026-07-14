@@ -12,18 +12,22 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8791";
 
 export type SourceKind = "text" | "url";
-/** Mirrors `app.models.knowledge.KnowledgeSource.status`'s full lifecycle
- * (`ingest.py`'s module docstring + `ocr.py`'s `_rollup_source_status`):
- * "ingesting" (transient, committed before the pipeline runs) -> "ready"
- * (char_count > 0) or "empty" (pipeline succeeded but extracted nothing —
- * SPEC D6: this is NOT "ready", see this file's `library` section docstring
- * below) or "failed" (pipeline raised). Note there is no "ocr_running" value
- * here — that only ever exists on `Page.status` (`PAGE_STATUSES` on the API
- * side); a source's own row doesn't change while its pages are mid-OCR, so
- * the Library page synthesizes an "OCR'ing" display state itself instead of
- * reading it off `SourceOut.status` (see `library/page.tsx`'s `ocrProgress`
- * state). */
-export type SourceStatus = "ingesting" | "ready" | "empty" | "failed";
+/** Mirrors `app.models.knowledge.SOURCE_STATUSES` (`ingest.py`'s module
+ * docstring + `ocr.py`'s `_rollup_source_status`): "ingesting" (transient,
+ * committed before the pipeline runs) -> "ready" (readable text, no failed
+ * pages) | "partial" (readable text, SOME pages unreadable) | "empty" (the
+ * pipeline succeeded but extracted nothing — SPEC D6: this is NOT "ready") |
+ * "failed" (the pipeline raised).
+ *
+ * "partial" is Stage 7.2 and it is the honest one: a 74-of-77-page book used to
+ * roll up to a green "Ready" with no retry path, forever. A partial source is
+ * fully readable and fully citable — treat it as USABLE everywhere (link into
+ * the Reader, cite it, search it); it just also offers "retry the failed pages".
+ *
+ * There is still no "ocr_running" here — that only ever exists on `Page.status`.
+ * Whether a book is being read RIGHT NOW is `SourceOut.ocr_active`, which is a
+ * server fact (an in-flight `GenerationJob`), not a React state. */
+export type SourceStatus = "ingesting" | "ready" | "partial" | "empty" | "failed";
 
 export interface SourceOut {
   id: string;
@@ -40,6 +44,18 @@ export interface SourceOut {
    * is no `Collection` row for "Unfiled" — it's just every source with a
    * null FK). Added alongside `routers/library.py` (Plan 9 Task 6). */
   collection_id: string | null;
+
+  /** Page-level truth, derived server-side per request (Stage 7.2), not columns.
+   * `ocr_active` is what makes a HARD RELOAD during the 9-minute OCR honest: the
+   * row can say "reading page 30 of 77" the instant the list lands, with no job
+   * id and no prior React state to remember. Before this, a reload mid-OCR showed
+   * the book RED ("nothing was read") with a Retry button that started a second
+   * racing job. Absent (0/false) on any API old enough not to send them. */
+  pages_total?: number;
+  pages_ready?: number;
+  pages_failed?: number;
+  pages_pending?: number;
+  ocr_active?: boolean;
 }
 
 export interface ChunkPreviewOut {
@@ -95,11 +111,14 @@ export interface UploadSourceInput {
   file: File;
 }
 
+/** `domain`/`language` are GONE from the API (Plan 13, Stage 4.4) — both were
+ * filters on columns that most real sources leave NULL, and `language` could
+ * filter the tutor's English book to zero in a Greek session. Scoping a search
+ * is `source_ids`, which HE chooses. */
 export interface SearchInput {
   query: string;
   k?: number;
-  domain?: string | null;
-  language?: string | null;
+  source_ids?: string[];
 }
 
 export interface AskInput {
@@ -668,13 +687,26 @@ export interface Outline {
   modules: OutlineModule[];
 }
 
+/** The derived counts for one curriculum. NUMBERS, not a formatted sentence:
+ * the API does not know the tutor's locale, and it used to send an English
+ * string that the (fully Greek) interview then rendered verbatim. Formatting a
+ * human-facing sentence server-side is a Greek bug waiting to happen — see
+ * `curricula.interview.steps.sources.shape` in `messages/{en,el}.json`. */
+export interface InterviewShape {
+  lessons_total: number;
+  modules: number;
+  lessons_per_module: number[];
+  target_words_per_lesson: number;
+  teaching_minutes: number;
+  qa_minutes: number;
+}
+
 /** The `findings` field of `InterviewStateOut` — a different payload per step,
- * all optional. "who" carries the level list, "sources" the derived shape echo
- * ("20 sessions -> 5 modules x 4 lessons -> ~2,200 words each"), and "outline"/
- * "confirm" carry the outline itself. */
+ * all optional. "who" carries the level list, "sources" the derived shape echo,
+ * and "outline"/"confirm" carry the outline itself. */
 export interface InterviewFindings {
   levels?: string[];
-  shape?: string;
+  shape?: InterviewShape;
   title?: string;
   modules?: OutlineModule[];
 }
@@ -1507,8 +1539,62 @@ export function moveSource(id: string, collectionId: string | null): Promise<Sou
  * the Retry button for "pdf"/"url" sources in the first place, so a 409 here
  * would mean that gate has a bug, not an expected response to design
  * around — same posture this file takes for `sendChatMessage`'s 409. */
-export function retrySource(id: string): Promise<{ job_id: string | null }> {
-  return request<{ job_id: string | null }>(`/knowledge/sources/${id}/retry`, { method: "POST" });
+export function retrySource(id: string): Promise<OcrJobRef> {
+  return request<OcrJobRef>(`/knowledge/sources/${id}/retry`, { method: "POST" });
+}
+
+/** What both OCR producers return. `already_running: true` means the server
+ * DECLINED to start a second job and handed back the one already reading this
+ * book (`routers/library.py::_enqueue_ocr` — the in-flight guard). The UI does
+ * not need to care: either way it now has the id of the one job that is running,
+ * and progress comes from the server regardless. */
+export interface OcrJobRef {
+  job_id: string | null;
+  already_running?: boolean;
+}
+
+/** Renames a source. The API has supported this since Plan 9 (`PATCH
+ * /knowledge/sources/{id}` takes `title`) and NOTHING in the UI ever called it —
+ * a PDF filed under a typo'd title was a typo forever. */
+export function renameSource(id: string, title: string): Promise<SourcePatchResult> {
+  return request<SourcePatchResult>(`/knowledge/sources/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ title }),
+  });
+}
+
+/** Renames a `Collection` (`PATCH /library/collections/{id}`) — same story as
+ * `renameSource`: the route existed, the UI never called it. */
+export function renameCollection(id: string, name: string): Promise<CollectionOut> {
+  return request<CollectionOut>(`/library/collections/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name }),
+  });
+}
+
+/** `GET /knowledge/sources/{id}/progress` — SERVER-COMPUTED OCR progress
+ * (`schemas/library.py::SourceProgress`). Every field is derived from `Page`
+ * rows + the in-flight `GenerationJob`, so it reads the same in a tab that never
+ * pressed the button, after a hard reload, and tomorrow. This is what replaced
+ * `library/page.tsx`'s `ocrProgress`/`watchOcr` tab-local state machine.
+ *
+ * `current_page` is null when nothing is running — a finished book is not "on" a
+ * page. `empty` pages are NOT failures: a real scan has blank pages, and counting
+ * them as defects would paint a healthy book amber. */
+export interface SourceProgressOut {
+  source_id: string;
+  total: number;
+  ready: number;
+  failed: number;
+  empty: number;
+  pending: number;
+  current_page: number | null;
+  active: boolean;
+  job_id: string | null;
+}
+
+export function getSourceProgress(id: string): Promise<SourceProgressOut> {
+  return request<SourceProgressOut>(`/knowledge/sources/${id}/progress`);
 }
 
 /** Enqueues OCR for a "pdf" source's pending/failed pages. Safe to call
@@ -1517,8 +1603,8 @@ export function retrySource(id: string): Promise<{ job_id: string | null }> {
  * skipped by pagination) is left untouched; `ocr_source` only re-picks-up
  * pending/failed/ocr_running pages (see `app.brain.ocr.ocr_source`'s own
  * docstring). */
-export function startOcr(id: string): Promise<{ job_id: string }> {
-  return request<{ job_id: string }>(`/knowledge/sources/${id}/ocr`, { method: "POST" });
+export function startOcr(id: string): Promise<OcrJobRef> {
+  return request<OcrJobRef>(`/knowledge/sources/${id}/ocr`, { method: "POST" });
 }
 
 /** One row of `GET /knowledge/sources/{id}/pages` — mirrors

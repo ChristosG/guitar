@@ -241,22 +241,38 @@ def test_who_step_with_garbage_answer_types_does_not_crash(db):
 # ---------------------------------------------------------------------------
 
 def test_the_sources_step_echoes_the_derived_shape_back_at_him(db):
-    """He agrees to a SIZE before we spend his money on it. "20 sessions -> 5
-    modules x 4 lessons -> ~2,200 words each"."""
+    """He agrees to a SIZE before we spend his money on it.
+
+    Chris, verbatim: "im making a curriculum with 20 weeks, and only 4 modules
+    are here. are those enough? i dont want us to be frugal here." 20 weeks now
+    yields FIVE modules of four lessons, and he sees that before we spend
+    anything.
+
+    The wire carries NUMBERS, not a formatted sentence. It used to send
+    `Shape.describe()` — an English string — which the (fully Greek) interview
+    rendered verbatim, so a Greek tutor on a Greek page read "20 sessions -> 5
+    modules". The API does not know his locale; the frontend does. Anything the
+    server formats for a human is a Greek bug waiting to happen, so this test
+    asserts on the counts and `interview-sources-step.tsx` owns the sentence.
+    """
     interview = _start(db)
     answer_interview(db, interview, {"student_id": None})
     answer_interview(db, interview, {"weeks": 20, "sessions_per_week": 1,
                                      "minutes_per_session": 50})
 
-    state = describe_step(db, interview.__class__ and interview)
-    # the shape is echoed at the next step the tutor lands on
     assert interview.step == "scope"
     _walk_to(db, interview, "sources")
-    state = describe_step(db, interview)
+    shape = describe_step(db, interview)["findings"]["shape"]
 
-    assert "20 sessions" in state["findings"]["shape"]
-    assert "5 modules" in state["findings"]["shape"]
-    assert "2,200 words" in state["findings"]["shape"]
+    assert shape["lessons_total"] == 20
+    assert shape["modules"] == 5                      # never 4 again
+    assert shape["lessons_per_module"] == [4, 4, 4, 4, 4]
+    assert shape["target_words_per_lesson"] == 2200   # 40 taught min x 55 wpm
+    assert shape["teaching_minutes"] == 40
+    assert shape["qa_minutes"] == 10                  # the 10' he asked for
+
+    # ...and nothing user-facing crosses the wire in English.
+    assert not any(isinstance(v, str) for v in shape.values())
 
 
 @pytest.mark.parametrize("bad", [

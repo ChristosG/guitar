@@ -64,6 +64,21 @@ class SourceOut(BaseModel):
     # inherits this field for free.
     collection_id: UUID | None = None
 
+    # Page-level truth, carried on the list row itself (Stage 7.2). NOT columns —
+    # derived per request from `Page.status` (`app.brain.ocr.page_counts`, one
+    # grouped query for the whole list). They exist so the Library can render
+    # "71 of 77 pages read · 6 failed" and, crucially, so a FRESHLY LOADED tab
+    # knows OCR is running: `ocr_active` is an in-flight `GenerationJob`, so a
+    # hard reload mid-OCR shows "reading page 30 of 77" instead of the source's
+    # at-rest status ("empty" — RED, with a Retry button that started a second
+    # racing job). Zeroes for a source that has no pages, which is no source
+    # ingested since Plan 9.
+    pages_total: int = 0
+    pages_ready: int = 0
+    pages_failed: int = 0
+    pages_pending: int = 0
+    ocr_active: bool = False
+
 
 class BulkSourceCreate(BaseModel):
     """`POST /knowledge/sources/bulk` — the Library's "paste many URLs" box.

@@ -15,13 +15,14 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 
 from app.brain.chunk import chunk_sections
 from app.brain.extract import Section
 from app.config import settings
 from app.llm.embed_factory import get_embedder
 from app.llm.factory import get_provider
+from app.models.generation_job import GenerationJob
 from app.models.knowledge import Chunk, KnowledgeSource, Page
 
 log = logging.getLogger(__name__)
@@ -162,11 +163,11 @@ def ocr_source(db, source_id) -> OcrResult:
     # attempt cap is what lets `empty` be retryable without re-billing the book's
     # blank pages on every run — see both constants' docstrings.
     #
-    # `or_(is_(None), <)` because `ocr_attempts` is NULL on every Page row written
-    # before the column existed (the server_default only applies to new INSERTs) —
-    # and in SQL, `NULL < 3` is NULL, not TRUE. Without the explicit NULL branch,
-    # this filter would silently exclude every page of the tutor's existing books
-    # and OCR would appear to do nothing at all.
+    # The `IS NULL` branch is not decoration: the column is NOT NULL going forward
+    # (migration d4f1a90c7b28 backfills 0), but in SQL `NULL < 3` is NULL, not
+    # TRUE — so if a row ever did carry NULL here, a bare `<` would silently drop
+    # that page out of every OCR run for good, which is precisely the class of
+    # never-retried-again bug this filter exists to end.
     pages = (
         db.query(Page)
         .filter(Page.source_id == source_id,
@@ -274,24 +275,30 @@ def ocr_source(db, source_id) -> OcrResult:
 
 
 def _rollup_source_status(db, source_id) -> None:
-    """Re-derive the parent `KnowledgeSource`'s `status`/`char_count` from
-    its pages, after the per-page loop above has finished.
+    """Re-derive the parent `KnowledgeSource`'s `status`/`char_count` from its
+    pages, after the per-page loop above has finished.
 
-    Review fix: without this, a PDF whose pages ALL reached `ready` with real
-    transcribed text still left the source row at status="empty",
-    char_count=0 forever — nothing had ever re-derived it. The Library UI
-    renders `source.status`, so a perfectly-OCR'd, fully-searchable book kept
-    showing RED/broken with a "Retry" button.
+    THE RULE, AND WHY IT CHANGED (Stage 7.2). It used to be `ingest_source`'s D6
+    rule verbatim — `ready iff char_count > 0` — which is right for a source that
+    is one indivisible blob of text and WRONG for a book. 74 pages read + 3 pages
+    unreadable is `char_count > 0`, so the tutor's book showed a green checkmark
+    and no retry path, forever; the job row already knew ("3 page(s) unreadable")
+    and the UI fetched that string and threw it away. Now:
 
-    Mirrors the D6 rule `ingest_source` already applies (app/brain/ingest.py:
-    ready iff char_count > 0) rather than inventing a new rule here — only
-    READY pages' text counts, so a partially-failed batch still rolls up to
-    `ready` with a char_count that reflects just the citable pages.
+        no readable text at all            -> "empty"   (red, retry)
+        readable text, some pages FAILED   -> "partial" (amber, retry failed pages)
+        readable text, no failed pages     -> "ready"   (green)
 
-    Guarded the same swallow-and-log way as every other commit in this
-    module (module docstring, D5): a rollup failure is logged and rolled
-    back, but must not raise back into the caller and must not undo the
-    per-page work already durably committed above.
+    `empty` PAGES ARE NOT FAILURES. A real 77-page scan has genuinely blank pages
+    (section breaks, the verso of a plate), and the quality gate above deliberately
+    records a model's "no visible text" narration as `empty` too. Counting those
+    as failures would paint a perfectly healthy book amber — the specific false
+    alarm Stage 7.4 was warned about. Only `failed` (we could not READ it) counts.
+
+    Guarded the same swallow-and-log way as every other commit in this module
+    (module docstring, D5): a rollup failure is logged and rolled back, but must
+    not raise back into the caller and must not undo the per-page work already
+    durably committed above.
     """
     try:
         source = db.get(KnowledgeSource, source_id)
@@ -301,12 +308,110 @@ def _rollup_source_status(db, source_id) -> None:
         char_count = sum(
             len(p.text) for p in source_pages if p.status == "ready" and p.text
         )
+        failed = sum(1 for p in source_pages if p.status == "failed")
         source.char_count = char_count
-        source.status = "ready" if char_count > 0 else "empty"
+        if char_count == 0:
+            source.status = "empty"
+        elif failed:
+            source.status = "partial"
+        else:
+            source.status = "ready"
         db.commit()
     except Exception:
         log.warning("ocr: source status rollup failed for source_id=%s", source_id, exc_info=True)
         db.rollback()
+
+
+@dataclass
+class PageCounts:
+    """What a source's pages actually add up to. The Library renders this
+    verbatim ("71 of 77 pages read · 6 failed") — before Stage 7.2 it had no way
+    to know any of it, and a partially-failed book was a green checkmark."""
+    total: int = 0
+    ready: int = 0
+    failed: int = 0
+    empty: int = 0
+    pending: int = 0        # pending + ocr_running: not yet resolved either way
+
+    @property
+    def resolved(self) -> int:
+        """Pages OCR has finished with, whatever the outcome. `resolved + 1` is
+        the page a running job is working on right now."""
+        return self.ready + self.failed + self.empty
+
+
+def page_counts(db, source_ids: list) -> dict:
+    """`{source_id: PageCounts}` for every id given, in ONE grouped query — not
+    a count per source per status, which on the Library's list endpoint would be
+    an N×5 fan-out on every poll while a book is being read."""
+    counts: dict = {sid: PageCounts() for sid in source_ids}
+    if not source_ids:
+        return counts
+    rows = (
+        db.query(Page.source_id, Page.status, func.count(Page.id))
+        .filter(Page.source_id.in_(source_ids))
+        .group_by(Page.source_id, Page.status)
+        .all()
+    )
+    for source_id, status, n in rows:
+        c = counts.setdefault(source_id, PageCounts())
+        c.total += n
+        if status == "ready":
+            c.ready += n
+        elif status == "failed":
+            c.failed += n
+        elif status == "empty":
+            c.empty += n
+        else:                                  # pending | ocr_running
+            c.pending += n
+    return counts
+
+
+# A job is "in flight" in exactly these two statuses. `pending` counts: the row is
+# committed by the request handler BEFORE `BackgroundTasks` runs the runner (see
+# `routers/library.py::start_ocr`), so there is a real window in which a job that
+# is absolutely about to run still reads `pending` — a guard that ignored it would
+# let a fast double-click through, which is the entire bug this exists to stop.
+# (A process restart cannot strand this guard: `jobs/sweep.py::sweep_orphaned_jobs`
+# fails every pending/running job at boot.)
+_IN_FLIGHT = ("pending", "running")
+
+
+def active_ocr_jobs(db, source_ids: list | None = None) -> dict:
+    """`{source_id_str: GenerationJob}` for every in-flight OCR job.
+
+    The `source_id` lives inside `GenerationJob.params`, a plain `sa.JSON`
+    column — filtered in Python rather than with a JSON operator, because the
+    in-flight set is at most a handful of rows (this app runs OCR from
+    `BackgroundTasks`, one job per press) and a `->>` predicate would tie this
+    to Postgres for no measurable gain.
+    """
+    jobs = (
+        db.query(GenerationJob)
+        .filter(GenerationJob.kind == "ocr", GenerationJob.status.in_(_IN_FLIGHT))
+        .order_by(GenerationJob.created_at)
+        .all()
+    )
+    wanted = {str(s) for s in source_ids} if source_ids is not None else None
+    out: dict = {}
+    for job in jobs:
+        sid = str((job.params or {}).get("source_id") or "")
+        if not sid or (wanted is not None and sid not in wanted):
+            continue
+        out[sid] = job                          # latest wins; they're time-ordered
+    return out
+
+
+def active_ocr_job(db, source_id):
+    """The in-flight OCR job for one source, or None. THE IN-FLIGHT GUARD.
+
+    Without it, `POST /ocr` and `POST /retry` each enqueued a fresh job every
+    time they were called — so a tutor who clicked Retry twice (which he did,
+    because a reload during the 9-minute OCR used to show his book as RED with a
+    Retry button) got TWO jobs reading the same book at once, both running the
+    same page's delete-then-insert of chunks, racing.
+    """
+    return active_ocr_jobs(db, [source_id]).get(str(source_id))
 
 
 def _transcribe_with_retry(provider, page: Page) -> str:

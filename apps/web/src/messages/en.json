@@ -11,7 +11,6 @@
     "notes": "Notes",
     "artifacts": "Artifacts",
     "chat": "Chat",
-    "searchPlaceholder": "Search… (coming soon)",
     "openMenu": "Open menu",
     "closeMenu": "Close menu",
     "settings": "Settings",
@@ -296,7 +295,8 @@
           "heading": "Which of your library sources should this be built from?",
           "hint": "I read them WHOLE — not a search over them. What you pick here is literally what the model reads.",
           "empty": "Your library is empty — this will draw on general knowledge only.",
-          "charCount": "{count, number} chars"
+          "charCount": "{count, number} chars",
+          "shape": "{lessons} lessons -> {modules} modules ({perModule}) -> ~{words} words each ({taught} min taught + {qa} min Q&A)"
         },
         "outline": {
           "working": "Reading your whole library and writing the course — this takes a moment…"
@@ -392,13 +392,14 @@
     "delete": "Remove",
     "deleting": "Removing…",
     "deleteError": "Could not remove this source.",
-    "ocrProgress": "Reading page {ready} of {total}…",
+    "ocrProgress": "Reading page {page} of {total}…",
     "status": {
       "ingesting": "Adding…",
       "ready": "Ready",
       "empty": "Empty — nothing was read from this source",
       "failed": "Couldn't read this source",
-      "ocr_running": "Reading your book…"
+      "ocr_running": "Reading your book…",
+      "partial": "{ready} of {total} pages read · {failed} failed"
     },
     "types": {
       "pdf": "PDF",
@@ -469,7 +470,37 @@
       "confirm": "Delete folder"
     },
     "deleteCollection": "Delete folder",
-    "deleteCollectionError": "Could not delete this folder."
+    "deleteCollectionError": "Could not delete this folder.",
+    "pageCount": "{count} pages",
+    "retryFailedPages": "Retry failed pages",
+    "rename": "Rename",
+    "renameCollection": "Rename folder",
+    "reocr": "Read this book again",
+    "renameDialog": {
+      "sourceHeading": "Rename this source",
+      "sourceDescription": "Only the name changes — nothing that was read out of it is touched.",
+      "collectionHeading": "Rename this folder",
+      "collectionDescription": "Only the folder's name changes. The sources in it stay where they are.",
+      "label": "Name",
+      "cancel": "Cancel",
+      "submit": "Save",
+      "submitting": "Saving…",
+      "error": "Could not rename this."
+    },
+    "confirmReocr": {
+      "title": "Read “{title}” again?",
+      "body": "Every page that isn't already read will be sent to the model again ({pages, plural, =0 {no pages yet} one {# page} other {up to # pages}}). Pages that were read fine are left alone, and nothing you already have is lost. This costs money and can take several minutes.",
+      "confirm": "Read it again"
+    },
+    "search": {
+      "placeholder": "Find something in your library — e.g. “Tube Screamer”",
+      "submit": "Search",
+      "searching": "Searching…",
+      "clear": "Clear the search",
+      "page": "p. {page}",
+      "noResults": "Nothing in your library matches “{query}”.",
+      "error": "Could not search your library."
+    }
   },
   "lessons": {
     "heading": "Lessons",

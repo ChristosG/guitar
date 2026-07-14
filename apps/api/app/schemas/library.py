@@ -33,6 +33,29 @@ class PageOut(BaseModel):
     total_pages: int
 
 
+class SourceProgress(BaseModel):
+    """`GET /knowledge/sources/{id}/progress` — OCR progress that SURVIVES A
+    RELOAD, because every field is derived from `Page.status` rows and a
+    `GenerationJob`, not from the React state of the tab that pressed the button
+    (which is where it used to live, and why hard-reloading during the tutor's
+    9-minute OCR showed his book as unreadable while it was being read).
+
+    `current_page` is `null` when no job is in flight — a finished book is not
+    "on" any page. `empty` pages are reported separately from `failed` ones and
+    are NOT a defect: a real scan has blank pages, and conflating the two is what
+    would paint a healthy book amber."""
+
+    source_id: uuid.UUID
+    total: int
+    ready: int
+    failed: int
+    empty: int
+    pending: int
+    current_page: int | None
+    active: bool
+    job_id: uuid.UUID | None
+
+
 class CollectionCreate(BaseModel):
     """Body for both `POST /library/collections` (create) and `PATCH
     /library/collections/{id}` (rename) — both take exactly one field."""

@@ -22,19 +22,26 @@ from fastapi.responses import FileResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.brain.ocr import active_ocr_job, page_counts
 from app.brain.repair import repair_pageless_source
 from app.config import settings
 from app.db import get_db
 from app.jobs.runner import run_ocr_job, run_reingest_job
 from app.llm.factory import require_llm_configured
 from app.models.generation_job import GenerationJob
-from app.models.knowledge import Collection, KnowledgeSource, Page
+from app.models.knowledge import (
+    SOURCE_USABLE_STATUSES,
+    Collection,
+    KnowledgeSource,
+    Page,
+)
 from app.schemas.library import (
     CollectionCreate,
     CollectionOut,
     PageOut,
     PageSummary,
     SourcePatch,
+    SourceProgress,
 )
 
 log = logging.getLogger(__name__)
@@ -51,6 +58,46 @@ def _source_or_404(db: Session, source_id: uuid.UUID) -> KnowledgeSource:
 
 # --- OCR ---------------------------------------------------------------
 
+def _enqueue_ocr(db: Session, background: BackgroundTasks, source_id: uuid.UUID) -> dict:
+    """Enqueue a `GenerationJob(kind="ocr")` + schedule `run_ocr_job` — UNLESS
+    one is already in flight for this source, in which case the caller gets that
+    job's id back and nothing new is started. THE IN-FLIGHT GUARD (Stage 7.2).
+
+    Both producers (`POST .../ocr` and the pdf branch of `POST .../retry`) go
+    through here. Before this, each of them enqueued unconditionally: two clicks
+    = two jobs = two `ocr_source` runs on the same book, each doing a
+    delete-then-insert of the same page's chunks, racing. And the tutor DID click
+    twice, because a reload during the 9-minute OCR used to paint his book red
+    with a Retry button (the progress lived in tab-local React state).
+
+    `SELECT ... FOR UPDATE` on the source row, not a bare read: FastAPI runs these
+    sync handlers in a threadpool, so two clicks 30ms apart are genuinely
+    concurrent and a check-then-insert without a lock is a check-then-insert with
+    a race. Locking the SOURCE (which every OCR enqueue for it must also lock)
+    serializes them into "first one wins, second one observes the first" — an
+    advisory lock on a row nobody else contends for, held for microseconds.
+
+    The job row is committed BEFORE `background.add_task` — NOT left to the
+    background task, which Starlette runs AFTER the response is sent — so the
+    runner (which opens its own session) is guaranteed to find the row, an
+    immediate `GET /jobs/{job_id}` poll sees it, and the guard above can see it.
+    """
+    db.query(KnowledgeSource).filter(KnowledgeSource.id == source_id).with_for_update().one()
+
+    existing = active_ocr_job(db, source_id)
+    if existing is not None:
+        db.commit()                                   # release the row lock
+        log.info("ocr: job %s already in flight for source=%s — not enqueuing a second",
+                 existing.id, source_id)
+        return {"job_id": str(existing.id), "already_running": True}
+
+    job = GenerationJob(kind="ocr", status="pending", params={"source_id": str(source_id)})
+    db.add(job)
+    db.commit()
+    background.add_task(run_ocr_job, job.id)
+    return {"job_id": str(job.id), "already_running": False}
+
+
 @router.post(
     "/knowledge/sources/{source_id}/ocr",
     status_code=202,
@@ -61,23 +108,50 @@ def _source_or_404(db: Session, source_id: uuid.UUID) -> KnowledgeSource:
 def start_ocr(
     source_id: uuid.UUID, background: BackgroundTasks, db: Session = Depends(get_db)
 ) -> dict:
-    """Enqueue a `GenerationJob(kind="ocr")` and schedule `run_ocr_job` via
-    `BackgroundTasks` — mirrors `routers/curriculum.py`'s
-    `generate_curriculum_endpoint` async pattern exactly (Task 6 brief: reuse
-    it, no new infra). Poll `GET /jobs/{job_id}` for the outcome.
+    """Start (or re-run) OCR on a source's unread pages. Poll `GET
+    /knowledge/sources/{id}/progress` — or `GET /jobs/{job_id}` — for the outcome.
 
-    The job row is committed BEFORE `background.add_task` is called — NOT
-    left for the background task, which Starlette/FastAPI run AFTER the
-    response is sent — so the runner (which opens its OWN session) is
-    guaranteed to find the row, and an immediate `GET /jobs/{job_id}` poll
-    sees it too.
+    Idempotent under a double-click (`_enqueue_ocr`), and safe to call on a
+    HEALTHY source: `ocr_source` only picks up pages that are not already `ready`
+    (and have attempts left), so this re-reads the pages that failed and leaves
+    the 71 good ones alone. That is what makes "Re-run OCR" an affordance the
+    Library can offer on any PDF rather than only on a broken one.
     """
     _source_or_404(db, source_id)
-    job = GenerationJob(kind="ocr", status="pending", params={"source_id": str(source_id)})
-    db.add(job)
-    db.commit()
-    background.add_task(run_ocr_job, job.id)
-    return {"job_id": str(job.id)}
+    return _enqueue_ocr(db, background, source_id)
+
+
+@router.get("/knowledge/sources/{source_id}/progress", response_model=SourceProgress)
+def source_progress(source_id: uuid.UUID, db: Session = Depends(get_db)) -> SourceProgress:
+    """SERVER-COMPUTED OCR progress — the whole point of Stage 7.2.
+
+    Progress used to live ONLY in the React state of the tab that started the job
+    (`library/page.tsx`'s `ocrProgress`/`watchOcr`). So a reload at page 30 of 77
+    — during a NINE MINUTE OCR — lost it, and the row fell back to the source's
+    at-rest status, which is still `empty`: the tutor's book showed RED, "nothing
+    was read", with a Retry button, WHILE IT WAS BEING READ. Pressing it started a
+    second job racing the first.
+
+    Everything here is derived from durable rows (`Page.status` + the
+    `GenerationJob`), so it reads the same in a fresh tab, after a reload, on his
+    phone, and tomorrow.
+    """
+    _source_or_404(db, source_id)
+    counts = page_counts(db, [source_id])[source_id]
+    job = active_ocr_job(db, source_id)
+    return SourceProgress(
+        source_id=source_id,
+        total=counts.total,
+        ready=counts.ready,
+        failed=counts.failed,
+        empty=counts.empty,
+        pending=counts.pending,
+        # `resolved + 1` is the page the job is on RIGHT NOW; clamped so the last
+        # page's own completion doesn't read "page 78 of 77".
+        current_page=min(counts.resolved + 1, counts.total) if job else None,
+        active=job is not None,
+        job_id=job.id if job else None,
+    )
 
 
 # --- Reader --------------------------------------------------------------
@@ -91,10 +165,13 @@ def _ensure_pages_exist(db: Session, source: KnowledgeSource) -> None:
     `app/brain/repair.py`'s module docstring for the full story and why
     this can no longer happen to anything ingested since Plan 9 Task 5.
 
-    Deliberately scoped tight — only fires for exactly this shape
-    (`status == "ready"` AND zero Pages) — so it never touches a source
-    that is legitimately still ingesting/failed/empty, or a merely
-    out-of-range page number on an otherwise-healthy source.
+    Deliberately scoped tight — only fires for exactly this shape (a USABLE
+    status AND zero Pages) — so it never touches a source that is legitimately
+    still ingesting/failed/empty, or a merely out-of-range page number on an
+    otherwise-healthy source. "Usable" is `ready` OR `partial` (Stage 7.2): a
+    book with 6 unreadable pages is still a book, and the Reader must open it —
+    gating this on the string "ready" alone would have made `partial` mean
+    "unopenable", which is not what it means.
 
     Runs inline on the read path (a GET), not queued as a background job:
     the repair is a bounded, idempotent, one-time cost (paginate_source
@@ -104,7 +181,7 @@ def _ensure_pages_exist(db: Session, source: KnowledgeSource) -> None:
     never raised — the caller re-checks afterward and still gets a clean,
     honest 404 rather than a 500 if the heal didn't take.
     """
-    if source.status != "ready":
+    if source.status not in SOURCE_USABLE_STATUSES:
         return
     if db.query(func.count(Page.id)).filter_by(source_id=source.id).scalar() > 0:
         return
@@ -139,7 +216,7 @@ def get_page(source_id: uuid.UUID, page_no: int, db: Session = Depends(get_db)) 
         # READY that still, somehow, has no pages at all.
         detail = (
             "This source is marked ready but has no pages — try re-indexing it."
-            if source.status == "ready"
+            if source.status in SOURCE_USABLE_STATUSES
             else "Page not found"
         )
         raise HTTPException(status_code=404, detail=detail)
@@ -216,11 +293,7 @@ def retry_source(
     source = _source_or_404(db, source_id)
 
     if source.type == "pdf":
-        job = GenerationJob(kind="ocr", status="pending", params={"source_id": str(source_id)})
-        db.add(job)
-        db.commit()
-        background.add_task(run_ocr_job, job.id)
-        return {"job_id": str(job.id)}
+        return _enqueue_ocr(db, background, source_id)
 
     if source.type == "url":
         job = GenerationJob(

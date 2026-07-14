@@ -1,12 +1,24 @@
 "use client";
 
+import { useState } from "react";
 import { useTranslations } from "next-intl";
 import Link from "next/link";
-import { AlertTriangle, CheckCircle2, FileText, Link2, Loader2, StickyNote, Trash2 } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  FileText,
+  Link2,
+  Loader2,
+  Pencil,
+  RefreshCw,
+  StickyNote,
+  Trash2,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm";
+import { RenameDialog } from "@/components/library/rename-dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import type { SourceOut } from "@/lib/api";
+import { renameSource, type SourceOut, type SourceProgressOut } from "@/lib/api";
 
 /** Statuses the honesty requirement (spec D6) applies to: a source that
  * genuinely has nothing readable in it. Rendered LOUD/red/destructive with a
@@ -46,20 +58,19 @@ function TypeIcon({ type }: { type: string }) {
   return <StickyNote className="size-4 shrink-0 text-muted-foreground" />;
 }
 
-export interface OcrProgress {
-  ready: number;
-  total: number;
-}
-
 interface SourceRowProps {
   source: SourceOut;
   locale: string;
-  /** Set only while THIS browser tab is actively watching an OCR/retry job
-   * it just started (see `library/page.tsx`'s `watchOcr`) — a source's own
-   * `status` never becomes "ocr_running" server-side (only `Page.status`
-   * does), so this is how the row shows "reading your book" instead of
-   * whatever stale terminal status it still has. */
-  ocrProgress?: OcrProgress;
+  /** Live, SERVER-COMPUTED progress for a source whose OCR is running right now
+   * (`GET /knowledge/sources/{id}/progress`, polled by the parent page). It used
+   * to be tab-local React state, which is why a hard reload during the tutor's
+   * 9-minute OCR showed his book as RED "nothing was read" with a Retry button —
+   * and why pressing that button started a SECOND job racing the first.
+   *
+   * Absent on the first render after a reload: `source.ocr_active` (also a server
+   * fact) is what carries the row until the first poll lands, so the row is
+   * honest immediately, not two seconds later. */
+  progress?: SourceProgressOut;
   retrying: boolean;
   deleting: boolean;
   moving: boolean;
@@ -67,17 +78,18 @@ interface SourceRowProps {
   onRetry: (id: string) => void;
   onDelete: (id: string) => void;
   onMove: (id: string, collectionId: string | null) => void;
+  onChanged: () => void;
 }
 
-/** One row of the Library: title (a real link into the reader ONLY when the
- * source is genuinely ready to read — nowhere else does this app invite a
- * click into a dead end), an honest status line, a "file under" folder
- * picker, and a remove button. Pure presentational — all fetching/mutation
- * lives in the parent page. */
+/** One row of the Library: title (a real link into the reader whenever the
+ * source is genuinely readable — which includes `partial`: a book with 6 bad
+ * pages is still a book), an honest status line, a "file under" folder picker,
+ * rename, re-read, and remove. Pure presentational — all fetching/mutation lives
+ * in the parent page, except the rename dialog, which owns its own PATCH. */
 export function SourceRow({
   source,
   locale,
-  ocrProgress,
+  progress,
   retrying,
   deleting,
   moving,
@@ -85,22 +97,36 @@ export function SourceRow({
   onRetry,
   onDelete,
   onMove,
+  onChanged,
 }: SourceRowProps) {
   const t = useTranslations("library");
   const confirm = useConfirm();
+  const [renaming, setRenaming] = useState(false);
+
+  // `ocr_active` (a server fact — an in-flight GenerationJob) is the authority on
+  // "is this book being read right now", not the presence of a poll result.
+  const reading = progress?.active ?? source.ocr_active ?? false;
   const contentEmpty = isEmptyContent(source);
-  const isBroken = !ocrProgress && (BROKEN_STATUSES.has(source.status) || contentEmpty);
-  const isReady = !ocrProgress && source.status === "ready" && !contentEmpty;
-  // Display-only status key: a "ready"-but-0-char row (see `isEmptyContent`
-  // above) is narrated as "empty" even though the API's own `status` field
-  // still (wrongly) says "ready" — never surface that stale label verbatim.
+  const isPartial = !reading && source.status === "partial";
+  const isBroken = !reading && (BROKEN_STATUSES.has(source.status) || contentEmpty);
+  // A partial book OPENS. Gating the Reader link on the literal string "ready"
+  // would have made the new status mean "unopenable", which is not what it means.
+  const isReadable = !reading && (source.status === "ready" || isPartial) && !contentEmpty;
   const displayStatus = contentEmpty ? "empty" : source.status;
 
+  const total = progress?.total ?? source.pages_total ?? 0;
+  const ready = progress?.ready ?? source.pages_ready ?? 0;
+  const failed = progress?.failed ?? source.pages_failed ?? 0;
+  // Before the first poll lands there is no `current_page`; `ready + 1` is the
+  // page it is almost certainly on, and it is never worse than showing nothing.
+  const currentPage = progress?.current_page ?? Math.min(ready + 1, total || 1);
+
   // `DELETE /knowledge/sources/{id}` cascades to every Page and Chunk (both
-  // `ON DELETE CASCADE`) — re-adding the book means re-running OCR over 77
-  // pages against a paid vision model. The dialog quotes the indexed char
-  // count so the tutor can see the difference between dropping an empty
-  // Wikipedia stub and dropping the book the whole library is built on.
+  // `ON DELETE CASCADE`) and now deletes the page scans off disk too — re-adding
+  // the book means re-running OCR over 77 pages against a paid vision model. The
+  // dialog quotes the indexed char count so the tutor can see the difference
+  // between dropping an empty Wikipedia stub and dropping the book the whole
+  // library is built on.
   async function requestDelete() {
     const ok = await confirm({
       title: t("confirmDelete.title", { title: source.title }),
@@ -109,6 +135,19 @@ export function SourceRow({
       destructive: true,
     });
     if (ok) onDelete(source.id);
+  }
+
+  /** Re-reading a healthy 77-page book is 77 vision calls against a paid model.
+   * The server makes it SAFE (only unread pages are picked up, and a second job
+   * can't start while one is running) — but it cannot make it free, so this asks
+   * first. It is not destructive, so the dialog is not styled as such. */
+  async function requestReocr() {
+    const ok = await confirm({
+      title: t("confirmReocr.title", { title: source.title }),
+      body: t("confirmReocr.body", { pages: total || 0 }),
+      confirmLabel: t("confirmReocr.confirm"),
+    });
+    if (ok) onRetry(source.id);
   }
 
   return (
@@ -125,7 +164,7 @@ export function SourceRow({
         <Tooltip>
           <TooltipTrigger
             render={
-              isReady ? (
+              isReadable ? (
                 <Link href={`/${locale}/library/${source.id}`} className="block truncate font-medium hover:underline" />
               ) : (
                 <span className="block truncate font-medium" />
@@ -137,13 +176,39 @@ export function SourceRow({
           <TooltipContent>{source.title}</TooltipContent>
         </Tooltip>
 
-        {ocrProgress ? (
-          <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
+        {reading ? (
+          <span
+            data-testid={`ocr-progress-${source.id}`}
+            className="flex items-center gap-1.5 text-sm text-muted-foreground"
+          >
             <Loader2 className="size-3.5 shrink-0 animate-spin" />
-            {source.type === "pdf"
-              ? t("ocrProgress", { ready: ocrProgress.ready, total: ocrProgress.total })
+            {total > 0
+              ? t("ocrProgress", { page: currentPage, total })
               : t("status.ocr_running")}
           </span>
+        ) : isPartial ? (
+          // AMBER, not green. 71 of 77 pages read is not "Ready" — and it is not
+          // broken either. The failed pages have their own retry, which re-reads
+          // ONLY them (`ocr_source` never re-reads a page that is already ready).
+          <div
+            data-testid={`status-partial-${source.id}`}
+            className="flex flex-wrap items-center gap-2 text-amber-600 dark:text-amber-500"
+          >
+            <span className="flex items-center gap-1.5 text-sm font-medium">
+              <AlertTriangle className="size-3.5 shrink-0" />
+              {t("status.partial", { ready, total, failed })}
+            </span>
+            <Button
+              type="button"
+              size="xs"
+              variant="outline"
+              disabled={retrying}
+              data-testid={`retry-${source.id}`}
+              onClick={() => onRetry(source.id)}
+            >
+              {retrying ? t("retrying") : t("retryFailedPages")}
+            </Button>
+          </div>
         ) : isBroken ? (
           <div className="flex flex-wrap items-center gap-2 text-destructive">
             <span className="flex items-center gap-1.5 text-sm font-medium">
@@ -168,10 +233,13 @@ export function SourceRow({
         ) : source.status === "ready" ? (
           <span
             data-testid={`status-ok-${source.id}`}
-            className="flex items-center gap-1.5 text-sm text-emerald-600 dark:text-emerald-400"
+            className="flex flex-wrap items-center gap-1.5 text-sm text-emerald-600 dark:text-emerald-400"
           >
             <CheckCircle2 className="size-3.5 shrink-0" />
             {t("status.ready")}
+            {total > 0 && (
+              <span className="text-muted-foreground">· {t("pageCount", { count: total })}</span>
+            )}
             {source.char_count != null && (
               <span className="text-muted-foreground">
                 · {t("charCount", { count: source.char_count })}
@@ -205,6 +273,39 @@ export function SourceRow({
         type="button"
         variant="ghost"
         size="icon-sm"
+        aria-label={t("rename")}
+        data-testid={`rename-${source.id}`}
+        onClick={() => setRenaming(true)}
+        className="shrink-0 text-muted-foreground hover:text-foreground"
+      >
+        <Pencil />
+      </Button>
+
+      {/* Re-read: the OCR job has always been re-runnable server-side and no UI
+          ever offered it on a HEALTHY book — so a book that OCR'd badly (a bad
+          scan, a model hiccup) could only be fixed by deleting and re-uploading
+          it. Hidden while a job is running: the server would just hand back the
+          same job, but a button that looks like it does nothing is worse than no
+          button. */}
+      {source.type === "pdf" && !reading && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          aria-label={t("reocr")}
+          disabled={retrying}
+          data-testid={`reocr-${source.id}`}
+          onClick={requestReocr}
+          className="shrink-0 text-muted-foreground hover:text-foreground"
+        >
+          <RefreshCw />
+        </Button>
+      )}
+
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-sm"
         aria-label={t("delete")}
         disabled={deleting}
         data-testid={`delete-${source.id}`}
@@ -213,6 +314,16 @@ export function SourceRow({
       >
         <Trash2 />
       </Button>
+
+      <RenameDialog
+        open={renaming}
+        onOpenChange={setRenaming}
+        value={source.title}
+        heading={t("renameDialog.sourceHeading")}
+        description={t("renameDialog.sourceDescription")}
+        onSubmit={(title) => renameSource(source.id, title)}
+        onRenamed={onChanged}
+      />
     </div>
   );
 }

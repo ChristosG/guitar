@@ -25,12 +25,6 @@ const MODES: Mode[] = ["text", "url", "pdf"];
 
 interface AddSourceDialogProps {
   onCreated: () => void;
-  /** Fired only for a "pdf" upload, right after `startOcr` accepts the job —
-   * lets the parent page begin live-watching this specific source's OCR
-   * progress (see `library/page.tsx`'s `watchOcr`). Never fired for
-   * text/url sources (those ingest synchronously; there's no job to
-   * watch). */
-  onOcrStarted: (sourceId: string, jobId: string) => void;
 }
 
 /** The "Add source" trigger + dialog — deliberately just Title + the one
@@ -40,7 +34,7 @@ interface AddSourceDialogProps {
  * the API and unused by anything this page renders). A brand-new source
  * always lands Unfiled; filing it into a collection happens afterward via
  * the row's own "file under" picker, not a second field in this dialog. */
-export function AddSourceDialog({ onCreated, onOcrStarted }: AddSourceDialogProps) {
+export function AddSourceDialog({ onCreated }: AddSourceDialogProps) {
   const t = useTranslations("library.addDialog");
 
   const [open, setOpen] = useState(false);
@@ -74,9 +68,15 @@ export function AddSourceDialog({ onCreated, onOcrStarted }: AddSourceDialogProp
         // book). Best-effort: the source already exists either way, so a
         // failure here doesn't block adding it — the tutor can Retry it
         // from the row later.
+        //
+        // Nothing is handed back to the parent any more: the job is a SERVER
+        // fact from here on (`SourceOut.ocr_active` + `GET .../progress`), so
+        // the `onCreated()` refresh below is all it takes for the new row to
+        // start narrating "reading page N of M" — in this tab, in a second tab,
+        // and after a reload. It used to hand the parent a job id to watch in
+        // React state, which is exactly why an F5 lost the thread.
         try {
-          const { job_id } = await startOcr(created.id);
-          onOcrStarted(created.id, job_id);
+          await startOcr(created.id);
         } catch {
           // swallowed — see docstring above
         }

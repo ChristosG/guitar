@@ -66,9 +66,20 @@ class Shape:
     floor_words_per_lesson: int
 
     def describe(self) -> str:
-        """The one-line echo the interview's duration step shows the tutor —
-        *"20 sessions -> 5 modules x 4 lessons -> ~2,200 words each"*. He is
-        agreeing to a size before we spend his money on it.
+        """A one-line English summary — FOR LOGS AND TESTS ONLY.
+
+        NOT for the tutor's screen. It used to be: the interview rendered this
+        string verbatim, so a Greek-speaking tutor on a fully Greek page was
+        shown *"20 sessions -> 5 modules (4+4+4+4+4 lessons) -> ~2,200 words
+        each"* in English. Caught by driving the real interview.
+
+        The seam was simply in the wrong place. The API has no business
+        formatting user-facing prose — it does not know the locale, and the
+        frontend already holds both translations (`messages/{en,el}.json`). So
+        the wire carries the NUMBERS (`ShapeOut`), and
+        `interview-sources-step.tsx` formats them with `next-intl`. Anything that
+        renders a server-built sentence to the tutor is a Greek bug waiting to
+        happen; this method's job is to make a log line readable.
         """
         per = "+".join(str(n) for n in self.lessons_per_module)
         return (

@@ -21,6 +21,7 @@ import os
 import fitz
 
 from app.brain.extract import extract_text
+from app.brain.media import purge_source_media
 from app.config import settings
 from app.models.knowledge import Page
 
@@ -49,6 +50,16 @@ def paginate_source(db, source_id, *, kind, data=None, url=None, text=None) -> l
     # partway through page creation doesn't leave the source pageless.
     db.query(Page).filter(Page.source_id == source_id).delete(synchronize_session=False)
     db.expire_all()
+
+    # The Page rows are gone; their scans must go with them (Stage 7.3). Deleting
+    # the rows alone was a leak with a sharp edge: a re-render from a SHORTER PDF
+    # leaves the previous document's tail pages sitting on disk under this
+    # source's id — files no row points at, that nothing will ever clean up, and
+    # that a future `{page_no:04d}.jpg` write will happily read as if they were
+    # this document's. Same-length overwrites hid it. `purge_source_media` is a
+    # no-op for a source that has no scans at all (url/text/note — spec D2) and
+    # for a first ingest, which is every PDF ingest this app performs today.
+    purge_source_media(source_id)
 
     if kind == "pdf" and data:
         return _paginate_pdf(db, source_id, data)

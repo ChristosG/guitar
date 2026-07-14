@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 
 from app.auth.middleware import SessionAuthMiddleware
 from app.brain.lexical import warm_index
+from app.brain.media import sweep_orphaned_media
 from app.config import settings
 from app.db import SessionLocal
 from app.i18n import LOCALE_HEADER
@@ -47,6 +48,13 @@ async def lifespan(app: FastAPI):
        slow the first time and nobody can reproduce it" bug. `warm_index` never
        raises: a cold index is a slow first search, not a dead app.
 
+    3. Delete page scans whose `KnowledgeSource` no longer exists (Stage 7.3,
+       `app.brain.media.sweep_orphaned_media`). Every DELETE this app served
+       before that module existed leaked its book's JPEGs — ~25MB per copy of
+       the tutor's 77-page scan — and this boot pass is the only thing that can
+       ever collect them. Cheap (one `listdir` of a directory with a handful of
+       entries) and idempotent, so it costs nothing on the boots that find none.
+
     Opens and closes its own short-lived `SessionLocal()` (same "own session"
     reasoning as `run_curriculum_job`): this runs before any request could exist,
     so there is no request-scoped `Depends(get_db)` session to reuse. Nothing runs
@@ -56,6 +64,7 @@ async def lifespan(app: FastAPI):
     try:
         sweep_orphaned_jobs(db)
         sweep_interrupted_lessons(db)
+        sweep_orphaned_media(db)
         warm_index(db)
     finally:
         db.close()

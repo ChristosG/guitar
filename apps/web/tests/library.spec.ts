@@ -3,7 +3,8 @@ import { test, expect } from "@playwright/test";
 const collections = [{ id: "c1", name: "Tone & Gear", source_count: 2 }];
 const sources = [
   { id: "s1", type: "pdf", title: "Getting Great Guitar Sounds",
-    status: "ready", char_count: 91000, collection_id: "c1" },
+    status: "ready", char_count: 91000, collection_id: "c1",
+    pages_total: 77, pages_ready: 77, pages_failed: 0, ocr_active: false },
   { id: "s2", type: "url", title: "Humbucker (Wikipedia)",
     status: "empty", char_count: 0, collection_id: "c1" },
   { id: "s3", type: "text", title: "Loose note", status: "ready",
@@ -53,7 +54,7 @@ test("retry calls the API", async ({ page }) => {
   let called = false;
   await page.route("**/knowledge/sources/s2/retry", (r) => {
     called = true;
-    return r.fulfill({ status: 202, json: { job_id: "j1" } });
+    return r.fulfill({ status: 202, json: { job_id: "j1", already_running: false } });
   });
   await page.goto("/en/library");
   await page.getByTestId("retry-s2").click();
@@ -62,6 +63,85 @@ test("retry calls the API", async ({ page }) => {
 
 test("a ready source links into the reader", async ({ page }) => {
   await page.goto("/en/library");
-  await page.getByTestId("source-s1").getByRole("link").click();
+  await page.getByTestId("source-s1").getByRole("link").first().click();
   await expect(page).toHaveURL(/\/en\/library\/s1/);
+});
+
+// --- Stage 7.2: the reload-during-OCR bug ---------------------------------
+
+test("a FRESHLY LOADED tab shows a book that is mid-OCR as being read — not as empty-with-a-retry", async ({ page }) => {
+  // THE BUG. Progress lived in the React state of the tab that pressed the
+  // button, so a hard reload during the 9-minute OCR fell back to the source's
+  // at-rest status — "empty" — and painted the book RED, "nothing was read",
+  // with a Retry button that started a SECOND job racing the first. This page
+  // has never seen a job id; the server tells it everything.
+  const mid = [{
+    id: "s9", type: "pdf", title: "Getting Great Guitar Sounds",
+    status: "empty", char_count: 0, collection_id: null,
+    pages_total: 77, pages_ready: 29, pages_failed: 0, ocr_active: true,
+  }];
+  await page.route("**/knowledge/sources", (r) => r.fulfill({ json: mid }));
+  await page.route("**/knowledge/sources/s9/progress", (r) =>
+    r.fulfill({ json: {
+      source_id: "s9", total: 77, ready: 29, failed: 0, empty: 0, pending: 48,
+      current_page: 30, active: true, job_id: "j9",
+    } }),
+  );
+
+  await page.goto("/en/library");
+
+  await expect(page.getByTestId("ocr-progress-s9")).toContainText("Reading page 30 of 77");
+  await expect(page.getByTestId("retry-s9")).toHaveCount(0);
+  await expect(page.getByTestId("source-s9")).not.toContainText(/nothing was read/i);
+});
+
+test("a partially-read book is AMBER with a retry for just the failed pages — never a green checkmark", async ({ page }) => {
+  const partial = [{
+    id: "s8", type: "pdf", title: "Getting Great Guitar Sounds",
+    status: "partial", char_count: 88000, collection_id: null,
+    pages_total: 77, pages_ready: 71, pages_failed: 6, ocr_active: false,
+  }];
+  await page.route("**/knowledge/sources", (r) => r.fulfill({ json: partial }));
+  await page.goto("/en/library");
+
+  const row = page.getByTestId("source-s8");
+  await expect(row.getByTestId("status-partial-s8")).toContainText("71 of 77 pages read");
+  await expect(row.getByTestId("status-partial-s8")).toContainText("6 failed");
+  await expect(row.getByTestId("status-ok-s8")).toHaveCount(0);
+  await expect(row.getByTestId("retry-s8")).toBeVisible();
+  // A partial book is still a book: the Reader must open it.
+  await expect(row.getByRole("link").first()).toHaveAttribute("href", /\/library\/s8/);
+});
+
+// --- Stage 8: ask your library --------------------------------------------
+
+test("searching the library returns cited hits that link into the reader AT THE PAGE", async ({ page }) => {
+  await page.route("**/knowledge/search", (r) =>
+    r.fulfill({ json: { hits: [{
+      chunk_id: "ch1", source_id: "s1", source_title: "Getting Great Guitar Sounds",
+      text: "The Tube Screamer is the classic mid-humped overdrive; its 808 circuit ...",
+      section_path: null, page: 43, page_id: "p43", score: 0.032,
+      vector_score: 0.88, lexical_score: 4.1,
+    }] } }),
+  );
+
+  await page.goto("/en/library");
+  await page.getByTestId("library-search-input").fill("Tube Screamer");
+  await page.getByTestId("library-search-submit").click();
+
+  const hit = page.getByTestId("search-hit-ch1");
+  await expect(hit).toContainText("Getting Great Guitar Sounds");
+  await expect(hit).toContainText("p. 43");
+  await expect(hit).toContainText(/Tube Screamer/);
+
+  await hit.click();
+  await expect(page).toHaveURL(/\/en\/library\/s1\?page=43/);
+});
+
+test("a search with no hits says so, honestly", async ({ page }) => {
+  await page.route("**/knowledge/search", (r) => r.fulfill({ json: { hits: [] } }));
+  await page.goto("/en/library");
+  await page.getByTestId("library-search-input").fill("theremin");
+  await page.getByTestId("library-search-submit").click();
+  await expect(page.getByTestId("library-search-empty")).toContainText("theremin");
 });

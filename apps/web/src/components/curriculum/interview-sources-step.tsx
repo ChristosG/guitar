@@ -5,16 +5,16 @@ import { useTranslations } from "next-intl";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import type { InterviewOption } from "@/lib/api";
+import type { InterviewOption, InterviewShape } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 interface InterviewSourcesStepProps {
   options: InterviewOption[];
-  /** The DERIVED SHAPE, echoed back at him before he spends anything: "20
-   * sessions -> 5 modules x 4 lessons (4+4+4+4+4 lessons) -> ~2,200 words each".
-   * Computed by the API from the duration he just gave (`Shape.describe()`) — the
-   * counts are arithmetic now, not a suggestion in a prompt. */
-  shape?: string;
+  /** Arithmetic, not a suggestion in a prompt: 20 weeks x 50 min really does
+   * produce 5 modules of 4 lessons, and he agrees to that size before we spend
+   * anything. (It used to produce 4 modules for 20 weeks, because the count was
+   * a sentence in a prompt the model was free to ignore.) */
+  shape?: InterviewShape;
   submitting: boolean;
   error: string | null | undefined;
   onSubmit: (answer: unknown) => void;
@@ -62,7 +62,14 @@ export function InterviewSourcesStep({ options, shape, submitting, error, onSubm
           data-testid="interview-shape-echo"
           className="rounded-xl border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
         >
-          {shape}
+          {t("steps.sources.shape", {
+            lessons: shape.lessons_total,
+            modules: shape.modules,
+            perModule: shape.lessons_per_module.join("+"),
+            words: shape.target_words_per_lesson,
+            taught: shape.teaching_minutes,
+            qa: shape.qa_minutes,
+          })}
         </p>
       )}
 
