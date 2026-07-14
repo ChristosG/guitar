@@ -140,8 +140,20 @@ class ClaudeProvider(LLMProvider):
                     "No Anthropic API key configured. Open Settings and paste your key.",
                 )
             kw: dict[str, Any] = {"api_key": self._api_key, "max_retries": 2, "timeout": 600.0}
-            if settings.llm_base_url:
-                kw["base_url"] = settings.llm_base_url
+            # `anthropic_base_url`, NOT `llm_base_url`. They look interchangeable
+            # and they are not: `llm_base_url` belongs to the QWEN provider and
+            # defaults to `http://qwen-vllm:6888/v1`, which is always truthy. An
+            # earlier version of this method read it, so ClaudeProvider silently
+            # pointed every request at the local vLLM box — where
+            # `models.retrieve("claude-sonnet-5")` 404s, and the Settings screen
+            # duly told the tutor "this model isn't available on your account,
+            # try the other one". A wrong answer, about the wrong thing, with no
+            # error anywhere. Two settings, because they are two servers.
+            #
+            # Empty by default: the SDK then uses api.anthropic.com. Set it only
+            # to point at a gateway that speaks the Anthropic Messages API.
+            if settings.anthropic_base_url:
+                kw["base_url"] = settings.anthropic_base_url
             self._client = anthropic.Anthropic(**kw)
         return self._client
 

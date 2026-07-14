@@ -182,6 +182,26 @@ def test_max_tokens_truncation_is_named_not_reported_as_bad_json():
     assert exc.value.kind == "upstream"
 
 
+def test_claude_never_points_at_the_qwen_box():
+    """`settings.llm_base_url` defaults to `http://qwen-vllm:6888/v1` and is
+    ALWAYS truthy. A ClaudeProvider that read it sent every request to the local
+    9B model — and the only symptom was the Settings screen telling the tutor
+    "this model isn't available on your account" for a perfectly good key,
+    because vLLM 404s on /v1/models/claude-sonnet-5. Wrong answer, wrong thing,
+    no error anywhere. Two servers, two settings."""
+    from app.config import settings
+
+    assert settings.llm_base_url, "precondition: the Qwen URL is non-empty and truthy"
+    assert settings.anthropic_base_url == "", (
+        "Claude must default to api.anthropic.com, not to whatever llm_base_url holds"
+    )
+
+    p = ClaudeProvider(api_key="sk-ant-test", model=SONNET)
+    client = p.client  # constructs the real SDK client (no network)
+    assert "qwen" not in str(client.base_url).lower()
+    assert "anthropic.com" in str(client.base_url)
+
+
 def test_a_missing_key_is_an_auth_error_not_a_crash():
     """The ONE error the tutor can act on. It must not arrive as a stack trace."""
     p = ClaudeProvider(api_key="none", model=SONNET)
