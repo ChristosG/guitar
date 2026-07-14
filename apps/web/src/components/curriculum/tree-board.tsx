@@ -16,7 +16,7 @@ interface TreeBoardProps {
 export function TreeBoard({ root, onRootDeleted }: TreeBoardProps) {
   return (
     <div data-testid="tree-board" className="flex flex-col gap-3">
-      <BlockCard key={root.id} node={root} onRemoved={onRootDeleted} />
+      <BlockCard key={root.id} node={root} onRemoved={onRootDeleted} isRoot />
     </div>
   );
 }

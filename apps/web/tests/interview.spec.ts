@@ -10,7 +10,13 @@ import { test, expect, type Page, type Route } from "@playwright/test";
 const API_ORIGIN = "http://localhost:8791";
 
 const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
+  // Must echo the app's real origin + `Allow-Credentials`, not "*": every call
+  // in `lib/api.ts` is `credentials: "include"` (the auth slice), and a browser
+  // rejects a wildcard-ACAO response to a credentialed request outright — the
+  // page then renders its "could not load" state and the assertions below fail
+  // for a reason that has nothing to do with what they check.
+  "Access-Control-Allow-Origin": "http://localhost:3100",
+  "Access-Control-Allow-Credentials": "true",
   "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
   "Access-Control-Allow-Headers": "content-type",
 };

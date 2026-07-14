@@ -3,6 +3,7 @@
 import { useTranslations } from "next-intl";
 import { Loader2, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ui/confirm";
 import type { ArtifactOut } from "@/lib/api";
 import { Artifact } from "./artifact";
 
@@ -21,6 +22,23 @@ interface ArtifactListProps {
  * as `components/knowledge/source-list.tsx`. */
 export function ArtifactList({ artifacts, loading, error, deletingId, onDelete }: ArtifactListProps) {
   const t = useTranslations("artifacts");
+  const confirm = useConfirm();
+
+  // The confirm lives HERE, not in the page's `handleDelete` — the page only
+  // ever receives an `id`, and a dialog that cannot name what it is deleting
+  // is the useless "Are you sure?" this whole change exists to avoid. Same
+  // reasoning in `source-row`, `student-card`, `note-card`: the guard belongs
+  // wherever the item's title is in scope. `onDelete` is only ever reached
+  // once the tutor has said yes, so the parent pages need no change at all.
+  async function requestDelete(artifact: ArtifactOut) {
+    const ok = await confirm({
+      title: t("confirmDelete.title", { title: artifact.title }),
+      body: t("confirmDelete.body"),
+      confirmLabel: t("confirmDelete.confirm"),
+      destructive: true,
+    });
+    if (ok) onDelete(artifact.id);
+  }
 
   return (
     <div className="flex flex-col gap-3">
@@ -52,7 +70,7 @@ export function ArtifactList({ artifacts, loading, error, deletingId, onDelete }
                   size="icon-sm"
                   data-testid="artifact-delete"
                   disabled={deletingId === artifact.id}
-                  onClick={() => onDelete(artifact.id)}
+                  onClick={() => requestDelete(artifact)}
                   aria-label={t("delete")}
                 >
                   {deletingId === artifact.id ? <Loader2 className="animate-spin" /> : <Trash2 />}

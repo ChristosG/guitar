@@ -7,14 +7,17 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ApprovalCard } from "@/components/chat/approval-card";
 import { MessageList, type ChatDisplayMessage } from "@/components/chat/message-list";
+import { useChatSessions } from "@/components/chat/chat-sessions";
 import {
   ApiError,
-  createChatSession,
+  getChatHistory,
   getJob,
+  getPendingApproval,
   resolveApproval,
   sendChatMessage,
   streamChatMessage,
   type ChatCitation,
+  type ChatMessageOut,
   type ChatTurnOut,
 } from "@/lib/api";
 
@@ -39,6 +42,23 @@ interface PendingApprovalState {
   description: string;
 }
 
+interface ChatPanelProps {
+  /** The conversation to show, from the URL (`/{locale}/chat/{sessionId}`).
+   * The page keys this component on it, so a change here is a fresh mount,
+   * never a stale-transcript re-render. */
+  sessionId: string;
+}
+
+/** A persisted transcript row becomes a bubble. Rows with no `content` are
+ * DROPPED, not rendered empty: a `content: null` assistant row is a
+ * tool-calls-only turn (the model proposed a mutation and narrated nothing),
+ * and there is nothing to show for it. */
+function toDisplayMessage(row: ChatMessageOut): ChatDisplayMessage | null {
+  if (row.role !== "user" && row.role !== "assistant") return null;
+  if (!row.content) return null;
+  return { id: row.id, role: row.role, content: row.content, citations: row.citations };
+}
+
 /**
  * The chat cockpit's one stateful surface (Plan 5 Task 5): a transcript
  * (`MessageList`) + composer, plus the HITL approval gate every mutation
@@ -57,18 +77,31 @@ interface PendingApprovalState {
  *    generating case as a composer-area error) and re-enable the composer
  *    either way.
  *
- * A session is created once, on mount (`createChatSession`, no `student_id`
- * — this page isn't scoped to one student) — this page never resumes a
- * previous session (no session id kept in the URL/storage yet), so
- * `lib/api.ts`'s `getChatHistory`/`getPendingApproval` have nothing to
- * hydrate here and aren't called from this component (see their own
- * docstrings in `lib/api.ts` for when they would be).
+ * The session comes in as a PROP from the URL (`/{locale}/chat/{sessionId}`)
+ * and this component HYDRATES from it on mount (Plan 13 Stage 5.6) — it used
+ * to `createChatSession()` on mount and keep the id in React state only,
+ * which orphaned every conversation on refresh. Hydration is both halves of
+ * the persisted state, and the second one is the one that matters:
+ *
+ *  - `getChatHistory` -> the transcript.
+ *  - `getPendingApproval` -> an approval left OPEN when the tab was closed.
+ *    Its `ApprovalCard` must come back with the SAME description it had, and
+ *    the composer must stay disabled (the API 409s a new message while an
+ *    approval is open — the disabled composer is the client half of that
+ *    guard, and it has to survive a reload, not just a lucky render). The
+ *    description is not a field on the API's `MessageOut` — it is the
+ *    TRAILING ASSISTANT ROW's own content, the narration the model wrote when
+ *    it proposed the mutation (`agent/loop.py` persists it). So on hydration
+ *    that row is popped off the transcript and handed to the card instead of
+ *    being rendered as a stray bubble above it — exactly where it sits in the
+ *    live (never-reloaded) flow.
  */
-export function ChatPanel() {
+export function ChatPanel({ sessionId }: ChatPanelProps) {
   const t = useTranslations("chat");
   const locale = useLocale();
+  const { refresh: refreshSessions } = useChatSessions();
 
-  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [hydrating, setHydrating] = useState(true);
   const [sessionError, setSessionError] = useState<string | null>(null);
 
   const [messages, setMessages] = useState<ChatDisplayMessage[]>([]);
@@ -86,22 +119,45 @@ export function ChatPanel() {
   // fetchSources, for the same reason: every setState call stays lexically
   // inside a callback rather than a bare statement in the function body
   // (what react-hooks/set-state-in-effect actually checks for).
-  const startSession = useCallback(() => {
-    return createChatSession()
-      .then((res) => setSessionId(res.session_id))
-      .catch((err) => setSessionError(err instanceof ApiError ? err.detail : t("sessionError")));
-  }, [t]);
+  const hydrate = useCallback(() => {
+    return Promise.all([getChatHistory(sessionId), getPendingApproval(sessionId)])
+      .then(([rows, pending]) => {
+        const display = rows
+          .map(toDisplayMessage)
+          .filter((m): m is ChatDisplayMessage => m !== null);
 
-  // Guard against React Strict Mode's dev double-invoke of mount effects,
-  // which would otherwise POST /chat twice and create two sessions. The ref
-  // persists across the strict-mode unmount/remount of the same instance, so
-  // the session is created exactly once.
-  const startedRef = useRef(false);
+        if (pending) {
+          // The trailing assistant row IS the card's description (see this
+          // component's docstring), so it moves OUT of the transcript and
+          // into the card. Fallback for the case the API itself documents:
+          // the model can propose a mutation having narrated nothing, and
+          // that row is then persisted with no content at all.
+          let description = t("approval.proposedAction");
+          if (display.at(-1)?.role === "assistant") {
+            description = display.pop()!.content;
+          }
+          setPendingApproval({
+            approvalId: pending.id,
+            toolName: pending.tool_name,
+            toolArgs: pending.tool_args ?? {},
+            description,
+          });
+        }
+        setMessages(display);
+      })
+      .catch((err) => setSessionError(err instanceof ApiError ? err.detail : t("sessionError")))
+      .finally(() => setHydrating(false));
+  }, [sessionId, t]);
+
+  // Guard against React Strict Mode's dev double-invoke of mount effects.
+  // Harmless for two GETs, but it would double-run the `display.pop()` above
+  // against two independent responses — the ref keeps hydration to one pass.
+  const hydratedRef = useRef(false);
   useEffect(() => {
-    if (startedRef.current) return;
-    startedRef.current = true;
-    startSession();
-  }, [startSession]);
+    if (hydratedRef.current) return;
+    hydratedRef.current = true;
+    void hydrate();
+  }, [hydrate]);
 
   function appendMessage(
     role: "user" | "assistant",
@@ -172,7 +228,11 @@ export function ChatPanel() {
     }
   }
 
-  const composerDisabled = !sessionId || sending || pendingApproval != null || jobPending;
+  // `hydrating` is in here for the reload-with-a-pending-approval case: until
+  // `getPendingApproval` has answered we do not yet KNOW whether this session
+  // is blocked, and an enabled composer in that window is a message the API
+  // would 409 anyway.
+  const composerDisabled = hydrating || sending || pendingApproval != null || jobPending;
 
   // Plan 11 Task 3 (C4): streams the plain-answer path token-by-token via
   // `streamChatMessage`, with the existing REST `sendChatMessage` as an
@@ -188,7 +248,7 @@ export function ChatPanel() {
   async function handleSend(e: FormEvent) {
     e.preventDefault();
     const content = draft.trim();
-    if (!content || !sessionId || composerDisabled) return;
+    if (!content || composerDisabled) return;
 
     setDraft("");
     appendMessage("user", content);
@@ -226,11 +286,17 @@ export function ChatPanel() {
       setComposerError(err instanceof ApiError ? err.detail : t("error"));
     } finally {
       setSending(false);
+      // The sidebar's row for this session is SERVER-derived — the first user
+      // message is what names it (and every message moves its preview and its
+      // position in the last-activity ordering). A brand-new session isn't in
+      // the list at ALL until this turn lands, so without this refresh the
+      // conversation you are currently having has no row to click back to.
+      void refreshSessions();
     }
   }
 
   async function resolvePending(decision: "approve" | "reject", editedArgs?: Record<string, unknown>) {
-    if (!sessionId || !pendingApproval) return;
+    if (!pendingApproval) return;
     setResolving(true);
     setApprovalError(null);
     try {
@@ -252,7 +318,17 @@ export function ChatPanel() {
         </p>
       )}
 
-      <MessageList messages={messages} />
+      {hydrating ? (
+        <div
+          role="status"
+          data-testid="chat-hydrating"
+          className="flex items-center gap-2 text-sm text-muted-foreground"
+        >
+          <Loader2 className="size-4 animate-spin" />
+        </div>
+      ) : (
+        <MessageList messages={messages} />
+      )}
 
       {pendingApproval && (
         <ApprovalCard

@@ -9,9 +9,35 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
+import { useConfirm } from "@/components/ui/confirm";
 import { AttachArtifactDialog } from "@/components/curriculum/attach-artifact-dialog";
 import { SegmentDialog } from "@/components/curriculum/segment-dialog";
 import { ApiError, deleteBlock, listArtifacts, updateBlock, type ArtifactOut, type BlockNode } from "@/lib/api";
+
+interface SubtreeCounts {
+  total: number;
+  modules: number;
+  lessons: number;
+}
+
+/** What a `DELETE /blocks/{id}` is actually about to take with it. The API
+ * cascades (`delete_block`: ORM `delete-orphan` AND `ON DELETE CASCADE`), so
+ * one click on the root's Trash icon destroys the entire generated tree —
+ * which is exactly why the confirm dialog has to be able to SAY so, with
+ * numbers, instead of asking "are you sure?" about an unnamed quantity. */
+function countSubtree(nodes: BlockNode[]): SubtreeCounts {
+  return nodes.reduce<SubtreeCounts>(
+    (acc, child) => {
+      const sub = countSubtree(child.children);
+      return {
+        total: acc.total + 1 + sub.total,
+        modules: acc.modules + (child.kind === "module" ? 1 : 0) + sub.modules,
+        lessons: acc.lessons + (child.kind === "lesson" ? 1 : 0) + sub.lessons,
+      };
+    },
+    { total: 0, modules: 0, lessons: 0 },
+  );
+}
 
 type BadgeVariant = "default" | "secondary" | "outline";
 
@@ -39,6 +65,12 @@ const KIND_ACCENT: Record<string, string> = {
 interface BlockCardProps {
   node: BlockNode;
   onRemoved: (id: string) => void;
+  /** True only for the node `TreeBoard` mounts — the curriculum root. Passed
+   * explicitly rather than sniffed from `node.kind === "course"` because the
+   * ONLY thing that makes this node special is that nothing above it survives
+   * its deletion, and that is a fact about its position, not its kind. The
+   * root's confirm copy is the loudest in the app for the same reason. */
+  isRoot?: boolean;
 }
 
 /** One node of a curriculum Block tree, rendered recursively: children
@@ -64,8 +96,9 @@ interface BlockCardProps {
  *    already uses above, just scoped to the leaf "segment" kind instead of
  *    "course".
  */
-export function BlockCard({ node, onRemoved }: BlockCardProps) {
+export function BlockCard({ node, onRemoved, isRoot = false }: BlockCardProps) {
   const t = useTranslations("curricula.tree");
+  const confirm = useConfirm();
 
   const [title, setTitle] = useState(node.title);
   const [editing, setEditing] = useState(false);
@@ -151,6 +184,27 @@ export function BlockCard({ node, onRemoved }: BlockCardProps) {
   }
 
   async function handleDelete() {
+    // Counted from LIVE state (`children`), not `node.children`: a tutor who
+    // just deleted three lessons must not be told they're still at risk.
+    const counts = countSubtree(children);
+    const ok = await confirm({
+      title: isRoot ? t("confirmDelete.rootTitle", { title }) : t("confirmDelete.title", { title }),
+      body: (
+        <>
+          <p>{t("confirmDelete.lead", { title, kind: kindLabel })}</p>
+          {counts.total > 0 && (
+            <p>{t("confirmDelete.counts", { ...counts })}</p>
+          )}
+          <p className="font-medium text-destructive">
+            {isRoot ? t("confirmDelete.rootWarning") : t("confirmDelete.irreversible")}
+          </p>
+        </>
+      ),
+      confirmLabel: t("confirmDelete.confirm"),
+      destructive: true,
+    });
+    if (!ok) return;
+
     setDeleting(true);
     setDeleteError(null);
     try {

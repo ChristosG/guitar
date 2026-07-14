@@ -17,8 +17,15 @@ import { test, expect, type Page, type Route } from "@playwright/test";
 // ambiguity outright instead of relying on coincidence.
 const API_ORIGIN = "http://localhost:8791";
 
+// `Access-Control-Allow-Origin` must echo the app's real origin (and pair
+// with `Allow-Credentials`) rather than "*": since the auth slice made every
+// call in `lib/api.ts` `credentials: "include"`, a browser REJECTS a
+// wildcard-ACAO response outright — the page then renders its "could not
+// load" error and every assertion below it fails for a reason that has
+// nothing to do with what the test is checking.
 const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Origin": "http://localhost:3100",
+  "Access-Control-Allow-Credentials": "true",
   "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
   "Access-Control-Allow-Headers": "content-type",
 };
@@ -326,6 +333,9 @@ test.describe("notes cockpit (mocked API)", () => {
     await expect(row).toBeVisible();
 
     await row.getByTestId("note-delete").click();
+    // Guarded since Stage 7.1 — the DELETE only fires once the confirm dialog
+    // is accepted (the guard itself is covered exhaustively in confirm.spec.ts).
+    await page.getByTestId("confirm-accept").click();
     await expect(page.getByTestId("note-item").filter({ hasText: "Delete Me" })).toHaveCount(0);
     await expect(page.getByTestId("notes-empty")).toBeVisible();
     expect(mock.calls.delete).toBe(1);

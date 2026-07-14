@@ -6,6 +6,7 @@ import { Loader2, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogClose,
   DialogContent,
   DialogDescription,
@@ -262,8 +263,12 @@ export function InterviewDialog({ locale, onGenerated }: InterviewDialogProps) {
           </form>
         )}
 
+        {/* DialogBody, not a bare <div>: `DialogContent` is now height-capped
+            and `overflow-hidden`, so the tallest step in the app (the preview
+            step's findings list, or a library with 30 sources) has to scroll
+            INSIDE the card. Before this it just painted over the backdrop. */}
         {phase === "interview" && state && (
-          <div className="flex flex-col gap-4">
+          <DialogBody data-testid="interview-body">
             <StepTrail currentStep={state.step} />
 
             {state.step === "who" && (
@@ -312,7 +317,7 @@ export function InterviewDialog({ locale, onGenerated }: InterviewDialogProps) {
                 onSubmit={handleAnswer}
               />
             )}
-          </div>
+          </DialogBody>
         )}
 
         {phase === "job" && (

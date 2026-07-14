@@ -1,8 +1,8 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
 import {
   Calendar,
@@ -11,13 +11,18 @@ import {
   LayoutGrid,
   Library,
   ListTree,
+  LogOut,
   Menu,
   MessageCircle,
   Search,
+  Settings,
   StickyNote,
+  TriangleAlert,
   Users,
   X,
 } from "lucide-react";
+import { getAuthState, getSettings, logout } from "@/lib/api";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { LocaleToggle } from "@/components/locale-toggle";
@@ -49,13 +54,43 @@ const NAV_ITEMS = [
 export function AppShell({ children }: { children: ReactNode }) {
   const t = useTranslations("nav");
   const tApp = useTranslations("app");
+  const tSettings = useTranslations("settings");
   const locale = useLocale();
+  const router = useRouter();
   const pathname = usePathname() ?? "/";
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+
+  // `null` while unknown — the banner must not flash on every page load and then
+  // vanish. It appears only once the API has actually said "no key".
+  const [configured, setConfigured] = useState<boolean | null>(null);
+  const [authEnabled, setAuthEnabled] = useState(false);
+
+  useEffect(() => {
+    // Both probes fail silently. Neither the banner nor the sign-out button is
+    // worth a red error on a page whose real content loaded fine — and if the
+    // API is unreachable, every page under this shell is already saying so.
+    void getSettings()
+      .then((s) => setConfigured(s.configured))
+      .catch(() => {});
+    void getAuthState()
+      .then((a) => setAuthEnabled(a.auth_enabled))
+      .catch(() => {});
+  }, [pathname]);
 
   const segments = pathname.split("/").filter(Boolean);
   const activeSegment = segments[1] ?? "today";
   const pageTitle = t.has(activeSegment) ? t(activeSegment) : t("today");
+
+  async function onSignOut() {
+    try {
+      await logout();
+    } catch {
+      // A failed logout still means "get me out of here" — the cookie is either
+      // already gone or about to be rejected. Navigating is the honest response.
+    }
+    router.push(`/${locale}/login`);
+    router.refresh();
+  }
 
   const nav = (
     <nav className="flex flex-1 flex-col gap-0.5 px-3" data-testid="app-nav">
@@ -120,7 +155,20 @@ export function AppShell({ children }: { children: ReactNode }) {
 
         <div className="flex items-center justify-between gap-2 border-t border-sidebar-border px-3 py-3">
           <LocaleToggle />
-          <ThemeToggle />
+          <div className="flex items-center gap-1">
+            {authEnabled && (
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label={t("signOut")}
+                data-testid="sign-out"
+                onClick={onSignOut}
+              >
+                <LogOut className="size-4" />
+              </Button>
+            )}
+            <ThemeToggle />
+          </div>
         </div>
       </aside>
 
@@ -151,7 +199,38 @@ export function AppShell({ children }: { children: ReactNode }) {
               className="pl-8"
             />
           </div>
+          <Link
+            href={`/${locale}/settings`}
+            aria-label={t("settings")}
+            aria-current={activeSegment === "settings" ? "page" : undefined}
+            data-testid="nav-settings"
+            className={cn(
+              "ml-auto flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground sm:ml-2",
+              activeSegment === "settings" && "bg-muted text-foreground",
+            )}
+          >
+            <Settings className="size-4" />
+          </Link>
         </header>
+
+        {/* The app cannot write a single word without a key, and the tutor has no
+            way to know that from any other screen — every button simply 409s. One
+            banner, one link, on every page, until it is fixed. */}
+        {configured === false && activeSegment !== "settings" && (
+          <div
+            data-testid="not-configured-banner"
+            className="flex flex-wrap items-center gap-2 border-b border-amber-500/30 bg-amber-500/10 px-4 py-2.5 text-sm md:px-6"
+          >
+            <TriangleAlert className="size-4 shrink-0 text-amber-600 dark:text-amber-400" />
+            <span>{tSettings("notConfiguredBanner")}</span>
+            <Link
+              href={`/${locale}/settings`}
+              className="font-medium underline underline-offset-4"
+            >
+              {tSettings("notConfiguredCta")}
+            </Link>
+          </div>
+        )}
 
         <main className="flex-1 overflow-y-auto">
           <div className="mx-auto w-full max-w-6xl p-4 md:p-8">{children}</div>

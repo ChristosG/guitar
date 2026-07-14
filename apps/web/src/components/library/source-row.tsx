@@ -4,6 +4,8 @@ import { useTranslations } from "next-intl";
 import Link from "next/link";
 import { AlertTriangle, CheckCircle2, FileText, Link2, Loader2, StickyNote, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ui/confirm";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { SourceOut } from "@/lib/api";
 
 /** Statuses the honesty requirement (spec D6) applies to: a source that
@@ -85,6 +87,7 @@ export function SourceRow({
   onMove,
 }: SourceRowProps) {
   const t = useTranslations("library");
+  const confirm = useConfirm();
   const contentEmpty = isEmptyContent(source);
   const isBroken = !ocrProgress && (BROKEN_STATUSES.has(source.status) || contentEmpty);
   const isReady = !ocrProgress && source.status === "ready" && !contentEmpty;
@@ -92,6 +95,21 @@ export function SourceRow({
   // above) is narrated as "empty" even though the API's own `status` field
   // still (wrongly) says "ready" — never surface that stale label verbatim.
   const displayStatus = contentEmpty ? "empty" : source.status;
+
+  // `DELETE /knowledge/sources/{id}` cascades to every Page and Chunk (both
+  // `ON DELETE CASCADE`) — re-adding the book means re-running OCR over 77
+  // pages against a paid vision model. The dialog quotes the indexed char
+  // count so the tutor can see the difference between dropping an empty
+  // Wikipedia stub and dropping the book the whole library is built on.
+  async function requestDelete() {
+    const ok = await confirm({
+      title: t("confirmDelete.title", { title: source.title }),
+      body: t("confirmDelete.body", { chars: source.char_count ?? 0 }),
+      confirmLabel: t("confirmDelete.confirm"),
+      destructive: true,
+    });
+    if (ok) onDelete(source.id);
+  }
 
   return (
     <div
@@ -101,16 +119,23 @@ export function SourceRow({
       <TypeIcon type={source.type} />
 
       <div className="min-w-0 flex-1">
-        {isReady ? (
-          <Link
-            href={`/${locale}/library/${source.id}`}
-            className="block truncate font-medium hover:underline"
+        {/* A truncated title is unreadable text, and a URL-typed source's
+            title is routinely a long link. The tooltip is the only way to
+            read one without opening it — hover OR keyboard focus. */}
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              isReady ? (
+                <Link href={`/${locale}/library/${source.id}`} className="block truncate font-medium hover:underline" />
+              ) : (
+                <span className="block truncate font-medium" />
+              )
+            }
           >
             {source.title}
-          </Link>
-        ) : (
-          <span className="block truncate font-medium">{source.title}</span>
-        )}
+          </TooltipTrigger>
+          <TooltipContent>{source.title}</TooltipContent>
+        </Tooltip>
 
         {ocrProgress ? (
           <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
@@ -183,7 +208,7 @@ export function SourceRow({
         aria-label={t("delete")}
         disabled={deleting}
         data-testid={`delete-${source.id}`}
-        onClick={() => onDelete(source.id)}
+        onClick={requestDelete}
         className="shrink-0 text-muted-foreground hover:text-destructive"
       >
         <Trash2 />

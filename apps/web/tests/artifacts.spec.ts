@@ -23,8 +23,15 @@ import { test, expect, type Page, type Route } from "@playwright/test";
 // once `?block_id=...` is appended) and is unambiguous to read.
 const API_ORIGIN = "http://localhost:8791";
 
+// `Access-Control-Allow-Origin` must echo the app's real origin (and pair
+// with `Allow-Credentials`) rather than "*": since the auth slice made every
+// call in `lib/api.ts` `credentials: "include"`, a browser REJECTS a
+// wildcard-ACAO response outright — the page then renders its "could not
+// load" error and every assertion below it fails for a reason that has
+// nothing to do with what the test is checking.
 const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Origin": "http://localhost:3100",
+  "Access-Control-Allow-Credentials": "true",
   "Access-Control-Allow-Methods": "GET,POST,DELETE,OPTIONS",
   "Access-Control-Allow-Headers": "content-type",
 };
@@ -538,6 +545,9 @@ test.describe("artifacts gallery (mocked API)", () => {
     await expect(item).toBeVisible();
 
     await item.getByTestId("artifact-delete").click();
+    // Every destructive action in this app is now guarded (see confirm.spec.ts):
+    // the DELETE only leaves the browser after the tutor accepts the dialog.
+    await page.getByTestId("confirm-accept").click();
     await expect(page.getByTestId("artifact-item").filter({ hasText: "Delete Me" })).toHaveCount(0);
     await expect(page.getByTestId("artifacts-empty")).toBeVisible();
 

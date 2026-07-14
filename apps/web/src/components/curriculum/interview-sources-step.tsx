@@ -4,6 +4,7 @@ import { useState, type FormEvent } from "react";
 import { useTranslations } from "next-intl";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { InterviewOption } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -51,7 +52,14 @@ export function InterviewSourcesStep({ options, submitting, error, onSubmit }: I
         <p className="text-xs text-muted-foreground">{t("steps.sources.hint")}</p>
       </div>
 
-      <fieldset disabled={submitting} className="flex max-h-72 flex-col gap-1.5 overflow-y-auto pr-1">
+      {/* `min-w-0` on the fieldset is load-bearing and was missing: a <fieldset>
+          is a flex ITEM here, and a flex item's default `min-width: auto`
+          refuses to shrink below its widest child — a source titled with a
+          120-character URL therefore pushed this whole step wider than the
+          dialog and painted outside the card. With `min-w-0` the fieldset can
+          shrink, which is what lets the `line-clamp-2` title below actually
+          clamp instead of merely being asked to. */}
+      <fieldset disabled={submitting} className="flex max-h-72 min-w-0 flex-col gap-1.5 overflow-y-auto pr-1">
         {options.length === 0 && (
           <p className="text-sm text-muted-foreground" data-testid="interview-sources-empty">
             {t("steps.sources.empty")}
@@ -73,7 +81,20 @@ export function InterviewSourcesStep({ options, submitting, error, onSubmit }: I
               onChange={() => toggle(opt.value)}
               className="size-4 shrink-0 accent-primary"
             />
-            <span className="min-w-0 flex-1 truncate font-medium">{opt.label}</span>
+            {/* Two clamped lines + a tooltip with the FULL title. Chris,
+                verbatim: "some long links are clipped so we need a mouseover
+                tooltip to get the full title." A tutor deciding whether to
+                ground a curriculum in a source cannot make that call from
+                "Guitar Tone & Gear — Course Spi…". */}
+            <Tooltip>
+              <TooltipTrigger
+                render={<span className="min-w-0 flex-1 line-clamp-2 font-medium break-words" />}
+                data-testid={`interview-source-label-${opt.value}`}
+              >
+                {opt.label}
+              </TooltipTrigger>
+              <TooltipContent>{opt.label}</TooltipContent>
+            </Tooltip>
             {opt.type && (
               <Badge variant="outline" className="shrink-0">
                 {opt.type}

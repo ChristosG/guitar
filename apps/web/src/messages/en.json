@@ -13,7 +13,9 @@
     "chat": "Chat",
     "searchPlaceholder": "Search… (coming soon)",
     "openMenu": "Open menu",
-    "closeMenu": "Close menu"
+    "closeMenu": "Close menu",
+    "settings": "Settings",
+    "signOut": "Sign out"
   },
   "locale": {
     "en": "EN",
@@ -61,6 +63,12 @@
       "cancel": "Cancel",
       "error": "Could not add the note.",
       "editError": "Could not save the note."
+    },
+    "confirmDelete": {
+      "title": "Delete “{title}”?",
+      "body": "This note will be permanently deleted. This cannot be undone.",
+      "promotedNote": "The copy you already promoted to the library stays there — only the note goes.",
+      "confirm": "Delete note"
     }
   },
   "students": {
@@ -150,6 +158,11 @@
         "submitting": "Logging…",
         "error": "Could not log this lesson."
       }
+    },
+    "confirmDelete": {
+      "title": "Delete {name}?",
+      "body": "{name}, their progress, their assignments and their lesson logs are permanently deleted. Notes about them stay in Notes but lose the link. This cannot be undone.",
+      "confirm": "Delete student"
     }
   },
   "curricula": {
@@ -188,6 +201,15 @@
         "segment": "Segment",
         "delivery_root": "Delivery plan",
         "session": "Session"
+      },
+      "confirmDelete": {
+        "title": "Delete “{title}”?",
+        "rootTitle": "Delete the entire curriculum “{title}”?",
+        "lead": "“{title}” ({kind}) will be permanently deleted.",
+        "counts": "Everything inside it goes too — {modules, plural, =0 {no modules} one {# module} other {# modules}}, {lessons, plural, =0 {no lessons} one {# lesson} other {# lessons}}, {total, plural, one {# block in all} other {# blocks in all}}.",
+        "rootWarning": "This is the whole curriculum. It took the model hours to write and none of it can be brought back.",
+        "irreversible": "This cannot be undone.",
+        "confirm": "Delete"
       }
     },
     "segmentDialog": {
@@ -349,7 +371,19 @@
       "authorStillDrafting": "Still drafting — check the Lessons list in a bit.",
       "authorError": "Could not draft a lesson from this passage.",
       "authorRetry": "Retry"
-    }
+    },
+    "confirmDelete": {
+      "title": "Remove “{title}” from the library?",
+      "body": "The source and everything read out of it ({chars, plural, =0 {no indexed text} one {# character of indexed text} other {# characters of indexed text}}) will be deleted, scanned pages included. Chat and curriculum authoring will no longer be able to cite it. This cannot be undone.",
+      "confirm": "Remove"
+    },
+    "confirmDeleteCollection": {
+      "title": "Delete the folder “{name}”?",
+      "body": "Only the folder goes. {count, plural, =0 {It is empty.} one {The # source in it becomes Unfiled — it is NOT deleted.} other {The # sources in it become Unfiled — they are NOT deleted.}}",
+      "confirm": "Delete folder"
+    },
+    "deleteCollection": "Delete folder",
+    "deleteCollectionError": "Could not delete this folder."
   },
   "lessons": {
     "heading": "Lessons",
@@ -393,7 +427,22 @@
       "addSession": "Add a session",
       "addingSession": "Adding…",
       "newSessionTitle": "New session",
-      "addSessionError": "Could not add a session."
+      "addSessionError": "Could not add a session.",
+      "confirmDeleteSession": {
+        "title": "Delete session “{title}”?",
+        "body": "The session and {items, plural, =0 {nothing else} one {its # item} other {its # items}} will be permanently deleted. This cannot be undone.",
+        "confirm": "Delete session"
+      },
+      "confirmDeleteItem": {
+        "title": "Delete “{title}”?",
+        "body": "This item will be permanently deleted from the session. This cannot be undone.",
+        "confirm": "Delete item"
+      },
+      "confirmMerge": {
+        "title": "Merge “{title}” with “{next}”?",
+        "body": "The two become one session: “{next}” stops existing and its items move up into “{title}”. Splitting afterwards will not restore this exact split.",
+        "confirm": "Merge sessions"
+      }
     }
   },
   "artifacts": {
@@ -447,6 +496,11 @@
     "unsupported": {
       "title": "Unsupported artifact",
       "body": "No renderer yet for kind \"{kind}\"."
+    },
+    "confirmDelete": {
+      "title": "Delete “{title}”?",
+      "body": "This artifact will be permanently deleted, including from any lesson or curriculum block it is attached to. This cannot be undone.",
+      "confirm": "Delete"
     }
   },
   "chat": {
@@ -467,7 +521,8 @@
       "cancelEdit": "Cancel edit",
       "reject": "Reject",
       "invalidJson": "That isn't valid JSON.",
-      "error": "Could not resolve this approval."
+      "error": "Could not resolve this approval.",
+      "proposedAction": "The copilot is proposing an action."
     },
     "job": {
       "pending": "Generating your curriculum — this can take a minute…",
@@ -476,6 +531,76 @@
       "failed": "Curriculum generation failed.",
       "stillGenerating": "Still generating — check the Curricula page again shortly.",
       "pollError": "Lost track of the generation job — check the Curricula page shortly."
+    },
+    "resuming": "Opening your conversation…",
+    "history": {
+      "heading": "Conversations",
+      "newChat": "New",
+      "empty": "No conversations yet.",
+      "untitled": "Untitled conversation",
+      "rename": "Rename",
+      "renamePlaceholder": "Conversation name",
+      "save": "Save",
+      "cancel": "Cancel",
+      "delete": "Delete",
+      "deleteTitle": "Delete this conversation?",
+      "deleteBody": "“{title}” and its {count} messages will be permanently deleted, along with anything still waiting for your approval in it. This cannot be undone.",
+      "loadError": "Could not load your conversations.",
+      "createError": "Could not start a new conversation.",
+      "renameError": "Could not rename this conversation.",
+      "deleteError": "Could not delete this conversation."
     }
+  },
+  "login": {
+    "title": "Guitar Tutor Copilot",
+    "subtitle": "Enter the password to continue.",
+    "passwordLabel": "Password",
+    "passwordPlaceholder": "Your password",
+    "submit": "Sign in",
+    "submitting": "Signing in…",
+    "wrongPassword": "That password isn't right. Try again.",
+    "networkError": "Couldn't reach the server. Check your connection and try again.",
+    "show": "Show password",
+    "hide": "Hide password"
+  },
+  "settings": {
+    "heading": "Settings",
+    "subheading": "Your Anthropic key and which model writes your lessons.",
+    "keyTitle": "Anthropic API key",
+    "keyHelp": "Paste the key from your Anthropic account. It's stored encrypted on this machine and never shown again.",
+    "keyLabel": "API key",
+    "keyPlaceholder": "sk-ant-…",
+    "keySaved": "Saved key: {hint}",
+    "show": "Show",
+    "hide": "Hide",
+    "getKey": "Get a key at console.anthropic.com",
+    "save": "Save",
+    "saving": "Saving…",
+    "saved": "Saved.",
+    "test": "Test",
+    "testing": "Testing…",
+    "testOk": "Everything works.",
+    "modelTitle": "Model",
+    "modelHelp": "Sonnet is the default. Haiku is cheaper and faster, and noticeably shallower on long lessons.",
+    "sonnetName": "Claude Sonnet 5",
+    "sonnetNote": "The best writing, the deepest lessons, and it can search the web. Recommended.",
+    "haikuName": "Claude Haiku 4.5",
+    "haikuNote": "About 3× cheaper and quicker, but shorter, plainer lessons.",
+    "notConfiguredBanner": "No Anthropic key yet — the app can't write anything until you add one.",
+    "notConfiguredCta": "Open Settings",
+    "errors": {
+      "not_configured": "There's no key saved yet. Paste your key above and press Save.",
+      "invalid_key": "That key isn't valid. Copy it again from your Anthropic account.",
+      "no_access": "The key works, but your account can't use this model — usually that means it's out of credit.",
+      "unknown_model": "That model isn't available on your account. Try the other one.",
+      "rate_limited": "Anthropic is busy right now. Wait a minute and try again.",
+      "network": "Couldn't reach Anthropic. Check your internet connection.",
+      "generation_failed": "The key works, but writing a test answer failed. Try again in a moment.",
+      "save_failed": "Couldn't save. Try again."
+    }
+  },
+  "confirm": {
+    "cancel": "Cancel",
+    "confirm": "Delete"
   }
 }

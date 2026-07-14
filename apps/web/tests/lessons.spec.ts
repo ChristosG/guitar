@@ -9,8 +9,15 @@ import { test, expect, type Page, type Route } from "@playwright/test";
 // call (see that file's own docstring on this exact hazard).
 const API_ORIGIN = "http://localhost:8791";
 
+// `Access-Control-Allow-Origin` must echo the app's real origin (and pair
+// with `Allow-Credentials`) rather than "*": since the auth slice made every
+// call in `lib/api.ts` `credentials: "include"`, a browser REJECTS a
+// wildcard-ACAO response outright — the page then renders its "could not
+// load" error and every assertion below it fails for a reason that has
+// nothing to do with what the test is checking.
 const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Origin": "http://localhost:3100",
+  "Access-Control-Allow-Credentials": "true",
   "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
   "Access-Control-Allow-Headers": "content-type",
 };
@@ -258,6 +265,10 @@ test("a 422 from an invalid merge is surfaced to the user, not swallowed", async
   await page.goto(`/en/lessons/${LESSON_ID}`);
 
   await page.locator('[data-session-id="session-1"]').getByTestId("session-merge-down").click();
+  // Merge is destructive (the next session ceases to exist and there is no
+  // unmerge), so it is confirm-guarded like the deletes — accept, then assert
+  // the API's 422 still surfaces.
+  await page.getByTestId("confirm-accept").click();
 
   await expect(page.getByTestId("session-merge-error")).toBeVisible();
   await expect(page.getByTestId("session-merge-error")).toContainText(/not contiguous|cannot merge/i);

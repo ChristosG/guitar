@@ -5,6 +5,7 @@ import { useLocale, useTranslations } from "next-intl";
 import { GraduationCap, Guitar, Languages, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { useConfirm } from "@/components/ui/confirm";
 import type { StudentOut } from "@/lib/api";
 
 interface StudentCardProps {
@@ -22,6 +23,21 @@ interface StudentCardProps {
 export function StudentCard({ student, deleting, onDelete }: StudentCardProps) {
   const t = useTranslations("students");
   const locale = useLocale();
+  const confirm = useConfirm();
+
+  // `DELETE /students/{id}` cascades to Progress, Assignment and LessonLog
+  // (all `ondelete="CASCADE"`); Notes survive with `student_id` SET NULL. The
+  // dialog says exactly that — a tutor deleting a student who left is doing
+  // something different from a tutor who mis-clicked on a student he teaches.
+  async function requestDelete() {
+    const ok = await confirm({
+      title: t("confirmDelete.title", { name: student.name }),
+      body: t("confirmDelete.body", { name: student.name }),
+      confirmLabel: t("confirmDelete.confirm"),
+      destructive: true,
+    });
+    if (ok) onDelete(student.id);
+  }
 
   return (
     <Card data-testid="student-item">
@@ -42,7 +58,7 @@ export function StudentCard({ student, deleting, onDelete }: StudentCardProps) {
             size="icon-sm"
             data-testid="student-delete"
             disabled={deleting}
-            onClick={() => onDelete(student.id)}
+            onClick={requestDelete}
             aria-label={t("delete")}
           >
             <Trash2 />

@@ -6,6 +6,7 @@ import { Library, Loader2, Pencil, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { useConfirm } from "@/components/ui/confirm";
 import { NoteForm } from "@/components/notes/note-form";
 import type { NoteOut, StudentOut } from "@/lib/api";
 
@@ -32,7 +33,24 @@ interface NoteCardProps {
  * second call unreachable from this UI rather than merely disabled. */
 export function NoteCard({ note, students, deleting, promoting, onDelete, onPromote, onUpdated }: NoteCardProps) {
   const t = useTranslations("notes");
+  const confirm = useConfirm();
   const [editing, setEditing] = useState(false);
+
+  // A promoted note has a COPY in the library that `DELETE /notes/{id}` does
+  // not touch (`routers/notes.py` deletes the Note row only). Saying so is
+  // the difference between "I'm deleting a duplicate" and "I'm deleting the
+  // only copy" — two different decisions, one button.
+  async function requestDelete() {
+    const ok = await confirm({
+      title: t("confirmDelete.title", { title: note.title }),
+      body: note.promoted_to_knowledge
+        ? `${t("confirmDelete.body")} ${t("confirmDelete.promotedNote")}`
+        : t("confirmDelete.body"),
+      confirmLabel: t("confirmDelete.confirm"),
+      destructive: true,
+    });
+    if (ok) onDelete(note.id);
+  }
 
   if (editing) {
     return (
@@ -72,7 +90,7 @@ export function NoteCard({ note, students, deleting, promoting, onDelete, onProm
               size="icon-sm"
               data-testid="note-delete"
               disabled={deleting}
-              onClick={() => onDelete(note.id)}
+              onClick={requestDelete}
               aria-label={t("delete")}
             >
               {deleting ? <Loader2 className="animate-spin" /> : <Trash2 />}

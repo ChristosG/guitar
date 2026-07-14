@@ -7,6 +7,7 @@ import { CollectionTree, type SourceGroup } from "@/components/library/collectio
 import { NewCollectionDialog } from "@/components/library/new-collection-dialog";
 import {
   ApiError,
+  deleteCollection,
   deleteSource,
   getJob,
   listCollections,
@@ -42,6 +43,7 @@ export default function LibraryPage() {
   const [error, setError] = useState<string | null>(null);
   const [retryingId, setRetryingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deletingCollectionId, setDeletingCollectionId] = useState<string | null>(null);
   const [movingId, setMovingId] = useState<string | null>(null);
   const [ocrProgress, setOcrProgress] = useState<Record<string, OcrProgress>>({});
 
@@ -134,6 +136,22 @@ export default function LibraryPage() {
     }
   }
 
+  // The folder goes; its sources land in Unfiled (SET NULL, server-side) —
+  // which is why this just `refresh()`es like every other mutation here
+  // instead of trying to re-file anything client-side.
+  async function handleDeleteCollection(id: string) {
+    setDeletingCollectionId(id);
+    setError(null);
+    try {
+      await deleteCollection(id);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.detail : t("deleteCollectionError"));
+    } finally {
+      setDeletingCollectionId(null);
+    }
+  }
+
   async function handleMove(id: string, collectionId: string | null) {
     setMovingId(id);
     setError(null);
@@ -167,9 +185,13 @@ export default function LibraryPage() {
       key: c.id,
       testId: `collection-${c.name}`,
       name: c.name,
+      collectionId: c.id,
       sources: byCollection.get(c.id) ?? [],
     }));
-    return [...named, { key: "unfiled", testId: "collection-unfiled", name: t("unfiled"), sources: unfiled }];
+    return [
+      ...named,
+      { key: "unfiled", testId: "collection-unfiled", name: t("unfiled"), collectionId: null, sources: unfiled },
+    ];
   }, [collections, sources, t]);
 
   const collectionOptions = useMemo(
@@ -216,9 +238,11 @@ export default function LibraryPage() {
           ocrProgress={ocrProgress}
           retryingId={retryingId}
           deletingId={deletingId}
+          deletingCollectionId={deletingCollectionId}
           movingId={movingId}
           onRetry={handleRetry}
           onDelete={handleDelete}
+          onDeleteCollection={handleDeleteCollection}
           onMove={handleMove}
         />
       )}

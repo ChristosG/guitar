@@ -102,31 +102,85 @@ export interface AskInput {
 }
 
 /** Thrown for any non-2xx response. `detail` is the server's message when parseable
- * (FastAPI's `{"detail": ...}` shape), else the raw response text/status. */
+ * (FastAPI's `{"detail": ...}` shape), else the raw response text/status.
+ *
+ * `code` and `body` were added with the password gate (Plan 13 Task 3.2). Some
+ * errors are now *actionable* rather than merely reportable — `llm_not_configured`
+ * (409) means "open Settings and paste your key", and the UI has a Greek sentence
+ * and a button for that. It cannot key off `detail`, because `detail` is prose
+ * written on the server, in one language, that the tutor must never actually read.
+ * So the server sends `{"detail": {"code": "...", "message": "..."}}` and the UI
+ * branches on `code`.
+ */
 export class ApiError extends Error {
   constructor(
     public status: number,
     public detail: string,
+    /** Machine-readable, when the server sent one. Branch on this, never on `detail`. */
+    public code?: string,
+    /** The parsed response body, for the rare caller that needs more than a code. */
+    public body?: unknown,
   ) {
     super(`API error ${status}: ${detail}`);
     this.name = "ApiError";
   }
 }
 
-async function parseErrorDetail(res: Response): Promise<string> {
+interface ParsedError {
+  detail: string;
+  code?: string;
+  body?: unknown;
+}
+
+async function parseError(res: Response): Promise<ParsedError> {
   const raw = await res.text().catch(() => "");
   try {
     const body = JSON.parse(raw);
-    if (typeof body?.detail === "string") return body.detail;
-    if (Array.isArray(body?.detail)) {
-      return body.detail
-        .map((d: { msg?: string }) => d.msg ?? JSON.stringify(d))
-        .join("; ");
+    const d = body?.detail;
+    if (typeof d === "string") return { detail: d, body };
+    if (Array.isArray(d)) {
+      return {
+        detail: d.map((x: { msg?: string }) => x.msg ?? JSON.stringify(x)).join("; "),
+        body,
+      };
     }
+    // `{"detail": {"code": ..., "message": ...}}` — the shape the auth/settings
+    // routers and `main.py`'s LLMNotConfigured handler emit.
+    if (d && typeof d === "object") {
+      return { detail: String(d.message ?? raw), code: d.code, body };
+    }
+    return { detail: raw || res.statusText, body };
   } catch {
-    // not JSON — fall through to the raw text below
+    return { detail: raw || res.statusText };
   }
-  return raw || res.statusText;
+}
+
+const LOCALES = ["el", "en"];
+/** Set once we've committed to a bounce, so ten parallel 401s (the cockpit
+ * pages fan out several fetches on mount) don't each assign `location.href`. */
+let redirectingToLogin = false;
+
+/** A 401 means the session cookie is gone or expired. The user is not going to
+ * fix that by reading an error toast, so we take him to the login page.
+ *
+ * `/auth/*` IS EXEMPT, and that exemption is load-bearing: `POST /auth/login`
+ * answers a WRONG PASSWORD with a 401. If the interceptor fired on it, the login
+ * page would navigate to itself the instant the tutor typed the wrong password —
+ * the calm Greek "wrong password" sentence would never render, and a stale-cookie
+ * bounce would look like an infinite redirect loop.
+ */
+function handleUnauthorized(path: string): void {
+  if (typeof window === "undefined") return;
+  if (path.startsWith("/auth/")) return;
+  if (redirectingToLogin) return;
+
+  const segments = window.location.pathname.split("/");
+  const locale = LOCALES.includes(segments[1]) ? segments[1] : "el";
+  if (window.location.pathname === `/${locale}/login`) return;
+
+  redirectingToLogin = true;
+  const next = `${window.location.pathname}${window.location.search}`;
+  window.location.href = `/${locale}/login?next=${encodeURIComponent(next)}`;
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -135,9 +189,15 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     ...(init.body != null && !isFormData ? { "Content-Type": "application/json" } : {}),
     ...(init.headers ?? {}),
   };
-  const res = await fetch(`${API_BASE}${path}`, { ...init, headers });
+  // `credentials: "include"` — the API is a DIFFERENT ORIGIN (see this file's top
+  // docstring: the browser calls it directly), and fetch's default of
+  // `same-origin` means the `gt_session` cookie is simply not attached. Every
+  // request would 401, forever, with a perfectly valid cookie sitting in the jar.
+  const res = await fetch(`${API_BASE}${path}`, { ...init, headers, credentials: "include" });
   if (!res.ok) {
-    throw new ApiError(res.status, await parseErrorDetail(res));
+    if (res.status === 401) handleUnauthorized(path);
+    const { detail, code, body } = await parseError(res);
+    throw new ApiError(res.status, detail, code, body);
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
@@ -822,15 +882,64 @@ export interface ResolveApprovalInput {
   editedArgs?: Record<string, unknown> | null;
 }
 
+/** A session without its transcript-derived fields — mirrors `schemas/chat.py`'s
+ * `ChatSessionOut`, which is what `PATCH /chat/{id}` answers with (a rename
+ * cannot change a count or a preview). `title` is NULL until the session's
+ * first user message names it (server-side truncation, no model call). */
+export interface ChatSessionOut {
+  id: string;
+  title: string | null;
+  locale: string;
+  student_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** One row of the chat sidebar's list — mirrors `schemas/chat.py`'s
+ * `ChatSessionSummary`. `message_count`/`preview` count user+assistant rows
+ * only, so the count matches the number of bubbles that will render. Sessions
+ * with no messages are never in this list at all — see `list_chat_sessions`. */
+export interface ChatSessionSummary extends ChatSessionOut {
+  message_count: number;
+  last_message_at: string;
+  preview: string | null;
+}
+
 /** `POST /chat`'s response — mirrors `schemas/chat.py`'s
  * `ChatSessionCreated`: just enough to start posting messages/resolving
  * approvals against this session. `studentId` is optional (a chat session
- * need not be scoped to one student). */
-export function createChatSession(studentId?: string | null): Promise<{ session_id: string }> {
+ * need not be scoped to one student). `locale` records which UI language the
+ * conversation was STARTED in — persisted, not re-derived at resume time. */
+export function createChatSession(
+  studentId?: string | null,
+  locale?: string,
+): Promise<{ session_id: string }> {
   return request<{ session_id: string }>("/chat", {
     method: "POST",
-    body: JSON.stringify({ student_id: studentId ?? null }),
+    body: JSON.stringify({ student_id: studentId ?? null, locale: locale ?? null }),
   });
+}
+
+/** Every session that has actually been spoken in, most-recently-active
+ * first (`GET /chat`). */
+export function listChatSessions(): Promise<ChatSessionSummary[]> {
+  return request<ChatSessionSummary[]>("/chat");
+}
+
+/** Renames a session. The server keeps the new title through subsequent
+ * turns (`_ensure_title` only fires on a NULL title), so this sticks. */
+export function renameChatSession(sessionId: string, title: string): Promise<ChatSessionOut> {
+  return request<ChatSessionOut>(`/chat/${sessionId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ title }),
+  });
+}
+
+/** Deletes a session and, by `ON DELETE CASCADE`, its whole transcript and
+ * every approval record on it. Irreversible — every call site must go
+ * through `useConfirm()` first. */
+export function deleteChatSession(sessionId: string): Promise<void> {
+  return request<void>(`/chat/${sessionId}`, { method: "DELETE" });
 }
 
 /** Posts one user turn and runs the agent loop against it. Callers MUST NOT
@@ -919,11 +1028,19 @@ export async function streamChatMessage(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ content }),
+      // THIS FETCH BYPASSES `request()` ENTIRELY — it has to, because it reads a
+      // streaming body rather than awaiting `.json()`. Which means it also
+      // bypasses the one place `credentials: "include"` is set, and it is the
+      // ONLY call in the app that does. Miss this line and every other page works
+      // perfectly while chat — the flagship — silently 401s and falls back to the
+      // non-streaming path, i.e. it looks like a streaming bug, not an auth bug.
+      credentials: "include",
     });
   } catch {
     return { status: "fallback", reason: "error" };
   }
   if (!res.ok || !res.body) {
+    if (res?.status === 401) handleUnauthorized("/chat");
     return { status: "fallback", reason: "error" };
   }
 
@@ -985,21 +1102,20 @@ export function resolveApproval(
   });
 }
 
-/** The session's transcript (user/assistant rows only, oldest first).
- * Exposed for API completeness (mirrors `GET /chat/{id}`) — the chat page
- * always starts a brand-new session on mount (`chat-panel.tsx`), which can
- * never already have history, so nothing in this app calls this yet; it's
- * here for whenever this app grows a way to resume a previous session (e.g.
- * a session id kept in the URL/storage). */
+/** The session's transcript (user/assistant rows only, oldest first) —
+ * `chat-panel.tsx` hydrates from this on every mount now that the session id
+ * lives in the URL (`/{locale}/chat/{sessionId}`). Tool rows are omitted
+ * server-side; a `content: null` row is a tool-calls-only assistant turn. */
 export function getChatHistory(sessionId: string): Promise<ChatMessageOut[]> {
   return request<ChatMessageOut[]>(`/chat/${sessionId}`);
 }
 
-/** The session's currently-open approval, or `null`. Same "exposed for
- * completeness, not yet called" status as `getChatHistory` above, for the
- * same reason — mirrors `GET /chat/{id}/pending`, useful once this app can
- * resume a session that might already have one outstanding (a fresh session
- * from `createChatSession` never does). */
+/** The session's currently-open approval, or `null` — the other half of
+ * hydration. A session reloaded mid-approval must come back with its HITL
+ * card intact and its composer disabled; this supplies the tool call, and the
+ * TRAILING ASSISTANT ROW of `getChatHistory` supplies the card's description
+ * (the API deliberately carries no `has_tool_calls`/`description` field on
+ * `MessageOut` — see `routers/chat.py`). */
 export function getPendingApproval(sessionId: string): Promise<PendingApprovalOut | null> {
   return request<PendingApprovalOut | null>(`/chat/${sessionId}/pending`);
 }
@@ -1113,6 +1229,15 @@ export function createCollection(name: string): Promise<CollectionOut> {
     method: "POST",
     body: JSON.stringify({ name }),
   });
+}
+
+/** Deletes the FOLDER, never the tutor's material: `KnowledgeSource.
+ * collection_id` is `ondelete="SET NULL"`, so the sources inside it just
+ * become Unfiled (`routers/library.py::delete_collection`, spec D7). The
+ * route has existed since the Library was built and had no caller — the UI
+ * could create folders it could never remove. */
+export function deleteCollection(id: string): Promise<void> {
+  return request<void>(`/library/collections/${id}`, { method: "DELETE" });
 }
 
 /** Mirrors `routers/library.py::patch_source`'s response — deliberately NOT
@@ -1333,5 +1458,86 @@ export function addSession(lessonId: string, input: AddSessionInput): Promise<Bl
   return request<BlockNode>(`/lessons/${lessonId}/sessions`, {
     method: "POST",
     body: JSON.stringify(input),
+  });
+}
+
+/**
+ * Auth + Settings (Plan 13 Stage 3).
+ *
+ * `login` deliberately does NOT throw on a wrong password. A 401 here is the
+ * expected answer to a question the form exists to ask, not an exception — and
+ * `request()`'s 401 interceptor skips `/auth/*` precisely so this can be true
+ * (see `handleUnauthorized`). The caller reads `authenticated` and renders one
+ * calm sentence.
+ */
+
+export interface AuthState {
+  authenticated: boolean;
+  /** False on a dev/local build with `AUTH_ENABLED=0`: there is no password to
+   * type, so the login page must not be a door the tutor can get stuck behind. */
+  auth_enabled: boolean;
+}
+
+export function getAuthState(): Promise<AuthState> {
+  return request<AuthState>("/auth/me");
+}
+
+export async function login(password: string): Promise<AuthState> {
+  const res = await fetch(`${API_BASE}/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password }),
+    credentials: "include",
+  });
+  if (res.status === 401) return { authenticated: false, auth_enabled: true };
+  if (!res.ok) throw new ApiError(res.status, (await parseError(res)).detail);
+  return (await res.json()) as AuthState;
+}
+
+export function logout(): Promise<AuthState> {
+  return request<AuthState>("/auth/logout", { method: "POST" });
+}
+
+export type LlmModel = "claude-sonnet-5" | "claude-haiku-4-5";
+
+export interface AppSettings {
+  provider: string;
+  model: LlmModel | (string & {});
+  /** Is there a usable key? Drives the "not configured" banner in the AppShell. */
+  configured: boolean;
+  /** THE LAST FOUR CHARACTERS OF THE KEY, and nothing else — the server never
+   * sends more (see `settings_store.mask_key`). The `sk-ant-…` prefix you see in
+   * the UI is rendered by the browser from a constant, so that a regression test
+   * can grep the API's response for `sk-ant-` and fail if it ever appears. */
+  key_hint: string | null;
+}
+
+export interface SettingsTestResult {
+  ok: boolean;
+  model: string;
+  /** One of: not_configured | invalid_key | no_access | unknown_model |
+   * rate_limited | network | generation_failed. The UI maps this to ONE plain
+   * sentence in the tutor's language. He never sees a status code, a stack
+   * trace, or the word "Anthropic" followed by a number. */
+  code: string | null;
+}
+
+export function getSettings(): Promise<AppSettings> {
+  return request<AppSettings>("/settings");
+}
+
+export function saveSettings(input: {
+  anthropic_key?: string;
+  model?: LlmModel;
+}): Promise<AppSettings> {
+  return request<AppSettings>("/settings", { method: "PUT", body: JSON.stringify(input) });
+}
+
+/** A failed test comes back as HTTP 200 with `ok: false` — a wrong key is the
+ * expected outcome of a button whose entire job is to find out, not an error. */
+export function testSettings(anthropic_key?: string): Promise<SettingsTestResult> {
+  return request<SettingsTestResult>("/settings/test", {
+    method: "POST",
+    body: JSON.stringify({ anthropic_key: anthropic_key ?? null }),
   });
 }

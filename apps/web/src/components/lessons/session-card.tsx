@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { useConfirm } from "@/components/ui/confirm";
 import { ApiError, deleteBlock, mergeSessions, splitSession, updateBlock, type BlockNode } from "@/lib/api";
 
 interface SessionCardProps {
@@ -54,6 +55,7 @@ interface SessionCardProps {
  * and delete. Nothing else — this is an outline, not a form. */
 export function SessionCard({ session, lessonId, index, nextSession, applyTree, refreshTree }: SessionCardProps) {
   const t = useTranslations("lessons.editor");
+  const confirm = useConfirm();
 
   const [editingTitle, setEditingTitle] = useState(false);
   const [draftTitle, setDraftTitle] = useState(session.title);
@@ -103,6 +105,14 @@ export function SessionCard({ session, lessonId, index, nextSession, applyTree, 
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
   async function handleDelete() {
+    const ok = await confirm({
+      title: t("confirmDeleteSession.title", { title: session.title }),
+      body: t("confirmDeleteSession.body", { items: session.children.length }),
+      confirmLabel: t("confirmDeleteSession.confirm"),
+      destructive: true,
+    });
+    if (!ok) return;
+
     setDeleting(true);
     setDeleteError(null);
     try {
@@ -137,8 +147,21 @@ export function SessionCard({ session, lessonId, index, nextSession, applyTree, 
   const [merging, setMerging] = useState(false);
   const [mergeError, setMergeError] = useState<string | null>(null);
 
+  /** Merge is destructive in the one way that matters: the NEXT session stops
+   * existing and `POST /lessons/{id}/merge` returns a new tree — there is no
+   * "unmerge", and a later Split produces a different split, not this one
+   * back. It gets the same guard as a delete for that reason, even though it
+   * isn't spelled DELETE on the wire. */
   async function handleMergeDown() {
     if (!nextSession) return;
+    const ok = await confirm({
+      title: t("confirmMerge.title", { title: session.title, next: nextSession.title }),
+      body: t("confirmMerge.body", { title: session.title, next: nextSession.title }),
+      confirmLabel: t("confirmMerge.confirm"),
+      destructive: true,
+    });
+    if (!ok) return;
+
     setMerging(true);
     setMergeError(null);
     try {
@@ -371,6 +394,7 @@ interface ItemRowProps {
  * this deliberately doesn't invent an affordance the backend can't serve. */
 function ItemRow({ item, refreshTree }: ItemRowProps) {
   const t = useTranslations("lessons.editor");
+  const confirm = useConfirm();
 
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(item.title);
@@ -397,6 +421,14 @@ function ItemRow({ item, refreshTree }: ItemRowProps) {
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
   async function handleDelete() {
+    const ok = await confirm({
+      title: t("confirmDeleteItem.title", { title: item.title }),
+      body: t("confirmDeleteItem.body"),
+      confirmLabel: t("confirmDeleteItem.confirm"),
+      destructive: true,
+    });
+    if (!ok) return;
+
     setDeleting(true);
     setDeleteError(null);
     try {

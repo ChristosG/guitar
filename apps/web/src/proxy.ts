@@ -32,8 +32,44 @@ function localeRootRedirect(request: NextRequest): NextResponse | null {
   return NextResponse.redirect(url);
 }
 
+// THE API IS THE REAL GATE. This is UX.
+//
+// The cookie is HttpOnly and signed, and only `app/auth/middleware.py` can
+// actually verify it — this file can see that a cookie named `gt_session` is
+// PRESENT, nothing more. Which is exactly enough for the job it has: keep a
+// signed-out browser from painting an empty cockpit, flashing ten spinners, and
+// only then bouncing to /login once the first fetch comes back 401. A forged
+// cookie gets you a pretty, permanently-401ing shell — and that is fine, because
+// the actual data never leaves the API.
+//
+// Gated on the build-time flag rather than always-on: with `AUTH_ENABLED=0`
+// (dev, and every Playwright run against a local API) there is no password to
+// type, so an unconditional redirect would strand a developer at a login screen
+// that cannot be passed.
+const AUTH_ENABLED = process.env.NEXT_PUBLIC_AUTH_ENABLED === "1";
+const SESSION_COOKIE = "gt_session";
+
+function loginRedirect(request: NextRequest): NextResponse | null {
+  if (!AUTH_ENABLED) return null;
+  if (request.cookies.has(SESSION_COOKIE)) return null;
+
+  const match = request.nextUrl.pathname.match(/^\/(en|el)(\/.*)?$/);
+  if (!match) return null;
+  const [locale, rest] = [match[1], match[2] ?? ""];
+  if (rest.startsWith("/login")) return null;   // the door cannot lock itself
+
+  // `nextUrl.clone()`, not a bare string: `NextResponse.redirect()` requires an
+  // absolute URL and throws `TypeError: Invalid URL` on a relative one — a crash
+  // that only ever reproduces for a signed-out user, i.e. never in development.
+  const url = request.nextUrl.clone();
+  url.pathname = `/${locale}/login`;
+  url.search = "";
+  if (rest && rest !== "/") url.searchParams.set("next", `/${locale}${rest}`);
+  return NextResponse.redirect(url);
+}
+
 export default function proxy(request: NextRequest) {
-  const res = localeRootRedirect(request) ?? intl(request);
+  const res = loginRedirect(request) ?? localeRootRedirect(request) ?? intl(request);
   // App-Router Vary:rsc trap (spec §5.4): HTML must never be cached.
   res.headers.set("Cache-Control", "no-store");
   return res;
