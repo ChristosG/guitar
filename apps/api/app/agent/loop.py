@@ -284,15 +284,45 @@ _RELEVANCE_FLOOR = 0.15
 
 
 def _is_content_bearing(text: str) -> bool:
-    """True iff `text` plausibly asks a guitar technique/theory/gear/tone
-    question — see the module-level comment block above for the full rule
-    and its defence.
+    """Should this turn search the library first? **Default: YES.**
 
-    Matches against the FOLDED text (`app/text/normalize.py`): accents stripped,
-    case folded, final sigma unified. That is what lets one unaccented Greek
-    stem match every inflected form of a word whose accent moves (μάθημα ->
-    μαθήματα), and it also means a tutor who types without accents — as people
-    actually do — gets the same behaviour as one who doesn't.
+    THE DEFAULT WAS INVERTED (Plan 13). This function used to require a POSITIVE
+    match — a `?` or a leading wh-word — before it would ground anything. That
+    is a "prove you are a question" rule, and it fails open: anything the
+    keyword list doesn't recognise is silently answered from the model's memory
+    with no library search at all.
+
+    Which is exactly what happened. A Greek question ends in `;` and begins «Τι»,
+    so the rule recognised none of them, and EVERY question the tutor asked in
+    his own default language was answered ungrounded. But translating the
+    keyword list into Greek only moves the problem: no keyword list reliably
+    classifies natural language, and the next phrasing it doesn't know fails the
+    same silent way. Chris's read was correct — patching the pattern was fixing
+    the symptom.
+
+    The rule that existed at all is a QWEN-ERA ARTEFACT. The forced-retrieval
+    pre-hop was built because the 9B model kept declining to call the search tool
+    (see this module's C1 notes), so the code took the decision away from it. The
+    pre-hop is still worth keeping — "always search his library before answering
+    a content question" is a product promise, not a model workaround — but the
+    GATE in front of it no longer needs to be clever, because the model behind it
+    no longer needs to be tricked.
+
+    So the gate is now a cheap NEGATIVE filter: ground unless the turn is
+    obviously small talk, or obviously an instruction about the tutor's own data
+    (a student, a lesson, "split session 2") that a tool answers and the library
+    never could. Everything else grounds.
+
+    The asymmetry is the whole point:
+      - a false NEGATIVE (we skip the search) = an ungrounded answer. Wrong, and
+        invisible. This is the bug we just lived through.
+      - a false POSITIVE (we search when we didn't need to) = ~7ms and a few
+        hundred tokens of grounding the model ignores. Nothing.
+    A rule whose failure mode is 7ms should fail toward searching.
+
+    Matched against FOLDED text (`app/text/normalize.py`) so the negative filter
+    itself works in Greek — accents move under inflection (μάθημα -> μαθήματα)
+    and `.lower()` keeps them.
     """
     raw = (text or "").strip()
     if not raw:
@@ -302,13 +332,7 @@ def _is_content_bearing(text: str) -> bool:
         return False
     if _ENTITY_OR_ARTIFACT_RE.search(folded):
         return False
-    if _QUESTION_RE.search(folded):
-        return True
-    # The Greek question mark, ONLY when the text is actually Greek — a bare `;`
-    # in Latin text is a statement separator ("do this; then that"), not a
-    # question, and treating it as one would force a library search on every
-    # multi-clause English command.
-    return bool(has_greek(raw) and _GREEK_QUESTION_MARK_RE.search(raw))
+    return True
 
 
 def _snippet(text: str, limit: int = 300) -> str:
