@@ -22,8 +22,7 @@ and returns the suspend info for a caller to persist (see `loop.py`'s
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, JSON, String, Text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import DateTime, ForeignKey, JSON, String, Text, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -47,10 +46,29 @@ class ChatSession(Base, PkMixin, TimestampMixin):
     erase exactly the context a historical record needs most. A stale/
     dangling id here is an accepted tradeoff, same as `GenerationJob.
     result_root_id`'s own documented one.
+
+    `title` and `locale` (Plan 13 Stage 5.6) are what turn this table from
+    write-only storage into a resumable HISTORY. Both are set by
+    `routers/chat.py`, never by the model layer:
+
+    - `title` stays NULL until the session's FIRST user message lands, then
+      becomes a truncation of it (`_title_from_message`). Deliberately NOT
+      model-generated: a Haiku "name this conversation" call is a billed
+      request per conversation for a string the tutor can rename in one
+      click, and the seam has no per-call model override to make it cheap.
+      NULL is therefore meaningful — "nothing has been said here yet" — and
+      `GET /chat` never lists such a session at all.
+    - `locale` is the UI language the conversation was STARTED in ("el" |
+      "en"). Persisted (not re-derived from the browser at resume time)
+      because a Greek transcript resumed under an English UI is still a Greek
+      conversation, and the agent's own language handling has to key off what
+      was actually said, not off today's toggle.
     """
 
     __tablename__ = "chat_session"
-    student_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    student_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    title: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    locale: Mapped[str] = mapped_column(String(5), nullable=False, server_default="el", default="el")
 
 
 class Message(Base, PkMixin, TimestampMixin):

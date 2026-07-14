@@ -11,6 +11,15 @@ import os
 # environment, wrote rows, and never cleaned up.
 os.environ["DATABASE_URL"] = "postgresql+psycopg://guitar:guitar@localhost:5434/guitar_test"
 
+# Same import-time reasoning, for the password gate (Plan 13 Task 3.1). ~40 test
+# modules drive the API through `TestClient` with no cookie jar; with the gate on
+# they would every one of them 401. `Settings.auth_enabled` already defaults to
+# False, so this is belt-and-braces — it pins the value even if a developer has
+# `AUTH_ENABLED=1` exported in the shell they run pytest from (which they will,
+# because that is what the deployed app needs). `tests/test_auth.py` turns the
+# gate ON explicitly, per test, with monkeypatch.
+os.environ["AUTH_ENABLED"] = "0"
+
 import pytest
 from sqlalchemy import text
 from fastapi.testclient import TestClient
@@ -22,17 +31,28 @@ from app.main import app
 
 @pytest.fixture(scope="session", autouse=True)
 def _test_database():
-    """Build the guitar_test schema once per test run.
+    """Rebuild the guitar_test schema from the models, once per test run.
 
-    pgvector's `vector` type must exist before create_all, since Chunk.embedding
-    is a Vector column. Individual test modules also call
-    `Base.metadata.create_all(engine)` in their own `setup_module` (pre-dating
-    this fixture) — that's a harmless no-op here since create_all checks for
-    existing tables first, and this fixture (session-scoped) always runs
-    before any module-scoped setup for the first test that needs it.
+    DROP THEN CREATE, and the drop is not optional. `create_all` SKIPS a table that
+    already exists — it does not ALTER it. So the moment a model grows a column,
+    every test that touches that table fails with `UndefinedColumn` against a
+    schema built by some earlier run, and the failure names the column rather than
+    the cause: 200 red tests, none of which have anything to do with the change.
+    (Stage 6 added `block.meta`, `student.goals`, `generation_job.progress` and
+    four interview columns, and that is exactly what happened.)
+
+    Free to do: `_truncate_all_tables` already wipes every table after every test,
+    so nothing in this database was ever meant to outlive a run. This just makes
+    the SCHEMA as disposable as the rows always were.
+
+    pgvector's `vector` type must exist first — `Chunk.embedding` is a Vector
+    column. Individual test modules also call `create_all` in their own
+    `setup_module` (pre-dating this fixture); harmless, since this session-scoped
+    fixture always runs first.
     """
     with engine.begin() as conn:
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+    Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
     yield
 
@@ -52,6 +72,89 @@ def _truncate_all_tables(_test_database):
     if table_names:
         with engine.begin() as conn:
             conn.execute(text(f"TRUNCATE TABLE {table_names} RESTART IDENTITY CASCADE"))
+
+
+class _FakeEmbedder:
+    """Deterministic 384-dim vectors, no model, no network, ~0ms.
+
+    Hash-based rather than random: the same text always yields the same vector,
+    so a test can assert that two identical chunks embed identically, and a test
+    run is reproducible. Unit-normalised, because everything downstream
+    (`cosine_distance`, the RRF fusion, the cosine floor) assumes unit vectors —
+    a fake that skipped that would let a bug through that the real embedder
+    would have caught.
+    """
+
+    dim = 384
+    model_id = "fake-embedder"
+
+    def embed(self, texts, *, is_query: bool = False):
+        import hashlib
+        import struct
+
+        out = []
+        for t in texts:
+            h = hashlib.sha256((("q:" if is_query else "p:") + t).encode()).digest()
+            # stretch 32 bytes -> 384 floats deterministically
+            raw = b"".join(
+                hashlib.sha256(h + bytes([i])).digest() for i in range(48)
+            )[: 384 * 4]
+            # Unpack as UNSIGNED INTS and map into [-1, 1) — NOT as `<384f`.
+            #
+            # Reinterpreting hash bytes as raw float32 bit patterns looks equivalent
+            # and is not: a float32 whose 8 exponent bits are all 1 is inf or NaN,
+            # which is 1/256 of uniformly random patterns. Over 384 draws that is
+            # 1 - (255/256)^384 = 78% of vectors carrying at least one non-finite
+            # value, and a single NaN poisons the whole vector through the
+            # normalisation sum (n becomes NaN; every x/n follows). Measured: 394 of
+            # 500. It surfaced as `psycopg.errors.DataException: NaN not allowed in
+            # vector` on any test that actually persisted a chunk. Integers have no
+            # such trap representation.
+            ints = struct.unpack("<384I", raw)
+            v = [(u / 2147483647.5) - 1.0 for u in ints]
+            n = sum(x * x for x in v) ** 0.5 or 1.0
+            out.append([x / n for x in v])
+        return out
+
+    def health(self) -> bool:
+        return True
+
+
+@pytest.fixture(autouse=True)
+def _fake_embedder(monkeypatch, request):
+    """Unit tests must NOT load the real embedding model.
+
+    Since Plan 13 Stage 4 flipped `embed_backend` to `local-e5`, `get_embedder()`
+    builds a 470MB onnxruntime session and then CPU-embeds every chunk at ~70ms
+    apiece. `test_seed.py` alone went from seconds to over three minutes, and the
+    full suite from 50s to 10+. That is not a slow test, it is the wrong test:
+    nothing in the unit suite is asserting anything about *embedding quality* —
+    they need vectors of the right width that behave like vectors.
+
+    The real embedder is exercised where it belongs: `scripts/retrieval_baseline.py`
+    (Gate 4.6, against the real library) and the `@pytest.mark.integration` tests —
+    which is why this fixture, though `autouse`, STANDS DOWN for anything marked
+    `integration`. It did not always: as an unconditional autouse fixture it also
+    patched the very tests whose docstrings say they "drive the real embed + chat
+    servers", so they asserted against hash vectors and proved nothing about the
+    model they existed to exercise. An autouse fake that cannot be escaped does not
+    isolate the integration tests, it hollows them out.
+
+    Patched at each CALL SITE, not at `embed_factory`, because every consumer does
+    `from app.llm.embed_factory import get_embedder` — rebinding the factory alone
+    would leave the already-imported names pointing at the real thing.
+    """
+    if request.node.get_closest_marker("integration"):
+        return
+    fake = _FakeEmbedder()
+    for module in (
+        "app.llm.embed_factory",
+        "app.brain.ingest",
+        "app.brain.ocr",
+        "app.brain.retrieve",
+        "app.brain.reembed",
+    ):
+        monkeypatch.setattr(f"{module}.get_embedder", lambda: fake, raising=False)
 
 
 @pytest.fixture(autouse=True)

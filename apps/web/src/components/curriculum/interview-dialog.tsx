@@ -20,43 +20,32 @@ import { Label } from "@/components/ui/label";
 import {
   ApiError,
   answerInterview,
-  getCurriculum,
-  getJob,
   isJobAccepted,
   startInterview,
-  type BlockNode,
-  type InterviewOption,
   type InterviewStateOut,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { InterviewWhoStep } from "./interview-who-step";
 import { InterviewDurationStep } from "./interview-duration-step";
+import { InterviewScopeStep } from "./interview-scope-step";
 import { InterviewSourcesStep } from "./interview-sources-step";
-import { InterviewPreviewStep } from "./interview-preview-step";
+import { InterviewOutlineStep } from "./interview-outline-step";
 import { InterviewConfirmStep } from "./interview-confirm-step";
 
-/** Same poll cadence/cap as `generate-dialog.tsx`'s own `POLL_INTERVAL_MS`/
- * `MAX_POLLS` — deliberately not invented afresh (the brief: "reuse the
- * EXISTING job-poll pattern... do NOT invent a second polling mechanism").
- * 150 * 2s ~ 5 minutes, comfortably above the 49-179s/call the API measured
- * for a curriculum generation run. */
-const POLL_INTERVAL_MS = 2000;
-const MAX_POLLS = 150;
-
-const STEP_ORDER = ["who", "duration", "sources", "preview", "confirm"] as const;
+/** `app.curriculum.interview.STEP_ORDER`, for the progress trail only — the state
+ * machine itself is entirely server-side and this client never decides what comes
+ * next. It renders whatever step the API says it is on. */
+const STEP_ORDER = ["who", "duration", "scope", "sources", "outline", "confirm"] as const;
 
 interface InterviewDialogProps {
-  /** Current UI locale — pre-fills nothing here (unlike `GenerateDialog`'s
-   * old `language` field, this interview's "who" step derives language from
-   * the chosen/new student instead), but IS what a preview citation link
-   * targets (`/${locale}/library/...`). */
-  locale: string;
-  onGenerated: (tree: BlockNode) => void;
+  /** Called the moment `confirm` returns its 202: the tree ALREADY EXISTS (every
+   * lesson `queued`), so the board opens on it instantly and watches the lessons
+   * arrive. This is NOT a "generation finished" callback — nothing has been
+   * written yet, and that is the entire point. */
+  onMaterialized: (rootId: string) => void;
 }
 
-/** Minimal step progress trail — 5 quiet segments, not a numbered wizard
- * chrome: reassures the tutor there's a short, fixed number of questions
- * left without adding another box to fill in. */
+/** Six quiet segments, not a numbered wizard chrome. */
 function StepTrail({ currentStep }: { currentStep: string }) {
   const currentIndex = STEP_ORDER.indexOf(currentStep as (typeof STEP_ORDER)[number]);
   return (
@@ -76,61 +65,43 @@ function StepTrail({ currentStep }: { currentStep: string }) {
   );
 }
 
-/** THE new entry point for curriculum generation (Plan 12 Task 3, G2's
- * frontend): replaces the old one-shot `GenerateDialog` form. Chris,
- * verbatim, on why: "when i click 'Generate a curriculum' seems like it
- * just uses the llm general knowledge... it would be beneficial here to
- * select things from our library... maybe llm can act as an assistant
- * there bro, guiding him, and asking him questions or corrections
- * throughout the process." The state machine itself lives entirely
- * server-side (`app.curriculum.interview`'s own docstring: the model never
- * tracks `step` — Plan 10/11 both found it "unreliable at id-plumbing"),
- * this dialog is just a thin client that renders whatever step the API
- * says it's on and posts back one answer at a time.
+/** The guided curriculum-authoring interview, v2 — who -> duration -> scope ->
+ * sources -> OUTLINE -> confirm.
  *
- * `title`/`domain` are collected in an "intro" phase BEFORE the first
- * `POST /curricula/interview` call — the interview's own five steps
- * (`who`/`duration`/`sources`/`preview`/`confirm`) don't include a "what's
- * this course called" step (see `start_interview`'s own docstring on the
- * API side: that's asked once, up front, exactly like the old direct
- * `POST /curricula/generate` form already did).
+ * Two things changed here, and both are about the tutor's money.
  *
- * On the final "confirm" step, `answerInterview`'s response is a 202
- * `JobAccepted` rather than another `InterviewStateOut` (`isJobAccepted`
- * discriminates it) — this dialog then polls `GET /jobs/{id}` with the
- * EXACT same cadence/cap `GenerateDialog` used, and only then fetches the
- * generated tree and hands it to `onGenerated`, same handoff contract the
- * old dialog had.
+ * THE OUTLINE STEP REPLACED THE PREVIEW STEP. "Preview" showed him what a cosine
+ * floor thought his library covered (separation margin on his real corpus: 0.021)
+ * and offered him a Proceed button. The outline step shows him a course written by
+ * a model that has READ HIS ENTIRE LIBRARY, and lets him rename, add, delete,
+ * reorder and re-tier every part of it before a word is drafted. Chris: "the man
+ * might want to change something... we have NOTHING of those bro."
+ *
+ * CONFIRM NO LONGER POLLS A JOB TO COMPLETION. It used to sit on a spinner for the
+ * several minutes a whole curriculum takes, and closing the tab lost the thread.
+ * Now confirm MATERIALIZES the tree (course -> modules -> lessons, every lesson
+ * `queued`) and returns `{job_id, root_id}` — the dialog closes, the board opens on
+ * a real curriculum immediately, and the lessons fill in underneath him. There is
+ * nothing left to wait for in a dialog.
  */
-export function InterviewDialog({ locale, onGenerated }: InterviewDialogProps) {
+export function InterviewDialog({ onMaterialized }: InterviewDialogProps) {
   const t = useTranslations("curricula.interview");
 
   const [open, setOpen] = useState(false);
-  const [phase, setPhase] = useState<"intro" | "interview" | "job">("intro");
+  const [phase, setPhase] = useState<"intro" | "interview">("intro");
   const [title, setTitle] = useState("");
-  const [domain, setDomain] = useState("");
   const [interviewId, setInterviewId] = useState<string | null>(null);
   const [state, setState] = useState<InterviewStateOut | null>(null);
-  // Title -> option, built from the "sources" step's own options the moment
-  // the tutor answers it — the ONLY place `source_id` is ever seen on the
-  // wire for a source (the later "preview" findings only carry
-  // `source_title` — see `InterviewPassage`'s docstring in `lib/api.ts`).
-  // This is what lets a preview citation deep-link into the Reader.
-  const [sourceCatalog, setSourceCatalog] = useState<Map<string, InterviewOption>>(new Map());
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [jobError, setJobError] = useState<string | null>(null);
 
   function reset() {
     setPhase("intro");
     setTitle("");
-    setDomain("");
     setInterviewId(null);
     setState(null);
-    setSourceCatalog(new Map());
     setSubmitting(false);
     setError(null);
-    setJobError(null);
   }
 
   async function handleStart(e: FormEvent) {
@@ -138,7 +109,7 @@ export function InterviewDialog({ locale, onGenerated }: InterviewDialogProps) {
     setSubmitting(true);
     setError(null);
     try {
-      const result = await startInterview({ title, domain: domain || undefined });
+      const result = await startInterview({ title });
       setInterviewId(result.interview_id);
       setState(result);
       setPhase("interview");
@@ -153,17 +124,26 @@ export function InterviewDialog({ locale, onGenerated }: InterviewDialogProps) {
     if (!interviewId) return;
     setSubmitting(true);
     setError(null);
-    // Capture the sources catalog on the way OUT of the "sources" step —
-    // `state` here is still that step's own response (options = every
-    // library source with its real id), read before it's replaced below.
-    if (state?.step === "sources" && state.options) {
-      setSourceCatalog(new Map(state.options.map((o) => [o.label, o])));
-    }
     try {
-      const result = await answerInterview(interviewId, answer);
+      let result = await answerInterview(interviewId, answer);
+
+      // THE OUTLINE CALL IS FIRED HERE, AND ONLY HERE. The API advances to the
+      // "outline" step with nothing to show — deliberately: generating the outline
+      // is the expensive call (the whole library, ~30-60s, ~$0.35) and it belongs to
+      // the step that DISPLAYS its result, so a tutor who backs out of the sources
+      // step and re-picks does not pay for an outline he never saw
+      // (`_answer_outline`'s own docstring). Landing on an empty editor and making
+      // him press "Rewrite it" to get his first outline would be an ambush; this
+      // asks for it the moment he arrives.
+      if (!isJobAccepted(result) && result.step === "outline" && !result.findings?.modules?.length) {
+        result = await answerInterview(interviewId, { regenerate: true });
+      }
+
       if (isJobAccepted(result)) {
-        setPhase("job");
-        await pollJob(result.job_id);
+        // The tree exists NOW. Hand the board its root and get out of the way.
+        if (result.root_id) onMaterialized(result.root_id);
+        reset();
+        setOpen(false);
         return;
       }
       setState(result);
@@ -174,37 +154,16 @@ export function InterviewDialog({ locale, onGenerated }: InterviewDialogProps) {
     }
   }
 
-  async function pollJob(jobId: string) {
-    try {
-      let job = await getJob(jobId);
-      let polls = 1;
-      while (job.status !== "succeeded" && job.status !== "failed" && polls < MAX_POLLS) {
-        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
-        job = await getJob(jobId);
-        polls++;
-      }
-      if (job.status === "succeeded") {
-        const tree = await getCurriculum(job.result_root_id!);
-        onGenerated(tree);
-        reset();
-        setOpen(false);
-      } else if (job.status === "failed") {
-        setJobError(job.error ?? t("steps.confirm.error"));
-      } else {
-        setJobError(t("steps.confirm.stillGenerating"));
-      }
-    } catch (err) {
-      setJobError(err instanceof ApiError ? err.detail : t("steps.confirm.error"));
-    }
-  }
-
-  const busy = submitting || phase === "job";
+  const findings = state?.findings ?? null;
 
   return (
     <Dialog
       open={open}
       onOpenChange={(next) => {
-        if (busy) return; // never let this vanish mid-flight — same posture as GenerateDialog
+        // Never let it vanish mid-flight. The outline call reads 90K tokens, takes
+        // 30-60 seconds and costs real money; a dialog that closes under a stray
+        // click would throw away an outline he has already paid for.
+        if (submitting) return;
         setOpen(next);
         if (!next) reset();
       }}
@@ -213,7 +172,11 @@ export function InterviewDialog({ locale, onGenerated }: InterviewDialogProps) {
         <Sparkles />
         {t("trigger")}
       </DialogTrigger>
-      <DialogContent data-testid="interview-dialog" className="sm:max-w-lg">
+      {/* The outline editor is the tallest thing in this app. `sm:max-w-2xl` gives
+          it a column wide enough to actually edit in; `DialogContent` is
+          height-capped and `overflow-hidden`, so it scrolls INSIDE the card rather
+          than painting over the backdrop. */}
+      <DialogContent data-testid="interview-dialog" className="sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>{t("dialogHeading")}</DialogTitle>
           {phase === "intro" && <DialogDescription>{t("introDescription")}</DialogDescription>}
@@ -231,16 +194,6 @@ export function InterviewDialog({ locale, onGenerated }: InterviewDialogProps) {
                   onChange={(e) => setTitle(e.target.value)}
                   placeholder={t("titlePlaceholder")}
                   required
-                />
-              </div>
-              <div className="flex flex-col gap-1.5">
-                <Label htmlFor="interview-domain">{t("domainLabel")}</Label>
-                <Input
-                  id="interview-domain"
-                  data-testid="interview-domain"
-                  value={domain}
-                  onChange={(e) => setDomain(e.target.value)}
-                  placeholder={t("domainPlaceholder")}
                 />
               </div>
             </fieldset>
@@ -263,18 +216,29 @@ export function InterviewDialog({ locale, onGenerated }: InterviewDialogProps) {
           </form>
         )}
 
-        {/* DialogBody, not a bare <div>: `DialogContent` is now height-capped
-            and `overflow-hidden`, so the tallest step in the app (the preview
-            step's findings list, or a library with 30 sources) has to scroll
-            INSIDE the card. Before this it just painted over the backdrop. */}
         {phase === "interview" && state && (
           <DialogBody data-testid="interview-body">
             <StepTrail currentStep={state.step} />
+
+            {/* The outline call reads the WHOLE library and takes 30-60 seconds. A
+                silently disabled button for a minute reads as a broken app, so it
+                says what it is doing. */}
+            {submitting && (state.step === "sources" || state.step === "outline") && (
+              <p
+                role="status"
+                data-testid="interview-outline-working"
+                className="flex items-center gap-2 rounded-lg border border-border bg-muted/50 px-3 py-2 text-xs text-muted-foreground"
+              >
+                <Loader2 className="size-4 shrink-0 animate-spin" />
+                {t("steps.outline.working")}
+              </p>
+            )}
 
             {state.step === "who" && (
               <InterviewWhoStep
                 key={state.step}
                 options={state.options ?? []}
+                levels={findings?.levels ?? []}
                 submitting={submitting}
                 error={state.error}
                 onSubmit={handleAnswer}
@@ -288,8 +252,8 @@ export function InterviewDialog({ locale, onGenerated }: InterviewDialogProps) {
                 onSubmit={handleAnswer}
               />
             )}
-            {state.step === "sources" && (
-              <InterviewSourcesStep
+            {state.step === "scope" && (
+              <InterviewScopeStep
                 key={state.step}
                 options={state.options ?? []}
                 submitting={submitting}
@@ -297,12 +261,29 @@ export function InterviewDialog({ locale, onGenerated }: InterviewDialogProps) {
                 onSubmit={handleAnswer}
               />
             )}
-            {state.step === "preview" && state.findings && (
-              <InterviewPreviewStep
+            {state.step === "sources" && (
+              <InterviewSourcesStep
                 key={state.step}
-                findings={state.findings}
-                sourceCatalog={sourceCatalog}
-                locale={locale}
+                options={state.options ?? []}
+                shape={findings?.shape}
+                submitting={submitting}
+                error={state.error}
+                onSubmit={handleAnswer}
+              />
+            )}
+            {state.step === "outline" && (
+              <InterviewOutlineStep
+                // Keyed on the outline's identity so REGENERATE remounts the editor
+                // on the new one. Without this the editor keeps its own `draft`
+                // state (a `useState` initializer runs exactly once) and the tutor
+                // pays for a fresh outline and is shown the old one.
+                key={`outline-${findings?.modules?.length ?? 0}-${findings?.title ?? ""}`}
+                // `modules: []` is NOT unreachable, and rendering nothing for it was
+                // a dead end: if the outline call fails (a bad key, a 429, a
+                // truncated response) the API keeps the tutor on this step with
+                // `findings` empty. An empty editor still has a Regenerate button
+                // and an Add-module button; a blank dialog has neither.
+                outline={{ title: findings?.title ?? "", modules: findings?.modules ?? [] }}
                 submitting={submitting}
                 error={state.error}
                 onSubmit={handleAnswer}
@@ -311,39 +292,19 @@ export function InterviewDialog({ locale, onGenerated }: InterviewDialogProps) {
             {state.step === "confirm" && (
               <InterviewConfirmStep
                 key={state.step}
-                findings={state.findings}
+                findings={findings}
                 submitting={submitting}
                 error={state.error}
                 onSubmit={handleAnswer}
               />
             )}
-          </DialogBody>
-        )}
 
-        {phase === "job" && (
-          <div className="flex flex-col gap-3">
-            {!jobError ? (
-              <div
-                role="status"
-                data-testid="interview-job-loading"
-                className="flex items-center gap-2 rounded-lg border border-border bg-muted/50 px-3 py-2 text-sm text-muted-foreground"
-              >
-                <Loader2 className="size-4 shrink-0 animate-spin" />
-                {t("steps.confirm.generating")}
-              </div>
-            ) : (
-              <>
-                <p role="alert" data-testid="interview-job-error" className="text-sm text-destructive">
-                  {jobError}
-                </p>
-                <DialogFooter>
-                  <Button type="button" variant="outline" onClick={reset} data-testid="interview-start-over">
-                    {t("steps.confirm.startOver")}
-                  </Button>
-                </DialogFooter>
-              </>
+            {error && (
+              <p role="alert" data-testid="interview-answer-error" className="text-sm text-destructive">
+                {error}
+              </p>
             )}
-          </div>
+          </DialogBody>
         )}
       </DialogContent>
     </Dialog>

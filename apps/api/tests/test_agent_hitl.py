@@ -140,7 +140,13 @@ def test_mutation_tool_call_suspends_and_never_invokes_the_fn(monkeypatch):
     assert result.pending_tool == {
         "tool_call_id": "call_1",
         "name": "generate_artifact",
-        "arguments": {"kind": "chord_diagram", "prompt": "G major open chord"},
+        # The session's locale is INJECTED into the proposed args at suspend
+        # time (Plan 13, Stage 5.4) — the model never picks it, and the approval
+        # card, the wire transcript and the eventual dispatch all see the same
+        # dict. `el` is the app default `run_agent_turn` falls back to here.
+        "arguments": {
+            "kind": "chord_diagram", "prompt": "G major open chord", "locale": "el",
+        },
     }
     assert len(fake_provider.calls) == 1  # suspended on the FIRST turn — no round-trip
 

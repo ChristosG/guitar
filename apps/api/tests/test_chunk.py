@@ -90,16 +90,23 @@ def test_two_sections_never_mix_text_and_keep_own_heading_and_page():
 
 
 def test_short_section_yields_exactly_one_draft():
-    drafts = chunk_sections([Section(heading="Quick Tip", text="Keep your thumb relaxed.", page=2)])
-    assert drafts == [ChunkDraft(text="Keep your thumb relaxed.", section_path="Quick Tip", page=2)]
+    # Lengthened past MIN_CHUNK_CHARS (Plan 13, Stage 4.6): the old 24-char fixture
+    # ("Keep your thumb relaxed.") is now, by design, dropped as a junk fragment —
+    # so it no longer exercises what this test is about, which is that a section
+    # BELOW target_chars produces exactly one draft rather than zero or two.
+    text = "Keep your thumb relaxed behind the neck, not hooked over the top of it."
+    drafts = chunk_sections([Section(heading="Quick Tip", text=text, page=2)])
+    assert drafts == [ChunkDraft(text=text, section_path="Quick Tip", page=2)]
 
 
 def test_heading_none_and_page_none_pass_through():
     """text/url extraction always produce heading=None, page=None Sections
     (see extract.py) — this must round-trip cleanly, not just PDF's populated case.
     """
-    drafts = chunk_sections([Section(heading=None, text="Some untitled prose.", page=None)])
-    assert drafts == [ChunkDraft(text="Some untitled prose.", section_path=None, page=None)]
+    # Past MIN_CHUNK_CHARS — see test_short_section_yields_exactly_one_draft.
+    text = "Some untitled prose that runs on for a little while without a heading."
+    drafts = chunk_sections([Section(heading=None, text=text, page=None)])
+    assert drafts == [ChunkDraft(text=text, section_path=None, page=None)]
 
 
 def test_empty_or_whitespace_section_yields_no_drafts():
@@ -145,3 +152,34 @@ def test_non_positive_target_chars_raises():
 def test_negative_overlap_chars_raises():
     with pytest.raises(ValueError):
         chunk_sections([Section(heading="h", text="text", page=1)], overlap_chars=-1)
+
+
+# --- MIN_CHUNK_CHARS: stop CREATING junk (Plan 13, Stage 4.6) ---------------
+
+def test_a_fragment_below_min_chunk_chars_is_never_created():
+    """The live index really contains a 19-character chunk whose entire text is
+    "PART ONE The Guitar" — a heading OCR'd off an otherwise-blank page. It scores
+    0.64 against real tone queries and has been handed to the model as grounding.
+
+    `retrieve.py`'s floor refuses to RETRIEVE such a chunk. This is the other half:
+    it must never enter the corpus at all, where it still distorts BM25's IDF and
+    document-length statistics for every other query.
+    """
+    drafts = chunk_sections([Section(heading=None, text="PART ONE The Guitar", page=1)])
+    assert drafts == []
+
+
+def test_the_other_real_ocr_artifact_is_also_dropped():
+    drafts = chunk_sections(
+        [Section(heading=None, text="There is no visible text on this page.", page=7)]
+    )
+    assert drafts == []
+
+
+def test_a_substantive_section_is_still_chunked():
+    """The cut is at "carries no information whatsoever" (40 chars), NOT at the
+    relevance floor (200) — the two answer different questions and are deliberately
+    different numbers. A 60-char sentence is thin, but it is real text."""
+    text = "A humbucker cancels hum by using two coils wound in opposition."
+    drafts = chunk_sections([Section(heading=None, text=text, page=1)])
+    assert [d.text for d in drafts] == [text]

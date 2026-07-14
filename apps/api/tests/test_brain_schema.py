@@ -3,7 +3,7 @@ from sqlalchemy import select, text
 
 from app.config import settings
 from app.db import Base, SessionLocal, engine
-from app.models.knowledge import Chunk, KnowledgeSource
+from app.models.knowledge import EMBED_DIM, Chunk, KnowledgeSource
 
 # Skip cleanly (not error) when no DB is reachable — mirrors test_models_roundtrip.py.
 try:
@@ -37,7 +37,7 @@ def test_domain_and_cosine_order():
         # so they are equidistant from any query under cosine distance and "nearest
         # == c1" is not well-defined. This version tests the same capability, cosine
         # NN ordering, without that flaw.)
-        dim = settings.embed_dim
+        dim = EMBED_DIM
         axis_vectors = {
             "c_a": [1.0, 0.0, 0.0] + [0.0] * (dim - 3),
             "c_b": [0.0, 1.0, 0.0] + [0.0] * (dim - 3),

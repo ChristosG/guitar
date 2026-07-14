@@ -13,18 +13,30 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class CurriculumGenerateRequest(BaseModel):
+    """The non-interview `POST /curricula/generate` body.
+
+    `domain` IS GONE (Plan 13, Stage 6). Chris asked what it did; the honest answer
+    was one line in one prompt and a retrieval filter that, after 5d77bd0, could no
+    longer exclude anything. `brief` is what it was standing in for — the tutor
+    describing, in his own words, what the course is for — and unlike `domain` it
+    reaches every lesson-draft prompt, not just the outline.
+    """
     title: str
     language: str
-    profile: dict
-    domain: str | None = None
+    profile: dict = Field(default_factory=dict)
+    brief: str | None = None
+    # The real shape. `target_minutes_total` stays for the chat agent's tool, which
+    # only knows a total — `curriculum.generate.shape_from_request` derives from it.
+    weeks: int | None = Field(default=None, gt=0)
+    sessions_per_week: int = Field(default=1, gt=0)
+    minutes_per_session: int | None = Field(default=None, gt=0)
     target_minutes_total: int | None = Field(default=None, gt=0)
-    # Plan 12 Task 2 (G1): scope generation to the sources the tutor picked
-    # in the library, instead of the model's general knowledge. Both fields
-    # default to their pre-existing behaviour (unscoped search / gaps left
-    # unfilled) so an old request body — with neither key present — produces
-    # the exact same `generate_curriculum` call as before this task.
     source_ids: list[UUID] | None = None
-    allow_general: bool = False
+    student_id: UUID | None = None
+    # "library_only" | "general_knowledge" | "web". `allow_general` is the legacy
+    # boolean spelling of the same choice and is translated, not honoured twice.
+    gap_policy: str | None = None
+    allow_general: bool = True
 
 
 class CurriculumListItem(BaseModel):
@@ -72,11 +84,31 @@ class AssignRequest(BaseModel):
     student_id: UUID
 
 
+class ArtifactBrief(BaseModel):
+    """An artifact, embedded in the tree it is attached to."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    kind: str
+    title: str
+    spec: dict
+
+
 class BlockTreeOut(BaseModel):
     """Recursive tree shape returned by `routers.curriculum.block_to_tree`.
-    `from_attributes=True` so it would also accept an ORM object directly,
-    though every current call site passes the plain dict `block_to_tree`
-    returns.
+
+    `meta` IS SERIALIZED, AND UNTIL STAGE 6 IT WAS NOT. `block_to_tree` returned
+    nine fields and provenance was not one of them — so the citation chips, the
+    grounding tiers and the gap badges the spec promised were WRITTEN TO THE
+    DATABASE AND THEN THROWN AWAY at the API boundary. The board could not have
+    rendered them if it wanted to; there was nothing in the response to render.
+
+    `artifacts` is embedded for the same reason it is embedded rather than
+    fetched: every segment leaf used to fire its own `GET /artifacts?block_id=`,
+    ~120 of them in parallel on a single board render. That stampede IS the "Could
+    not load attached artifacts" error the tutor kept seeing — not a bug in the
+    artifacts endpoint, just too many of it at once. Now the whole tree's artifacts
+    come back from ONE `WHERE block_id IN (...)`.
     """
     model_config = ConfigDict(from_attributes=True)
 
@@ -89,7 +121,43 @@ class BlockTreeOut(BaseModel):
     language: str
     plane: str
     student_id: UUID | None = None
+    meta: dict | None = None
+    artifacts: list[ArtifactBrief] = []
     children: list["BlockTreeOut"] = []
 
 
 BlockTreeOut.model_rebuild()
+
+
+class ModuleCreate(BaseModel):
+    title: str = Field(min_length=1)
+    objective: str = ""
+    tier: str = "general_knowledge"
+    after: UUID | None = None
+
+
+class LessonCreate(BaseModel):
+    title: str = Field(min_length=1)
+    objective: str = ""
+    after: UUID | None = None
+
+
+class ReorderRequest(BaseModel):
+    direction: str   # "up" | "down"
+
+
+class RefineRequest(BaseModel):
+    """The Extend-with-chat instruction, in the tutor's own words."""
+    instruction: str = Field(min_length=1)
+
+
+class DraftProgressOut(BaseModel):
+    """What the board polls every 2 seconds. A GROUP BY over the lesson blocks —
+    never a counter on the job row (see `curriculum.draft.draft_progress`)."""
+    root_id: UUID
+    total: int
+    queued: int
+    drafting: int
+    ready: int
+    failed: int
+    done: bool

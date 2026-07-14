@@ -108,6 +108,7 @@ from app.curriculum.assign import clone_content_subtree
 from app.curriculum.generate import generate_curriculum as _generate_curriculum_service
 from app.curriculum.progress import upsert_progress as _upsert_progress_service
 from app.curriculum.segment import segment_block as _segment_block_service
+from app.i18n import DEFAULT_LOCALE
 from app.lessons.draft import draft_lesson_from_selection as _draft_lesson_service
 from app.lessons.edit import add_session as _add_session_service
 from app.lessons.edit import merge_sessions as _merge_sessions_service
@@ -121,6 +122,7 @@ from app.notes.promote import promote_note as _promote_note_service
 from app.schemas.curriculum import BlockUpdate
 from app.schemas.notes import NoteCreate
 from app.schemas.students import StudentCreate, StudentUpdate
+from app.text.normalize import fold
 
 
 @dataclass(frozen=True)
@@ -160,6 +162,61 @@ class ToolEntry:
     job_kind: str | None = None
 
 
+# THE LOCALE IS NOT THE MODEL'S TO CHOOSE (Plan 13, Stage 5.4).
+#
+# Three tools used to take the output language as a MODEL-SUPPLIED tool
+# argument: `explain_concept.locale` (default "en"), `draft_lesson_from_
+# selection.language` (default "en") and — worst — `generate_curriculum.
+# language`, which was a REQUIRED parameter the model filled in by guessing.
+# The tutor could be looking at a fully Greek UI and get an English
+# curriculum because the model decided the course title "looked English".
+# `generate_artifact` didn't expose one at all, so its specs were always
+# English.
+#
+# The language is a property of the SESSION (`ChatSession.locale`, itself
+# set from the browser's `X-App-Locale`), not of the model's judgment. So the
+# parameters are GONE from the schemas the model sees (it cannot supply what
+# it isn't offered), and this map is how the loop/router injects the real one
+# at dispatch time. The fns keep the keyword — with an `el` default, never
+# `en` — because they are also called directly (tests, the job runner, a
+# future non-chat caller).
+#
+# Values are the PARAMETER NAME each fn actually uses; the repo is not
+# consistent about `locale` vs `language` and this map is not the place to
+# start renaming public function signatures.
+LOCALE_ARG: dict[str, str] = {
+    "explain_concept": "locale",
+    "generate_artifact": "locale",
+    "generate_curriculum": "language",
+    "draft_lesson_from_selection": "language",
+}
+
+
+def with_locale(tool_name: str, arguments: dict, locale: str) -> dict:
+    """`arguments` + the session's locale, for any tool that takes one.
+
+    Returns a NEW dict — never mutates `arguments` in place. `loop.py` holds
+    the model's parsed `ToolCall.arguments` and `routers/chat.py` holds an
+    `ApprovalRequest.tool_args`/`edited_args` loaded off a plain `sa.JSON`
+    column (no `MutableDict`: an in-place mutation there would not even
+    persist), so both call sites need a value they can hand on, not a
+    surprise side effect on a shared object.
+
+    Injection is UNCONDITIONAL — it OVERWRITES whatever is already under that
+    key. That is the point: a resumed/edited approval can still carry a stale
+    `language` (an `ApprovalRequest` row proposed before this change, or a
+    tutor hand-editing the JSON in the approval card), and the session's
+    locale outranks all of it. The other direction matters too: `edited_args`
+    REPLACES `tool_args` wholesale at resolve time, so a tutor who edits the
+    JSON and simply drops `language` would otherwise hand `run_curriculum_job`
+    a params dict with no language at all.
+    """
+    param = LOCALE_ARG.get(tool_name)
+    if param is None:
+        return dict(arguments)
+    return {**arguments, param: locale}
+
+
 def _parse_uuid(raw: str) -> UUID | None:
     """Tool arguments arrive as JSON strings (JSON has no native UUID type) —
     a hallucinated or malformed id must not crash the loop, so this returns
@@ -175,14 +232,31 @@ def _parse_uuid(raw: str) -> UUID | None:
 # Brain reads
 # ---------------------------------------------------------------------------
 
-def _search_knowledge(
-    db, *, query: str, k: int = 8, domain: str | None = None, language: str | None = None
-) -> list[dict]:
-    hits = search(db, query, k=k, domain=domain, language=language)
-    return [{"source": h.source_title, "text": h.text, "score": round(h.score, 3)} for h in hits]
+def _search_knowledge(db, *, query: str, k: int = 8) -> list[dict]:
+    """`domain` and `language` are GONE from this tool, and their absence is the
+    fix (Plan 13, Stage 4.4).
+
+    Both were optional filters the MODEL chose the value for. `language` was the
+    live hazard: under the Greek default locale the model helpfully passes
+    `language="el"`, and the tutor's library is an ENGLISH book — so his entire
+    corpus filtered to zero results, in the language he actually works in, and
+    the model then answered from pretrained memory with nothing to show it had
+    even looked. (`domain` had the identical NULL-exclusion shape; 5d77bd0 fixed
+    that one and this deletes the class.) A filter whose value is guessed by the
+    model and whose failure mode is a silently empty corpus is not a feature.
+
+    `score` reported to the model is the COSINE (`Hit.vector_score`), not
+    `Hit.score` — which is now an RRF fusion score in the ~0.03 range and would
+    read to the model as "nothing here is relevant".
+    """
+    hits = search(db, query, k=k)
+    return [
+        {"source": h.source_title, "text": h.text, "score": round(h.vector_score, 3)}
+        for h in hits
+    ]
 
 
-def _explain_concept(db, *, query: str, locale: str = "en", k: int = 8) -> dict:
+def _explain_concept(db, *, query: str, locale: str = DEFAULT_LOCALE, k: int = 8) -> dict:
     result = answer(db, query, locale=locale, k=k)
     return {
         "text": result.text,
@@ -282,10 +356,36 @@ def _find_lesson(db, *, title_query: str) -> list[dict]:
     wrong (HITL caught every wrong guess — the gate working exactly as
     designed — but the guessing itself was the actual bug this fixes).
 
-    A (partial, case-insensitive) title match over `Block(kind="lesson")`
-    rows (see `app.lessons.draft`'s own B1 note: a lesson is `Block(
-    kind="lesson")` with `Block(kind="session")` children) — `kind="read"`,
+    A (partial, case- AND ACCENT-insensitive) title match over `Block(
+    kind="lesson")` rows (see `app.lessons.draft`'s own B1 note: a lesson is
+    `Block(kind="lesson")` with `Block(kind="session")` children) — `kind="read"`,
     it only ever SELECTs, same as every other read tool in this registry.
+
+    THE ACCENT PART IS A LIVE BUG FIX (Plan 13, Stage 4.7). This used to be
+    `Block.title.ilike(f"%{title_query}%")`, and **Postgres's ILIKE is
+    accent-SENSITIVE**: `ILIKE '%τονικοτητα%'` does not match `Τονικότητα`. It
+    lowercases, it does not fold. So a tutor asking about his own lesson in Greek
+    the way people actually type — without accents — got ZERO hits, and the model
+    went straight back to guessing uuids, which is the exact failure this tool
+    exists to end. Greek accents also MOVE under inflection (μάθημα ->
+    μαθήματα), so this is not an edge case people type their way around.
+
+    Fixed with `app.text.normalize.fold` in PYTHON, not with an accent-insensitive
+    SQL predicate: the honest SQL answer is the `unaccent` extension, which is one
+    more thing to install on the tutor's iMac (and one more thing to forget) for a
+    table that holds a few dozen lesson titles. Filtering `kind="lesson"` in SQL
+    and folding the survivors in memory is exact, portable, and free at this size.
+    """
+    candidates = db.scalars(
+        select(Block).where(Block.kind == "lesson").order_by(Block.created_at.desc())
+    ).all()
+    needle = fold(title_query)
+    lessons = [b for b in candidates if needle in fold(b.title or "")]
+    return _lesson_rows(db, lessons)
+
+
+def _lesson_rows(db, lessons: list[Block]) -> list[dict]:
+    """Shape each matched lesson for the model.
 
     Each match returns `id`/`title`/`provenance` — the `{"source_id",
     "page_no"}` a lesson drafted via `draft_lesson_from_selection` records on
@@ -299,11 +399,6 @@ def _find_lesson(db, *, title_query: str) -> list[dict]:
     ids exist under a lesson it already found by name — directly closing the
     "three attempts" gap this tool exists to fix.
     """
-    lessons = db.scalars(
-        select(Block)
-        .where(Block.kind == "lesson", Block.title.ilike(f"%{title_query}%"))
-        .order_by(Block.created_at.desc())
-    ).all()
     results = []
     for lesson in lessons:
         provenance = None
@@ -484,6 +579,7 @@ def _assign_curriculum(db, *, root_id: str, student_id: str) -> dict:
 
 def _generate_artifact(
     db, *, kind: str, prompt: str, block_id: str | None = None, ground: bool = False,
+    locale: str = DEFAULT_LOCALE,
 ) -> dict:
     """Wraps `app.artifacts.generate.generate_artifact` (also `POST
     /artifacts/generate`'s service) — a blocking guided-JSON LLM call
@@ -513,6 +609,7 @@ def _generate_artifact(
 
     artifact = _generate_artifact_service(
         db, kind=kind, prompt=prompt, block_id=parsed_block_id, ground=ground,
+        locale=locale,
     )
     return {
         "id": artifact.id, "kind": artifact.kind, "title": artifact.title,
@@ -521,25 +618,39 @@ def _generate_artifact(
 
 
 def _generate_curriculum(
-    db, *, title: str, language: str, profile: dict,
-    domain: str | None = None, target_minutes_total: int | None = None,
+    db, *, title: str, profile: dict | None = None, language: str = DEFAULT_LOCALE,
+    brief: str | None = None, weeks: int | None = None,
+    minutes_per_session: int | None = None, target_minutes_total: int | None = None,
+    student_id: str | None = None,
 ) -> dict:
     """Thin wrapper over `app.curriculum.generate.generate_curriculum` for
-    REGISTRY COMPLETENESS ONLY — Task 4 does NOT call this fn directly at
-    resolve time. `generate_curriculum` blocks for 49-179s/call (that
-    module's own docstring), which is exactly why Plan 8 gave it a
-    `GenerationJob` + background-runner path (`routers/curriculum.py`'s
-    `POST /curricula/generate`); this `ToolEntry` is registered with
-    `async_job=True` specifically so Task 4 special-cases it to enqueue a
-    `GenerationJob(kind="curriculum", params=...)` + schedule
-    `run_curriculum_job` instead, never calling this fn inline on the
-    request path. Kept as a genuinely working function anyway (rather than a
-    stub that raises) so the registry entry isn't a dead end — e.g. still
-    directly callable/testable, or usable by a future non-HTTP caller.
+    REGISTRY COMPLETENESS ONLY — the loop does NOT call this fn at resolve time.
+    It is registered with `async_job=True` so `routers/chat.py` enqueues a
+    `GenerationJob(kind="curriculum")` and schedules `run_curriculum_job` instead,
+    never calling this inline on the request path. Kept as a genuinely working
+    function (rather than a stub that raises) so the registry entry isn't a dead
+    end.
+
+    `domain` IS GONE from the signature and from the schema below. It was one dead
+    prompt line and a retrieval filter that could no longer exclude anything;
+    `brief` is what the model should have been passing all along.
+
+    `student_id` is NEW here, and its absence was the bug: the tool could name a
+    student in `profile` and that string reached the outline prompt and nowhere
+    else. Now it resolves a real `Student` and reaches every lesson draft.
     """
+    parsed_student_id = None
+    if student_id is not None:
+        parsed_student_id = _parse_uuid(student_id)
+        if parsed_student_id is None:
+            return {"error": f"invalid student_id: {student_id!r}"}
+        if db.get(Student, parsed_student_id) is None:
+            return {"error": f"student not found: {student_id}"}
+
     root_id = _generate_curriculum_service(
-        db, title=title, language=language, profile=profile,
-        domain=domain, target_minutes_total=target_minutes_total,
+        db, title=title, language=language, profile=profile or {}, brief=brief,
+        weeks=weeks, minutes_per_session=minutes_per_session,
+        target_minutes_total=target_minutes_total, student_id=parsed_student_id,
     )
     return {"root_id": root_id}
 
@@ -715,7 +826,7 @@ def _log_progress(
 # ---------------------------------------------------------------------------
 
 def _draft_lesson_from_selection(
-    db, *, source_id: str, page_no: int, text: str, language: str = "en",
+    db, *, source_id: str, page_no: int, text: str, language: str = DEFAULT_LOCALE,
 ) -> dict:
     """Wraps `app.lessons.draft.draft_lesson_from_selection` (also `POST
     /lessons/from-selection`'s service, Plan 10 Task 1) — REGISTRY
@@ -851,14 +962,11 @@ TOOLS: dict[str, ToolEntry] = {
                             "type": "integer",
                             "description": "how many results to return (default 8)",
                         },
-                        "domain": {
-                            "type": "string",
-                            "description": "optional: only this knowledge domain, e.g. 'tone', 'theory'",
-                        },
-                        "language": {
-                            "type": "string",
-                            "description": "optional: only sources in this 2-letter language, e.g. 'en'/'el'",
-                        },
+                        # NO `domain`, NO `language`. See `_search_knowledge`'s
+                        # docstring — a model-chosen `language="el"` filtered the
+                        # tutor's English library to zero hits under his own
+                        # default locale. The library is searched cross-lingually
+                        # by `retrieve.search`, which translates the query itself.
                     },
                     "required": ["query"],
                 },
@@ -883,10 +991,10 @@ TOOLS: dict[str, ToolEntry] = {
                     "type": "object",
                     "properties": {
                         "query": {"type": "string", "description": "the concept or question to explain"},
-                        "locale": {
-                            "type": "string",
-                            "description": "answer language, 'en' or 'el' (default 'en')",
-                        },
+                        # NO `locale` — the answer language comes from the
+                        # session, injected at dispatch (`LOCALE_ARG`/
+                        # `with_locale`). It used to be a model-chosen
+                        # parameter that defaulted to English.
                         "k": {
                             "type": "integer",
                             "description": "how many source chunks to ground the answer in (default 8)",
@@ -1241,35 +1349,54 @@ TOOLS: dict[str, ToolEntry] = {
             "function": {
                 "name": "generate_curriculum",
                 "description": (
-                    "Generate a brand-new curriculum (course -> modules -> "
-                    "lessons -> segments) from a title/profile/domain using "
-                    "the LLM, grounded in the knowledge base. Slow (roughly "
-                    "1-3 minutes) — runs as a background job once approved. "
-                    "This is a MUTATION — it requires the tutor's explicit "
+                    "Author a brand-new curriculum (course -> modules -> lessons) "
+                    "by reading the tutor's ENTIRE library and outlining from it, "
+                    "then drafting every lesson in the background. Slow — runs as "
+                    "a background job once approved, and the tutor watches the "
+                    "lessons arrive. This is a MUTATION — it requires his explicit "
                     "approval before it starts."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "title": {"type": "string", "description": "the course title"},
-                        "language": {
+                        # NO `language` — it was a REQUIRED, model-chosen parameter
+                        # here, which is how a Greek tutor got an English
+                        # curriculum. Injected from the session at dispatch AND at
+                        # suspend (`with_locale`), so the approval card, the wire
+                        # message and the enqueued job's params all agree.
+                        #
+                        # NO `domain` either — it was one dead prompt line and a
+                        # filter that could no longer filter. `brief` replaces it.
+                        "brief": {
                             "type": "string",
-                            "description": "2-letter language for the generated content, e.g. 'en'/'el'",
+                            "description": (
+                                "what this course is FOR, in the tutor's own words — "
+                                "what the student should be able to do at the end"
+                            ),
+                        },
+                        "weeks": {
+                            "type": "integer",
+                            "description": "how many weeks the course runs (one session a week)",
+                        },
+                        "minutes_per_session": {
+                            "type": "integer",
+                            "description": "minutes per session, e.g. 50",
+                        },
+                        "student_id": {
+                            "type": "string",
+                            "description": (
+                                "optional: the student this is for. Omit it for a "
+                                "course aimed at no one in particular — that is a "
+                                "normal, expected answer, not a missing field."
+                            ),
                         },
                         "profile": {
                             "type": "object",
-                            "description": "student/target profile, e.g. {\"level\": \"beginner\", \"age\": 10}",
-                        },
-                        "domain": {
-                            "type": "string",
-                            "description": "optional: knowledge-base domain to ground generation in, e.g. 'tone', 'theory'",
-                        },
-                        "target_minutes_total": {
-                            "type": "integer",
-                            "description": "optional: target total course length in minutes",
+                            "description": "optional: target profile, e.g. {\"level\": \"beginner\"}",
                         },
                     },
-                    "required": ["title", "language", "profile"],
+                    "required": ["title"],
                 },
             },
         },
@@ -1416,13 +1543,11 @@ TOOLS: dict[str, ToolEntry] = {
                             "type": "string",
                             "description": "the exact passage text to ground the lesson in",
                         },
-                        "language": {
-                            "type": "string",
-                            "description": (
-                                "optional: 2-letter language for the generated "
-                                "lesson, e.g. 'en'/'el' (default 'en')"
-                            ),
-                        },
+                        # NO `language` — same reasoning as
+                        # `generate_curriculum` above: injected from the
+                        # session, never chosen by the model. The passage the
+                        # lesson grounds on is his ENGLISH book; the lesson
+                        # is written in HIS language.
                     },
                     "required": ["source_id", "page_no", "text"],
                 },

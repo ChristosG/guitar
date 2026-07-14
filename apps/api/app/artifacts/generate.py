@@ -17,6 +17,7 @@ from pydantic import ValidationError
 
 from app.artifacts.specs import SPECS, validate_spec
 from app.brain.retrieve import search
+from app.i18n import DEFAULT_LOCALE, answer_in, language_directive
 from app.llm.factory import get_provider
 from app.models.artifact import Artifact
 
@@ -58,7 +59,8 @@ TITLE_MAX_LEN = 300
 
 
 def _build_messages(
-    *, kind: str, prompt: str, hits: list, repair_error: str | None = None,
+    *, kind: str, prompt: str, hits: list, locale: str = DEFAULT_LOCALE,
+    repair_error: str | None = None,
 ) -> list[dict]:
     """Pure function: the {system,user} messages for one guided_json call —
     kept separate from `generate_artifact` (which also calls the live model)
@@ -84,6 +86,19 @@ def _build_messages(
     schema already constrains, it's teaching the model a field's *content*
     syntax (AlphaTab's alphaTex mini-language) the schema can't express at
     all (`alphaTex` is just `str` — see `app.artifacts.specs.TabSpec`).
+
+    `locale` (Plan 13, Stage 5.3) — this builder had NO locale at all, which
+    is why a Greek tutor's artifacts came out in English: the spec's prose
+    fields (a chord's `notes`, a gear card's `why`, a tone recipe's steps)
+    were written in whatever language the model felt like, and the model
+    defaults to English. `app.i18n.language_directive` is what makes them
+    Greek — and, critically, what stops the model ALSO "translating"
+    `alphaTex`, the chord/note names and the gear model names inside that
+    same spec. A transliterated chord name is not a chord name; AlphaTab
+    throws on a translated alphaTex. The directive states that exemption
+    explicitly, which is why this is the one place in the app where "write
+    it in Greek" and "leave it exactly as it is" have to be said in the same
+    breath.
     """
     system = (
         f"You generate ONLY the JSON spec for a {kind}, matching the given "
@@ -91,11 +106,12 @@ def _build_messages(
     )
     if kind in _KIND_PROMPT_GUIDANCE:
         system += "\n\n" + _KIND_PROMPT_GUIDANCE[kind]
+    system += "\n\n" + language_directive(locale)
     if hits:
         context = "\n\n".join(f"[{i}] {hit.text}" for i, hit in enumerate(hits, start=1))
-        user = f"{prompt}\n\nCONTEXT:\n{context}"
+        user = f"{prompt}\n\nCONTEXT:\n{context}\n\n{answer_in(locale)}"
     else:
-        user = prompt
+        user = f"{prompt}\n\n{answer_in(locale)}"
     if repair_error:
         user += (
             f"\n\nYour previous attempt was INVALID: {repair_error}\n"
@@ -150,6 +166,7 @@ def derive_title(kind: str, spec: dict, prompt: str | None) -> str:
 
 def generate_artifact(
     db, *, kind: str, prompt: str, block_id=None, ground: bool = False,
+    locale: str = DEFAULT_LOCALE,
 ) -> Artifact:
     """Guided-JSON generate a `kind` spec from `prompt`, validate it (one
     repair retry on a structural/semantic failure), persist as an
@@ -171,6 +188,14 @@ def generate_artifact(
     that silently no-ops an explicit `ground=True` for some kind would be a
     surprise, not a safety net. Keeps this function's behavior simple and
     predictable instead.
+
+    `locale`: the tutor's UI language (`X-App-Locale`, via `app.i18n.
+    locale_dep` at the HTTP boundary, or injected from the chat session at
+    tool-dispatch time — it is never model-chosen). Defaults to the app's
+    own default, `el`, NOT to English: a caller that forgets it gets the
+    tutor's language, not the model's. See `_build_messages` for what the
+    directive actually has to say to keep the prose Greek while leaving
+    alphaTex/chord names/gear names untouched.
 
     THE CRITICAL DESIGN POINT: vLLM's guided decoding (`guided_json`)
     CONSTRAINS output *shape* to `SPECS[kind]`'s own JSON schema, but does
@@ -199,7 +224,7 @@ def generate_artifact(
     schema = SPECS[kind].model_json_schema()
     provider = get_provider()
 
-    messages = _build_messages(kind=kind, prompt=prompt, hits=hits)
+    messages = _build_messages(kind=kind, prompt=prompt, hits=hits, locale=locale)
     raw = provider.guided_json(messages, schema)
     try:
         spec = validate_spec(kind, raw)
@@ -209,7 +234,7 @@ def generate_artifact(
             "attempt, retrying once with the error folded back in: %s", kind, e,
         )
         repair_messages = _build_messages(
-            kind=kind, prompt=prompt, hits=hits, repair_error=str(e),
+            kind=kind, prompt=prompt, hits=hits, locale=locale, repair_error=str(e),
         )
         raw = provider.guided_json(repair_messages, schema)
         spec = validate_spec(kind, raw)  # a second failure propagates uncaught

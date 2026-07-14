@@ -208,14 +208,17 @@ def test_get_curriculum_malformed_root_id_returns_graceful_error():
 # ---------------------------------------------------------------------------
 
 def test_search_knowledge_wraps_search_into_compact_rows(monkeypatch):
+    # `score` reported to the model is the COSINE (`vector_score`), never
+    # `Hit.score` — which is now an RRF fusion score in the ~0.03 range and would
+    # read to the model as "nothing in the library is relevant".
     hits = [
         Hit(chunk_id="c1", source_id="s1", source_title="Pickups", text="hum is cancelled",
-            section_path=None, page=None, score=0.912345),
+            section_path=None, page=None, score=0.0328, vector_score=0.912345),
     ]
     captured = {}
 
-    def _fake_search(db, query, *, k=8, domain=None, language=None):
-        captured.update(query=query, k=k, domain=domain, language=language)
+    def _fake_search(db, query, *, k=8):
+        captured.update(query=query, k=k)
         return hits
 
     monkeypatch.setattr(agent_tools, "search", _fake_search)

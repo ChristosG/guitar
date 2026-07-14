@@ -11,7 +11,11 @@ is what turns a retrieved chunk into a citation you can actually open.
 """
 import logging
 import os
+import re
+import unicodedata
 from dataclasses import dataclass
+
+from sqlalchemy import or_
 
 from app.brain.chunk import chunk_sections
 from app.brain.extract import Section
@@ -50,6 +54,56 @@ _MAX_ATTEMPTS = 2       # initial + one retry
 # eliminate — it is cheap insurance, not a proof.
 _SUSPECTED_TRUNCATION_CHARS = 12_000
 
+# Page-level pickup cap (Stage 7.4). Counts PICKUPS (`Page.ocr_attempts`), not
+# vision() calls — each pickup already gets `_MAX_ATTEMPTS` tries of its own.
+# Three exists to make re-picking-up `empty` pages affordable: an OCR'd-to-empty
+# page used to be dead forever (the old pickup filter was pending/failed/
+# ocr_running only), so a one-off "" from the model permanently lost a page of
+# the book; retrying it on every run instead would re-bill the book's genuinely
+# blank pages — a real 77-page scan has several — every single time the tutor
+# pressed Retry. After three honest attempts a page is left alone.
+MAX_PAGE_ATTEMPTS = 3
+
+# Which page statuses `ocr_source` re-picks-up. "ocr_running" is here so a page
+# orphaned by a hard process kill mid-vision() (which never got to write `failed`)
+# resumes on the next run instead of being stuck forever; "empty" is here for the
+# reason above. Safe to re-pick-up any of them: re-OCRing a page is idempotent
+# (`_embed_page` deletes that page's existing chunks before re-adding them).
+PICKUP_STATUSES = ("pending", "failed", "ocr_running", "empty")
+
+# The quality gate (Stage 7.4). A vision model asked to transcribe a page it
+# cannot read does not fail — it NARRATES. These are the shapes that answer,
+# lifted from what actually turned up in the real library (retrieve.py's floor
+# quotes the same 38-char "There is no visible text on this page." junk chunk,
+# which was embedded, indexed, and cited to the tutor before anything screened
+# for it). Matched only against a SHORT response — see `_looks_like_no_text`.
+_NO_TEXT_PATTERNS = re.compile(
+    r"(no (visible|readable|legible|discernible)?\s*text"
+    r"|nothing (is )?(visible|readable|written)"
+    r"|(this |the )?page (is|appears) (blank|empty)"
+    r"|blank page"
+    r"|δεν υπάρχει (ορατό )?κείμενο"
+    r"|κενή σελίδα)",
+    re.IGNORECASE,
+)
+
+# A page's response is screened for a "no visible text" sentinel only if it is at
+# most this long. THE POINT OF THE BOUND: a genuinely short page with real content
+# ("Chapter 3", a part title, a photo caption) must never be screened out — that
+# would turn a healthy book amber, which is the exact failure mode Stage 7.4 was
+# warned about. A model's refusal narration is one sentence; a real page that
+# happens to also contain the phrase "no visible text" (a book about OCR, say)
+# will be far longer than this.
+_NO_TEXT_MAX_CHARS = 200
+
+# Unicode-garbage screen. Mojibake and a mis-decoded scan produce long runs of
+# symbol/private-use/replacement codepoints; real prose in any language this app
+# serves (English, Greek) is overwhelmingly letters, digits, whitespace and
+# punctuation. Only applied above a length where the ratio means anything at all:
+# a 12-char page of pure musical symbols is not evidence of a broken read.
+_GARBAGE_RATIO = 0.30
+_GARBAGE_MIN_CHARS = 120
+
 
 class _SuspectedTruncation(RuntimeError):
     """Raised when a vision() response is long enough to plausibly have hit
@@ -61,6 +115,40 @@ class _SuspectedTruncation(RuntimeError):
     failure — there is still no manual-edit path."""
 
 
+class _GarbageTranscription(RuntimeError):
+    """The response was long enough to judge and was mostly not language (see
+    `_looks_like_garbage`). Routed through the same one-retry-then-`failed` path
+    as any other vision() error: a mis-decoded scan is a FAILED page (amber, with
+    a retry), not an `empty` one (which would silently roll up green)."""
+
+
+def _looks_like_no_text(text: str) -> bool:
+    """True for a model NARRATING that the page has nothing on it, rather than
+    transcribing it. Such a page is `empty` — a true fact about the book, not a
+    failure to read it — so it must not be counted against the source's health.
+
+    The length bound is load-bearing; see `_NO_TEXT_MAX_CHARS`.
+    """
+    return len(text) <= _NO_TEXT_MAX_CHARS and bool(_NO_TEXT_PATTERNS.search(text))
+
+
+def _looks_like_garbage(text: str) -> bool:
+    """True when a long-enough response is mostly not letters/digits/whitespace/
+    punctuation — the signature of mojibake or a mis-decoded image, which must
+    never reach the index as if it were the tutor's book.
+
+    Unicode CATEGORIES, not an ASCII allowlist: Greek is a first-class language
+    here, and `str.isascii()`-style screens fail an entire Greek corpus.
+    """
+    if len(text) < _GARBAGE_MIN_CHARS:
+        return False
+    junk = sum(
+        1 for ch in text
+        if not (ch.isspace() or unicodedata.category(ch)[0] in ("L", "N", "P"))
+    )
+    return junk / len(text) > _GARBAGE_RATIO
+
+
 @dataclass
 class OcrResult:
     total: int
@@ -69,15 +157,22 @@ class OcrResult:
 
 
 def ocr_source(db, source_id) -> OcrResult:
-    # "ocr_running" is included so a page orphaned by a hard process kill
-    # mid-vision() (which never gets to write `failed`) is resumed on the
-    # next run instead of being stuck forever. Safe to re-pick-up: re-OCRing
-    # a page is idempotent (_embed_page deletes that page's existing chunks
-    # before re-adding them).
+    # Pages this run will touch: a non-terminal/retryable status (PICKUP_STATUSES)
+    # that has not already burned its attempt budget (MAX_PAGE_ATTEMPTS). The
+    # attempt cap is what lets `empty` be retryable without re-billing the book's
+    # blank pages on every run — see both constants' docstrings.
+    #
+    # `or_(is_(None), <)` because `ocr_attempts` is NULL on every Page row written
+    # before the column existed (the server_default only applies to new INSERTs) —
+    # and in SQL, `NULL < 3` is NULL, not TRUE. Without the explicit NULL branch,
+    # this filter would silently exclude every page of the tutor's existing books
+    # and OCR would appear to do nothing at all.
     pages = (
         db.query(Page)
         .filter(Page.source_id == source_id,
-                Page.status.in_(["pending", "failed", "ocr_running"]))
+                Page.status.in_(PICKUP_STATUSES),
+                or_(Page.ocr_attempts.is_(None),
+                    Page.ocr_attempts < MAX_PAGE_ATTEMPTS))
         .order_by(Page.page_no)
         .all()
     )
@@ -99,6 +194,12 @@ def ocr_source(db, source_id) -> OcrResult:
             continue
 
         page.status = "ocr_running"
+        # Incremented BEFORE the call, and committed with the "ocr_running"
+        # status, so it counts attempts that were MADE — a page whose vision()
+        # call hard-kills the process still spent an attempt, and must not be
+        # able to spend an unbounded number of them by never getting to record
+        # any (`ocr_running` is itself a pickup status).
+        page.ocr_attempts = (page.ocr_attempts or 0) + 1
         db.commit()
         try:
             text = _transcribe_with_retry(provider, page)
@@ -111,6 +212,16 @@ def ocr_source(db, source_id) -> OcrResult:
             db.commit()
             failed += 1
             continue
+
+        # The quality gate (Stage 7.4), in the one place that can still tell the
+        # difference between "this page has nothing on it" and "we failed to read
+        # this page". Getting that distinction wrong in either direction is a lie
+        # the tutor pays for: an `empty` page rolls the source up GREEN, a
+        # `failed` one turns it AMBER with a retry.
+        if _looks_like_no_text(text):
+            log.info("ocr: page %s narrated 'no visible text' — recording empty",
+                     page.page_no)
+            text = ""
 
         page.text = text or None
         page.ocr_error = None
@@ -221,6 +332,16 @@ def _transcribe_with_retry(provider, page: Page) -> str:
                     f"{_SUSPECTED_TRUNCATION_CHARS}) — suspected truncation "
                     "at the max_tokens ceiling; finish_reason is not "
                     "available to confirm either way"
+                )
+            # Garbage is screened HERE, inside the retry loop, rather than at the
+            # call site: mojibake is exactly the kind of transient decode failure
+            # a second attempt can come back clean from, and if it doesn't, this
+            # lands on the same `failed` path as any other unreadable page.
+            if _looks_like_garbage(text):
+                raise _GarbageTranscription(
+                    f"vision() returned {len(text)} chars that are mostly not "
+                    "language (>30% symbol/control codepoints) — the scan did "
+                    "not decode"
                 )
             return text
         except Exception as e:                       # noqa: BLE001 — retry boundary

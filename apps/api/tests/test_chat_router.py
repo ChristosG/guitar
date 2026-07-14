@@ -476,7 +476,13 @@ def test_resolve_approve_async_generate_curriculum_enqueues_a_job_and_does_not_r
     scheduled_job_ids = []
     monkeypatch.setattr(chat_router, "run_curriculum_job", scheduled_job_ids.append)
 
+    # The model still *tries* to pick a language (an old transcript, a
+    # hallucinated arg — the parameter is gone from the schema, not from the
+    # universe). The session's locale overrides it, at suspend AND at resolve
+    # (Plan 13, Stage 5.4): the enqueued job must carry `el`, not the "en" the
+    # model asked for, or a Greek tutor gets an English curriculum.
     args = {"title": "Test Course", "language": "en", "profile": {"level": "beginner"}}
+    expected_params = {**args, "language": "el"}
     fake_provider = _use_provider(monkeypatch, [
         AssistantTurn(
             content="I'll generate that curriculum.",
@@ -505,7 +511,7 @@ def test_resolve_approve_async_generate_curriculum_enqueues_a_job_and_does_not_r
         assert job is not None
         assert job.kind == "curriculum"
         assert job.status == "pending"
-        assert job.params == args
+        assert job.params == expected_params
     finally:
         db.close()
 
@@ -561,6 +567,10 @@ def test_resolve_approve_async_draft_lesson_enqueues_a_lesson_job_and_does_not_r
     monkeypatch.setattr(chat_router, "run_lesson_job", _fake_lesson_runner)
 
     args = {"source_id": str(uuid.uuid4()), "page_no": 3, "text": "Some selected passage."}
+    # Same locale injection as the curriculum case above — the lesson job's
+    # params carry the session's language even though the model never sent one
+    # (the tool schema no longer offers it).
+    expected_params = {**args, "language": "el"}
     fake_provider = _use_provider(monkeypatch, [
         AssistantTurn(
             content="I'll draft that lesson.",
@@ -594,7 +604,7 @@ def test_resolve_approve_async_draft_lesson_enqueues_a_lesson_job_and_does_not_r
         assert job is not None
         assert job.kind == "lesson"
         assert job.status == "pending"
-        assert job.params == args
+        assert job.params == expected_params
     finally:
         db.close()
 

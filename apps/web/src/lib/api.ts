@@ -60,7 +60,14 @@ export interface HitOut {
   text: string;
   section_path: string | null;
   page: number | null;
+  /** RRF FUSION score — an ordering key only. It tops out around 0.033 and means
+   *  nothing on its own; never render it as a relevance percentage. */
   score: number;
+  /** Cosine similarity in [0,1] — the one number that answers "how close a match
+   *  is this?". Present since the hybrid-retrieval swap (Plan 13, Stage 4). */
+  vector_score?: number;
+  /** Okapi BM25. 0 when the chunk was found by the dense arm alone. */
+  lexical_score?: number;
 }
 
 export interface SearchResponse {
@@ -156,6 +163,38 @@ async function parseError(res: Response): Promise<ParsedError> {
 }
 
 const LOCALES = ["el", "en"];
+const DEFAULT_LOCALE = "el";
+
+/** The header that finally tells the API what language the tutor is looking at
+ * (Plan 13, Stage 5.1 — `app/i18n.py`'s `LOCALE_HEADER`/`locale_dep`).
+ *
+ * Until now the UI locale never left the browser: `useLocale()` is read by eight
+ * components and every one of them used it only to build an href. So the MODEL
+ * picked the output language — a Greek tutor, on a Greek page, got English
+ * artifacts and an English lesson draft. Every call in this file now carries it,
+ * and the API defaults it to Greek if it is ever missing.
+ */
+const LOCALE_HEADER = "X-App-Locale";
+
+/** The locale the tutor is CURRENTLY LOOKING AT, read off the URL rather than
+ * threaded through 30 call sites.
+ *
+ * next-intl's routing (`src/i18n/routing.ts`) prefixes every route with the
+ * locale — `/el/chat/…`, `/en/library` — so the first path segment IS the
+ * locale, and it is the same segment `handleUnauthorized` already trusts to
+ * build its login bounce. Deliberately a plain module function, NOT a hook:
+ * this file is called from event handlers, polling loops and `useEffect`s, and
+ * a hook would force every one of those call sites to pass a locale down.
+ *
+ * No `window` (SSR/prerender) => the app default, Greek — matching
+ * `routing.ts`'s `defaultLocale` and `app/i18n.py`'s `DEFAULT_LOCALE`.
+ */
+function uiLocale(): string {
+  if (typeof window === "undefined") return DEFAULT_LOCALE;
+  const seg = window.location.pathname.split("/")[1];
+  return LOCALES.includes(seg) ? seg : DEFAULT_LOCALE;
+}
+
 /** Set once we've committed to a bounce, so ten parallel 401s (the cockpit
  * pages fan out several fetches on mount) don't each assign `location.href`. */
 let redirectingToLogin = false;
@@ -187,6 +226,9 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const isFormData = typeof FormData !== "undefined" && init.body instanceof FormData;
   const headers: HeadersInit = {
     ...(init.body != null && !isFormData ? { "Content-Type": "application/json" } : {}),
+    // Before `...init.headers`, so a caller could override it; after nothing,
+    // because no caller ever should.
+    [LOCALE_HEADER]: uiLocale(),
     ...(init.headers ?? {}),
   };
   // `credentials: "include"` — the API is a DIFFERENT ORIGIN (see this file's top
@@ -323,7 +365,93 @@ export interface BlockNode {
   language: string;
   plane: string;
   student_id: string | null;
+  /** THE FIELD THE BOARD WAS MISSING. `block_to_tree` used to serialize nine
+   * fields and `meta` was not one of them, so the tier badges, the gap flags
+   * and the page citations were written to the database by the generator and
+   * dropped at the API boundary — the board could not have rendered them if
+   * it had tried. Optional here because a Block written before Stage 6 has
+   * `null` meta, and every reader below treats that as "nothing to show"
+   * rather than as an error. */
+  meta: BlockMeta | null;
+  /** EMBEDDED, not fetched. Every segment leaf used to fire its own `GET
+   * /artifacts?block_id=` — ~120 in parallel on one board render, which IS
+   * the "Could not load attached artifacts" error the tutor kept seeing. The
+   * whole tree's artifacts now arrive from one `WHERE block_id IN (...)`. */
+  artifacts: ArtifactOut[];
   children: BlockNode[];
+}
+
+/** Where a module's material actually comes from, decided by the model AFTER
+ * READING THE WHOLE LIBRARY — not by a cosine score clearing a constant (that
+ * constant's separation margin on this corpus was measured at 0.021).
+ *
+ * `gap` is not a fourth kind of source; it is the honest absence of one, and it
+ * only happens under the `library_only` gap policy. It is a first-class value
+ * precisely because "your library doesn't cover this" is a TRUE and useful thing
+ * to tell a tutor, and unlabelled general knowledge is the bug he reported. */
+export type Tier = "library" | "general_knowledge" | "web" | "gap";
+
+/** One validated (source, page) pair a segment was actually written from.
+ * `source_id` is the real `KnowledgeSource.id`, so the chip deep-links straight
+ * into the Reader at the cited page — and every one of these was checked against
+ * the pages the model was actually shown before it was persisted
+ * (`curriculum/draft.py`: a citation the tutor clicks and finds nothing on is
+ * worse than no citation, because it is one he will trust). */
+export interface Citation {
+  source_id: string;
+  source_ref: string;
+  source_title: string | null;
+  page: number;
+}
+
+export type DraftStatus = "queued" | "drafting" | "ready" | "failed";
+
+/** `Block.meta` — a different shape per `kind`, all of it optional, because
+ * `meta` is one plain JSON column on one table and a course, a module, a lesson
+ * and a segment each keep different things in it. Kept as one flat interface
+ * rather than a discriminated union: nothing here is required, every reader
+ * already checks the fields it cares about, and a union keyed off `kind` (a
+ * deliberately soft string on the API) would buy type-safety it cannot actually
+ * guarantee. */
+export interface BlockMeta {
+  // module
+  tier?: Tier;
+  tier_requested?: string | null;
+  coverage_note?: string;
+  objective?: string;
+  // lesson
+  draft_status?: DraftStatus;
+  word_count?: number;
+  target_words?: number;
+  floor_words?: number;
+  meets_floor?: boolean;
+  error?: string | null;
+  // lesson + segment
+  citations?: Citation[];
+  section?: string;
+  // any block that has been through Extend-with-chat
+  prev_body?: string;
+  refined?: boolean;
+  // course
+  brief?: string | null;
+  gap_policy?: string;
+  library?: {
+    token_count?: number;
+    fits?: boolean;
+    /** FALSE MEANS THE LIBRARY DID NOT FIT and the lessons were drafted from
+     * per-module retrieval instead. The board says so, in words. A silent
+     * downgrade to retrieval is the exact failure Stage 6 exists to remove. */
+    full_context?: boolean;
+    sources?: { ref: string; id: string; title: string; pages?: number }[];
+  };
+  shape?: {
+    lessons_total?: number;
+    modules?: number;
+    minutes_per_lesson?: number;
+    target_words_per_lesson?: number;
+    floor_words_per_lesson?: number;
+  };
+  [key: string]: unknown;
 }
 
 /** `GET /curricula` row shape — template roots only (no `children`). */
@@ -362,10 +490,103 @@ export interface JobOut {
 }
 
 /** `POST /curricula/generate`'s 202 response — mirrors `schemas/jobs.py`'s
- * `JobAccepted`, just enough for the caller to start polling `getJob`. */
+ * `JobAccepted`, just enough for the caller to start polling `getJob`.
+ *
+ * `root_id` is set ONLY by the interview's confirm step, and it changes what the
+ * UI does with this response completely: the tree ALREADY EXISTS (the outline is
+ * materialized at confirm, every lesson `queued`), so the board opens instantly on
+ * a real curriculum with a progress bar instead of sitting on a spinner for four
+ * minutes waiting for a job to produce something to look at. */
 export interface JobAccepted {
   job_id: string;
   status: string;
+  root_id?: string | null;
+}
+
+/** `GET /curricula/{root}/progress` — a GROUP BY over the lesson blocks, computed
+ * fresh on every poll (never a counter on the job row: the blocks are what the
+ * tutor is looking at, so the blocks are what we count). This is what lets him
+ * READ MODULE 1 WHILE MODULE 5 IS STILL BEING WRITTEN. */
+export interface DraftProgress {
+  root_id: string;
+  total: number;
+  queued: number;
+  drafting: number;
+  ready: number;
+  failed: number;
+  done: boolean;
+}
+
+export function getCurriculumProgress(rootId: string): Promise<DraftProgress> {
+  return request<DraftProgress>(`/curricula/${rootId}/progress`);
+}
+
+/** RESUME. Drafts every lesson still `queued` (or newly added, or rate-limited
+ * back to `queued`) under this curriculum. It is a REQUEST because a
+ * `BackgroundTask` is the only thing this app can schedule and only a request can
+ * schedule one — there is no worker process. That is the entire recovery story. */
+export function resumeCurriculumDraft(rootId: string): Promise<JobAccepted> {
+  return request<JobAccepted>(`/curricula/${rootId}/draft`, { method: "POST" });
+}
+
+/** DEEPEN one lesson: back to `queued` with a raised word target, and the ordinary
+ * fan-out redrafts it. Same job, same cached library prefix — no second pipeline. */
+export function deepenLesson(lessonId: string): Promise<JobAccepted> {
+  return request<JobAccepted>(`/blocks/${lessonId}/deepen`, { method: "POST" });
+}
+
+export interface AddModuleInput {
+  title: string;
+  objective?: string;
+  tier?: Tier;
+  /** Insert after this module. Omitted = append. */
+  after?: string | null;
+}
+
+export interface AddLessonInput {
+  title: string;
+  objective?: string;
+  after?: string | null;
+}
+
+export function addModule(rootId: string, input: AddModuleInput): Promise<BlockNode> {
+  return request<BlockNode>(`/curricula/${rootId}/modules`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function addLesson(moduleId: string, input: AddLessonInput): Promise<BlockNode> {
+  return request<BlockNode>(`/blocks/${moduleId}/lessons`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+/** Up/down, not drag-and-drop — the tutor is reordering five modules, not a
+ * thousand rows, and two buttons beat a drag library with touch targets and an
+ * autoscroll. Moving past the end is a no-op on the API, not an error. */
+export function reorderBlock(blockId: string, direction: "up" | "down"): Promise<BlockNode> {
+  return request<BlockNode>(`/blocks/${blockId}/reorder`, {
+    method: "POST",
+    body: JSON.stringify({ direction }),
+  });
+}
+
+/** EXTEND WITH CHAT. Chris: "a button to Extend with chat where the user writes
+ * e.g. change this and give more detail about the Amp — and it actually follows
+ * his instruction." Synchronous (one block, a few thousand tokens, and he is
+ * sitting there watching), and the old body is stashed server-side so `undoRefine`
+ * can put it back. */
+export function refineBlock(blockId: string, instruction: string): Promise<BlockNode> {
+  return request<BlockNode>(`/blocks/${blockId}/refine`, {
+    method: "POST",
+    body: JSON.stringify({ instruction }),
+  });
+}
+
+export function undoRefine(blockId: string): Promise<BlockNode> {
+  return request<BlockNode>(`/blocks/${blockId}/undo`, { method: "POST" });
 }
 
 export interface BlockUpdateInput {
@@ -414,61 +635,72 @@ export interface InterviewOption {
   default_selected?: boolean;
 }
 
-/** One grounding passage the "preview" step's `ground_topic` retrieval
- * actually found for a module — deliberately carries `source_title`, NOT
- * `source_id` (`_compute_preview` in `app.curriculum.interview` only ever
- * serializes `source_title`/`page_no`/`score` onto the wire). A citation
- * link into the Reader (`/library/{source_id}?page={page_no}`) therefore
- * has to resolve `source_id` client-side, by matching `source_title`
- * against the source catalog the "sources" step's own `options` already
- * handed this dialog — see `InterviewPreviewStep`'s `sourceIdByTitle` map. */
-export interface InterviewPassage {
-  source_title: string;
-  page_no: number | null;
-  score: number;
-}
-
-/** One planned module of the "preview" step's findings. `gap: true` means
- * `ground_topic` found nothing above the relevance floor for this module in
- * the sources the tutor chose — an honest gap, never silently hidden (see
- * `app.curriculum.ground`'s module docstring on the floor itself). */
-export interface InterviewModule {
+/** One lesson of the outline, BEFORE anything has been drafted. Titles,
+ * objectives and minutes — this is the cheap moment, and editing it here costs
+ * nothing while editing it after the draft costs another twenty model calls. */
+export interface OutlineLesson {
   title: string;
   objective: string;
-  gap: boolean;
-  passages: InterviewPassage[];
+  est_minutes: number;
 }
 
-/** `interview.preview` on the wire — mirrors `_compute_preview`'s return
- * shape. Rendered by both the "preview" step (to review) and the "confirm"
- * step (the same cached findings, per `describe_step`'s "confirm" branch —
- * `_compute_preview` never runs twice for one interview). */
-export interface InterviewPreview {
-  course_title: string;
-  modules: InterviewModule[];
-  gap_count: number;
+/** One module of the outline. `tier` was assigned BY THE MODEL, HAVING READ THE
+ * WHOLE LIBRARY — and the tutor can override it per module ("for this one, go
+ * search the web"). `coverage_note` is the model's own one-sentence answer to
+ * "what in his library covers this, or what is missing from it" — which is the
+ * honest replacement for a cosine score with a 0.021 separation margin. */
+export interface OutlineModule {
+  title: string;
+  objective: string;
+  tier: Tier;
+  coverage_note: string;
+  /** Set when the tutor's gap policy CLAMPED what the model asked for (it wanted
+   * `general_knowledge` under a `library_only` policy, so it became a `gap`). */
+  tier_requested?: string | null;
+  lessons: OutlineLesson[];
+}
+
+/** `interview.outline` on the wire — and the thing the tutor EDITS. Whatever he
+ * sends back is what gets materialized; the model's original is not kept anywhere
+ * and is not supposed to be. */
+export interface Outline {
+  title: string;
+  modules: OutlineModule[];
+}
+
+/** The `findings` field of `InterviewStateOut` — a different payload per step,
+ * all optional. "who" carries the level list, "sources" the derived shape echo
+ * ("20 sessions -> 5 modules x 4 lessons -> ~2,200 words each"), and "outline"/
+ * "confirm" carry the outline itself. */
+export interface InterviewFindings {
+  levels?: string[];
+  shape?: string;
+  title?: string;
+  modules?: OutlineModule[];
 }
 
 /** The `{interview_id, step, question, options?, findings?, error?}` envelope
  * every interview route returns (mirrors `schemas/interview.py`'s
  * `InterviewStateOut`). `step` is one of `STEP_ORDER` ("who" | "duration" |
- * "sources" | "preview" | "confirm") or the terminal "done" — kept as a
- * plain `string` here (not a union), same "an unrecognized future step
- * still round-trips" reasoning as `BlockNode.kind`/`JobOut.status`
- * elsewhere in this file. `error` is set only when the previous answer was
- * invalid and this response is re-asking the same step's question. */
+ * "scope" | "sources" | "outline" | "confirm") or the terminal "done" — kept as
+ * a plain `string` here (not a union), same "an unrecognized future step still
+ * round-trips" reasoning as `BlockNode.kind`/`JobOut.status` elsewhere in this
+ * file. `error` is set only when the previous answer was invalid and this
+ * response is re-asking the same step's question. */
 export interface InterviewStateOut {
   interview_id: string;
   step: string;
   question: string;
   options: InterviewOption[] | null;
-  findings: InterviewPreview | null;
+  findings: InterviewFindings | null;
   error: string | null;
+  /** Set once "confirm" has materialized the tree. */
+  root_id?: string | null;
+  job_id?: string | null;
 }
 
 export interface InterviewStartInput {
   title: string;
-  domain?: string | null;
 }
 
 /** Starts a brand-new interview at its first ("who") step. */
@@ -1026,14 +1258,18 @@ export async function streamChatMessage(
   try {
     res = await fetch(`${API_BASE}/chat/${sessionId}/messages/stream`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content }),
       // THIS FETCH BYPASSES `request()` ENTIRELY — it has to, because it reads a
-      // streaming body rather than awaiting `.json()`. Which means it also
-      // bypasses the one place `credentials: "include"` is set, and it is the
-      // ONLY call in the app that does. Miss this line and every other page works
-      // perfectly while chat — the flagship — silently 401s and falls back to the
-      // non-streaming path, i.e. it looks like a streaming bug, not an auth bug.
+      // streaming body rather than awaiting `.json()`. Which means it bypasses
+      // BOTH things `request()` adds for everyone else, and it is the only call
+      // in the app that does:
+      //   - `credentials: "include"`: miss it and every other page works while
+      //     chat — the flagship — silently 401s and falls back to the
+      //     non-streaming path. It looks like a streaming bug, not an auth bug.
+      //   - `X-App-Locale`: miss it and the ONE endpoint the tutor talks to most
+      //     is the ONE endpoint with no locale, so the streamed answer comes back
+      //     in the default language while every other surface honours the UI.
+      headers: { "Content-Type": "application/json", [LOCALE_HEADER]: uiLocale() },
+      body: JSON.stringify({ content }),
       credentials: "include",
     });
   } catch {
@@ -1483,9 +1719,14 @@ export function getAuthState(): Promise<AuthState> {
 }
 
 export async function login(password: string): Promise<AuthState> {
+  // The third and last fetch that bypasses `request()` (it has to: a 401 here is
+  // a WRONG PASSWORD, not an expired session, so it must not reach the
+  // redirect-to-login interceptor). It still carries the locale — "every request
+  // to the API carries X-App-Locale" is only a checkable invariant if it has no
+  // exceptions.
   const res = await fetch(`${API_BASE}/auth/login`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", [LOCALE_HEADER]: uiLocale() },
     body: JSON.stringify({ password }),
     credentials: "include",
   });

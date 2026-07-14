@@ -25,7 +25,13 @@ services:
       - "127.0.0.1:${API_PORT:-8791}:8000"
     volumes:
       - media:/media
-    networks: [appnet, platform-net]   # platform-net → reach qwen-vllm / qwen-emb-vllm
+    # platform-net → reach the qwen-vllm CHAT box. NOT the embed box any more:
+    # since Plan 13 Stage 4 the embeddings run on this container's own CPU
+    # (multilingual-e5-small, baked into the image — see apps/api/Dockerfile), so
+    # `qwen-emb-vllm` is gone from the app's dependency graph entirely. That is
+    # the point: the end state is a bundle on the tutor's iMac, and an iMac has
+    # no shared GPU box to reach.
+    networks: [appnet, platform-net]
 
   worker:
     build: { context: ./apps/api }
@@ -40,6 +46,9 @@ services:
       context: ./apps/web
       args:
         NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:8791}
+        # Inlined at BUILD time (it is a NEXT_PUBLIC_*), so flipping the gate on
+        # is a rebuild of `web`, not a restart. Same as NEXT_PUBLIC_API_BASE.
+        NEXT_PUBLIC_AUTH_ENABLED: ${NEXT_PUBLIC_AUTH_ENABLED:-0}
     env_file: .env
     depends_on: [api]
     ports:

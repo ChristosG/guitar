@@ -20,7 +20,7 @@ from app.brain.repair import (
 )
 from app.config import settings
 from app.db import Base, engine
-from app.models.knowledge import Chunk, KnowledgeSource, Page
+from app.models.knowledge import EMBED_DIM, Chunk, KnowledgeSource, Page
 
 try:
     with engine.connect() as _c:
@@ -38,7 +38,7 @@ def setup_module(_):
 
 class _Provider:
     def embed(self, texts, *, is_query=False):
-        return [[0.1] * settings.embed_dim for _ in texts]
+        return [[0.1] * EMBED_DIM for _ in texts]
 
 
 # A long document made of ~12,000 UNIQUELY-numbered tokens — long enough
@@ -129,7 +129,7 @@ def test_repair_pageless_text_source_reassembles_chunks_into_a_page(db, monkeypa
     db.add(src); db.commit()
 
     for chunk_text in _real_chunks_for(_LONG_DOC):
-        db.add(Chunk(source_id=src.id, text=chunk_text, embedding=[0.0] * settings.embed_dim))
+        db.add(Chunk(source_id=src.id, text=chunk_text, embedding=[0.0] * EMBED_DIM))
     db.commit()
 
     assert db.query(Page).filter_by(source_id=src.id).count() == 0  # reproduces the bug
@@ -160,7 +160,7 @@ def test_repair_pageless_text_source_does_not_duplicate_the_old_orphaned_chunks(
     db.add(src); db.commit()
     old_chunk_count = len(_real_chunks_for(_LONG_DOC))
     for chunk_text in _real_chunks_for(_LONG_DOC):
-        db.add(Chunk(source_id=src.id, text=chunk_text, embedding=[0.0] * settings.embed_dim))
+        db.add(Chunk(source_id=src.id, text=chunk_text, embedding=[0.0] * EMBED_DIM))
     db.commit()
 
     repair_pageless_source(db, src)
@@ -206,7 +206,7 @@ def test_repair_pageless_url_source_refetches_its_stored_url_instead_of_reassemb
                           url="https://example.com/tone-tips")
     db.add(src); db.commit()
     # A stale chunk from some prior (buggy) state — must be ignored, not reassembled.
-    db.add(Chunk(source_id=src.id, text="stale leftover text", embedding=[0.0] * settings.embed_dim))
+    db.add(Chunk(source_id=src.id, text="stale leftover text", embedding=[0.0] * EMBED_DIM))
     db.commit()
 
     healed = repair_pageless_source(db, src)

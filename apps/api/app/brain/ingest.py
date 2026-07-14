@@ -156,9 +156,10 @@ def ingest_source(db, source_id, payload: IngestPayload) -> None:
         drafts = chunk_sections(sections)
 
         texts = [d.text for d in drafts]
+        embedder = get_embedder()
         # Skip the call entirely for an empty source rather than asking the
         # provider to embed an empty batch.
-        vectors = get_embedder().embed(texts, is_query=False) if texts else []
+        vectors = embedder.embed(texts, is_query=False) if texts else []
         if len(vectors) != len(texts):
             raise RuntimeError(f"embed() returned {len(vectors)} vectors for {len(texts)} texts")
 
@@ -177,6 +178,12 @@ def ingest_source(db, source_id, payload: IngestPayload) -> None:
             char_count += len(draft.text)
 
         source.char_count = char_count
+        # Which embedding space these vectors live in (Plan 13, Stage 4). Stamped
+        # at ingest so `scripts/reembed.py --only-stale` can tell, after the NEXT
+        # model swap, which sources still hold vectors from a foreign space —
+        # whose cosine distances are not wrong so much as MEANINGLESS, and look
+        # exactly like ordinary results.
+        source.embed_model = getattr(embedder, "model_id", None)
         # SPEC D6 — a source with nothing in it is NOT ready. Three live rows
         # sat "ready" with 0 chars and rendered green; that lie hid a broken
         # knowledge base for two days and is why the agent had nothing to

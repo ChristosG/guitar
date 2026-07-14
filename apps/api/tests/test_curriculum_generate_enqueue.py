@@ -48,12 +48,16 @@ def setup_module(_):
 
 client = TestClient(app)
 
+# `domain` is GONE from this request (Plan 13, Stage 6) — replaced by `brief`, the
+# tutor's own words about what the course is for, which unlike `domain` actually
+# reaches every lesson-draft prompt instead of one dead line in the outline.
 _PAYLOAD = {
     "title": "Test Course",
     "language": "en",
     "profile": {"level": "beginner"},
-    "domain": "test-domain",
-    "target_minutes_total": 300,
+    "brief": "get a beginner playing open chords cleanly",
+    "weeks": 20,
+    "minutes_per_session": 50,
 }
 
 
@@ -107,7 +111,14 @@ def test_generate_curriculum_endpoint_persists_request_params_verbatim_on_the_jo
     try:
         job = db.get(GenerationJob, job_id)
         assert job is not None
-        assert job.params == _PAYLOAD
+        # A SUPERSET, not equality: the endpoint also persists the keys the request
+        # left to their defaults (`gap_policy`, `allow_general`, ...), because
+        # `run_curriculum_job` unpacks this dict as kwargs and a missing key is a
+        # different call from an explicit default. What matters is that everything
+        # the tutor actually said survives verbatim.
+        for key, value in _PAYLOAD.items():
+            assert job.params[key] == value, key
+        assert "domain" not in job.params
     finally:
         db.close()
 

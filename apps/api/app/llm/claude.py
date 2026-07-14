@@ -84,13 +84,18 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
 # 2,200-word Greek lesson is ~6k tokens of prose inside a JSON envelope; 32k
 # leaves room for a long one plus the structure. OCR's 4000 (a Qwen-era number)
 # is TIGHTER under Claude than it was under Qwen, not looser — hence 8000.
+#
+# `stream` is not about the UI — no `guided_json` caller consumes deltas. The API
+# REJECTS a non-streaming request whose `max_tokens` implies more than ~10 minutes
+# of generation, and a 32,000-token Greek lesson is precisely that request. So the
+# two long roles stream and wait for the final message; the short ones do not.
 _ROLES: dict[str, dict[str, Any]] = {
-    "default": {"thinking": False, "effort": "medium", "max_tokens": 4_096},
-    "chat":    {"thinking": False, "effort": "medium", "max_tokens": 8_192},
-    "plan":    {"thinking": True,  "effort": "high",   "max_tokens": 16_000},
-    "draft":   {"thinking": True,  "effort": "high",   "max_tokens": 32_000},
-    "spec":    {"thinking": False, "effort": "medium", "max_tokens": 4_096},
-    "ocr":     {"thinking": False, "effort": "low",    "max_tokens": 8_000},
+    "default": {"thinking": False, "effort": "medium", "max_tokens": 4_096,  "stream": False},
+    "chat":    {"thinking": False, "effort": "medium", "max_tokens": 8_192,  "stream": False},
+    "plan":    {"thinking": True,  "effort": "high",   "max_tokens": 16_000, "stream": True},
+    "draft":   {"thinking": True,  "effort": "high",   "max_tokens": 32_000, "stream": True},
+    "spec":    {"thinking": False, "effort": "medium", "max_tokens": 4_096,  "stream": False},
+    "ocr":     {"thinking": False, "effort": "low",    "max_tokens": 8_000,  "stream": False},
 }
 
 # Sonnet 5's real image ceiling is 2576px on the long edge (NOT the widely-cited
@@ -109,6 +114,14 @@ class ClaudeProvider(LLMProvider):
                 f"Unknown Claude model {self._model!r}. Known: {sorted(_CAPABILITIES)}"
             )
         self._client = None
+        # The last response's `usage`, as a plain dict. Exists so the caller can
+        # ask the ONE question the prompt cache makes it possible to get wrong
+        # silently: `cache_read_input_tokens` on the second call of a fan-out. If
+        # that is zero, the "stable prefix" is not stable, every lesson is
+        # re-writing the 90K-token library at 1.25x, and NOTHING ELSE LOOKS
+        # DIFFERENT — the curriculum still generates, it just costs 10x. The only
+        # symptom is the invoice, which the tutor sees a month later.
+        self.last_usage: dict[str, int] = {}
 
     # -- request composition ------------------------------------------------
 
@@ -181,15 +194,27 @@ class ClaudeProvider(LLMProvider):
         system, msgs = to_anthropic(messages)
         kw = self._kwargs(role, max_tokens=max_tokens)
         clean = to_anthropic_schema(schema)
+        request = {
+            "system": system or anthropic_omit(),
+            "messages": msgs,
+            "output_config": {**kw.pop("output_config", {}),
+                              "format": {"type": "json_schema", "schema": clean}},
+            **kw,
+        }
 
         with _mapped_errors():
-            resp = self.client.messages.create(
-                system=system or anthropic_omit(),
-                messages=msgs,
-                output_config={**kw.pop("output_config", {}),
-                               "format": {"type": "json_schema", "schema": clean}},
-                **kw,
-            )
+            if _ROLES.get(role, _ROLES["default"])["stream"]:
+                # STREAMING IS NOT A UX CHOICE HERE — nothing consumes the deltas.
+                # A non-streaming request whose `max_tokens` implies more than ~10
+                # minutes of generation is REJECTED by the API outright, and a
+                # 32,000-token Greek lesson is exactly that request. So `plan` and
+                # `draft` stream and we simply wait for the final message; `spec`
+                # and `chat` (4-8k) do not need to.
+                with self.client.messages.stream(**request) as stream:
+                    resp = stream.get_final_message()
+            else:
+                resp = self.client.messages.create(**request)
+        self._record_usage(resp)
 
         if resp.stop_reason == "max_tokens":
             raise GuidedJSONError(
@@ -271,6 +296,33 @@ class ClaudeProvider(LLMProvider):
         return "".join(
             b.text for b in resp.content if getattr(b, "type", None) == "text"
         ).strip()
+
+    def count_tokens(self, text: str) -> int:
+        """Exact, and FREE — `messages.count_tokens` is not a billed endpoint.
+
+        This is what lets `app.curriculum.corpus` say "3 sources · 92,400 tokens ·
+        fits whole" instead of guessing. The alternative (a chars/N heuristic) is
+        wrong in the one direction that matters: it undercounts a Greek/English
+        mixed corpus, and the app would only find out when a 90-second call came
+        back as a context-length 400.
+        """
+        with _mapped_errors():
+            resp = self.client.messages.count_tokens(
+                model=self._model, messages=[{"role": "user", "content": text}]
+            )
+        return int(resp.input_tokens)
+
+    def _record_usage(self, resp: Any) -> None:
+        usage = getattr(resp, "usage", None)
+        if usage is None:
+            return
+        self.last_usage = {
+            field: int(getattr(usage, field, 0) or 0)
+            for field in (
+                "input_tokens", "output_tokens",
+                "cache_creation_input_tokens", "cache_read_input_tokens",
+            )
+        }
 
     def health(self) -> dict:
         """Zero-token probe. `models.retrieve` distinguishes a bad key (401) from

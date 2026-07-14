@@ -4,7 +4,7 @@ from sqlalchemy import text
 from app.db import Base, engine, SessionLocal
 from app.models.student import Student
 from app.models.block import Block
-from app.models.knowledge import KnowledgeSource, Chunk
+from app.models.knowledge import EMBED_DIM, KnowledgeSource, Chunk
 
 # Skip cleanly (not error) when no DB is reachable — e.g. a bare `pytest` on a fresh
 # checkout without DATABASE_URL pointing at a running Postgres.
@@ -34,7 +34,7 @@ def test_recursive_block_tree_and_vector_roundtrip():
                               status="ready", language="en")
         db.add(src); db.flush()
         chunk = Chunk(source_id=src.id, text="A humbucker cancels hum.",
-                      section_path="Ch1", embedding=[0.1] * 2560)
+                      section_path="Ch1", embedding=[0.1] * EMBED_DIM)
         db.add(chunk); db.commit()
         course_id, module_id, src_id, chunk_id = course.id, module.id, src.id, chunk.id
     finally:
@@ -52,7 +52,7 @@ def test_recursive_block_tree_and_vector_roundtrip():
         got_chunk = db2.get(Chunk, chunk_id)
         assert got_chunk is not None
         assert got_chunk.source_id == src_id
-        assert len(got_chunk.embedding) == 2560             # 2560-dim vector read from pgvector
+        assert len(got_chunk.embedding) == EMBED_DIM        # 384-dim vector read from pgvector
         assert abs(float(got_chunk.embedding[0]) - 0.1) < 1e-4
     finally:
         db2.close()

@@ -55,3 +55,26 @@ class LLMProvider(ABC):
     @abstractmethod
     def vision(self, image_bytes: bytes, prompt: str, *,
                media_type: str = "image/jpeg") -> str: ...
+
+    def count_tokens(self, text: str) -> int:
+        """How many tokens `text` costs THIS model. Used by
+        `app.curriculum.corpus` to decide whether the tutor's whole library fits
+        in one prompt — a decision we MEASURE rather than guess, because getting
+        it wrong means either a 400 at the end of a 90-second call or a silent
+        fallback to retrieval on a library that would have fit.
+
+        NOT `@abstractmethod`: the estimate below is honest enough for the one
+        thing this is used for (a fits/doesn't-fit branch against a 600K budget),
+        and a provider without a tokenizer endpoint should degrade rather than
+        fail to instantiate. `ClaudeProvider` overrides it with
+        `client.messages.count_tokens`, which is free and exact.
+
+        The 3.0 divisor is deliberately pessimistic. The default curriculum
+        language is GREEK, which costs ~2-3x the tokens per character of English
+        under Sonnet 5's tokenizer, and the tutor's library is English — so a
+        chars/4 estimate (the usual English rule of thumb) would UNDERCOUNT a
+        mixed corpus and the failure would be "your library didn't fit after
+        all", discovered at the API. Over-estimating only costs a fallback we
+        can see and label.
+        """
+        return len(text) // 3 + 1

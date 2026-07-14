@@ -25,16 +25,22 @@ class Settings(BaseSettings):
     # ---- Embeddings (a SEPARATE seam from the chat provider — Claude has no
     # embeddings endpoint; see app/llm/embedder.py's docstring) -------------
     #
-    # `qwen` is still the default because the live `chunk.embedding` column is
-    # `vector(2560)` and holds 408 Qwen vectors. Flipping to `local-e5` is a
-    # DATA migration (ALTER TYPE vector(384) + a full re-embed), not a config
-    # change — doing it out of order hands a 384-dim query to a 2560-dim column
-    # and fails every search at the DB. Plan 13 Stage 4 flips this default in
-    # the same commit as the migration.
-    embed_backend: str = "qwen"                  # "qwen" | "local-e5"
+    # `local-e5` since Plan 13 Stage 4, flipped in the SAME commit as the
+    # migration that made it true (`a3c7e1b90d42`: chunk.embedding is now
+    # `vector(384)`). The order was never optional: flipping this before the
+    # column changed would have handed a 384-dim query vector to a 2560-dim
+    # column and failed every search at the DB.
+    #
+    # `qwen` remains selectable, and it is now a FOOT-GUN, not a fallback: the
+    # column is 384 wide, so a Qwen backend fails at the first insert. It stays
+    # only so a future embedding swap has a second implementation to look at.
+    embed_backend: str = "local-e5"              # "local-e5" | "qwen"
     embed_base_url: str = "http://qwen-emb-vllm:8090/v1"   # qwen backend only
     embed_model: str = "qwen3-emb-4b"                      # qwen backend only
-    embed_dim: int = 2560                                  # qwen backend only
+    # qwen backend ONLY. The live column width is `app.models.knowledge.EMBED_DIM`,
+    # which is hardcoded — a column width is a fact about the bytes on disk, not a
+    # setting (see that constant's comment).
+    embed_dim: int = 2560
     # local-e5 backend: weights are baked into the image at build time.
     embed_model_dir: str = "/opt/models/e5-small"
     embed_threads: int = 4
@@ -67,6 +73,32 @@ class Settings(BaseSettings):
     # `.cgrigoriadis.online` so ONE cookie covers `guitar.` and `guitar-api.`.
     cookie_domain: str = ""
     cookie_secure: bool = False   # True in prod (HTTPS); False for plain-http dev
+
+    # ---- Curriculum authoring (Plan 13 Stage 6) ---------------------------
+    #
+    # Above this, the tutor's library does NOT go into the prompt whole and
+    # authoring degrades to per-module retrieval — with a banner, never silently
+    # (see app/curriculum/corpus.py). 600K leaves ~400K of Sonnet 5's 1M window
+    # for a 32K lesson output plus the volatile tail. His real library measures
+    # ~90K, so this is headroom for a library 6x the one he has.
+    full_context_budget: int = 600_000
+    # Lesson drafts that run at once. TWO, deliberately: each is a 32K-output
+    # call, and a fresh Anthropic account's per-minute OUTPUT token limit is the
+    # binding constraint long before wall-clock is. A 429 puts a lesson back to
+    # `queued`, not `failed` — but the cheapest 429 is the one we never provoke.
+    draft_concurrency: int = 2
+
+    # ---- Connection pool --------------------------------------------------
+    #
+    # RAISED from SQLAlchemy's default 5/10 for Stage 6, and this is not tuning.
+    # The draft fan-out runs `draft_concurrency` worker threads, each opening its
+    # OWN SessionLocal, while the board polls `GET /curricula/{root}/progress`
+    # every 2 seconds from the request path. At 5/10 those compete, and the one
+    # that loses is the poll — which times out, and a timed-out progress poll
+    # looks EXACTLY like the flagship feature being broken. It isn't; it just
+    # cannot get a connection to say so.
+    db_pool_size: int = 15
+    db_max_overflow: int = 10
 
     # ---- Secret at rest (Plan 13 Task 3.4) --------------------------------
     #

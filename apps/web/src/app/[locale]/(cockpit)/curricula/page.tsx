@@ -46,16 +46,29 @@ export default function CurriculaPage() {
     return fetchTemplates();
   }, [fetchTemplates]);
 
-  // The generate dialog already awaited the (slow) POST itself and only
-  // calls this on success — the tree renders immediately from that
-  // response; refreshing the template list is a fire-and-forget follow-up,
-  // not something the board needs to wait on.
-  function handleGenerated(tree: BlockNode) {
-    setActiveTree(tree);
-    setActiveId(tree.id);
-    setBoardError(null);
-    refreshTemplates();
-  }
+  /** The interview's confirm step MATERIALIZED the tree — it exists right now, with
+   * every lesson `queued` and not one word drafted. So this fetches it and opens the
+   * board on it IMMEDIATELY, with a progress bar, instead of holding the tutor on a
+   * spinner for the four minutes the lessons take to write. He reads module 1 while
+   * module 5 is still being written; that is the whole flagship claim, and this
+   * function is where it becomes true. */
+  const handleMaterialized = useCallback(
+    async (rootId: string) => {
+      setActiveId(rootId);
+      setBoardLoading(true);
+      setBoardError(null);
+      try {
+        setActiveTree(await getCurriculum(rootId));
+      } catch (err) {
+        setActiveTree(null);
+        setBoardError(err instanceof ApiError ? err.detail : t("boardError"));
+      } finally {
+        setBoardLoading(false);
+      }
+      refreshTemplates();
+    },
+    [refreshTemplates, t],
+  );
 
   async function handleSelectTemplate(item: CurriculumListItem) {
     setActiveId(item.id);
@@ -87,7 +100,7 @@ export default function CurriculaPage() {
           </h1>
           <p className="text-sm text-muted-foreground">{t("subheading")}</p>
         </div>
-        <InterviewDialog locale={locale} onGenerated={handleGenerated} />
+        <InterviewDialog onMaterialized={handleMaterialized} />
       </div>
 
       <div className="flex flex-col gap-2">
@@ -146,7 +159,17 @@ export default function CurriculaPage() {
             {t("boardEmpty")}
           </p>
         )}
-        {activeTree && <TreeBoard root={activeTree} onRootDeleted={handleRootDeleted} />}
+        {activeTree && (
+          // `key` is load-bearing: the board OWNS its tree once mounted (draft polls
+          // write into it), so switching curricula must give it a fresh one rather
+          // than syncing a prop into state inside an effect.
+          <TreeBoard
+            key={activeTree.id}
+            root={activeTree}
+            locale={locale}
+            onRootDeleted={handleRootDeleted}
+          />
+        )}
       </div>
     </div>
   );

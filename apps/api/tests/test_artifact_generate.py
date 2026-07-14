@@ -19,6 +19,7 @@ import app.artifacts.generate as artifact_generate
 from app.artifacts.generate import TITLE_MAX_LEN, _build_messages, derive_title, generate_artifact
 from app.brain.retrieve import Hit
 from app.db import Base, SessionLocal, engine
+from app.i18n import DEFAULT_LOCALE, answer_in
 from app.llm.errors import GuidedJSONError
 from app.models.artifact import Artifact
 
@@ -52,7 +53,10 @@ def test_build_messages_system_prompt_names_the_kind_and_forbids_prose():
 def test_build_messages_without_hits_uses_bare_prompt():
     messages = _build_messages(kind="tab", prompt="an E minor pentatonic lick", hits=[])
     user = messages[1]["content"]
-    assert user == "an E minor pentatonic lick"
+    # The prompt, plus the tail language reminder every builder now appends
+    # (Plan 13, Stage 5.3) — and nothing else: no CONTEXT block when there are
+    # no hits.
+    assert user == f"an E minor pentatonic lick\n\n{answer_in(DEFAULT_LOCALE)}"
     assert "CONTEXT" not in user
 
 

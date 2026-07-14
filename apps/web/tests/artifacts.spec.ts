@@ -33,7 +33,7 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "http://localhost:3100",
   "Access-Control-Allow-Credentials": "true",
   "Access-Control-Allow-Methods": "GET,POST,DELETE,OPTIONS",
-  "Access-Control-Allow-Headers": "content-type",
+  "Access-Control-Allow-Headers": "content-type,x-app-locale",
 };
 
 interface FixtureArtifact {
@@ -282,56 +282,43 @@ interface FixtureBlockNode {
   language: string;
   plane: string;
   student_id: string | null;
+  meta: Record<string, unknown> | null;
+  /** EMBEDDED. `block_to_tree` now serves the whole tree's artifacts from one
+   * `WHERE block_id IN (...)`, so the board fetches nothing per leaf. */
+  artifacts: unknown[];
   children: FixtureBlockNode[];
 }
 
 /** course -> module -> lesson -> segment, with the segment's id pinned to
- * `segmentId` (a caller-chosen, known-ahead-of-time UUID) so a test can seed
- * a matching artifact's `block_id` before the tree is even generated. */
-function makeTreeWithSegment(segmentId: string, title: string, language: string): FixtureBlockNode {
+ * `segmentId` (a caller-chosen, known-ahead-of-time UUID) so a test can seed a
+ * matching artifact's `block_id` before the tree exists — and with that artifact
+ * EMBEDDED on the segment, which is how it now arrives. */
+function makeTreeWithSegment(
+  segmentId: string,
+  title: string,
+  language: string,
+  segmentArtifacts: unknown[] = [],
+): FixtureBlockNode {
   return {
-    id: randomUUID(),
-    kind: "course",
-    title,
-    body: null,
-    est_minutes: null,
-    order: 0,
-    language,
-    plane: "content",
-    student_id: null,
+    id: randomUUID(), kind: "course", title, body: null, est_minutes: null, order: 0,
+    language, plane: "content", student_id: null, meta: null, artifacts: [],
     children: [
       {
-        id: randomUUID(),
-        kind: "module",
-        title: "Open Chords",
-        body: null,
-        est_minutes: null,
-        order: 0,
-        language,
-        plane: "content",
-        student_id: null,
+        id: randomUUID(), kind: "module", title: "Open Chords", body: null,
+        est_minutes: null, order: 0, language, plane: "content", student_id: null,
+        meta: { tier: "library", coverage_note: "Your book, p. 12." }, artifacts: [],
         children: [
           {
-            id: randomUUID(),
-            kind: "lesson",
-            title: "G Major",
-            body: "Learn the open G major chord.",
-            est_minutes: 15,
-            order: 0,
-            language,
-            plane: "content",
-            student_id: null,
+            id: randomUUID(), kind: "lesson", title: "G Major",
+            body: "Learn the open G major chord.", est_minutes: 15, order: 0,
+            language, plane: "content", student_id: null,
+            meta: { draft_status: "ready", word_count: 2200 }, artifacts: [],
             children: [
               {
-                id: segmentId,
-                kind: "segment",
-                title: "Fretting G major",
-                body: "Practice fretting the G shape cleanly.",
-                est_minutes: 5,
-                order: 0,
-                language,
-                plane: "content",
-                student_id: null,
+                id: segmentId, kind: "segment", title: "Fretting G major",
+                body: "Practice fretting the G shape cleanly.", est_minutes: 5, order: 0,
+                language, plane: "content", student_id: null, meta: null,
+                artifacts: segmentArtifacts,
                 children: [],
               },
             ],
@@ -342,28 +329,17 @@ function makeTreeWithSegment(segmentId: string, title: string, language: string)
   };
 }
 
-/** A trimmed `/curricula` + the guided interview (`/curricula/interview...`,
- * Plan 12 Task 3 / G2 — the entry point that replaced the old one-shot
- * `POST /curricula/generate` form) + `/jobs/{id}` mock — just enough to get
- * a fixed tree (with a known segment id) onto the board, for the
- * segment-artifact test below. Mirrors the async enqueue-then-poll contract
- * `cockpit.spec.ts`'s own `mockCurriculaApi` covers in full (Plan 8 Task 4)
- * — the interview's final "confirm" step answer returns a 202 `{job_id,
- * status: "pending"}` (mirrors `answer_curriculum_interview`'s two-shape
- * response on the API side), `GET /jobs/{id}` resolves "succeeded" on its
- * very first poll (this test isn't exercising the loading state, so there's
- * no need to make it wait through a real pending-then-succeeded cycle) with
- * `result_root_id` set to the fixed tree's own id, and `GET /curricula/{id}`
- * then serves that tree. Same predicate-route reasoning as
- * `mockArtifactsApi` above (kept local to this file rather than imported
- * from `cockpit.spec.ts`, matching this test suite's existing
- * per-file self-containment convention). Every other step
- * (who/duration/sources/preview) is answered with the barest valid shape —
- * this mock only cares about reaching "confirm". */
+/** Just enough `/curricula` to put ONE known tree on the board — the template list
+ * plus the tree itself plus its progress poll.
+ *
+ * It no longer drives the interview to get there, and it no longer mocks
+ * `/jobs/{id}`. Both were scaffolding around a flow that does not exist any more:
+ * the interview materializes the tree at CONFIRM, and the board opens on it
+ * directly. Clicking the template is the same board, in two lines instead of ten.
+ *
+ * The segment's artifact is EMBEDDED in the tree (`artifacts: [...]`), which is the
+ * whole point of the test below: the board must not fetch it. */
 async function mockCurriculaForSegmentTest(page: Page, tree: FixtureBlockNode) {
-  const interviewId = randomUUID();
-  let step = "who";
-
   async function handler(route: Route) {
     const req = route.request();
     const method = req.method();
@@ -373,99 +349,33 @@ async function mockCurriculaForSegmentTest(page: Page, tree: FixtureBlockNode) {
       await route.fulfill({ status: 204, headers: CORS_HEADERS });
       return;
     }
+    const json = (body: unknown, status = 200) =>
+      route.fulfill({ status, contentType: "application/json", headers: CORS_HEADERS, body: JSON.stringify(body) });
+
     if (pathname === "/curricula" && method === "GET") {
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        headers: CORS_HEADERS,
-        body: JSON.stringify([]),
-      });
-      return;
+      return json([
+        {
+          id: tree.id, title: tree.title, language: tree.language,
+          target_profile: null, created_at: new Date().toISOString(),
+        },
+      ]);
     }
-    if (pathname === "/curricula/interview" && method === "POST") {
-      step = "who";
-      await route.fulfill({
-        status: 201,
-        contentType: "application/json",
-        headers: CORS_HEADERS,
-        body: JSON.stringify({
-          interview_id: interviewId, step: "who", question: "Who is this for?",
-          options: [], findings: null, error: null,
-        }),
+    if (pathname === `/curricula/${tree.id}/progress` && method === "GET") {
+      return json({
+        root_id: tree.id, total: 1, queued: 0, drafting: 0, ready: 1, failed: 0, done: true,
       });
-      return;
-    }
-    const answerMatch = pathname.match(/^\/curricula\/interview\/([^/]+)\/answer$/);
-    if (answerMatch && method === "POST") {
-      const NEXT: Record<string, string> = {
-        who: "duration", duration: "sources", sources: "preview", preview: "confirm",
-      };
-      if (step !== "confirm") {
-        const nextStep = NEXT[step];
-        step = nextStep;
-        await route.fulfill({
-          status: 200, contentType: "application/json", headers: CORS_HEADERS,
-          body: JSON.stringify({
-            interview_id: interviewId, step: nextStep, question: "...", options: [],
-            findings: nextStep === "preview" || nextStep === "confirm"
-              ? { course_title: tree.title, modules: [], gap_count: 0 }
-              : null,
-            error: null,
-          }),
-        });
-        return;
-      }
-      await route.fulfill({
-        status: 202,
-        contentType: "application/json",
-        headers: CORS_HEADERS,
-        body: JSON.stringify({ job_id: randomUUID(), status: "pending" }),
-      });
-      return;
-    }
-    const jobMatch = pathname.match(/^\/jobs\/([^/]+)$/);
-    if (jobMatch && method === "GET") {
-      const now = new Date().toISOString();
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        headers: CORS_HEADERS,
-        body: JSON.stringify({
-          id: jobMatch[1],
-          kind: "curriculum",
-          status: "succeeded",
-          result_root_id: tree.id,
-          error: null,
-          error_kind: null,
-          created_at: now,
-          updated_at: now,
-        }),
-      });
-      return;
     }
     const getMatch = pathname.match(/^\/curricula\/([^/]+)$/);
     if (getMatch && method === "GET") {
-      const found = getMatch[1] === tree.id ? tree : null;
-      await route.fulfill({
-        status: found ? 200 : 404,
-        contentType: "application/json",
-        headers: CORS_HEADERS,
-        body: JSON.stringify(found ?? { detail: "not found" }),
-      });
-      return;
+      return getMatch[1] === tree.id ? json(tree) : json({ detail: "not found" }, 404);
     }
-    await route.fulfill({
-      status: 500,
-      contentType: "application/json",
-      headers: CORS_HEADERS,
-      body: JSON.stringify({ detail: "unmocked request in test" }),
-    });
+    return json({ detail: "unmocked request in test" }, 500);
   }
 
   await page.route(
     (url) =>
       url.origin === API_ORIGIN &&
-      (url.pathname === "/curricula" || url.pathname.startsWith("/curricula/") || url.pathname.startsWith("/jobs/")),
+      (url.pathname === "/curricula" || url.pathname.startsWith("/curricula/")),
     handler,
   );
 }
@@ -613,42 +523,29 @@ test.describe("artifacts gallery (mocked API)", () => {
 });
 
 test.describe("curriculum board segment artifacts (mocked API)", () => {
-  test("a segment shows an already-attached artifact, and can attach a new one via its own dialog", async ({
+  test("a segment's artifact arrives EMBEDDED in the tree — the board fetches none — and it can attach another", async ({
     page,
   }) => {
     const segmentId = randomUUID();
-    const tree = makeTreeWithSegment(segmentId, "Open Chords Basics", "en");
     const preAttached = makeArtifact({ kind: "chord_diagram", spec: CHORD_SPEC, title: "G", block_id: segmentId });
+    const tree = makeTreeWithSegment(segmentId, "Open Chords Basics", "en", [preAttached]);
 
     const artifactsMock = await mockArtifactsApi(page, { initial: [preAttached] });
     await mockCurriculaForSegmentTest(page, tree);
 
-    await page.goto("/en/today");
-    await page.getByTestId("nav-curricula").click();
-    await expect(page).toHaveURL(/\/en\/curricula$/);
+    await page.goto("/en/curricula");
+    await page.getByTestId("template-item").click();
+    await expect(page.getByTestId("tree-board")).toBeVisible();
 
-    await page.getByTestId("curricula-generate-button").click();
-    await page.getByTestId("interview-title").fill("Open Chords Basics");
-    await page.getByTestId("interview-start-submit").click();
-    await page.getByTestId("interview-who-new-toggle").click();
-    await page.getByTestId("interview-who-name").fill("Nikos");
-    await page.getByTestId("interview-answer-submit").click();
-    await page.getByTestId("interview-duration-weeks").fill("6");
-    await page.getByTestId("interview-duration-minutes").fill("30");
-    await page.getByTestId("interview-answer-submit").click();
-    await page.getByTestId("interview-answer-submit").click(); // sources
-    await page.getByTestId("interview-answer-submit").click(); // preview
-    await page.getByTestId("interview-confirm-submit").click();
-    await expect(page.getByTestId("interview-dialog")).toBeHidden({ timeout: 10_000 });
-
-    // The segment leaf (only "segment"-kind nodes get this affordance) shows
-    // its pre-attached chord diagram inline, fetched automatically on mount
-    // via `GET /artifacts?block_id=<segmentId>` — no click needed.
+    // The segment shows its chord diagram with NO request of its own. Every segment
+    // leaf used to fire `GET /artifacts?block_id=` on mount — ~120 in parallel on a
+    // real curriculum, which IS the "Could not load attached artifacts" error.
     await expect(page.getByTestId("segment-artifact-list")).toBeVisible();
     await expect(page.getByTestId("chord-diagram-name")).toHaveText("G");
-    expect(artifactsMock.lastListQuery?.get("block_id")).toBe(segmentId);
+    expect(artifactsMock.calls.list).toBe(0);
+    expect(artifactsMock.lastListQuery).toBeNull();
 
-    // Attach a second artifact via the segment's own "Add artifact" dialog.
+    // Attaching a NEW one still works, through the segment's own dialog.
     await page.getByTestId("block-card-attach-artifact").click();
     await expect(page.getByTestId("attach-artifact-dialog")).toBeVisible();
     await page.getByTestId("attach-artifact-kind-tone_recipe").click();

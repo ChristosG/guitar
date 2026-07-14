@@ -5,12 +5,12 @@ codebase's established split (mirrors `schemas/knowledge.py` vs
 `app.models.knowledge`) — this module is only the HTTP boundary's shape; it
 holds no DB logic.
 
-NOTE: the Curriculum plan's task brief lists an optional `goals` field on
-`POST /students`, but the current `Student` model (Plan 3 Task 1, out of
-scope for this task) has no backing column for it — `status`, `level`,
-`instrument`, `birthdate`, `preferred_language`, `name` are the whole row.
-Rather than accept `goals` and silently drop it (deceptive: the client would
-believe it was saved), it's omitted here entirely; see this task's report.
+`goals` IS HERE NOW, and it used to be deliberately absent. This module's earlier
+docstring said so out loud: the plan asked for it, `Student` had no column to put
+it in, and accepting a field we would silently drop is worse than not offering it
+("the client would believe it was saved"). Plan 13, Stage 6 added the column —
+because the brief the tutor writes here (`app.students.context.build_student_brief`)
+is what reaches the LESSON DRAFT prompt, which the student had never touched.
 """
 import datetime as dt
 from datetime import date, datetime
@@ -25,6 +25,9 @@ class StudentCreate(BaseModel):
     level: str | None = None
     instrument: str | None = None
     preferred_language: str = "el"  # mirrors Student.preferred_language's own default
+    # What he actually wants ("play Wonderwall at his sister's wedding"), in the
+    # tutor's own words — free text, deliberately not an enum.
+    goals: str | None = None
 
 
 class StudentUpdate(BaseModel):
@@ -38,6 +41,7 @@ class StudentUpdate(BaseModel):
     level: str | None = None
     instrument: str | None = None
     preferred_language: str | None = None
+    goals: str | None = None
 
 
 class StudentOut(BaseModel):
@@ -49,6 +53,7 @@ class StudentOut(BaseModel):
     level: str | None
     instrument: str | None
     preferred_language: str
+    goals: str | None = None
     status: str
     created_at: datetime
     updated_at: datetime

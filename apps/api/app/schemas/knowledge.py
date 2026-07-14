@@ -120,8 +120,14 @@ class SourceDetailOut(SourceOut):
 class SearchRequest(BaseModel):
     query: str = Field(max_length=_MAX_QUERY_CHARS)
     k: int = Field(default=8, ge=_MIN_K, le=_MAX_K)
-    domain: str | None = None
-    language: str | None = None
+    # `domain` and `language` are GONE (Plan 13, Stage 4.4). Both were filters on
+    # `KnowledgeSource` columns that 12 of the 16 real sources leave NULL, so both
+    # could silently empty the corpus — and `language` was worse still, because the
+    # CHAT MODEL chose its value: under the Greek default locale it passed
+    # `language="el"` and filtered the tutor's English book to zero. See
+    # `app.brain.retrieve.search`'s docstring. Both columns survive as Library
+    # DISPLAY metadata; scoping a search is `source_ids`, which the tutor chooses.
+    source_ids: list[UUID] | None = None
 
 
 class HitOut(BaseModel):
@@ -139,7 +145,12 @@ class HitOut(BaseModel):
     # merely claimed. None only for chunks from sources ingested before
     # Plan 9 Task 1, which predate Page rows entirely.
     page_id: UUID | None = None
+    # The RRF FUSION score (Plan 13, Stage 4.4) — an ordering key, not a
+    # similarity. It tops out near 0.033 and means nothing on its own. Anything
+    # that wants "how good is this match" wants `vector_score`, the cosine.
     score: float
+    vector_score: float = 0.0
+    lexical_score: float = 0.0
 
 
 class SearchResponse(BaseModel):

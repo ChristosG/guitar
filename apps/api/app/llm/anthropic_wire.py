@@ -109,7 +109,10 @@ def to_anthropic(messages: list[dict]) -> tuple[str | None, list[dict]]:
             continue
 
         if role == "user":
-            _append(out, "user", _text_blocks(msg.get("content")))
+            # `cache: True` on a message marks it as a prompt-cache breakpoint —
+            # see `_text_blocks`. Only `curriculum/corpus.py` sets it, and only
+            # on the library block.
+            _append(out, "user", _text_blocks(msg.get("content"), cache=bool(msg.get("cache"))))
             continue
 
         if role == "assistant":
@@ -183,14 +186,32 @@ def from_anthropic(response: Any) -> AssistantTurn:
 # ---------------------------------------------------------------------------
 
 
-def _text_blocks(content: Any) -> list[dict]:
-    """Text content -> blocks, dropping empty/whitespace text (point 2)."""
+def _text_blocks(content: Any, *, cache: bool = False) -> list[dict]:
+    """Text content -> blocks, dropping empty/whitespace text (point 2).
+
+    `cache=True` stamps `cache_control: {"type": "ephemeral"}` on the LAST block,
+    which is how Anthropic marks a prompt-cache breakpoint: everything from the
+    start of the request up to and including that block is cached, and a later
+    request whose prefix is byte-identical reads it at 0.1x instead of writing it
+    at 1.25x. `app.curriculum.corpus` uses it for the whole-library block —
+    90K tokens, read once per lesson by a 20-lesson fan-out. Uncached that is
+    ~$5.40 of re-reading the same book; cached it is $0.54.
+
+    THE PREFIX MUST BE STABLE OR THE CACHE IS WORTHLESS, and worse than
+    worthless: a cache miss costs 1.25x, not 1x. Anything volatile — the module
+    title, the student brief, the lesson objective — must be appended AFTER the
+    cached block, never woven into it. See `corpus.py`'s docstring.
+    """
     if content is None:
         return []
     if isinstance(content, list):  # already blocks; pass through
-        return [b for b in content if b]
-    text = str(content)
-    return [{"type": "text", "text": text}] if text.strip() else []
+        blocks = [b for b in content if b]
+    else:
+        text = str(content)
+        blocks = [{"type": "text", "text": text}] if text.strip() else []
+    if cache and blocks:
+        blocks[-1] = {**blocks[-1], "cache_control": {"type": "ephemeral"}}
+    return blocks
 
 
 def _is_tool_result_turn(message: dict) -> bool:

@@ -7,9 +7,11 @@ Ingestion (`POST /sources`, etc.) stays in `routers/knowledge.py`; this
 module owns everything downstream of a `KnowledgeSource` already existing —
 filing it into a `Collection`, reading its pages, retrying a failed one.
 
-No-auth PoC posture, same as `routers/knowledge.py` — no
-authentication/authorization here either; this deploys origin-locked behind
-Cloudflare for a single user.
+Auth: every route here sits behind the `gt_session` password gate
+(`app/auth/middleware.py`), which is a whole-API ASGI middleware rather than a
+per-router dependency — so there is nothing to declare in this file. One tutor,
+one password; there is still no authorization model, because there is nobody to
+authorize against anybody else.
 """
 import logging
 import os
@@ -24,6 +26,7 @@ from app.brain.repair import repair_pageless_source
 from app.config import settings
 from app.db import get_db
 from app.jobs.runner import run_ocr_job, run_reingest_job
+from app.llm.factory import require_llm_configured
 from app.models.generation_job import GenerationJob
 from app.models.knowledge import Collection, KnowledgeSource, Page
 from app.schemas.library import (
@@ -48,7 +51,13 @@ def _source_or_404(db: Session, source_id: uuid.UUID) -> KnowledgeSource:
 
 # --- OCR ---------------------------------------------------------------
 
-@router.post("/knowledge/sources/{source_id}/ocr", status_code=202)
+@router.post(
+    "/knowledge/sources/{source_id}/ocr",
+    status_code=202,
+    # OCR is 77 vision calls. Without a key that is 77 "failed" pages and a book
+    # the tutor is told is unreadable — see `require_llm_configured`.
+    dependencies=[Depends(require_llm_configured)],
+)
 def start_ocr(
     source_id: uuid.UUID, background: BackgroundTasks, db: Session = Depends(get_db)
 ) -> dict:
@@ -154,19 +163,37 @@ def get_page_image(page_id: uuid.UUID, db: Session = Depends(get_db)) -> FileRes
     both a `Page` with no scan at all (`image_path is None` — the D2
     degenerate url/text/note page) and one whose file has gone missing on
     disk (volume issue) — neither should look like an unknown page id to
-    the caller, but both must fail closed rather than crash."""
+    the caller, but both must fail closed rather than crash.
+
+    `Cache-Control: private, no-store` IS THE LINE THAT MAKES THE PASSWORD GATE
+    REAL (Plan 13 Task 3.3). This app is served through Cloudflare, and
+    Cloudflare edge-caches `.jpg` BY EXTENSION, by default, with no regard for
+    the cookie the request carried. Without this header, the first authenticated
+    fetch of a page scan populates the edge, and every subsequent request for
+    that URL — from anyone, with no cookie at all — is served the tutor's
+    scanned book straight off the CDN, never reaching this handler and never
+    reaching the auth middleware. The gate would be theatre. One line, and it
+    lives here because `FileResponse` sets no cache headers of its own."""
     page = db.get(Page, page_id)
     if page is None or not page.image_path:
         raise HTTPException(status_code=404, detail="No scan for this page")
     path = os.path.join(settings.media_dir, page.image_path)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Scan missing on disk")
-    return FileResponse(path, media_type="image/jpeg")
+    return FileResponse(
+        path,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, no-store"},
+    )
 
 
 # --- Retry (controller decision, Task 6) ------------------------------------
 
-@router.post("/knowledge/sources/{source_id}/retry", status_code=202)
+@router.post(
+    "/knowledge/sources/{source_id}/retry",
+    status_code=202,
+    dependencies=[Depends(require_llm_configured)],
+)
 def retry_source(
     source_id: uuid.UUID, background: BackgroundTasks, db: Session = Depends(get_db)
 ) -> dict:

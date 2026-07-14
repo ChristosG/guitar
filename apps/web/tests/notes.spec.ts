@@ -27,7 +27,7 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "http://localhost:3100",
   "Access-Control-Allow-Credentials": "true",
   "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
-  "Access-Control-Allow-Headers": "content-type",
+  "Access-Control-Allow-Headers": "content-type,x-app-locale",
 };
 
 interface FixtureNote {

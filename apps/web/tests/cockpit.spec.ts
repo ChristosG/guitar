@@ -31,7 +31,7 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "http://localhost:3100",
   "Access-Control-Allow-Credentials": "true",
   "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
-  "Access-Control-Allow-Headers": "content-type",
+  "Access-Control-Allow-Headers": "content-type,x-app-locale",
 };
 
 interface FixtureStudent {
@@ -207,46 +207,56 @@ interface CurriculumListItemFixture {
   created_at: string;
 }
 
-/** Real backend copy (`app.jobs.runner.run_curriculum_job`'s
- * `GuidedJSONError` branch) reused as the fixture's failure message, so the
- * failed-job test below is directly comparable to a real error. */
-const JOB_FAILURE_MESSAGE =
-  "Curriculum generation failed (model returned invalid/truncated output). Try again.";
+/** What the API says when the confirm step cannot materialize the tree. The
+ * failure surface moved with the flow: there is no job to fail inside the dialog
+ * any more, so the thing that can go wrong is the answer itself. */
+const CONFIRM_FAILURE_MESSAGE = "The curriculum could not be created. Try again.";
 
-/** Mocks `/curricula`, the guided interview (`/curricula/interview...`,
- * Plan 12 Task 3 / G2 — the new entry point that replaced the old one-shot
- * `POST /curricula/generate` form), `/jobs/{id}` and `/curricula/{id}`/
- * `/blocks/{id}` (PATCH). Drives the SAME async enqueue-then-poll contract
- * the old direct form used (Plan 8 Task 4) — the interview's own final
- * "confirm" step answer is what returns a 202 `{job_id, status: "pending"}`
- * (mirrors `answer_curriculum_interview`'s two-shape response on the API
- * side); `GET /jobs/{id}` answers "pending" for `pendingPolls` calls, then a
- * terminal status — same "provably visible across a real wait, not just a
- * synchronous tick" reasoning the old mock's own docstring gave, since
- * `InterviewDialog`'s poll loop reuses the exact same `POLL_INTERVAL_MS`/
- * `MAX_POLLS` cadence `generate-dialog.tsx` used.
+/** The model's outline, as the "outline" step's `findings` — the thing the tutor
+ * edits (and, here, accepts as-is). */
+const OUTLINE = {
+  title: "Tone Shaping Fundamentals",
+  modules: [
+    {
+      title: "Signal Chain Basics",
+      objective: "Understand the guitar signal path.",
+      tier: "library",
+      coverage_note: "Covered by your book, pp. 12-30.",
+      lessons: [
+        { title: "Pickups and Tone", objective: "Pickup types.", est_minutes: 60 },
+        { title: "Cables and Signal Integrity", objective: "Cable quality.", est_minutes: 60 },
+      ],
+    },
+  ],
+};
+
+/** Mocks `/curricula`, the guided interview v2 (`/curricula/interview...` — six
+ * steps: who -> duration -> scope -> sources -> OUTLINE -> confirm),
+ * `/curricula/{id}` + its progress poll, and `PATCH /blocks/{id}`.
  *
- * `jobOutcome: "succeeded"` (default) resolves with `result_root_id` set to
- * the generated tree's root id, fetchable via the `GET /curricula/{id}`
- * handler below — and only THEN is the new template added to the
- * `/curricula` list, mirroring `run_curriculum_job`'s real behavior.
- * `jobOutcome: "failed"` resolves with `error`/`error_kind` set and no
- * `result_root_id` — nothing is added to `templates`. */
+ * THERE IS NO JOB POLL HERE ANY MORE, and that is the point of Stage 6. The old
+ * flow approved a curriculum and then held the tutor on a spinner inside the dialog
+ * for the several minutes the whole thing took to generate. Now the "confirm"
+ * answer MATERIALIZES the tree (course -> modules -> lessons, every lesson
+ * `queued`) and returns a 202 carrying `root_id` as well as `job_id` — so the
+ * dialog closes, the board opens on a real curriculum immediately, and the lessons
+ * fill in underneath him while he reads module 1.
+ *
+ * `confirmFails: true` makes that final answer a 500 — the dialog must stay open,
+ * say so, and leave the board and the template list untouched. */
 async function mockCurriculaApi(
   page: Page,
   {
     templates = [] as CurriculumListItemFixture[],
-    pendingPolls = 1,
-    jobOutcome = "succeeded" as "succeeded" | "failed",
+    confirmFails = false,
   } = {},
 ) {
   const interviewId = randomUUID();
   let interviewStep = "who";
   let courseTitle = "";
-  let courseLanguage = "en";
+  const courseLanguage = "en";
   let currentTree: FixtureBlock | null = null;
-  let jobPolls = 0;
-  const calls = { list: 0, interviewStart: 0, answer: 0, job: 0, get: 0, patch: 0 };
+  const calls = { list: 0, interviewStart: 0, answer: 0, progress: 0, get: 0, patch: 0 };
   const answerBodies: unknown[] = [];
   const lastBody: { patch?: unknown } = {};
   const unexpected: string[] = [];
@@ -283,8 +293,10 @@ async function mockCurriculaApi(
           interview_id: interviewId,
           step: "who",
           question: "Who is this curriculum for?",
-          options: [],
-          findings: null,
+          // The API always offers "no particular student" as a first-class option,
+          // and hands over the levels it will accept — the student is OPTIONAL.
+          options: [{ value: "none", label: "No particular student", kind: "none" }],
+          findings: { levels: ["all_levels", "beginner", "intermediate", "advanced"] },
           error: null,
         }),
       });
@@ -293,135 +305,75 @@ async function mockCurriculaApi(
     const answerMatch = pathname.match(/^\/curricula\/interview\/([^/]+)\/answer$/);
     if (answerMatch && method === "POST") {
       calls.answer++;
-      const payload = req.postDataJSON() as { answer: { language?: string } };
+      const payload = req.postDataJSON() as { answer: Record<string, unknown> };
       answerBodies.push(payload.answer);
 
+      // The interview's SIX steps (Stage 6.8): who -> duration -> scope -> sources
+      // -> outline -> confirm. "preview" is gone; the outline step replaced it, and
+      // it is the one the tutor actually edits.
+      const state = (over: Record<string, unknown>) => ({
+        interview_id: interviewId, options: null, findings: null, error: null, ...over,
+      });
+      const send = (body: unknown, status = 200) =>
+        route.fulfill({ status, contentType: "application/json", headers: CORS_HEADERS, body: JSON.stringify(body) });
+
       if (interviewStep === "who") {
-        courseLanguage = payload.answer.language || "en";
         interviewStep = "duration";
-        await route.fulfill({
-          status: 200, contentType: "application/json", headers: CORS_HEADERS,
-          body: JSON.stringify({
-            interview_id: interviewId, step: "duration",
-            question: "How many weeks, and minutes per session?",
-            options: null, findings: null, error: null,
-          }),
-        });
+        await send(state({ step: "duration", question: "How long does this run?" }));
         return;
       }
       if (interviewStep === "duration") {
+        interviewStep = "scope";
+        await send(state({
+          step: "scope",
+          question: "What is this course FOR?",
+          options: [{ value: "general_knowledge", label: "Fill the gaps from general knowledge." }],
+        }));
+        return;
+      }
+      if (interviewStep === "scope") {
         interviewStep = "sources";
-        await route.fulfill({
-          status: 200, contentType: "application/json", headers: CORS_HEADERS,
-          body: JSON.stringify({
-            interview_id: interviewId, step: "sources",
-            question: "Which sources?", options: [], findings: null, error: null,
-          }),
-        });
+        await send(state({ step: "sources", question: "Which sources?", options: [] }));
         return;
       }
       if (interviewStep === "sources") {
-        interviewStep = "preview";
-        currentTree = makeGeneratedTree(courseTitle, courseLanguage);
-        await route.fulfill({
-          status: 200, contentType: "application/json", headers: CORS_HEADERS,
-          body: JSON.stringify({
-            interview_id: interviewId, step: "preview",
-            question: "Here's what your library supports.", options: null,
-            findings: { course_title: courseTitle, modules: [], gap_count: 0 },
-            error: null,
-          }),
-        });
+        interviewStep = "outline";
+        await send(state({ step: "outline", question: "Here is the course.", findings: OUTLINE }));
         return;
       }
-      if (interviewStep === "preview") {
+      if (interviewStep === "outline") {
         interviewStep = "confirm";
-        await route.fulfill({
-          status: 200, contentType: "application/json", headers: CORS_HEADERS,
-          body: JSON.stringify({
-            interview_id: interviewId, step: "confirm",
-            question: "Ready to generate?", options: null,
-            findings: { course_title: courseTitle, modules: [], gap_count: 0 },
-            error: null,
-          }),
-        });
+        await send(state({ step: "confirm", question: "Ready?", findings: payload.answer.outline }));
         return;
       }
-      // interviewStep === "confirm"
-      jobPolls = 0;
-      await route.fulfill({
-        status: 202,
-        contentType: "application/json",
-        headers: CORS_HEADERS,
-        body: JSON.stringify({ job_id: randomUUID(), status: "pending" }),
+      // confirm. The tree is MATERIALIZED here, so the 202 carries `root_id` and
+      // the board opens on a real curriculum immediately (Stage 6.6/6.9).
+      if (confirmFails) {
+        await send({ detail: CONFIRM_FAILURE_MESSAGE }, 500);
+        return;
+      }
+      currentTree = makeGeneratedTree(courseTitle, courseLanguage);
+      templates.unshift({
+        id: currentTree.id, title: currentTree.title, language: currentTree.language,
+        target_profile: null, created_at: new Date().toISOString(),
       });
+      await send({ job_id: randomUUID(), root_id: currentTree.id, status: "pending" }, 202);
       return;
     }
-    const jobMatch = pathname.match(/^\/jobs\/([^/]+)$/);
-    if (jobMatch && method === "GET") {
-      calls.job++;
-      jobPolls++;
-      const base = { id: jobMatch[1], kind: "curriculum", created_at: new Date().toISOString() };
-      const updated_at = new Date().toISOString();
-      if (jobPolls <= pendingPolls) {
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          headers: CORS_HEADERS,
-          body: JSON.stringify({
-            ...base,
-            updated_at,
-            status: "pending",
-            result_root_id: null,
-            error: null,
-            error_kind: null,
-          }),
-        });
-        return;
-      }
-      if (jobOutcome === "failed") {
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          headers: CORS_HEADERS,
-          body: JSON.stringify({
-            ...base,
-            updated_at,
-            status: "failed",
-            result_root_id: null,
-            error: JOB_FAILURE_MESSAGE,
-            error_kind: "upstream",
-          }),
-        });
-        return;
-      }
-      // succeeded — only now does the generated curriculum "exist" for the
-      // template list, mirroring the real background job's timing (see this
-      // function's docstring above).
-      if (currentTree) {
-        templates.unshift({
-          id: currentTree.id,
-          title: currentTree.title,
-          language: currentTree.language,
-          target_profile: null,
-          created_at: updated_at,
-        });
-      }
+
+    const progressMatch = pathname.match(/^\/curricula\/([^/]+)\/progress$/);
+    if (progressMatch && method === "GET") {
+      calls.progress++;
       await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        headers: CORS_HEADERS,
+        status: 200, contentType: "application/json", headers: CORS_HEADERS,
         body: JSON.stringify({
-          ...base,
-          updated_at,
-          status: "succeeded",
-          result_root_id: currentTree?.id ?? null,
-          error: null,
-          error_kind: null,
+          root_id: progressMatch[1], total: 2, queued: 0, drafting: 0,
+          ready: 2, failed: 0, done: true,
         }),
       });
       return;
     }
+
     const getMatch = pathname.match(/^\/curricula\/([^/]+)$/);
     if (getMatch && method === "GET") {
       calls.get++;
@@ -474,7 +426,6 @@ async function mockCurriculaApi(
   await page.route(`${API_ORIGIN}/curricula`, handler);
   await page.route(`${API_ORIGIN}/curricula/**`, handler);
   await page.route(`${API_ORIGIN}/blocks/**`, handler);
-  await page.route(`${API_ORIGIN}/jobs/**`, handler);
 
   return { calls, answerBodies, lastBody, unexpected };
 }
@@ -540,7 +491,7 @@ test.describe("students (mocked API)", () => {
 });
 
 test.describe("curricula (mocked API)", () => {
-  test("generating shows a non-frozen loading state, renders the nested tree, and title edits PATCH", async ({
+  test("the interview materializes the tree, the board opens on it at once, and title edits PATCH", async ({
     page,
   }) => {
     const mock = await mockCurriculaApi(page, { templates: [] });
@@ -554,69 +505,60 @@ test.describe("curricula (mocked API)", () => {
     await page.getByTestId("curricula-generate-button").click();
     await expect(page.getByTestId("interview-dialog")).toBeVisible();
 
+    // Title only. `domain` is GONE — it was one line in one prompt and a retrieval
+    // filter that could no longer filter anything; the "scope" step's free-text
+    // brief is what it was pretending to be.
     await page.getByTestId("interview-title").fill("Tone Shaping Fundamentals");
-    await page.getByTestId("interview-domain").fill("tone");
     await page.getByTestId("interview-start-submit").click();
 
-    // "who": a brand-new student, with a level + language (the interview's
-    // replacement for the old form's `level`/`language` fields).
-    await page.getByTestId("interview-who-new-toggle").click();
-    await page.getByTestId("interview-who-name").fill("Nikos");
-    await page.getByTestId("interview-who-level").fill("beginner");
-    await page.getByTestId("interview-who-language").fill("en");
+    // "who" — the student is OPTIONAL, so "no one in particular" + a level is a
+    // complete answer.
+    await page.getByTestId("interview-who-level-beginner").click();
     await page.getByTestId("interview-answer-submit").click();
 
-    // "duration": weeks + minutes/session (the old form's single "target
-    // hours" field, now asked as two real numbers).
+    // "duration" — weeks x sessions/week x minutes. The shape is arithmetic now.
     await page.getByTestId("interview-duration-weeks").fill("6");
     await page.getByTestId("interview-duration-minutes").fill("60");
     await page.getByTestId("interview-answer-submit").click();
 
-    // "sources": accept the (empty, in this mock) default selection.
+    // "scope" — what the course is FOR, in his own words.
+    await page.getByTestId("interview-scope-brief").fill("A usable live tone.");
     await page.getByTestId("interview-answer-submit").click();
 
-    // "preview": nothing to review in this trimmed mock — proceed.
+    // "sources" — accept the (empty, in this mock) default selection.
     await page.getByTestId("interview-answer-submit").click();
 
-    // "confirm": approve — this is what actually enqueues the job.
-    await expect(page.getByTestId("interview-dialog")).toContainText(/ready to generate/i);
+    // "outline" — the editor. Accept the model's course as-is here; editing it is
+    // interview.spec.ts's whole subject.
+    await expect(page.getByTestId("outline-editor")).toBeVisible();
+    await page.getByTestId("interview-answer-submit").click();
+
+    // "confirm" — and this is where the money goes.
     await page.getByTestId("interview-confirm-submit").click();
 
-    // Clear, non-frozen loading state while the job is enqueued and polled
-    // (the mock answers "pending" once, then "succeeded" — see
-    // `mockCurriculaApi`'s docstring) — this is the brief's core requirement,
-    // now reached via the interview's own job-poll phase.
-    await expect(page.getByTestId("interview-job-loading")).toBeVisible();
+    // NO WAITING ROOM. The tree already exists; the dialog closes and the board is
+    // on it, with the draft progress bar running.
+    await expect(page.getByTestId("interview-dialog")).toBeHidden();
+    await expect(page.getByTestId("tree-board")).toBeVisible();
 
-    // The dialog must not be dismissible mid-flight (Escape is a no-op).
-    await page.keyboard.press("Escape");
-    await expect(page.getByTestId("interview-dialog")).toBeVisible();
-
-    await expect(page.getByTestId("interview-dialog")).toBeHidden({ timeout: 10_000 });
-
-    // course + module + 2 lessons. Nested BlockCards render *inside* their
-    // parent's DOM subtree (that's what makes the indentation work), so a
-    // descendant lookup scoped to "the course card" would also match its
-    // module/lesson children — filter by the badge's own text globally
-    // instead of scoping to a parent locator.
+    // course + module + 2 lessons. Nested BlockCards render INSIDE their parent's
+    // DOM subtree (that is what makes the indentation work), so a descendant lookup
+    // scoped to the course card would also match its children — count by kind
+    // globally instead.
     await expect(page.getByTestId("block-card")).toHaveCount(4);
-    await expect(page.getByTestId("block-card-kind").filter({ hasText: "Course" })).toHaveCount(1);
-    await expect(page.getByTestId("block-card-kind").filter({ hasText: "Module" })).toHaveCount(1);
-    await expect(page.getByTestId("block-card-kind").filter({ hasText: "Lesson" })).toHaveCount(2);
+    await expect(page.locator('[data-testid="block-card"][data-kind="course"]')).toHaveCount(1);
+    await expect(page.locator('[data-testid="block-card"][data-kind="module"]')).toHaveCount(1);
+    await expect(page.locator('[data-testid="block-card"][data-kind="lesson"]')).toHaveCount(2);
     await expect(page.getByTestId("block-card-title").filter({ hasText: "Signal Chain Basics" })).toBeVisible();
     await expect(page.getByTestId("block-card-title").filter({ hasText: "Pickups and Tone" })).toBeVisible();
     await expect(page.getByTestId("block-card-title").filter({ hasText: "Cables and Signal Integrity" })).toBeVisible();
 
     expect(mock.calls.interviewStart).toBe(1);
-    // Exactly 2 polls: the mock's default `pendingPolls: 1` answers "pending"
-    // once, then "succeeded" — proving the dialog actually polled `GET
-    // /jobs/{id}` rather than trusting the enqueue response alone.
-    expect(mock.calls.job).toBe(2);
-    // 5 answers: who, duration, sources, preview, confirm.
-    expect(mock.answerBodies).toHaveLength(5);
-    expect(mock.answerBodies[0]).toEqual({ name: "Nikos", level: "beginner", language: "en" });
-    expect(mock.answerBodies[1]).toEqual({ weeks: 6, minutes_per_session: 60 });
-    expect(mock.answerBodies[4]).toEqual({ approved: true, allow_general: false });
+    // Six answers: who, duration, scope, sources, outline, confirm.
+    expect(mock.answerBodies).toHaveLength(6);
+    expect(mock.answerBodies[0]).toEqual({ student_id: null, level: "beginner" });
+    expect(mock.answerBodies[1]).toEqual({ weeks: 6, sessions_per_week: 1, minutes_per_session: 60 });
+    expect(mock.answerBodies[5]).toEqual({ approved: true });
 
     // Inline-edit the course (root) card's title -> PATCH /blocks/{id}.
     const courseTitle = page.getByTestId("block-card-title").filter({ hasText: "Tone Shaping Fundamentals" });
@@ -634,42 +576,33 @@ test.describe("curricula (mocked API)", () => {
     expect(mock.unexpected).toEqual([]);
   });
 
-  test("shows the job's error and keeps the dialog open when generation fails", async ({ page }) => {
-    const mock = await mockCurriculaApi(page, { templates: [], jobOutcome: "failed" });
+  test("a failed confirm keeps the dialog open and leaves the board untouched", async ({ page }) => {
+    const mock = await mockCurriculaApi(page, { templates: [], confirmFails: true });
 
-    await page.goto("/en/today");
-    await page.getByTestId("nav-curricula").click();
-    await expect(page).toHaveURL(/\/en\/curricula$/);
-
+    await page.goto("/en/curricula");
     await page.getByTestId("curricula-generate-button").click();
     await page.getByTestId("interview-title").fill("Broken Curriculum");
     await page.getByTestId("interview-start-submit").click();
 
-    await page.getByTestId("interview-who-new-toggle").click();
-    await page.getByTestId("interview-who-name").fill("Nikos");
-    await page.getByTestId("interview-answer-submit").click();
+    await page.getByTestId("interview-answer-submit").click(); // who
     await page.getByTestId("interview-duration-weeks").fill("6");
     await page.getByTestId("interview-duration-minutes").fill("60");
-    await page.getByTestId("interview-answer-submit").click();
+    await page.getByTestId("interview-answer-submit").click(); // duration
+    await page.getByTestId("interview-scope-brief").fill("Anything.");
+    await page.getByTestId("interview-answer-submit").click(); // scope
     await page.getByTestId("interview-answer-submit").click(); // sources
-    await page.getByTestId("interview-answer-submit").click(); // preview
+    await page.getByTestId("interview-answer-submit").click(); // outline
     await page.getByTestId("interview-confirm-submit").click();
 
-    await expect(page.getByTestId("interview-job-loading")).toBeVisible();
-    await expect(page.getByTestId("interview-job-error")).toHaveText(JOB_FAILURE_MESSAGE, { timeout: 10_000 });
-
-    // NOT the success handoff: the dialog stays open (with a "start over"
-    // action — the spent interview itself can't be resubmitted, since the
-    // server already advanced it to "done" the moment it was approved).
+    // The error is SHOWN and the interview is still there — he does not lose the
+    // outline he just paid 90K tokens for because the last call failed.
+    await expect(page.getByTestId("interview-answer-error")).toHaveText(CONFIRM_FAILURE_MESSAGE);
     await expect(page.getByTestId("interview-dialog")).toBeVisible();
-    await expect(page.getByTestId("interview-start-over")).toBeEnabled();
-    expect(mock.calls.interviewStart).toBe(1);
-    expect(mock.calls.job).toBe(2); // pending, then failed
+    await expect(page.getByTestId("interview-confirm-submit")).toBeEnabled();
 
-    // Nothing was generated: board and template list are untouched.
+    // Nothing was created: the board and the template list are untouched.
     await expect(page.getByTestId("board-empty")).toBeVisible();
     await expect(page.getByTestId("templates-empty")).toBeVisible();
-
     expect(mock.unexpected).toEqual([]);
   });
 });

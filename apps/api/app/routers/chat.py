@@ -15,24 +15,27 @@ messages_to_wire`), persists whatever new turns the loop produces
 (`persist_new_messages`), and persists/resolves the `ApprovalRequest` a
 suspended turn leaves behind.
 
-No-auth PoC posture, same as every other router in this app — no
-authentication/authorization here either; this deploys origin-locked behind
-Cloudflare for a single user.
+Auth: every route here sits behind the `gt_session` password gate
+(`app/auth/middleware.py`) — a whole-API ASGI middleware, not a per-router
+dependency, so there is nothing to declare in this file. One tutor, one
+password; there is still no authorization model, because there is nobody to
+authorize against anybody else.
 """
 import json
 import logging
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.agent.loop import AgentResult, run_agent_turn, stream_plain_turn
-from app.agent.tools import TOOLS
+from app.agent.tools import TOOLS, with_locale
 from app.agent.transcript import messages_to_wire, persist_new_messages
 from app.db import get_db
+from app.i18n import normalize_locale
 from app.jobs.runner import run_curriculum_job, run_lesson_job
 from app.models.chat import ApprovalRequest, ChatSession, Message
 from app.models.generation_job import GenerationJob
@@ -41,6 +44,9 @@ from app.schemas.chat import (
     ChatMessageIn,
     ChatSessionCreate,
     ChatSessionCreated,
+    ChatSessionOut,
+    ChatSessionSummary,
+    ChatSessionUpdate,
     ChatTurnOut,
     MessageOut,
     PendingApprovalOut,
@@ -59,6 +65,41 @@ _ASYNC_JOB_LABELS: dict[str, str] = {
     "curriculum": "Curriculum generation",
     "lesson": "Lesson drafting",
 }
+
+
+# The roles a human ever sees. `tool` rows are internal plumbing (see
+# `MessageOut`'s docstring); everything user-facing in this module — the
+# transcript, the sidebar's count, its preview, its "last activity" ordering —
+# filters on exactly this tuple, so all four agree by construction.
+_VISIBLE_ROLES = ("user", "assistant")
+
+# A truncation of the first user message, NOT a model-written summary (Plan 13
+# Stage 5.6): a "name this conversation" call is a billed request per
+# conversation, for a string the tutor can rename in one click. 60 chars is a
+# sidebar-width truncation; the column holds 200.
+_TITLE_MAX = 60
+_PREVIEW_MAX = 120
+
+
+def _truncate(text: str, limit: int) -> str:
+    """Whitespace-collapsed, ellipsized-if-cut. Collapsing first matters: a
+    pasted multi-line message would otherwise put a newline (and a run of
+    indentation) inside a sidebar row.
+    """
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[:limit].rstrip() + "…"
+
+
+def _ensure_title(session: ChatSession, content: str) -> None:
+    """Name a session after its first user message. Idempotent by the NULL
+    check — a rename (`PATCH /chat/{id}`) is never undone by the next turn.
+    Does not commit: every caller is about to, through
+    `persist_new_messages`'s own commit on the same Session.
+    """
+    if session.title is None and content.strip():
+        session.title = _truncate(content, _TITLE_MAX)
 
 
 def _get_session_or_404(db: Session, session_id: UUID) -> ChatSession:
@@ -222,17 +263,137 @@ def _respond_to_turn(db: Session, session_id: UUID, prior_wire: list[dict], resu
 
 @router.post("/chat", response_model=ChatSessionCreated)
 def create_chat_session(payload: ChatSessionCreate, db: Session = Depends(get_db)) -> ChatSessionCreated:
-    session = ChatSession(student_id=payload.student_id)
+    """`locale` is normalized (`el-GR` -> `el`, unknown -> `el`) BEFORE it is
+    stored, not when it is read: this column is the single source of truth for
+    the language of every turn, every proposed tool call and every job this
+    conversation ever enqueues (see `run_agent_turn`'s `locale`), and it is
+    read from four places. Normalizing once, at the boundary, means none of
+    them can disagree.
+    """
+    session = ChatSession(student_id=payload.student_id, locale=normalize_locale(payload.locale))
     db.add(session)
     db.commit()
     return ChatSessionCreated(session_id=session.id)
+
+
+@router.get("/chat", response_model=list[ChatSessionSummary])
+def list_chat_sessions(db: Session = Depends(get_db)) -> list[ChatSessionSummary]:
+    """The sidebar's list (Plan 13 Stage 5.6), most-recently-active first.
+
+    Sessions with NO user/assistant message are EXCLUDED — and that exclusion
+    is the INNER JOIN itself, not a filter bolted on after it. It has to be:
+    the UI this replaces created a session on every single mount of the chat
+    page and kept its id in React state only, so the deployed database holds a
+    pile of orphaned empty sessions, and the new UI still creates one the
+    moment the tutor clicks "new chat" and then walks away. Neither is a
+    conversation. Listing them would bury the real transcripts under blanks.
+
+    Ordered by LAST ACTIVITY, not by `created_at`: resuming a week-old thread
+    and adding to it should float it to the top, which is what a chat sidebar
+    means by "recent". `updated_at` on the session row would NOT do this —
+    nothing in the message path touches the parent row (see `_ensure_title`,
+    the one exception, and only on the first turn).
+
+    Two queries, deliberately, and neither one is per-session (no N+1): one
+    aggregate for count + last-activity, one Postgres `DISTINCT ON` for the
+    preview text. The preview cannot come out of the aggregate — SQL has no
+    "the value from the max row" aggregate — and a correlated subquery per row
+    is the same N+1 in a costume.
+    """
+    visible = Message.role.in_(_VISIBLE_ROLES)
+
+    agg = (
+        select(
+            Message.session_id.label("session_id"),
+            func.count(Message.id).label("message_count"),
+            func.max(Message.created_at).label("last_message_at"),
+        )
+        .where(visible)
+        .group_by(Message.session_id)
+        .subquery()
+    )
+    rows = db.execute(
+        select(ChatSession, agg.c.message_count, agg.c.last_message_at)
+        .join(agg, agg.c.session_id == ChatSession.id)
+        .order_by(agg.c.last_message_at.desc())
+    ).all()
+    if not rows:
+        return []
+
+    # DISTINCT ON (session_id) + ORDER BY session_id, created_at DESC = "the
+    # newest visible message per session". `content IS NOT NULL` skips a
+    # tool-calls-only assistant turn (`Message.content` is nullable — a
+    # suspended mutation's narration can be absent entirely), which would
+    # otherwise win the ordering and give the session a blank preview.
+    session_ids = [session.id for session, _, _ in rows]
+    previews = {
+        session_id: _truncate(content, _PREVIEW_MAX)
+        for session_id, content in db.execute(
+            select(Message.session_id, Message.content)
+            .where(
+                Message.session_id.in_(session_ids),
+                visible,
+                Message.content.is_not(None),
+            )
+            .distinct(Message.session_id)
+            .order_by(Message.session_id, Message.created_at.desc(), Message.id.desc())
+        ).all()
+    }
+
+    return [
+        ChatSessionSummary(
+            id=session.id,
+            title=session.title,
+            locale=session.locale,
+            student_id=session.student_id,
+            created_at=session.created_at,
+            updated_at=session.updated_at,
+            message_count=message_count,
+            last_message_at=last_message_at,
+            preview=previews.get(session.id),
+        )
+        for session, message_count, last_message_at in rows
+    ]
+
+
+@router.patch("/chat/{session_id}", response_model=ChatSessionOut)
+def rename_chat_session(
+    session_id: UUID, payload: ChatSessionUpdate, db: Session = Depends(get_db)
+) -> ChatSession:
+    session = _get_session_or_404(db, session_id)
+    title = payload.title.strip()
+    if not title:
+        raise HTTPException(status_code=422, detail="title must not be blank")
+    session.title = title[:200]
+    db.commit()
+    db.refresh(session)
+    return session
+
+
+@router.delete("/chat/{session_id}", status_code=204)
+def delete_chat_session(session_id: UUID, db: Session = Depends(get_db)) -> Response:
+    """Deletes the transcript AND its approval records — the `ON DELETE
+    CASCADE` on `message.session_id`/`approval_request.session_id` (migration
+    `8fa57b72fb21`) does that in the database, so this is one DELETE, not a
+    hand-rolled three-table teardown that could half-fail.
+
+    A pending approval is destroyed with the rest of the session. That is the
+    honest semantic: the mutation it gated was never executed (nothing outside
+    these three tables was written), so there is nothing left dangling — and
+    a tutor deleting the conversation is, unambiguously, not going to approve
+    what it proposed.
+    """
+    session = _get_session_or_404(db, session_id)
+    db.delete(session)
+    db.commit()
+    return Response(status_code=204)
 
 
 @router.get("/chat/{session_id}", response_model=list[MessageOut])
 def get_chat_history(session_id: UUID, db: Session = Depends(get_db)) -> list[Message]:
     _get_session_or_404(db, session_id)
     rows = _ordered_messages(db, session_id)
-    return [row for row in rows if row.role in ("user", "assistant")]
+    return [row for row in rows if row.role in _VISIBLE_ROLES]
 
 
 @router.get("/chat/{session_id}/pending", response_model=PendingApprovalOut | None)
@@ -246,7 +407,7 @@ def get_pending_approval(session_id: UUID, db: Session = Depends(get_db)) -> Pen
 
 @router.post("/chat/{session_id}/messages", response_model=ChatTurnOut)
 def post_message(session_id: UUID, payload: ChatMessageIn, db: Session = Depends(get_db)) -> ChatTurnOut:
-    _get_session_or_404(db, session_id)
+    session = _get_session_or_404(db, session_id)
 
     # Refuse a new turn while an approval is still open (409, same vocabulary
     # as the resolve endpoint's non-pending 409). After an `awaiting_approval`
@@ -266,10 +427,12 @@ def post_message(session_id: UUID, payload: ChatMessageIn, db: Session = Depends
             detail="an approval is pending — resolve it before sending a new message",
         )
 
+    # Flushed by `persist_new_messages`'s own commit, on the same Session.
+    _ensure_title(session, payload.content)
     persist_new_messages(db, session_id, [{"role": "user", "content": payload.content}])
 
     wire = messages_to_wire(_ordered_messages(db, session_id))
-    result = run_agent_turn(db, wire)
+    result = run_agent_turn(db, wire, locale=session.locale)
 
     return _respond_to_turn(db, session_id, wire, result)
 
@@ -306,7 +469,7 @@ def post_message_stream(session_id: UUID, payload: ChatMessageIn, db: Session = 
     never a stray persisted user message left with no answer for the loop to
     choke on next turn.
     """
-    _get_session_or_404(db, session_id)
+    session = _get_session_or_404(db, session_id)
 
     # Same guard, same reasoning, as `post_message` above.
     if _open_pending_approval(db, session_id) is not None:
@@ -321,13 +484,20 @@ def post_message_stream(session_id: UUID, payload: ChatMessageIn, db: Session = 
 
     def event_stream():
         try:
-            for event in stream_plain_turn(db, wire):
+            for event in stream_plain_turn(db, wire, locale=session.locale):
                 if event["event"] == "delta":
                     yield f"event: delta\ndata: {json.dumps({'text': event['text']})}\n\n"
                 elif event["event"] == "fallback":
                     yield f"event: fallback\ndata: {json.dumps({'reason': event['reason']})}\n\n"
                     return
                 elif event["event"] == "done":
+                    # Titled here and not at the top of the request for the
+                    # same reason NOTHING else is persisted before "done":
+                    # a fallback writes nothing at all, and a session titled
+                    # after a turn it never recorded would show up in the
+                    # sidebar with a name and an empty transcript. On the
+                    # fallback path the REST retry (`post_message`) titles it.
+                    _ensure_title(session, payload.content)
                     persist_new_messages(
                         db, session_id,
                         [user_wire, event["messages"][-1]],
@@ -355,7 +525,7 @@ def resolve_approval(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ) -> ChatTurnOut:
-    _get_session_or_404(db, session_id)
+    session = _get_session_or_404(db, session_id)
 
     approval = db.get(ApprovalRequest, approval_id)
     if approval is None or approval.session_id != session_id:
@@ -378,13 +548,22 @@ def resolve_approval(
         persist_new_messages(db, session_id, [tool_msg])
 
         wire_with_answer = wire + [tool_msg]
-        result = run_agent_turn(db, wire_with_answer)
+        result = run_agent_turn(db, wire_with_answer, locale=session.locale)
         return _respond_to_turn(db, session_id, wire_with_answer, result)
 
     # decision == "approve" (the only other value Literal["approve","reject"] allows)
     if payload.edited_args is not None:
         approval.edited_args = payload.edited_args
     args = approval.edited_args if approval.edited_args is not None else approval.tool_args
+
+    # RE-INJECT the session's locale (Plan 13, Stage 5.4). `loop.py` already
+    # injected it into `tool_args` at suspend time, but `edited_args` REPLACES
+    # `tool_args` wholesale — a tutor who edits the JSON on the approval card and
+    # drops `language` would hand `run_curriculum_job` a params dict with no
+    # language in it (a `TypeError` inside a background task, i.e. a job that
+    # just says "failed"), and one who *changes* it would be choosing a language
+    # the rest of the app disagrees with. The session's locale wins, always.
+    args = with_locale(approval.tool_name, args, session.locale)
 
     entry = TOOLS.get(approval.tool_name)
     if entry is None:
@@ -487,5 +666,5 @@ def resolve_approval(
     persist_new_messages(db, session_id, [tool_msg])
 
     wire_with_answer = wire + [tool_msg]
-    result = run_agent_turn(db, wire_with_answer)
+    result = run_agent_turn(db, wire_with_answer, locale=session.locale)
     return _respond_to_turn(db, session_id, wire_with_answer, result)

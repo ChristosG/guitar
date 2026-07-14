@@ -1,6 +1,6 @@
 import fitz
 from app.brain.paginate import paginate_source
-from app.models.knowledge import Chunk, KnowledgeSource, Page
+from app.models.knowledge import EMBED_DIM, Chunk, KnowledgeSource, Page
 
 
 def _two_page_scanned_pdf() -> bytes:
@@ -71,7 +71,7 @@ def test_repaginating_cascades_away_old_chunks(db, tmp_path, monkeypatch):
 
     first = paginate_source(db, src.id, kind="pdf", data=_two_page_scanned_pdf())
     chunk = Chunk(source_id=src.id, page_id=first[0].id, text="stale",
-                  embedding=[0.0] * 2560)
+                  embedding=[0.0] * EMBED_DIM)
     db.add(chunk); db.commit()
     chunk_id = chunk.id
 

@@ -30,14 +30,23 @@ prompt.
 """
 import uuid
 
+from app.i18n import DEFAULT_LOCALE, answer_in, language_directive
 from app.llm.factory import get_provider
 from app.models.block import Block
 from app.models.knowledge import KnowledgeSource
 
 # guided-JSON schema for {title, sessions:[{title, est_minutes,
-# items:[{title, body}]}]}. Mirrors MODULE_SCHEMA's (app.curriculum.generate) shape/verified
-# keywords (`app.curriculum.generate`): `est_minutes` carries `"minimum": 1`
-# (live A/B-verified there to be actually enforced, not just accepted).
+# items:[{title, body}]}]} — a lesson drafted from a READER SELECTION, which is a
+# different feature from curriculum authoring and keeps its own, smaller shape.
+#
+# It used to say it mirrored `curriculum.generate.MODULE_SCHEMA`, including that
+# schema's `"minimum": 1` on `est_minutes`. Both are gone (Plan 13, Stage 6):
+# curriculum authoring now drafts one LESSON per call against
+# `curriculum.depth.LESSON_DRAFT_SCHEMA`, and — more to the point — `"minimum"` was
+# never enforced by ANYTHING once the provider became Claude. `llm/schema.py`
+# strips it before the call, so the SDK cannot even raise on it. `_positive_minutes`
+# below is now the only thing keeping `est_minutes` positive, which is exactly why
+# it exists.
 LESSON_SCHEMA = {
     "type": "object",
     "properties": {
@@ -96,22 +105,31 @@ def _build_messages(
     `page_from`..`page_to` (a selection made in the continuous-scroll
     Reader can cross a page boundary) — `text` is still the WHOLE selected
     passage, verbatim, regardless of how many pages it spans.
+
+    `language` is the tutor's UI locale, threaded all the way from the
+    browser's `X-App-Locale` header (Plan 13, Stage 5.5 — it used to be a
+    dead parameter: `SelectionIn` had no field for it, so the job runner
+    always read `"en"` and a Greek tutor selecting Greek text got an English
+    lesson). The PASSAGE it grounds on is usually ENGLISH regardless, which
+    is exactly the case `app.i18n.language_directive` is written for, and why
+    `answer_in` is repeated after the passage: those are the last tokens
+    before generation and they are in the wrong language.
     """
     system = (
         "You generate ONLY the JSON lesson tree matching the given schema — "
         "no prose, no markdown, no commentary outside the JSON object. "
-        f"Write every title/body in {language} (el=Greek, en=English). "
         "Ground the ENTIRE lesson in the PASSAGE below: every session and "
         "item must teach something the PASSAGE actually says. Do NOT invent "
         "facts, gear, techniques, citations, or URLs the PASSAGE does not "
         "support. A lesson may span multiple teaching sessions (this is a "
         "unit of instruction, not a single hour) — break it into 1-4 "
         "sessions, each with 1-5 items, that build on each other. Give every "
-        "session a realistic, non-zero est_minutes."
+        "session a realistic, non-zero est_minutes.\n\n"
+        f"{language_directive(language)}"
     )
     user = (
         f"Source: {source_title}, {_page_label(page_from, page_to)}\n\n"
-        f"PASSAGE:\n{text}"
+        f"PASSAGE:\n{text}\n\n{answer_in(language)}"
     )
     return [
         {"role": "system", "content": system},
@@ -183,7 +201,7 @@ def _persist_tree(
 
 
 def draft_lesson_from_selection(
-    db, *, source_id: uuid.UUID, text: str, language: str = "en",
+    db, *, source_id: uuid.UUID, text: str, language: str = DEFAULT_LOCALE,
     page_from: int | None = None, page_to: int | None = None,
     page_no: int | None = None,
 ) -> uuid.UUID:

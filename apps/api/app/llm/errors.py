@@ -36,6 +36,37 @@ class LLMError(Exception):
         super().__init__(message or kind)
 
 
+class LLMNotConfigured(LLMError):
+    """There is no usable Anthropic key — because the tutor has not pasted one
+    yet, or because the stored ciphertext no longer decrypts under the current
+    `ENCRYPTION_SECRET`.
+
+    DISTINCT FROM `LLMError(kind="auth")`, which means "you gave us a key and
+    Anthropic rejected it". Both are the tutor's to fix, but they are different
+    sentences and different HTTP codes:
+
+        LLMNotConfigured        -> 409  "no key yet — open Settings"
+        LLMError(kind="auth")   -> 424  "your key was rejected — open Settings"
+
+    409 SPECIFICALLY, and not a 500. This is the DEFAULT state of a fresh
+    install: the first thing the tutor ever does is open an app that has no key.
+    A stack trace at that moment tells a non-technical user the software is
+    broken, and he is not wrong to think so. `app/main.py` installs an exception
+    handler that turns this into a 409 with a machine-readable `code`, so it can
+    never reach a browser as a 500 — including from a call site that had no idea
+    a provider was about to be constructed under it.
+
+    It is also checked BEFORE a `GenerationJob` row is created (see
+    `app.llm.factory.require_llm_configured`, wired into every enqueue route).
+    Discovering "no key" inside a BackgroundTask would produce a job that fails
+    with a traceback in `job.error` — the tutor would have a red row in his
+    Curricula list and no idea it means "go paste a key".
+    """
+
+    def __init__(self, message: str = "") -> None:
+        super().__init__("not_configured", message or "No LLM provider is configured.")
+
+
 class GuidedJSONError(LLMError):
     """Raised by `LLMProvider.guided_json` when the model's response can't be
     used as the requested structured JSON: the model refused (`message.

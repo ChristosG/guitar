@@ -29,7 +29,7 @@ could have skipped retrieval. Every hit is also surfaced as a citation
 (`_to_citation`) on `AgentResult.citations`, persisted onto the `Message` row
 by `app/routers/chat.py` via `app.agent.transcript.persist_new_messages` —
 this is what lets the UI show a citation chip back to a real page. A turn
-with NO hits (or none clearing `_RELEVANCE_FLOOR`) still gets a GROUNDING
+with NO hits (none that cleared `retrieve.search`'s floor) still gets a GROUNDING
 block — one that instructs the model to say his library doesn't cover this
 and label the rest of the answer as general knowledge, rather than silently
 falling back to unlabelled pretrained knowledge. This pre-hop runs BEFORE
@@ -94,7 +94,7 @@ cannot interact with — and does not touch — the HITL suspend path at all.
 import json
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Iterator
 
 from app.agent.guards import (
@@ -103,8 +103,9 @@ from app.agent.guards import (
     looks_like_tablature,
 )
 from app.agent.prompts import SYSTEM_PROMPT
-from app.agent.tools import TOOLS
+from app.agent.tools import TOOLS, with_locale
 from app.brain.retrieve import search
+from app.i18n import DEFAULT_LOCALE, answer_in, language_directive
 from app.llm.errors import ToolArgsError
 from app.llm.factory import get_provider
 from app.llm.tools_types import ToolCall
@@ -275,12 +276,14 @@ _QUESTION_RE = re.compile(
 # separator, not a question ("do this; then that").
 _GREEK_QUESTION_MARK_RE = re.compile(r"[;;]")
 
-# Conservative on purpose: this PoC has no calibration data for what a
-# "genuinely relevant" cosine score looks like against this corpus/embedder,
-# so the floor only screens out clear noise (near-zero/negative similarity)
-# rather than risking false-negative filtering of a real hit. Revisit with
-# real usage data once there's a distribution to tune against.
-_RELEVANCE_FLOOR = 0.15
+# THIS MODULE NO LONGER OWNS A RELEVANCE FLOOR (Plan 13, Stage 4.4). It used to:
+# `_RELEVANCE_FLOOR = 0.15`, applied to `search()`'s hits right here. It was the
+# THIRD floor in the codebase (`curriculum/ground.py` had two more), it disagreed
+# with both, and — being a raw cosine threshold — it would have silently become
+# meaningless the moment `Hit.score` turned into an RRF fusion score that tops out
+# near 0.033. All three moved into `app.brain.retrieve.search`, which is the only
+# place that knows which embedding model produced the numbers. `search()`'s
+# results are now used as given; nothing below re-filters them.
 
 
 def _is_content_bearing(text: str) -> bool:
@@ -368,7 +371,7 @@ _NO_HITS_GROUNDING = (
 )
 
 
-def _grounding_block(hits: list) -> str:
+def _grounding_block(hits: list, locale: str) -> str:
     """The injected context TEXT (C1/C2) — appended onto the end of the
     user's OWN turn (see `run_agent_turn`'s pre-hop), deliberately NOT a
     second `{"role": "system", ...}` message: the real vLLM chat template
@@ -384,14 +387,23 @@ def _grounding_block(hits: list) -> str:
     in the part of the prefix that was already going to change this turn.
 
     Empty `hits` (no results, or every result screened out by
-    `_RELEVANCE_FLOOR`) gets the explicit "say so, label as general
+    `retrieve.search`'s own floor) gets the explicit "say so, label as general
     knowledge" instruction (`_NO_HITS_GROUNDING`) rather than silently
     omitting a grounding block — an omitted block is indistinguishable from
     "retrieval wasn't attempted" and invites exactly the unlabelled-
     pretrained-knowledge failure C2 exists to prevent.
+
+    THE LANGUAGE REMINDER GOES LAST (Plan 13, Stage 5.3). The passages are the
+    tutor's ENGLISH book, they can run to thousands of tokens, and they sit
+    immediately before the point where the model starts writing. A "write in
+    Greek" instruction up in the system prompt is, by then, the least recent
+    thing it saw — and it shows: it finishes reading English and answers in
+    English. `app.i18n.answer_in`, at the very tail of this block, is what
+    actually holds. Both branches get it, the no-hits one included (nothing
+    about "we found nothing" makes the answer's language matter less).
     """
     if not hits:
-        return _NO_HITS_GROUNDING
+        return f"{_NO_HITS_GROUNDING}\n\n{answer_in(locale)}"
     passages = "\n\n".join(
         f"[{i}] (source_id={hit.source_id}, page={hit.page}) {hit.text}"
         for i, hit in enumerate(hits, start=1)
@@ -401,7 +413,8 @@ def _grounding_block(hits: list) -> str:
         f"question:\n\n{passages}\n\n"
         "Answer from this context and cite the passages you use inline as [n]. If "
         "none of it actually answers the question, say his material doesn't cover "
-        "this and label the rest of your answer as general knowledge."
+        "this and label the rest of your answer as general knowledge.\n\n"
+        f"{answer_in(locale)}"
     )
 
 
@@ -426,7 +439,7 @@ class AgentResult:
     `citations` (Plan 11 Task 1, C1/C2) is the list of `_to_citation(hit)`
     dicts for whatever this turn's forced-retrieval pre-hop found —
     `[]` when the turn wasn't content-bearing (no search ran at all) OR the
-    search ran but returned nothing above `_RELEVANCE_FLOOR`. Populated on
+    search ran and everything it found fell below its floor. Populated on
     EVERY return branch below (not just the plain "answer" path), since a
     turn can still be genuinely grounded even when it also suspends on a
     mutation in the same reply (see `test_agent_grounding.py`'s C1/C6
@@ -449,15 +462,26 @@ def _tool_schemas() -> list[dict]:
     return [entry.schema for entry in TOOLS.values() if entry.kind in ("read", "mutation")]
 
 
-def _ensure_system_prompt(messages: list[dict]) -> list[dict]:
-    """Prepend `SYSTEM_PROMPT` unless the transcript already starts with a
-    system message. Callers (Task 4's chat router) own the transcript across
-    turns and pass the full history back in each time — prepending
-    unconditionally would accumulate a duplicate system message every turn.
+def _ensure_system_prompt(messages: list[dict], locale: str) -> list[dict]:
+    """Prepend `SYSTEM_PROMPT` + the session's LANGUAGE block unless the
+    transcript already starts with a system message. Callers (Task 4's chat
+    router) own the transcript across turns and pass the full history back in
+    each time — prepending unconditionally would accumulate a duplicate system
+    message every turn.
+
+    The LANGUAGE block (`app.i18n.language_directive`, Plan 13 Stage 5.3) is
+    appended to `SYSTEM_PROMPT` rather than baked into it: the prompt is a
+    module-level constant precisely so it stays byte-identical (agentic-
+    gotchas #8 — prefix caching), and a locale is per-session. Appending keeps
+    BOTH properties: the string is still fully determined by the session, so it
+    is still byte-identical turn over turn WITHIN a conversation (a session's
+    `locale` is set at creation and never changes), which is the only scope in
+    which prefix caching can hit anyway.
     """
     if messages and messages[0].get("role") == "system":
         return messages
-    return [{"role": "system", "content": SYSTEM_PROMPT}, *messages]
+    system = f"{SYSTEM_PROMPT}\n\n{language_directive(locale)}"
+    return [{"role": "system", "content": system}, *messages]
 
 
 def _wire_assistant_message(content: str | None, tool_calls: list[ToolCall]) -> dict:
@@ -549,8 +573,19 @@ def _first_mutation_index(tool_calls: list[ToolCall]) -> int | None:
     return None
 
 
-def run_agent_turn(db, messages: list[dict], *, max_steps: int = 6) -> AgentResult:
-    messages = _ensure_system_prompt(list(messages))
+def run_agent_turn(
+    db, messages: list[dict], *, locale: str = DEFAULT_LOCALE, max_steps: int = 6,
+) -> AgentResult:
+    """`locale` is the SESSION's language (`ChatSession.locale`, set from the
+    browser's `X-App-Locale` at session creation) — `app/routers/chat.py`
+    passes it on every call. It is threaded into the system prompt, into the
+    tail of the GROUNDING block, and INTO EVERY TOOL CALL THE MODEL PROPOSES
+    (`app.agent.tools.with_locale`) — including the one this turn suspends on,
+    so the wire transcript, the approval card the tutor sees, and the params of
+    the job that eventually runs all carry the same locale. Defaults to `el`
+    (the app's default), never `en`.
+    """
+    messages = _ensure_system_prompt(list(messages), locale)
     tools = _tool_schemas()
     provider = get_provider()
     repair_attempts = 0
@@ -595,10 +630,9 @@ def run_agent_turn(db, messages: list[dict], *, max_steps: int = 6) -> AgentResu
     # local list points to. `last` is still `messages[-1]` from the G5 check
     # above (unchanged — this function returned already if it had matched).
     if last.get("role") == "user" and _is_content_bearing(last.get("content") or ""):
-        raw_hits = search(db, last["content"], k=5)
-        hits = [hit for hit in raw_hits if hit.score >= _RELEVANCE_FLOOR]
+        hits = search(db, last["content"], k=5)
         citations = [_to_citation(hit) for hit in hits]
-        grounded_content = f"{last['content']}\n\n{_grounding_block(hits)}"
+        grounded_content = f"{last['content']}\n\n{_grounding_block(hits, locale)}"
         messages[-1] = {**last, "content": grounded_content}
 
     for _ in range(max_steps):
@@ -652,13 +686,26 @@ def run_agent_turn(db, messages: list[dict], *, max_steps: int = 6) -> AgentResu
             messages.append(_wire_assistant_message(turn.content, turn.tool_calls))
             return AgentResult(status="answer", content=turn.content, messages=messages, citations=citations)
 
-        pending_index = _first_mutation_index(turn.tool_calls)
+        # THE LOCALE IS INJECTED ONCE, HERE, into every call the model just
+        # proposed (`app.agent.tools.with_locale`) — before the wire message is
+        # reconstructed, before any read is dispatched, and before a mutation is
+        # suspended. Doing it in one place is exactly what makes those three
+        # AGREE: the transcript the model sees next turn, the args on the
+        # approval card, and the `GenerationJob.params` the runner will read all
+        # come from the same injected dict. `ToolCall` is frozen (a parsed call
+        # is a value), so this rebuilds each one rather than mutating it.
+        tool_calls = [
+            replace(call, arguments=with_locale(call.name, call.arguments, locale))
+            for call in turn.tool_calls
+        ]
+
+        pending_index = _first_mutation_index(tool_calls)
 
         if pending_index is None:
             # No mutation anywhere in this turn — unchanged from Task 2:
             # every call is dispatched inline, in order.
-            messages.append(_wire_assistant_message(turn.content, turn.tool_calls))
-            for call in turn.tool_calls:
+            messages.append(_wire_assistant_message(turn.content, tool_calls))
+            for call in tool_calls:
                 _dispatch_read_call(db, call, messages)
             continue
 
@@ -689,8 +736,8 @@ def run_agent_turn(db, messages: list[dict], *, max_steps: int = 6) -> AgentResu
         #     the model's intended order would run a call the human never
         #     gated. If still relevant, the model can re-propose them once
         #     the loop resumes after this mutation is resolved.
-        handled_calls = turn.tool_calls[:pending_index]
-        pending_call = turn.tool_calls[pending_index]
+        handled_calls = tool_calls[:pending_index]
+        pending_call = tool_calls[pending_index]
 
         messages.append(_wire_assistant_message(turn.content, handled_calls + [pending_call]))
         for call in handled_calls:
@@ -753,10 +800,12 @@ def run_agent_turn(db, messages: list[dict], *, max_steps: int = 6) -> AgentResu
 # transcript behind.
 #
 # Runs the EXACT SAME forced-retrieval pre-hop as `run_agent_turn` (C1/C2 —
-# same `_is_content_bearing` gate, same `_RELEVANCE_FLOOR`, same
-# `_grounding_block`) so a streamed answer is grounded identically to a REST
+# same `_is_content_bearing` gate, same floor — which now lives inside
+# `search()` — same `_grounding_block`) so a streamed answer is grounded identically to a REST
 # one; only the model-call transport differs.
-def stream_plain_turn(db, messages: list[dict]) -> Iterator[dict]:
+def stream_plain_turn(
+    db, messages: list[dict], *, locale: str = DEFAULT_LOCALE,
+) -> Iterator[dict]:
     """Yields, in order:
       - zero or more `{"event": "delta", "text": ...}` as content streams in.
       - exactly one terminal event, one of:
@@ -769,8 +818,14 @@ def stream_plain_turn(db, messages: list[dict]) -> Iterator[dict]:
            "error"}` — see this module's own comment block above for what
           each reason means and what the caller must do (never persist;
           resend via the REST turn endpoint instead).
+
+    `locale`: same session language `run_agent_turn` takes, same system-prompt
+    and GROUNDING-tail treatment — a streamed answer must not be in a different
+    language from the REST answer to the same question. No tool-call locale
+    injection here, because this function NEVER dispatches a tool call: any
+    proposed call is a `"fallback"` and `run_agent_turn` re-runs the turn.
     """
-    messages = _ensure_system_prompt(list(messages))
+    messages = _ensure_system_prompt(list(messages), locale)
     tools = _tool_schemas()
     provider = get_provider()
     citations: list[dict] = []
@@ -797,10 +852,9 @@ def stream_plain_turn(db, messages: list[dict]) -> Iterator[dict]:
     # helper with more parameters than callers" precedent (e.g. `_stringify`
     # in `app/routers/chat.py`).
     if last.get("role") == "user" and _is_content_bearing(last.get("content") or ""):
-        raw_hits = search(db, last["content"], k=5)
-        hits = [hit for hit in raw_hits if hit.score >= _RELEVANCE_FLOOR]
+        hits = search(db, last["content"], k=5)
         citations = [_to_citation(hit) for hit in hits]
-        grounded_content = f"{last['content']}\n\n{_grounding_block(hits)}"
+        grounded_content = f"{last['content']}\n\n{_grounding_block(hits, locale)}"
         messages[-1] = {**last, "content": grounded_content}
 
     final_content: str | None = None

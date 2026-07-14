@@ -314,8 +314,10 @@ class _FakeArtifact:
 def test_generate_artifact_wraps_service_into_compact_dict(monkeypatch):
     captured = {}
 
-    def _fake_generate(db, *, kind, prompt, block_id, ground):
-        captured.update(kind=kind, prompt=prompt, block_id=block_id, ground=ground)
+    def _fake_generate(db, *, kind, prompt, block_id, ground, locale):
+        captured.update(
+            kind=kind, prompt=prompt, block_id=block_id, ground=ground, locale=locale,
+        )
         return _FakeArtifact(
             id="art-1", kind=kind, title="G major", spec={"name": "G"}, block_id=block_id,
         )
@@ -331,6 +333,9 @@ def test_generate_artifact_wraps_service_into_compact_dict(monkeypatch):
     assert captured == {
         "kind": "chord_diagram", "prompt": "G major open chord",
         "block_id": None, "ground": True,
+        # Not passed by this call — the fn's own default, which is the APP's
+        # default locale (`el`), never "en" (Plan 13, Stage 5.4).
+        "locale": "el",
     }
     assert result == {
         "id": "art-1", "kind": "chord_diagram", "title": "G major",
@@ -388,25 +393,55 @@ def test_generate_curriculum_wraps_service_root_id(monkeypatch):
     captured = {}
     fake_root = uuid.uuid4()
 
-    def _fake_generate(db, *, title, language, profile, domain, target_minutes_total):
-        captured.update(
-            title=title, language=language, profile=profile,
-            domain=domain, target_minutes_total=target_minutes_total,
-        )
+    def _fake_generate(db, **kwargs):
+        captured.update(kwargs)
         return fake_root
 
     monkeypatch.setattr(agent_tools, "_generate_curriculum_service", _fake_generate)
 
     result = TOOLS["generate_curriculum"].fn(
         None, title="Blues 101", language="en", profile={"level": "beginner"},
-        domain="theory", target_minutes_total=120,
+        brief="get him playing 12-bar blues", weeks=20, minutes_per_session=50,
     )
 
-    assert captured == {
-        "title": "Blues 101", "language": "en", "profile": {"level": "beginner"},
-        "domain": "theory", "target_minutes_total": 120,
-    }
+    assert captured["title"] == "Blues 101"
+    assert captured["language"] == "en"
+    assert captured["brief"] == "get him playing 12-bar blues"
+    assert captured["weeks"] == 20
+    assert captured["minutes_per_session"] == 50
     assert result == {"root_id": fake_root}
+
+
+def test_generate_curriculum_no_longer_accepts_a_domain(monkeypatch):
+    """`domain` is DEAD (Plan 13, Stage 6). Chris asked what it was for; the
+    answer was one line in one prompt plus a retrieval filter that — after
+    5d77bd0 — could no longer exclude anything. `brief` replaces it, and unlike
+    `domain` it reaches every lesson-draft prompt rather than only the outline.
+    """
+    with pytest.raises(TypeError):
+        TOOLS["generate_curriculum"].fn(None, title="Blues 101", domain="theory")
+
+
+def test_generate_curriculum_schema_does_not_offer_domain_or_language_to_the_model():
+    props = TOOLS["generate_curriculum"].schema["function"]["parameters"]["properties"]
+    assert "domain" not in props
+    # `language` was a REQUIRED, model-chosen parameter here — which is how a Greek
+    # tutor got an English curriculum. It is injected from the session now.
+    assert "language" not in props
+    assert "brief" in props
+
+
+def test_generate_curriculum_rejects_a_student_that_does_not_exist(db):
+    """`student_id` is new on this tool, and it must resolve to a REAL student —
+    the whole point of threading it through is that the lesson-draft prompt gets a
+    brief built from his actual notes. A dangling id would silently produce a
+    curriculum personalized for nobody.
+    """
+    result = TOOLS["generate_curriculum"].fn(
+        db, title="Blues 101", student_id=str(uuid.uuid4()),
+    )
+    assert "error" in result
+    assert "not found" in result["error"]
 
 
 # ---------------------------------------------------------------------------

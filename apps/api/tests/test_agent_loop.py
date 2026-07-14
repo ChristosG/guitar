@@ -15,6 +15,7 @@ import json
 import app.agent.loop as agent_loop
 from app.agent.loop import AgentResult, run_agent_turn
 from app.agent.prompts import SYSTEM_PROMPT
+from app.i18n import DEFAULT_LOCALE, language_directive
 from app.agent.tools import TOOLS, ToolEntry
 from app.llm.errors import ToolArgsError
 from app.llm.tools_types import AssistantTurn, ToolCall
@@ -95,8 +96,13 @@ def test_run_agent_turn_dispatches_read_tool_then_returns_final_answer(monkeypat
     assert search_calls == ["what cancels hum?"]
     assert len(fake_provider.calls) == 2  # one round-trip: call -> tool -> call
 
-    # SYSTEM_PROMPT was prepended (the caller's messages didn't have one).
-    assert result.messages[0] == {"role": "system", "content": SYSTEM_PROMPT}
+    # SYSTEM_PROMPT was prepended (the caller's messages didn't have one), with
+    # the session's LANGUAGE block appended to it (Plan 13, Stage 5.3 — the
+    # prompt constant itself stays byte-identical; the locale is per-session).
+    system = result.messages[0]
+    assert system["role"] == "system"
+    assert system["content"].startswith(SYSTEM_PROMPT)
+    assert system["content"] == f"{SYSTEM_PROMPT}\n\n{language_directive(DEFAULT_LOCALE)}"
 
     # The assistant turn WITH tool_calls is in history in OpenAI WIRE shape —
     # NOT the parsed AssistantTurn shape chat_tools itself returns.

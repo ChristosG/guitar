@@ -3,43 +3,43 @@
 import { useState, type FormEvent } from "react";
 import { useTranslations } from "next-intl";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import type { InterviewOption } from "@/lib/api";
 
 interface InterviewWhoStepProps {
-  options: { value: string; label: string }[];
+  /** The roster, plus a first option with `value: "none"` — the API builds that
+   * one itself (`describe_step`); it is not a client-side affordance bolted on. */
+  options: InterviewOption[];
+  /** `findings.levels` — the levels the API will accept. Not hardcoded here: a
+   * level this client invented would just be re-asked by the validator. */
+  levels: string[];
   submitting: boolean;
   error: string | null | undefined;
   onSubmit: (answer: unknown) => void;
 }
 
-/** The interview's first step (`app.curriculum.interview.STEP_ORDER[0]`):
- * pick a real student off the roster as a one-tap option, or name someone
- * not yet on it. Mirrors `students/progress-row.tsx`'s "button-row
- * radiogroup" pattern for the roster picks (this app has no dedicated
- * radio-input component — see that file's own docstring for why). */
-export function InterviewWhoStep({ options, submitting, error, onSubmit }: InterviewWhoStepProps) {
+const NO_STUDENT = "none";
+
+/** The interview's first step — and THE STUDENT IS OPTIONAL.
+ *
+ * Chris, verbatim: "this has to be optional dude.. the student part here has to be
+ * TOTALLY optional". So "no particular student" is a first-class option with its
+ * own button, not a field left blank. And when there is no student there is an
+ * explicit LEVEL selector — "who is this for" and "how advanced are they" are two
+ * questions, and only one of them needs a person.
+ *
+ * The level selector disappears once a real student is picked, because his own
+ * level (on file) wins over it anyway (`_answer_who`), and a control that cannot
+ * change the outcome is a lie about what the app is doing.
+ */
+export function InterviewWhoStep({ options, levels, submitting, error, onSubmit }: InterviewWhoStepProps) {
   const t = useTranslations("curricula.interview");
 
-  const [mode, setMode] = useState<"existing" | "new">(options.length > 0 ? "existing" : "new");
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [name, setName] = useState("");
-  const [level, setLevel] = useState("");
-  const [language, setLanguage] = useState("");
-
-  const canSubmit = mode === "existing" ? Boolean(selectedId) : name.trim().length > 0;
+  const [selected, setSelected] = useState<string>(NO_STUDENT);
+  const [level, setLevel] = useState<string>(levels[0] ?? "all_levels");
 
   function handleSubmit(e: FormEvent) {
     e.preventDefault();
-    if (!canSubmit) return;
-    if (mode === "existing") {
-      onSubmit({ student_id: selectedId });
-    } else {
-      onSubmit({
-        name: name.trim(),
-        level: level.trim() || undefined,
-        language: language.trim() || undefined,
-      });
-    }
+    onSubmit({ student_id: selected === NO_STUDENT ? null : selected, level });
   }
 
   return (
@@ -47,62 +47,39 @@ export function InterviewWhoStep({ options, submitting, error, onSubmit }: Inter
       <p className="text-sm font-medium">{t("steps.who.heading")}</p>
 
       <fieldset disabled={submitting} className="flex flex-col gap-3">
-        {/* The "someone new" toggle is ALWAYS rendered, even with an empty
-            roster (`options.length === 0` — a brand-new tutor with no
-            students yet) — it's the only way to reach the name/level/
-            language form once the tutor edits those fields and this step
-            re-renders with `mode` still "new" but a non-empty draft. */}
         <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label={t("steps.who.heading")}>
           {options.map((opt) => (
             <Button
               key={opt.value}
               type="button"
               size="sm"
-              variant={mode === "existing" && selectedId === opt.value ? "default" : "outline"}
+              variant={selected === opt.value ? "default" : "outline"}
               data-testid={`interview-who-option-${opt.value}`}
-              aria-pressed={mode === "existing" && selectedId === opt.value}
-              onClick={() => {
-                setMode("existing");
-                setSelectedId(opt.value);
-              }}
+              aria-pressed={selected === opt.value}
+              onClick={() => setSelected(opt.value)}
             >
-              {opt.label}
+              {opt.value === NO_STUDENT ? t("steps.who.noStudent") : opt.label}
             </Button>
           ))}
-          <Button
-            type="button"
-            size="sm"
-            variant={mode === "new" ? "default" : "outline"}
-            data-testid="interview-who-new-toggle"
-            aria-pressed={mode === "new"}
-            onClick={() => setMode("new")}
-          >
-            {t("steps.who.newStudentToggle")}
-          </Button>
         </div>
 
-        {mode === "new" && (
-          <div className="flex flex-col gap-2 rounded-xl border border-border bg-card p-3 ring-1 ring-foreground/10">
-            <Input
-              data-testid="interview-who-name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder={t("steps.who.namePlaceholder")}
-              required
-            />
-            <div className="grid grid-cols-2 gap-2">
-              <Input
-                data-testid="interview-who-level"
-                value={level}
-                onChange={(e) => setLevel(e.target.value)}
-                placeholder={t("steps.who.levelPlaceholder")}
-              />
-              <Input
-                data-testid="interview-who-language"
-                value={language}
-                onChange={(e) => setLanguage(e.target.value)}
-                placeholder={t("steps.who.languagePlaceholder")}
-              />
+        {selected === NO_STUDENT && (
+          <div className="flex flex-col gap-1.5" data-testid="interview-who-levels">
+            <span className="text-xs text-muted-foreground">{t("steps.who.levelHint")}</span>
+            <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label={t("steps.who.levelHint")}>
+              {levels.map((lvl) => (
+                <Button
+                  key={lvl}
+                  type="button"
+                  size="sm"
+                  variant={level === lvl ? "default" : "outline"}
+                  data-testid={`interview-who-level-${lvl}`}
+                  aria-pressed={level === lvl}
+                  onClick={() => setLevel(lvl)}
+                >
+                  {t.has(`steps.who.levels.${lvl}`) ? t(`steps.who.levels.${lvl}`) : lvl}
+                </Button>
+              ))}
             </div>
           </div>
         )}
@@ -114,12 +91,7 @@ export function InterviewWhoStep({ options, submitting, error, onSubmit }: Inter
         </p>
       )}
 
-      <Button
-        type="submit"
-        disabled={submitting || !canSubmit}
-        data-testid="interview-answer-submit"
-        className="self-end"
-      >
+      <Button type="submit" disabled={submitting} data-testid="interview-answer-submit" className="self-end">
         {t("continue")}
       </Button>
     </form>

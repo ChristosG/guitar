@@ -75,25 +75,71 @@ def _reread(job_id: uuid.UUID) -> GenerationJob:
         db.close()
 
 
-def test_run_curriculum_job_success_sets_succeeded_and_result_root_id(monkeypatch):
+def test_run_curriculum_job_outlines_then_hands_off_to_the_lesson_fan_out(monkeypatch):
+    """`generate_curriculum` no longer drafts anything — it outlines the course over
+    the whole library and persists a tree of QUEUED lessons. This job then hands
+    that root to the fan-out (`run_curriculum_draft_job`), which is what actually
+    writes the twenty lessons and finalizes the row.
+
+    The handoff goes through `params["root_id"]` and not just `result_root_id`,
+    because that is exactly the params shape a RESUME click later sends — the first
+    run and the resume are the same code reading the same input.
+    """
     job = _create_job()
     fixed_root_id = uuid.uuid4()
     seen_kwargs = {}
+    handed_off = []
 
     def _fake_generate_curriculum(db, **kwargs):
         seen_kwargs.update(kwargs)
         return fixed_root_id
 
     monkeypatch.setattr(runner, "generate_curriculum", _fake_generate_curriculum)
+    monkeypatch.setattr(runner, "run_curriculum_draft_job", handed_off.append)
 
     runner.run_curriculum_job(job.id)
 
     assert seen_kwargs == _PARAMS  # job.params unpacked as kwargs, verbatim
+    assert handed_off == [job.id], "the outline must hand off to the lesson fan-out"
     got = _reread(job.id)
-    assert got.status == "succeeded"
     assert got.result_root_id == fixed_root_id
-    assert got.error is None
+    assert got.params["root_id"] == str(fixed_root_id)
     assert got.error_kind is None
+
+
+def test_run_curriculum_job_drops_params_from_an_older_deploy(monkeypatch):
+    """`GenerationJob.params` is a wire format with NO VERSION: a row can be written
+    seconds before a deploy and executed seconds after it. Every curriculum job this
+    app ever enqueued carried `domain`, which Stage 6 deleted — so
+    `generate_curriculum(db, **params)` would `TypeError`, get swallowed by the
+    broad `except Exception`, and be recorded as `internal` ("our bug") on a job
+    whose only sin was being five seconds early.
+    """
+    db = SessionLocal()
+    try:
+        job = GenerationJob(
+            kind="curriculum", status="pending",
+            params={**_PARAMS, "domain": "tone", "allow_general": False},
+        )
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+        job_id = job.id
+    finally:
+        db.close()
+
+    seen_kwargs = {}
+    monkeypatch.setattr(runner, "run_curriculum_draft_job", lambda _id: None)
+    monkeypatch.setattr(
+        runner, "generate_curriculum",
+        lambda db, **kwargs: (seen_kwargs.update(kwargs), uuid.uuid4())[1],
+    )
+
+    runner.run_curriculum_job(job_id)
+
+    assert "domain" not in seen_kwargs, "a dead param must be dropped, not raised on"
+    assert seen_kwargs["allow_general"] is False  # a live one still gets through
+    assert _reread(job_id).error_kind is None
 
 
 def test_run_curriculum_job_guided_json_error_sets_failed_upstream(monkeypatch):

@@ -25,7 +25,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.i18n import locale_dep
 from app.jobs.runner import run_lesson_job
+from app.llm.factory import require_llm_configured
 from app.lessons.edit import add_session, merge_sessions, split_session
 from app.models.block import Block
 from app.models.generation_job import GenerationJob
@@ -74,12 +76,31 @@ def _get_session_of_lesson_or_404(db: Session, lesson_id: UUID, session_id: UUID
     return session
 
 
-@router.post("/from-selection", response_model=JobAccepted, status_code=202)
+@router.post(
+    "/from-selection",
+    response_model=JobAccepted,
+    status_code=202,
+    dependencies=[Depends(require_llm_configured)],
+)
 def from_selection(
     payload: SelectionIn,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
+    locale: str = Depends(locale_dep),
 ) -> JobAccepted:
+    """THE DEAD PARAMETER (Plan 13, Stage 5.5). `draft_lesson_from_selection`
+    has always taken a `language` and its prompt has always used it — but
+    nothing ever supplied one: `SelectionIn` has no such field, so
+    `run_lesson_job` fell back to `params.get("language", "en")` and EVERY
+    lesson, for every tutor, in every locale, was drafted in English. A Greek
+    tutor highlighting a passage in the Reader got an English lesson back and
+    no explanation why.
+
+    The language belongs to the UI, not to the payload, so it comes off the
+    `X-App-Locale` header (`app.i18n.locale_dep`) rather than being added as
+    yet another body field the client could forget: the same header every
+    other request already carries, defaulted to `el`, never rejected.
+    """
     source = db.get(KnowledgeSource, payload.source_id)
     if source is None:
         raise HTTPException(status_code=404, detail="Source not found")
@@ -93,6 +114,7 @@ def from_selection(
         "page_from": payload.page_from,
         "page_to": payload.page_to,
         "text": payload.text,
+        "language": locale,
     }
     job = GenerationJob(kind="lesson", status="pending", params=params)
     db.add(job)

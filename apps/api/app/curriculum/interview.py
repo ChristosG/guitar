@@ -1,128 +1,175 @@
-"""The guided curriculum-authoring interview (Plan 12 Task 3, G2).
+"""The guided curriculum-authoring interview, v2.
 
-Chris: "maybe llm can act as an assistant there bro, guiding him, and asking
-him questions or corrections throughout the process. thats actually would be
-dope." And, on how it should ground itself: "Interview first might also be
-beneficial if we added here, so it is getting the passages needed while
-reading the book -- if that makes sense?" The interview is NOT a form: as it
-goes, it RETRIEVES the relevant passages from his actual library and shows
-him what it found, so the curriculum that eventually gets built is built
-from what he actually has, not the model's general knowledge.
+Chris: "maybe llm can act as an assistant there bro, guiding him, and asking him
+questions or corrections throughout the process. thats actually would be dope."
 
-THE HARD-WON DESIGN CONSTRAINT THIS MODULE OBEYS: the interview's STATE
-MACHINE LIVES HERE, IN CODE — never in the model's head. Plan 10's live run
-needed the model THREE attempts to track a single session id, and Plan 11's
-own notes call it "unreliable at id-plumbing". A free-form chat asked to
-remember which step it's on, what was already answered, and which sources
-were chosen would break exactly the same way. Every step, transition, and
-validation rule below is a plain Python `if` — the model's only involvement
-anywhere in this module is the SAME `get_provider().guided_json` plan call
-`app.curriculum.generate` already makes for Phase 1 (reused, not
-reinvented), and it never sees or touches `step`/`answers`/`preview`.
+THE STATE MACHINE LIVES HERE, IN CODE, NEVER IN THE MODEL'S HEAD. Plan 10's live
+run needed the model three attempts to track a single session id, and Plan 11's
+notes call it "unreliable at id-plumbing". A free-form chat asked to remember
+which step it is on, what was already answered, and which sources were chosen
+would break exactly the same way. Every step, transition and validation rule below
+is a plain Python `if`. The model is reached in exactly ONE place — the outline
+call — and it never sees `step` or `answers`.
 
-FIVE STEPS, in this fixed order (`STEP_ORDER` below):
-  who      -> student/level. Offers his REAL students (`Student` rows) as
-              one-tap options; a free-text name is also accepted for
-              someone not yet on the roster.
-  duration -> weeks + minutes/session.
-  sources  -> WHICH of his library sources to draw on. This is the step
-              that matters most (see this task's report): his library
-              currently contains one real OCR'd book and one synthetic
-              filler source ("Guitar Tone & Gear — Course Spine", seeded by
-              a script, not his content) that OUTSCORES the real book in
-              retrieval on several topics. This step shows EVERY source's
-              title/type/char_count so he can tell real material from
-              filler and choose for himself — nothing is silently excluded;
-              `default_selected` is only a suggestion (sources at/above
-              `app.curriculum.ground.LEN_FLOOR`, the SAME "substantive"
-              cutoff that module already uses to keep junk passages out of
-              a draft prompt — reused here, not a second arbitrary number).
-  preview  -> the step Chris asked for. Plans a module OUTLINE (reusing
-              `generate.PLAN_SCHEMA`/`_build_plan_messages`/`get_provider` —
-              the identical Phase 1 this module's non-interview sibling
-              runs) and then calls `app.curriculum.ground.ground_topic` for
-              EVERY planned module against the sources he just chose — the
-              same retrieval `generate_curriculum` itself uses for Phase 2 —
-              showing him what it actually found: real passages with
-              source title + page, or an honest GAP when nothing cleared
-              the relevance floor. Computed ONCE and cached on the row
-              (`CurriculumInterview.preview`) so `GET .../{id}` (a refresh)
-              never re-runs an LLM call or a retrieval query.
-  confirm  -> he approves, and chooses whether an unsupported module (a
-              gap) may be filled from labelled general knowledge. Approval
-              builds the EXACT params shape `POST /curricula/generate`
-              already builds (`routers/curriculum.py`) and hands it to a
-              REAL `GenerationJob` — the existing enqueue/poll machinery,
-              completely unmodified. No new async infrastructure is added
-              anywhere by this feature.
+SIX STEPS:
 
-VALIDATION: every step's answer either advances the step or returns an
-error and LEAVES THE STEP UNCHANGED — a blank/garbled/invalid answer
-re-asks the exact same question, never crashes, never silently advances
-(brief, verbatim).
+  who      -> THE STUDENT IS FULLY OPTIONAL. Chris, verbatim: "this has to be
+              optional dude.. the student part here has to be TOTALLY optional".
+              So "no student, all levels" is a first-class answer with its own
+              option, not a field left blank — and when there IS no student there
+              is an explicit LEVEL selector, because "who is this for" and "how
+              advanced are they" are two questions and only one of them needs a
+              person.
+  duration -> weeks x sessions/week x minutes, and it ECHOES THE DERIVED SHAPE
+              back at him: "20 sessions -> 5 modules x 4 lessons -> ~2,200 words
+              each". He is agreeing to a SIZE before we spend his money on it.
+              This is where "20 weeks, 4 modules" stops being possible.
+  scope    -> a free-text COURSE BRIEF, plus the gap policy.
+
+              **`domain` IS DEAD.** Chris asked: "is domain playing any role? is
+              it used somewhere or only for tagging?" It was ONE line in one
+              prompt ("Domain: {domain}") plus a retrieval filter that, after
+              5d77bd0, could no longer exclude anything. It never tagged a
+              curriculum and never rendered anywhere. A 30-character tag was
+              standing in for the thing he actually wanted to say, which is what
+              this course is FOR — so now he says it, in his own words, and it
+              reaches the outline prompt AND every lesson-draft prompt.
+  sources  -> which of his library sources to draw on. Every source is listed
+              with its size, and the step reports what the selection MEASURES:
+              "3 sources · 92,400 tokens · fits whole". Above the budget it says
+              so, honestly, rather than silently degrading to retrieval.
+  outline  -> the outline, generated by a model that has READ THE WHOLE LIBRARY,
+              with a per-module tier IT assigned. He EDITS it. This replaces the
+              old "preview" step, whose gap flags came from a cosine floor with a
+              0.021 separation margin.
+  confirm  -> materialize the tree (so the board opens instantly on 20 queued
+              lessons) and enqueue the draft fan-out. 202 {job_id, root_id}.
+
+VALIDATION: every step's answer either advances the step or returns an error and
+LEAVES THE STEP UNCHANGED. A blank/garbled/invalid answer re-asks the same
+question, never crashes, never silently advances.
 """
+from __future__ import annotations
+
 import uuid
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.curriculum.generate import PLAN_SCHEMA, _build_plan_messages
-from app.curriculum.ground import LEN_FLOOR, ground_topic
-from app.llm.factory import get_provider
+from app.brain.retrieve import MIN_PASSAGE_CHARS
+from app.curriculum.corpus import build_library_context
+from app.curriculum.outline import (
+    GAP_POLICIES,
+    POLICY_GENERAL,
+    generate_outline,
+    materialize_outline,
+)
+from app.curriculum.shape import plan_shape
+from app.i18n import DEFAULT_LOCALE
 from app.models.interview import CurriculumInterview
 from app.models.knowledge import KnowledgeSource
 from app.models.student import Student
+from app.students.context import build_student_brief
 
-STEP_ORDER = ["who", "duration", "sources", "preview", "confirm"]
+STEP_ORDER = ["who", "duration", "scope", "sources", "outline", "confirm"]
+
+# The levels offered when no student is chosen. "all_levels" is the DEFAULT and it
+# is not a cop-out: a tutor building a course for his whole roster is the common
+# case, and forcing him to pick "beginner" would silently pitch every lesson at
+# the least advanced student he has.
+LEVELS = ("all_levels", "beginner", "intermediate", "advanced")
 
 
-def start_interview(db: Session, *, title: str, domain: str | None = None) -> CurriculumInterview:
-    """Create a fresh interview at its first step ("who") and commit it.
+def start_interview(db: Session, *, title: str) -> CurriculumInterview:
+    """Create a fresh interview at "who" and commit it.
 
-    `title`/`domain` are the one piece of context this interview does NOT
-    ask about step-by-step — the brief's own five-step list has no
-    dedicated "what is this course about" step. Asking it once, up front,
-    the same way the tutor already names a course on the existing
-    non-interview `POST /curricula/generate` form, is the smallest change
-    that fits both that step list and the existing endpoint's request
-    shape (`CurriculumGenerateRequest.title`/`.domain`) — this interview is
-    a guided version of the SAME action, not a different one.
+    `title` is the one piece of context the interview does not ask about
+    step-by-step — the tutor already named the course to get here, exactly as he
+    does on the non-interview form.
     """
-    interview = CurriculumInterview(step="who", title=title, domain=domain, answers={})
+    interview = CurriculumInterview(step="who", title=title, answers={})
     db.add(interview)
     db.commit()
     db.refresh(interview)
     return interview
 
 
+# ---------------------------------------------------------------------------
+# Reading the current step
+# ---------------------------------------------------------------------------
+
+def _shape_of(interview: CurriculumInterview):
+    duration = interview.answers.get("duration") or {}
+    if not duration.get("weeks"):
+        return None
+    return plan_shape(
+        duration["weeks"],
+        duration.get("sessions_per_week", 1),
+        duration.get("minutes_per_session", 50),
+    )
+
+
 def describe_step(db: Session, interview: CurriculumInterview) -> dict:
-    """The `{question, options, findings}` for `interview`'s CURRENT step —
-    used by every read path (the initial `POST /curricula/interview`, a
-    non-final answer's response, and `GET .../{id}` for a refresh) so all
-    three render an IDENTICAL envelope for a given step. Never mutates
-    `interview` or touches the model.
-    """
+    """The `{question, options, findings}` for the CURRENT step. Never mutates,
+    never touches the model — every read path (start, a non-final answer, and a
+    refresh via GET) renders through here, so all three agree."""
     step = interview.step
 
     if step == "who":
         students = db.scalars(select(Student).order_by(Student.name)).all()
         options = [
-            {"value": str(s.id), "label": s.name + (f" ({s.level})" if s.level else "")}
-            for s in students
+            {
+                "value": "none",
+                "label": "No particular student — a course for anyone",
+                "kind": "none",
+            },
+            *[
+                {
+                    "value": str(s.id),
+                    "label": s.name + (f" ({s.level})" if s.level else ""),
+                    "kind": "student",
+                }
+                for s in students
+            ],
         ]
         return {
             "question": (
-                "Who is this curriculum for? Pick one of your students, "
-                "or answer with a name for someone new."
+                "Who is this curriculum for? Pick a student, or build it for no "
+                "one in particular — that is a perfectly normal answer, and then "
+                "you just tell me the level."
             ),
             "options": options,
-            "findings": None,
+            "findings": {"levels": list(LEVELS)},
         }
 
     if step == "duration":
         return {
-            "question": "How many weeks should this run, and how many minutes per session?",
+            "question": (
+                "How long does this course run? Give me the number of weeks, how "
+                "many sessions per week, and how many minutes a session."
+            ),
             "options": None,
+            "findings": None,
+        }
+
+    if step == "scope":
+        return {
+            "question": (
+                "In your own words: what is this course FOR? What should the "
+                "student be able to do at the end of it, and what do you want "
+                "covered? And — when your library doesn't cover something, what "
+                "should I do?"
+            ),
+            "options": [
+                {
+                    "value": "library_only",
+                    "label": "Only my library. Show me the gaps instead of filling them.",
+                },
+                {
+                    "value": "general_knowledge",
+                    "label": "Fill the gaps from general knowledge, clearly labelled.",
+                },
+            ],
             "findings": None,
         }
 
@@ -134,68 +181,77 @@ def describe_step(db: Session, interview: CurriculumInterview) -> dict:
                 "label": s.title,
                 "type": s.type,
                 "char_count": s.char_count,
-                # A suggestion only, never a silent exclusion — every
-                # source is listed regardless of this flag; see the module
-                # docstring on why the tutor, not this code, makes the real
-                # call on his library's synthetic filler.
-                "default_selected": (s.char_count or 0) >= LEN_FLOOR,
+                # A suggestion, never a silent exclusion — every source is listed.
+                # `MIN_PASSAGE_CHARS` is the same "is this substantive" cutoff the
+                # retrieval floor uses, reused here rather than a second arbitrary
+                # number.
+                "default_selected": (s.char_count or 0) >= MIN_PASSAGE_CHARS,
             }
             for s in sources
         ]
+        shape = _shape_of(interview)
         return {
             "question": (
-                "Which of your library sources should this draw on? "
-                "(shown with type + character count so you can tell real "
-                "material from filler — nothing is pre-excluded)"
+                "Which of your sources should this course be built from? I read "
+                "them WHOLE — not a search over them — so what you pick here is "
+                "literally what the model reads."
             ),
             "options": options,
-            "findings": None,
+            "findings": {"shape": shape.describe()} if shape else None,
         }
 
-    if step == "preview":
+    if step == "outline":
         return {
             "question": (
-                "Here's the proposed outline and what your library "
-                "actually supports for it. Proceed to confirm?"
+                "Here is the course. Edit anything — rename, reorder, add, delete, "
+                "change a module's tier. Nothing has been drafted yet, so this is "
+                "the cheap moment to change your mind."
             ),
             "options": None,
-            "findings": interview.preview,
+            "findings": interview.outline,
         }
 
     if step == "confirm":
         return {
             "question": (
-                "Ready to generate? Approve to enqueue it, and say whether "
-                "gap modules may be filled with labelled general knowledge."
+                "Ready? I'll write all the lessons in the background — you can "
+                "watch them arrive, and read module 1 while module 5 is still "
+                "being written."
             ),
             "options": None,
-            "findings": interview.preview,
+            "findings": interview.outline,
         }
 
-    # step == "done"
     return {
-        "question": "This curriculum has been enqueued for generation.",
+        "question": "This curriculum is being written.",
         "options": None,
-        "findings": interview.preview,
+        "findings": interview.outline,
     }
 
 
 def render_state(db: Session, interview: CurriculumInterview, *, error: str | None = None) -> dict:
-    """The full `{interview_id, step, question, options, findings, error}`
-    envelope every route returns (the brief's literal response shape, plus
-    `error`). `error` is attached only by the caller when the answer just
-    given was invalid and this is a re-ask.
-    """
+    """The full envelope every route returns."""
     info = describe_step(db, interview)
-    return {"interview_id": interview.id, "step": interview.step, "error": error, **info}
+    return {
+        "interview_id": interview.id,
+        "step": interview.step,
+        "error": error,
+        "root_id": interview.root_id,
+        "job_id": interview.job_id,
+        **info,
+    }
 
+
+# ---------------------------------------------------------------------------
+# Answering
+# ---------------------------------------------------------------------------
 
 def _reask(error: str) -> dict:
-    return {"ok": False, "error": error, "done": False, "params": None}
+    return {"ok": False, "error": error, "done": False}
 
 
-def _ok(*, done: bool = False, params: dict | None = None) -> dict:
-    return {"ok": True, "error": None, "done": done, "params": params}
+def _ok(*, done: bool = False) -> dict:
+    return {"ok": True, "error": None, "done": done}
 
 
 def _parse_uuid(value) -> uuid.UUID | None:
@@ -206,26 +262,32 @@ def _parse_uuid(value) -> uuid.UUID | None:
 
 
 def _answer_who(db: Session, interview: CurriculumInterview, answer) -> dict:
+    """The student is OPTIONAL — `{"student_id": null}` and `{"level": "all_levels"}`
+    are both complete, valid answers. The only thing this step can reject is a
+    student id that does not exist, or a level that is not one of ours."""
     if not isinstance(answer, dict):
-        return _reask("Tell me who this is for — pick a student or give a name.")
+        return _reask("Pick a student, or choose 'no particular student' and give me a level.")
 
-    student_id_raw = answer.get("student_id")
-    if student_id_raw:
-        student_id = _parse_uuid(student_id_raw)
-        student = db.get(Student, student_id) if student_id is not None else None
+    raw = answer.get("student_id")
+    level = answer.get("level") or "all_levels"
+    if level not in LEVELS:
+        return _reask(f"'{level}' isn't a level I know. Pick one of: {', '.join(LEVELS)}.")
+
+    if raw in (None, "", "none"):
+        who = {"student_id": None, "name": None, "level": level, "language": DEFAULT_LOCALE}
+    else:
+        student_id = _parse_uuid(raw)
+        student = db.get(Student, student_id) if student_id else None
         if student is None:
             return _reask("I don't recognize that student — pick one from the list.")
         who = {
-            "student_id": str(student.id), "name": student.name,
-            "level": student.level, "language": student.preferred_language,
-        }
-    else:
-        name = answer.get("name")
-        if not isinstance(name, str) or not name.strip():
-            return _reask("Tell me who this is for — pick a student or give a name.")
-        who = {
-            "student_id": None, "name": name.strip(),
-            "level": answer.get("level"), "language": answer.get("language") or "en",
+            "student_id": str(student.id),
+            "name": student.name,
+            # The student's OWN level wins over the selector when he has one on
+            # file — the selector exists for the case where there is no student to
+            # ask. `all_levels` from the picker is not an override, it is a default.
+            "level": student.level or (level if level != "all_levels" else None),
+            "language": student.preferred_language or DEFAULT_LOCALE,
         }
 
     interview.answers = {**interview.answers, "who": who}
@@ -234,40 +296,71 @@ def _answer_who(db: Session, interview: CurriculumInterview, answer) -> dict:
 
 def _answer_duration(interview: CurriculumInterview, answer) -> dict:
     if not isinstance(answer, dict):
-        return _reask("Give me weeks and minutes_per_session as numbers.")
+        return _reask("Give me weeks, sessions_per_week and minutes_per_session as numbers.")
 
-    weeks, minutes = answer.get("weeks"), answer.get("minutes_per_session")
-    # bool is an int subclass in Python — reject it explicitly so
-    # {"weeks": true} doesn't sail through as weeks=1.
-    if isinstance(weeks, bool) or isinstance(minutes, bool):
-        return _reask("Give me weeks and minutes_per_session as numbers.")
+    weeks = answer.get("weeks")
+    per_week = answer.get("sessions_per_week", 1)
+    minutes = answer.get("minutes_per_session")
+    # bool is an int subclass in Python — reject it explicitly, or {"weeks": true}
+    # sails through as a 1-week course.
+    if any(isinstance(v, bool) for v in (weeks, per_week, minutes)):
+        return _reask("Give me weeks, sessions_per_week and minutes_per_session as numbers.")
     try:
-        weeks_i, minutes_i = int(weeks), int(minutes)
+        weeks_i, per_week_i, minutes_i = int(weeks), int(per_week), int(minutes)
     except (TypeError, ValueError):
-        return _reask("Give me weeks and minutes_per_session as numbers.")
-    if weeks_i <= 0 or minutes_i <= 0:
-        return _reask("weeks and minutes_per_session must both be greater than 0.")
+        return _reask("Give me weeks, sessions_per_week and minutes_per_session as numbers.")
+    if weeks_i <= 0 or per_week_i <= 0 or minutes_i <= 0:
+        return _reask("Weeks, sessions per week and minutes must all be greater than 0.")
 
     interview.answers = {
         **interview.answers,
-        "duration": {"weeks": weeks_i, "minutes_per_session": minutes_i},
+        "duration": {
+            "weeks": weeks_i,
+            "sessions_per_week": per_week_i,
+            "minutes_per_session": minutes_i,
+        },
+    }
+    return _ok()
+
+
+def _answer_scope(interview: CurriculumInterview, answer) -> dict:
+    if not isinstance(answer, dict):
+        return _reask("Tell me what this course is for, in a sentence or two.")
+
+    brief = answer.get("brief")
+    if not isinstance(brief, str) or not brief.strip():
+        return _reask(
+            "Tell me what this course is for — what should the student be able to "
+            "do at the end of it? This is what the whole thing gets written from."
+        )
+    policy = answer.get("gap_policy") or POLICY_GENERAL
+    if policy not in GAP_POLICIES:
+        return _reask(f"'{policy}' isn't a gap policy I know: {', '.join(GAP_POLICIES)}.")
+
+    interview.brief = brief.strip()
+    interview.gap_policy = policy
+    interview.answers = {
+        **interview.answers, "scope": {"brief": brief.strip(), "gap_policy": policy},
     }
     return _ok()
 
 
 def _answer_sources(db: Session, interview: CurriculumInterview, answer) -> dict:
+    """Validates the selection and MEASURES it. The outline itself is NOT generated
+    here — see `_answer_outline`'s docstring for why the expensive call belongs to
+    the step that shows its result."""
     if not isinstance(answer, dict) or not isinstance(answer.get("source_ids"), list):
         return _reask(
-            "Tell me which source_ids to draw on, as a list "
-            "([] is a valid, deliberate choice to draw on none of them)."
+            "Tell me which source_ids to draw on, as a list ([] is a valid, "
+            "deliberate choice to draw on none of them)."
         )
 
     parsed: list[uuid.UUID] = []
     for raw in answer["source_ids"]:
-        pid = _parse_uuid(raw)
-        if pid is None:
+        sid = _parse_uuid(raw)
+        if sid is None:
             return _reask(f"{raw!r} isn't a valid source id.")
-        parsed.append(pid)
+        parsed.append(sid)
 
     if parsed:
         found = set(db.scalars(
@@ -277,133 +370,130 @@ def _answer_sources(db: Session, interview: CurriculumInterview, answer) -> dict
         if missing:
             return _reask(f"Unknown source id(s): {', '.join(missing)}.")
 
+    library = build_library_context(db, parsed)
     interview.answers = {
-        **interview.answers, "sources": {"source_ids": [str(p) for p in parsed]},
+        **interview.answers,
+        "sources": {
+            "source_ids": [str(p) for p in parsed],
+            # The measurement, cached — this is what the tutor is shown, and what
+            # makes "does my library fit whole?" a fact rather than a hope.
+            "measured": {
+                "token_count": library.token_count,
+                "fits": library.fits,
+                "summary": library.summary(),
+                "sources": library.sources,
+            },
+        },
     }
-    # The money step's data is computed HERE, the moment the sources are
-    # locked in, and cached on the row — "preview" itself (describe_step)
-    # never calls the model or the retriever, it only ever reads this back.
-    interview.preview = _compute_preview(db, interview)
     return _ok()
 
 
-def _profile_and_language(interview: CurriculumInterview) -> tuple[dict, str, int | None]:
-    """The `profile`/`language`/`target_minutes_total` `generate_curriculum`
-    kwargs, derived from the "who"/"duration" answers collected so far.
-    Shared by `_compute_preview` (the plan call must use the SAME profile
-    the real generation job will) and `_answer_confirm` (the job's actual
-    params) so the preview the tutor reviewed and the job he approved are
-    built from identical inputs.
+def _answer_outline(db: Session, interview: CurriculumInterview, answer) -> dict:
+    """`{"regenerate": true}` -> generate (or re-generate) the outline and STAY on
+    this step. `{"outline": {...}}` -> accept the tutor's EDITED outline and move
+    to confirm.
+
+    THE EDITED OUTLINE IS THE ONE THAT GETS BUILT. Not the model's original. That
+    is the entire point of the step — Chris's complaint was that the app gave him
+    something to accept or reject, not something to work on. Whatever comes back in
+    `answer["outline"]` is what `materialize_outline` persists at confirm.
+
+    The generate call is HERE and not at the end of the sources step, because it is
+    the expensive one (90K tokens, ~$0.34, 30-60s) and it belongs to the step that
+    shows its result: a tutor who backs out of the sources step and re-picks does
+    not pay for an outline he never saw.
     """
-    who = interview.answers.get("who", {})
-    duration = interview.answers.get("duration", {})
-    profile = {
-        "student_name": who.get("name"), "student_id": who.get("student_id"),
-        "level": who.get("level"), "weeks": duration.get("weeks"),
-        "minutes_per_session": duration.get("minutes_per_session"),
-    }
-    language = who.get("language") or "en"
-    target_minutes_total = None
-    if duration.get("weeks") and duration.get("minutes_per_session"):
-        target_minutes_total = duration["weeks"] * duration["minutes_per_session"]
-    return profile, language, target_minutes_total
+    if not isinstance(answer, dict):
+        return _reask('Send {"regenerate": true} to draft the outline, or {"outline": {...}} to accept it.')
 
+    if answer.get("regenerate") is True or interview.outline is None:
+        shape = _shape_of(interview)
+        if shape is None:
+            return _reask("I don't have the course length yet — go back to the duration step.")
+        who = interview.answers.get("who") or {}
+        source_ids = [
+            uuid.UUID(s) for s in (interview.answers.get("sources") or {}).get("source_ids") or []
+        ]
+        student_id = _parse_uuid(who.get("student_id")) if who.get("student_id") else None
 
-def _compute_preview(db: Session, interview: CurriculumInterview) -> dict:
-    """Phase-1-plan (reusing `generate.py`'s OWN schema/prompt-builder/
-    provider call — not a second one invented for the interview), then a
-    REAL per-module `ground_topic` retrieval — this is what makes the
-    preview genuine rather than a stub: every module's `passages` below
-    came from an actual `search()` over the tutor's chosen sources, and a
-    module gets `"gap": True` precisely when that retrieval returned
-    nothing above `app.curriculum.ground`'s relevance floor — the exact
-    same floor `generate_curriculum` itself will apply when it actually
-    drafts this module later.
-    """
-    profile, language, target_minutes_total = _profile_and_language(interview)
-    source_ids_raw = interview.answers.get("sources", {}).get("source_ids") or []
-    source_ids = [uuid.UUID(s) for s in source_ids_raw]
+        library = build_library_context(db, source_ids)
+        interview.outline = generate_outline(
+            db,
+            title=interview.title,
+            brief=interview.brief,
+            language=who.get("language") or DEFAULT_LOCALE,
+            shape=shape,
+            library=library,
+            student_brief=build_student_brief(db, student_id),
+            gap_policy=interview.gap_policy or POLICY_GENERAL,
+        )
+        # Stay on "outline" — he has to look at it.
+        return {"ok": True, "error": None, "done": False, "stay": True}
 
-    plan_messages = _build_plan_messages(
-        title=interview.title, language=language, profile=profile,
-        domain=interview.domain, target_minutes_total=target_minutes_total,
-    )
-    plan = get_provider().guided_json(plan_messages, PLAN_SCHEMA)
+    edited = answer.get("outline")
+    if not isinstance(edited, dict) or not isinstance(edited.get("modules"), list):
+        return _reask('Send the outline back as {"outline": {"title": ..., "modules": [...]}}.')
+    if not edited["modules"]:
+        return _reask("An outline with no modules isn't a course. Add at least one.")
 
-    modules_out = []
-    for module in plan.get("modules") or []:
-        query = f"{module['title']} {module.get('objective', '')}"
-        passages = ground_topic(db, query, source_ids=source_ids, k=5, domain=interview.domain)
-        modules_out.append({
-            "title": module["title"],
-            "objective": module.get("objective", ""),
-            "gap": not passages,
-            "passages": [
-                {
-                    "source_title": p.source_title, "page_no": p.page_no,
-                    "score": round(p.score, 3),
-                }
-                for p in passages
-            ],
-        })
-
-    return {
-        "course_title": plan.get("title", interview.title),
-        "modules": modules_out,
-        "gap_count": sum(1 for m in modules_out if m["gap"]),
-    }
-
-
-def _answer_preview(interview: CurriculumInterview, answer) -> dict:
-    if not isinstance(answer, dict) or answer.get("proceed") is not True:
-        return _reask('Reply with {"proceed": true} once you have reviewed the findings above.')
+    interview.outline = edited
     return _ok()
 
 
-def _answer_confirm(interview: CurriculumInterview, answer) -> dict:
+def _answer_confirm(db: Session, interview: CurriculumInterview, answer) -> dict:
+    """Materialize the tree and hand back. The ROUTER creates the GenerationJob and
+    schedules the BackgroundTask — it has the `BackgroundTasks` and this does not,
+    exactly as the old confirm step worked."""
     if not isinstance(answer, dict) or answer.get("approved") is not True:
-        return _reask('Reply with {"approved": true} to enqueue generation.')
+        return _reask('Reply with {"approved": true} to start writing the lessons.')
+    if not interview.outline:
+        return _reask("There's no outline to build yet.")
 
-    allow_general = bool(answer.get("allow_general", False))
-    profile, language, target_minutes_total = _profile_and_language(interview)
-    source_ids = interview.answers.get("sources", {}).get("source_ids") or []
+    who = interview.answers.get("who") or {}
+    shape = _shape_of(interview)
+    if shape is None:
+        return _reask("I don't have the course length yet — go back to the duration step.")
 
-    # Byte-for-byte the same shape `generate_curriculum_endpoint` builds in
-    # `routers/curriculum.py` — this is what "reuse the existing
-    # GenerationJob + poll machinery" means concretely: the router creates
-    # the row and schedules `run_curriculum_job` with THESE params, exactly
-    # as it already does for the non-interview endpoint.
-    params = {
-        "title": interview.title, "language": language, "profile": profile,
-        "domain": interview.domain, "target_minutes_total": target_minutes_total,
-        "source_ids": source_ids, "allow_general": allow_general,
-    }
-    interview.answers = {
-        **interview.answers, "confirm": {"approved": True, "allow_general": allow_general},
-    }
-    return _ok(done=True, params=params)
+    source_ids = [
+        uuid.UUID(s) for s in (interview.answers.get("sources") or {}).get("source_ids") or []
+    ]
+    student_id = _parse_uuid(who.get("student_id")) if who.get("student_id") else None
+    language = who.get("language") or DEFAULT_LOCALE
+
+    root_id = materialize_outline(
+        db,
+        interview.outline,
+        title=interview.title,
+        language=language,
+        shape=shape,
+        library=build_library_context(db, source_ids),
+        brief=interview.brief,
+        gap_policy=interview.gap_policy or POLICY_GENERAL,
+        student_id=student_id,
+        source_ids=source_ids,
+        profile={
+            "student_id": who.get("student_id"),
+            "student_name": who.get("name"),
+            "level": who.get("level"),
+        },
+    )
+    interview.root_id = root_id
+    interview.answers = {**interview.answers, "confirm": {"approved": True}}
+    return _ok(done=True)
 
 
 def answer_interview(db: Session, interview: CurriculumInterview, answer) -> dict:
-    """Validate `answer` against `interview`'s CURRENT step and, on success,
-    mutate `interview` (`answers`/`preview`/`step`) to the next step.
-    Returns one of:
+    """Validate `answer` against the CURRENT step; on success mutate `interview`
+    and advance. Returns:
 
-      {"ok": False, "error": "...", "done": False, "params": None}
-        Validation failed. `interview.step` is UNCHANGED — the caller
-        re-asks the SAME question (via `render_state(..., error=...)`).
-        This function NEVER raises on a bad/blank/malformed answer.
+      {"ok": False, "error": "...", "done": False}
+        Validation failed. `interview.step` is UNCHANGED — the caller re-asks the
+        SAME question. This function NEVER raises on a bad/blank/malformed answer.
 
-      {"ok": True, "error": None, "done": False, "params": None}
-        Advanced to the next (non-final) step.
-
-      {"ok": True, "error": None, "done": True, "params": {...}}
-        The "confirm" step was just approved. `params` is the exact kwargs
-        `generate_curriculum(db, **params)` expects. This function does
-        NOT create the `GenerationJob` row or schedule the runner itself —
-        it has no `BackgroundTasks` to schedule with, and creating that
-        row is the router's existing, already-tested responsibility
-        (mirrors `generate_curriculum_endpoint` exactly).
+      {"ok": True, "done": False}            advanced to the next step
+      {"ok": True, "done": False, "stay":True} outline (re)generated; same step
+      {"ok": True, "done": True}             confirmed. `interview.root_id` is set;
+                                             the ROUTER enqueues the draft job.
 
     Does not commit — the caller commits once, after inspecting the result.
     """
@@ -412,16 +502,18 @@ def answer_interview(db: Session, interview: CurriculumInterview, answer) -> dic
         result = _answer_who(db, interview, answer)
     elif step == "duration":
         result = _answer_duration(interview, answer)
+    elif step == "scope":
+        result = _answer_scope(interview, answer)
     elif step == "sources":
         result = _answer_sources(db, interview, answer)
-    elif step == "preview":
-        result = _answer_preview(interview, answer)
+    elif step == "outline":
+        result = _answer_outline(db, interview, answer)
     elif step == "confirm":
-        result = _answer_confirm(interview, answer)
+        result = _answer_confirm(db, interview, answer)
     else:
         return _reask(f"This interview is already at its final step ({step!r}).")
 
-    if result["ok"]:
+    if result["ok"] and not result.get("stay"):
         interview.step = "done" if result["done"] else STEP_ORDER[STEP_ORDER.index(step) + 1]
 
     return result

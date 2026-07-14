@@ -1,10 +1,20 @@
-"""Integration test for app.curriculum.generate: Brain-grounded, guided-JSON
-curriculum tree generation, persisted as a Block hierarchy.
+"""Integration test for `app.curriculum.generate`: authoring a curriculum tree
+over the tutor's WHOLE library, persisted as a Block hierarchy.
 
-Mirrors test_retrieve.py's/test_ingest.py's DB-skip-guard + fresh-session
-round-trip pattern (test_curriculum_schema.py's pattern too, for the Block
-tree read-back). Hits the real LLM (guided_json) and, transitively via Brain
-search(), the real embed server — mark integration.
+UPDATED FOR STAGE 6. Two things changed that this test had to follow:
+
+  * `domain` is gone (it was one dead prompt line and a filter that could no longer
+    filter). `brief` — the tutor's own words about what the course is for —
+    replaces it, and unlike `domain` it reaches every lesson-draft prompt.
+  * `generate_curriculum` NO LONGER DRAFTS LESSON CONTENT. It runs ONE call (the
+    outline, over the whole library) and persists the tree with every lesson
+    `queued`; the lessons are then written by the fan-out
+    (`jobs/curriculum_draft.py`), which is a separate, resumable job. So this
+    asserts the SHAPE and the GROUNDING of the outline — the lesson bodies are
+    `test_curriculum_grounding.py`'s live tests.
+
+Mirrors test_retrieve.py's DB-skip-guard + fresh-session round-trip pattern. Hits
+the real LLM — mark integration.
 """
 import pytest
 from sqlalchemy import select, text
@@ -74,7 +84,7 @@ def _descendants(db, root_id) -> list[Block]:
 
 
 @pytest.mark.integration
-def test_generate_curriculum_builds_brain_grounded_tree():
+def test_generate_curriculum_builds_a_library_grounded_tree_of_queued_lessons():
     db = SessionLocal()
     try:
         _seed_tone_source(db)
@@ -84,8 +94,9 @@ def test_generate_curriculum_builds_brain_grounded_tree():
             title="Guitar Tone Basics",
             language="en",
             profile={"level": "intermediate"},
-            domain="tone",
-            target_minutes_total=1200,
+            brief="Teach an intermediate player how pickups, amp and pedals shape his tone.",
+            weeks=8,
+            minutes_per_session=50,
         )
     finally:
         db.close()
@@ -100,34 +111,47 @@ def test_generate_curriculum_builds_brain_grounded_tree():
         assert root.is_template is True
         assert root.language == "en"
 
+        # THE SHAPE IS ENFORCED, not requested: 8 weekly sessions -> 2 modules x 4
+        # lessons. "8 weeks, 3 modules" is no longer representable.
         modules = _children(db2, root_id)
-        assert len(modules) >= 2, f"expected >=2 modules, got {[m.title for m in modules]}"
+        assert len(modules) == 2, f"expected exactly 2 modules, got {[m.title for m in modules]}"
         assert all(m.kind == "module" for m in modules)
-        assert all(m.language == "en" for m in modules)  # language propagated
+        assert all(m.language == "en" for m in modules)
 
         all_lessons: list[Block] = []
         for module in modules:
+            # The model READ the library and tiered this module itself.
+            assert module.meta["tier"] in ("library", "general_knowledge", "web", "gap")
+            if module.meta["tier"] == "gap":
+                continue   # a gap module is deliberately unfilled
             lessons = _children(db2, module.id)
-            assert len(lessons) >= 1, f"module {module.title!r} has no lessons"
+            assert len(lessons) == 4, f"module {module.title!r} has {len(lessons)} lessons"
             assert all(l.kind == "lesson" for l in lessons)
             assert all(l.language == "en" for l in lessons)
-            assert all(l.est_minutes is not None and l.est_minutes > 0 for l in lessons), (
-                f"module {module.title!r} lesson est_minutes: "
-                f"{[(l.title, l.est_minutes) for l in lessons]}"
+            assert all(l.est_minutes == 50 for l in lessons)
+            # QUEUED, not drafted — the lessons are the fan-out's job, and the board
+            # opens on this tree instantly.
+            assert all(l.meta["draft_status"] == "queued" for l in lessons)
+            assert all(not _children(db2, l.id) for l in lessons), (
+                "generate_curriculum must not draft segment content — that is the "
+                "fan-out's job, and doing it here would put 20 blocking calls on one "
+                "job with no progress and no resume"
             )
             all_lessons.extend(lessons)
 
-        # At least one node anywhere in the tree references a real tone
-        # concept from the seeded CONTEXT (not invented) — proves grounding,
-        # not just schema-shape compliance. `_descendants` already covers
-        # modules/lessons/segments; `root` is the one node it excludes.
+        # GROUNDING: the outline must talk about the tone material we seeded, not
+        # about general guitar teaching. The model was handed the source WHOLE.
         all_nodes = [root, *_descendants(db2, root_id)]
         haystack = " ".join(f"{n.title} {n.body or ''}".lower() for n in all_nodes)
         assert any(k in haystack for k in _TONE_KEYWORDS), (
-            f"expected one of {_TONE_KEYWORDS} in generated tree text, got: {haystack[:2000]!r}"
+            f"expected one of {_TONE_KEYWORDS} in the generated outline, got: {haystack[:2000]!r}"
+        )
+        assert any(m.meta["tier"] == "library" for m in modules), (
+            "not one module was tiered 'library' on a topic the seeded source is "
+            "ABOUT — that is the false-gap bug this stage exists to remove"
         )
 
-        print("\nGenerated module titles:", [m.title for m in modules])
+        print("\nGenerated modules:", [(m.title, m.meta["tier"]) for m in modules])
         print("Generated lesson titles:", [l.title for l in all_lessons])
     finally:
         db2.close()

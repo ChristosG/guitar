@@ -10,6 +10,11 @@ import { cn } from "@/lib/utils";
 
 interface InterviewSourcesStepProps {
   options: InterviewOption[];
+  /** The DERIVED SHAPE, echoed back at him before he spends anything: "20
+   * sessions -> 5 modules x 4 lessons (4+4+4+4+4 lessons) -> ~2,200 words each".
+   * Computed by the API from the duration he just gave (`Shape.describe()`) — the
+   * counts are arithmetic now, not a suggestion in a prompt. */
+  shape?: string;
   submitting: boolean;
   error: string | null | undefined;
   onSubmit: (answer: unknown) => void;
@@ -25,7 +30,7 @@ interface InterviewSourcesStepProps {
  * nothing is silently excluded, and the tutor's own choice always wins;
  * `[]` (deselect everything) is a valid, deliberate answer the API itself
  * accepts (`_answer_sources`'s own docstring). */
-export function InterviewSourcesStep({ options, submitting, error, onSubmit }: InterviewSourcesStepProps) {
+export function InterviewSourcesStep({ options, shape, submitting, error, onSubmit }: InterviewSourcesStepProps) {
   const t = useTranslations("curricula.interview");
   const [selected, setSelected] = useState<Set<string>>(
     () => new Set(options.filter((o) => o.default_selected).map((o) => o.value)),
@@ -51,6 +56,15 @@ export function InterviewSourcesStep({ options, submitting, error, onSubmit }: I
         <p className="text-sm font-medium">{t("steps.sources.heading")}</p>
         <p className="text-xs text-muted-foreground">{t("steps.sources.hint")}</p>
       </div>
+
+      {shape && (
+        <p
+          data-testid="interview-shape-echo"
+          className="rounded-xl border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
+        >
+          {shape}
+        </p>
+      )}
 
       {/* `min-w-0` on the fieldset is load-bearing and was missing: a <fieldset>
           is a flex ITEM here, and a flex item's default `min-width: auto`

@@ -1,9 +1,11 @@
 """`/students` routes: CRUD for the Student roster, plus per-student Progress
 upsert, LessonLog creation, and the student-detail aggregate (Plan 6 Task 3).
 
-No-auth PoC posture, same as `routers/knowledge.py` — no
-authentication/authorization here either; this deploys origin-locked behind
-Cloudflare for a single user.
+Auth: every route here sits behind the `gt_session` password gate
+(`app/auth/middleware.py`), which is a whole-API ASGI middleware rather than a
+per-router dependency — so there is nothing to declare in this file. One tutor,
+one password; there is still no authorization model, because there is nobody to
+authorize against anybody else.
 """
 from uuid import UUID
 

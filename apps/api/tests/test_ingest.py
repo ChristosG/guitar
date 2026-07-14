@@ -5,7 +5,7 @@ import app.brain.extract as extract_mod
 from app.brain.ingest import IngestPayload, ingest_source
 from app.config import settings
 from app.db import Base, SessionLocal, engine
-from app.models.knowledge import Chunk, KnowledgeSource
+from app.models.knowledge import EMBED_DIM, Chunk, KnowledgeSource
 
 # Skip cleanly (not error) when no DB is reachable — mirrors test_models_roundtrip.py.
 # Every test below needs the DB (to create the KnowledgeSource row and read the
@@ -67,7 +67,7 @@ def test_ingest_text_source_stores_real_embeddings_and_char_count():
         chunks = db2.scalars(select(Chunk).where(Chunk.source_id == source_id)).all()
         assert len(chunks) >= 1
         for c in chunks:
-            assert len(c.embedding) == settings.embed_dim  # 2560, real vLLM embeddings
+            assert len(c.embedding) == EMBED_DIM  # 384, real local-e5 embeddings
         # char_count is exactly the sum of the persisted chunks' text lengths.
         assert got.char_count == sum(len(c.text) for c in chunks)
         # Sanity: real content made it through extract->chunk->store unmangled.
@@ -241,7 +241,7 @@ def test_ingest_caps_total_extracted_text_at_max_ingest_chars(monkeypatch):
 
     class _ZeroVectorProvider:
         def embed(self, texts, *, is_query=False):
-            return [[0.0] * settings.embed_dim for _ in texts]
+            return [[0.0] * EMBED_DIM for _ in texts]
 
     monkeypatch.setattr("app.brain.ingest.get_embedder", lambda: _ZeroVectorProvider())
 

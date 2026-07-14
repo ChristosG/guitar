@@ -30,7 +30,7 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "http://localhost:3100",
   "Access-Control-Allow-Credentials": "true",
   "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
-  "Access-Control-Allow-Headers": "content-type",
+  "Access-Control-Allow-Headers": "content-type,x-app-locale",
 };
 
 /** Encodes a list of `{event, data}` pairs as an SSE response body — the
@@ -41,16 +41,18 @@ function sseBody(events: Array<{ event: string; data: unknown }>): string {
   return events.map((e) => `event: ${e.event}\ndata: ${JSON.stringify(e.data)}\n\n`).join("");
 }
 
-/** Wires up an in-memory mock of the Chat API (`POST /chat`, `POST
- * /chat/{id}/messages`, `POST /chat/{id}/messages/stream`, `POST
- * /chat/{id}/approvals/{id}/resolve`, plus the history/pending GETs for
- * completeness even though this page's current flow never calls them itself
- * — see `lib/api.ts`'s own docstring on `getChatHistory`/
- * `getPendingApproval`). Each write endpoint's NEXT response is queued
- * explicitly by the test right before the action that triggers it
- * (`setNextMessage`/`setNextResolve`/`setNextStream`) — simpler than
- * modeling the real agent loop, and every test here only ever sends/resolves
- * once.
+/** Wires up an in-memory mock of the Chat API. Each write endpoint's NEXT
+ * response is queued explicitly by the test right before the action that
+ * triggers it (`setNextMessage`/`setNextResolve`/`setNextStream`) — simpler
+ * than modeling the real agent loop.
+ *
+ * It does, however, REMEMBER (Plan 13 Stage 5.6): every turn it answers is
+ * also recorded into a transcript, an approval left open stays open, and a
+ * title is derived from the first user message — so `GET /chat`,
+ * `GET /chat/{id}` and `GET /chat/{id}/pending` answer with state the tests'
+ * own earlier actions produced. Without that, "reload and the conversation is
+ * still there" would be asserting against a fixture rather than against
+ * anything the UI did, and the reload proof would be worthless.
  *
  * The stream endpoint defaults to a single `event: fallback` SSE response
  * (mirroring the real API's own honest-simplification contract — Plan 11
@@ -63,13 +65,92 @@ function sseBody(events: Array<{ event: string; data: unknown }>): string {
  * first, and a `fallback` event is this mock's default, deliberately, so
  * that attempt is a harmless no-op ahead of the REST call those tests
  * already script via `setNextMessage`. */
+interface MockRow {
+  id: string;
+  role: "user" | "assistant";
+  content: string | null;
+  created_at: string;
+  citations?: unknown;
+}
+
+interface MockPending {
+  id: string;
+  tool_name: string;
+  tool_args: Record<string, unknown>;
+  status: string;
+  created_at: string;
+}
+
 async function mockChatApi(page: Page) {
-  const calls = { create: 0, message: 0, resolve: 0, history: 0, pending: 0, stream: 0 };
-  const lastBody: { message?: unknown; resolve?: unknown; stream?: unknown } = {};
+  const calls = { create: 0, message: 0, resolve: 0, history: 0, pending: 0, stream: 0, list: 0, rename: 0, remove: 0 };
+  const lastBody: { message?: unknown; resolve?: unknown; stream?: unknown; rename?: unknown } = {};
   const unexpected: string[] = [];
-  let nextMessage: unknown = { status: "answer", content: "OK." };
-  let nextResolve: unknown = { status: "answer", content: "OK." };
+  let nextMessage: Record<string, unknown> = { status: "answer", content: "OK." };
+  let nextResolve: Record<string, unknown> = { status: "answer", content: "OK." };
   let nextStream: string = sseBody([{ event: "fallback", data: { reason: "tool_call" } }]);
+
+  // The PERSISTED state — the whole point of Stage 5.6 and the reason this
+  // mock got a memory. `history`/`pending` are what a reload reads back, and
+  // `titles` is the server's own "name a session after its first user
+  // message" rule (a truncation, no model call).
+  const history = new Map<string, MockRow[]>();
+  const pending = new Map<string, MockPending>();
+  const titles = new Map<string, string>();
+  /** Most-recently-active first, and — exactly like `GET /chat`'s INNER JOIN
+   * — a session appears only once it has a message. */
+  let order: string[] = [];
+
+  function record(sessionId: string, rows: Array<Omit<MockRow, "id" | "created_at">>) {
+    const existing = history.get(sessionId) ?? [];
+    const stamped = rows.map((r) => ({ ...r, id: randomUUID(), created_at: new Date().toISOString() }));
+    history.set(sessionId, [...existing, ...stamped]);
+
+    const firstUser = [...existing, ...stamped].find((r) => r.role === "user" && r.content);
+    if (firstUser?.content && !titles.has(sessionId)) {
+      titles.set(sessionId, firstUser.content.slice(0, 60));
+    }
+    order = [sessionId, ...order.filter((id) => id !== sessionId)];
+  }
+
+  function summaries() {
+    return order.map((id) => {
+      const rows = (history.get(id) ?? []).filter((r) => r.content);
+      const now = new Date().toISOString();
+      return {
+        id,
+        title: titles.get(id) ?? null,
+        locale: "en",
+        student_id: null,
+        created_at: now,
+        updated_at: now,
+        message_count: rows.length,
+        last_message_at: rows.at(-1)?.created_at ?? now,
+        preview: rows.at(-1)?.content ?? null,
+      };
+    });
+  }
+
+  /** Applies whatever a scripted turn response implies for the PERSISTED
+   * state, so the mock stays self-consistent under a reload: an
+   * `awaiting_approval` turn leaves an open approval AND an assistant row
+   * carrying the narration — which is precisely where the resumed card's
+   * description has to come from (`MessageOut` has no description field). */
+  function applyTurn(sessionId: string, turn: Record<string, unknown>) {
+    if (turn.status === "awaiting_approval") {
+      pending.set(sessionId, {
+        id: String(turn.approval_id),
+        tool_name: String(turn.tool_name),
+        tool_args: (turn.tool_args ?? {}) as Record<string, unknown>,
+        status: "pending",
+        created_at: new Date().toISOString(),
+      });
+      record(sessionId, [{ role: "assistant", content: (turn.description as string) ?? null }]);
+      return;
+    }
+    if (typeof turn.content === "string") {
+      record(sessionId, [{ role: "assistant", content: turn.content, citations: turn.citations }]);
+    }
+  }
 
   async function handler(route: Route) {
     const req = route.request();
@@ -81,21 +162,41 @@ async function mockChatApi(page: Page) {
       return;
     }
 
+    const json = (body: unknown, status = 200) =>
+      route.fulfill({ status, contentType: "application/json", headers: CORS_HEADERS, body: JSON.stringify(body) });
+
     if (pathname === "/chat" && method === "POST") {
       calls.create++;
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        headers: CORS_HEADERS,
-        body: JSON.stringify({ session_id: randomUUID() }),
-      });
+      await json({ session_id: randomUUID() });
+      return;
+    }
+
+    if (pathname === "/chat" && method === "GET") {
+      calls.list++;
+      await json(summaries());
       return;
     }
 
     const streamMatch = pathname.match(/^\/chat\/([^/]+)\/messages\/stream$/);
     if (streamMatch && method === "POST") {
       calls.stream++;
-      lastBody.stream = req.postDataJSON();
+      const body = req.postDataJSON() as { content: string };
+      lastBody.stream = body;
+      // A stream only PERSISTS on `done` — a `fallback` writes nothing at
+      // all, which is exactly what makes the client's REST retry safe (see
+      // `post_message_stream`'s docstring). Mirrored here so a fallback
+      // followed by a REST send doesn't double-record the user turn.
+      if (nextStream.includes("event: done")) {
+        const text = [...nextStream.matchAll(/event: delta\ndata: (.+)\n\n/g)]
+          .map((m) => (JSON.parse(m[1]) as { text: string }).text)
+          .join("");
+        const done = nextStream.match(/event: done\ndata: (.+)\n\n/);
+        const citations = done ? (JSON.parse(done[1]) as { citations: unknown }).citations : null;
+        record(streamMatch[1], [
+          { role: "user", content: body.content },
+          { role: "assistant", content: text, citations },
+        ]);
+      }
       await route.fulfill({
         status: 200,
         contentType: "text/event-stream",
@@ -108,13 +209,11 @@ async function mockChatApi(page: Page) {
     const messagesMatch = pathname.match(/^\/chat\/([^/]+)\/messages$/);
     if (messagesMatch && method === "POST") {
       calls.message++;
-      lastBody.message = req.postDataJSON();
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        headers: CORS_HEADERS,
-        body: JSON.stringify(nextMessage),
-      });
+      const body = req.postDataJSON() as { content: string };
+      lastBody.message = body;
+      record(messagesMatch[1], [{ role: "user", content: body.content }]);
+      applyTurn(messagesMatch[1], nextMessage);
+      await json(nextMessage);
       return;
     }
 
@@ -122,26 +221,45 @@ async function mockChatApi(page: Page) {
     if (resolveMatch && method === "POST") {
       calls.resolve++;
       lastBody.resolve = req.postDataJSON();
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        headers: CORS_HEADERS,
-        body: JSON.stringify(nextResolve),
-      });
+      pending.delete(resolveMatch[1]);
+      applyTurn(resolveMatch[1], nextResolve);
+      await json(nextResolve);
       return;
     }
 
     const pendingMatch = pathname.match(/^\/chat\/([^/]+)\/pending$/);
     if (pendingMatch && method === "GET") {
       calls.pending++;
-      await route.fulfill({ status: 200, contentType: "application/json", headers: CORS_HEADERS, body: "null" });
+      await json(pending.get(pendingMatch[1]) ?? null);
       return;
     }
 
-    const historyMatch = pathname.match(/^\/chat\/([^/]+)$/);
-    if (historyMatch && method === "GET") {
+    const sessionMatch = pathname.match(/^\/chat\/([^/]+)$/);
+    if (sessionMatch && method === "GET") {
       calls.history++;
-      await route.fulfill({ status: 200, contentType: "application/json", headers: CORS_HEADERS, body: "[]" });
+      await json(history.get(sessionMatch[1]) ?? []);
+      return;
+    }
+    if (sessionMatch && method === "PATCH") {
+      calls.rename++;
+      const body = req.postDataJSON() as { title: string };
+      lastBody.rename = body;
+      titles.set(sessionMatch[1], body.title);
+      const now = new Date().toISOString();
+      await json({
+        id: sessionMatch[1], title: body.title, locale: "en", student_id: null,
+        created_at: now, updated_at: now,
+      });
+      return;
+    }
+    if (sessionMatch && method === "DELETE") {
+      calls.remove++;
+      // The cascade, mocked: transcript and open approval go with it.
+      history.delete(sessionMatch[1]);
+      pending.delete(sessionMatch[1]);
+      titles.delete(sessionMatch[1]);
+      order = order.filter((id) => id !== sessionMatch[1]);
+      await route.fulfill({ status: 204, headers: CORS_HEADERS });
       return;
     }
 
@@ -161,10 +279,11 @@ async function mockChatApi(page: Page) {
     calls,
     lastBody,
     unexpected,
-    setNextMessage(value: unknown) {
+    summaries,
+    setNextMessage(value: Record<string, unknown>) {
       nextMessage = value;
     },
-    setNextResolve(value: unknown) {
+    setNextResolve(value: Record<string, unknown>) {
       nextResolve = value;
     },
     /** Queues the raw SSE body the NEXT `.../messages/stream` call answers
@@ -257,11 +376,12 @@ test.describe("chat cockpit (mocked API)", () => {
     // "add chat to nav" requirement, not just the page's own route.
     await page.goto("/en/today");
     await page.getByTestId("nav-chat").click();
-    await expect(page).toHaveURL(/\/en\/chat$/);
+    // `/en/chat` is a redirector now (Stage 5.6): with nothing to resume it
+    // creates a session and replaces the URL with the conversation's own.
+    await expect(page).toHaveURL(/\/en\/chat\/[0-9a-f-]{36}$/);
     await expect(page.getByTestId("chat-heading")).toBeVisible();
     await expect(page.getByTestId("chat-empty")).toBeVisible();
 
-    // A session is created up front, on mount.
     await expect(page.getByTestId("chat-input")).toBeEnabled();
     expect(mock.calls.create).toBe(1);
 
@@ -545,6 +665,136 @@ test.describe("chat cockpit (mocked API)", () => {
 
     expect(mock.calls.stream).toBe(1);
     expect(mock.calls.message).toBe(1);
+    expect(mock.unexpected).toEqual([]);
+  });
+});
+
+// Plan 13 Stage 5.6 — chat history. Chris: "the chat needs a history bro."
+// The API always persisted every turn; the UI created a session on mount, kept
+// the id in React state, and orphaned the whole conversation on refresh. These
+// four tests are the proof the fix works where it counts: ACROSS A RELOAD.
+test.describe("chat history (mocked API)", () => {
+  /** Sends one message through the REST path and returns the conversation's
+   * URL — the shared setup for every reload proof below. */
+  async function sendFirstMessage(page: Page, mock: Awaited<ReturnType<typeof mockChatApi>>, text: string) {
+    await page.goto("/en/chat");
+    await expect(page.getByTestId("chat-input")).toBeEnabled();
+    await page.getByTestId("chat-input").fill(text);
+    await page.getByTestId("chat-send").click();
+    return page.url();
+  }
+
+  test("the transcript survives a reload", async ({ page }) => {
+    const mock = await mockChatApi(page);
+    mock.setNextMessage({ status: "answer", content: "A humbucker cancels hum." });
+
+    const url = await sendFirstMessage(page, mock, "What cancels hum?");
+    await expect(page.getByTestId("chat-message")).toHaveCount(2);
+
+    // The session is now in the sidebar, named after the first user message —
+    // server-derived, so this also proves the panel refreshes the list.
+    await expect(page.getByTestId("chat-session-title")).toHaveText("What cancels hum?");
+
+    await page.reload();
+
+    await expect(page).toHaveURL(url);
+    await expect(page.getByTestId("chat-message")).toHaveCount(2);
+    await expect(page.getByTestId("chat-message").first()).toContainText("What cancels hum?");
+    await expect(page.getByTestId("chat-message").last()).toContainText("A humbucker cancels hum.");
+    await expect(page.getByTestId("chat-input")).toBeEnabled();
+    expect(mock.unexpected).toEqual([]);
+  });
+
+  // THE one that matters. A session reloaded mid-approval must come back with
+  // the SAME HITL card and a STILL-DISABLED composer — the card's description
+  // is not a field on the API's `MessageOut`, it is the trailing assistant
+  // row's own content, and the composer being live for even one render would
+  // let through a message the API answers with a 409.
+  test("a pending approval survives a reload, keeps the composer disabled, and still completes", async ({ page }) => {
+    const mock = await mockChatApi(page);
+    const approvalId = randomUUID();
+    mock.setNextMessage({
+      status: "awaiting_approval",
+      approval_id: approvalId,
+      tool_name: "create_student",
+      tool_args: { name: "Maria Ioannou", level: "beginner" },
+      description: "I'll add Maria Ioannou as a new student.",
+    });
+
+    await sendFirstMessage(page, mock, "Add a student named Maria Ioannou, beginner level");
+    await expect(page.getByTestId("approval-card")).toBeVisible();
+    await expect(page.getByTestId("chat-input")).toBeDisabled();
+
+    await page.reload();
+
+    // Same card, same description, same args — rebuilt from `GET .../pending`
+    // plus the trailing assistant row of `GET /chat/{id}`.
+    await expect(page.getByTestId("approval-card")).toBeVisible();
+    await expect(page.getByTestId("approval-description")).toHaveText("I'll add Maria Ioannou as a new student.");
+    await expect(page.getByTestId("approval-tool-name")).toHaveText("create_student");
+    await expect(page.getByTestId("approval-args")).toContainText("beginner");
+    await expect(page.getByTestId("chat-input")).toBeDisabled();
+    await expect(page.getByTestId("chat-send")).toBeDisabled();
+
+    // The narration moved INTO the card — it must not also render as a stray
+    // assistant bubble above it. Only the user's own turn is in the transcript.
+    await expect(page.getByTestId("chat-message")).toHaveCount(1);
+
+    // ...and the resumed turn still completes.
+    mock.setNextResolve({ status: "answer", content: "Done — Maria Ioannou has been added to your roster." });
+    await page.getByTestId("approval-approve").click();
+
+    await expect(page.getByTestId("approval-card")).toHaveCount(0);
+    await expect(page.getByTestId("chat-message").last()).toContainText("has been added");
+    await expect(page.getByTestId("chat-input")).toBeEnabled();
+    expect(mock.calls.resolve).toBe(1);
+    expect(mock.unexpected).toEqual([]);
+  });
+
+  test("renaming a conversation sticks across a reload", async ({ page }) => {
+    const mock = await mockChatApi(page);
+    mock.setNextMessage({ status: "answer", content: "Sure." });
+    await sendFirstMessage(page, mock, "Plan for Nikos");
+    await expect(page.getByTestId("chat-session-title")).toHaveText("Plan for Nikos");
+
+    await page.getByTestId("chat-rename").click();
+    await page.getByTestId("chat-rename-input").fill("Nikos — 12 week plan");
+    await page.getByTestId("chat-rename-save").click();
+
+    await expect(page.getByTestId("chat-session-title")).toHaveText("Nikos — 12 week plan");
+    expect(mock.lastBody.rename).toEqual({ title: "Nikos — 12 week plan" });
+
+    await page.reload();
+    await expect(page.getByTestId("chat-session-title")).toHaveText("Nikos — 12 week plan");
+    expect(mock.unexpected).toEqual([]);
+  });
+
+  test("deleting the open conversation confirms first, cascades, and redirects", async ({ page }) => {
+    const mock = await mockChatApi(page);
+    mock.setNextMessage({ status: "answer", content: "Sure." });
+    const url = await sendFirstMessage(page, mock, "Delete me");
+    await expect(page.getByTestId("chat-session-item")).toHaveCount(1);
+
+    await page.getByTestId("chat-delete").click();
+
+    // Destructive, and behind the confirm dialog — cancelling deletes nothing.
+    await expect(page.getByTestId("confirm-dialog")).toBeVisible();
+    await expect(page.getByTestId("confirm-body")).toContainText("Delete me");
+    await page.getByTestId("confirm-cancel").click();
+    expect(mock.calls.remove).toBe(0);
+    await expect(page.getByTestId("chat-session-item")).toHaveCount(1);
+
+    await page.getByTestId("chat-delete").click();
+    await page.getByTestId("confirm-accept").click();
+
+    expect(mock.summaries()).toEqual([]);
+    // The open conversation was the one deleted, so the panel bounces to the
+    // index, which — with nothing left to resume — starts a fresh session.
+    await expect(page).toHaveURL(/\/en\/chat\/[0-9a-f-]{36}$/);
+    await expect(page).not.toHaveURL(url);
+    await expect(page.getByTestId("chat-sessions-empty")).toBeVisible();
+    await expect(page.getByTestId("chat-empty")).toBeVisible();
+    expect(mock.calls.remove).toBe(1);
     expect(mock.unexpected).toEqual([]);
   });
 });

@@ -42,8 +42,7 @@ about — there is no FK here to accidentally leave unnamed.
 """
 import uuid
 
-from sqlalchemy import JSON, String
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import JSON, String, Text, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -54,7 +53,20 @@ from app.models.base import PkMixin, TimestampMixin
 # and a real GenerationJob has been created. Exported here (not just as a
 # local constant in `app.curriculum.interview`) since it describes what
 # values `CurriculumInterview.step` can actually take.
-STEPS = ("who", "duration", "sources", "preview", "confirm", "done")
+# The six steps of the v2 interview, plus the terminal "done".
+#
+# "preview" IS GONE, REPLACED BY "outline" — and that rename is a data migration
+# (`9c1e4a5d7b30`), not a constant edit. `answer_interview` does
+# `STEP_ORDER.index(step)`, so a persisted row still sitting on "preview" when the
+# tutor came back from lunch would raise ValueError -> a 500 on his next click.
+#
+# "scope" is new, and it is where `domain` died. Chris asked, of `domain`: "is it
+# playing any role? is it used somewhere or only for tagging?" It was ONE line in
+# one prompt ("Domain: {domain}") plus a retrieval filter that — after 5d77bd0 —
+# could no longer exclude anything at all. It never tagged the curriculum and
+# never rendered. A free-text COURSE BRIEF in its place is the thing he was
+# reaching for: what this course is actually about, in his words.
+STEPS = ("who", "duration", "scope", "sources", "outline", "confirm", "done")
 
 
 class CurriculumInterview(Base, PkMixin, TimestampMixin):
@@ -68,15 +80,23 @@ class CurriculumInterview(Base, PkMixin, TimestampMixin):
     # The one piece of context NOT asked step-by-step — see
     # `app.curriculum.interview.start_interview`'s docstring for why.
     title: Mapped[str] = mapped_column(String(400))
-    domain: Mapped[str | None] = mapped_column(String(30), nullable=True)
-    # Accumulated per-step answers, keyed by step name ("who", "duration",
-    # "sources", "confirm") — never by "preview" (preview has no answer of
-    # its own beyond "proceed", nothing worth keeping past that click).
+    # The "scope" step's free-text course brief. This is what `domain` should
+    # always have been: not a 30-character enum-ish tag the model was told to
+    # respect, but the tutor describing the course he wants — which reaches the
+    # outline prompt AND every lesson-draft prompt.
+    brief: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # "library_only" | "general_knowledge" | "web" — the ceiling the tutor sets on
+    # how far a module may stray from his own material when his material doesn't
+    # cover it. Per-module tiers (assigned by the model reading the book) are
+    # clamped to this.
+    gap_policy: Mapped[str] = mapped_column(String(20), default="general_knowledge")
+    # Accumulated per-step answers, keyed by step name.
     answers: Mapped[dict] = mapped_column(JSON, default=dict)
-    # The "preview" step's computed {course_title, modules:[...], gap_count}
-    # payload — cached here so a GET (refresh) never re-runs the plan LLM
-    # call or the retrieval query. Also shown again, read-only, at "confirm".
-    preview: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    # Set once "confirm" is approved and a GenerationJob row is created.
-    # Deliberately no ForeignKey — see this module's own docstring, point 3.
-    job_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    # The generated (and then TUTOR-EDITED) outline — the thing he approves before
+    # a single expensive lesson is drafted. Cached here so a refresh never re-runs
+    # the 90K-token outline call.
+    outline: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Set once "confirm" is approved: the materialized course Block, and the job
+    # drafting into it. Deliberately un-FK'd — see this module's docstring, point 3.
+    root_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    job_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)

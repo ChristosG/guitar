@@ -1,9 +1,11 @@
 """`/artifacts` routes: create-from-spec, LLM generation, retrieval, and
 delete.
 
-No-auth PoC posture, same as `routers/knowledge.py`/`routers/curriculum.py`
-— no authentication/authorization here either; this deploys origin-locked
-behind Cloudflare for a single user.
+Auth: every route here sits behind the `gt_session` password gate
+(`app/auth/middleware.py`) — a whole-API ASGI middleware, not a per-router
+dependency, so there is nothing to declare in this file. One tutor, one
+password; there is still no authorization model, because there is nobody to
+authorize against anybody else.
 """
 from uuid import UUID
 
@@ -16,6 +18,7 @@ from sqlalchemy.orm import Session
 from app.artifacts.generate import TITLE_MAX_LEN, derive_title, generate_artifact
 from app.artifacts.specs import validate_spec
 from app.db import get_db
+from app.i18n import locale_dep
 from app.llm.errors import GuidedJSONError
 from app.models.artifact import Artifact
 from app.models.block import Block
@@ -85,7 +88,9 @@ def create_artifact(payload: ArtifactCreate, db: Session = Depends(get_db)) -> A
 
 @router.post("/artifacts/generate", response_model=ArtifactOut)
 def generate_artifact_endpoint(
-    payload: ArtifactGenerateRequest, db: Session = Depends(get_db)
+    payload: ArtifactGenerateRequest,
+    db: Session = Depends(get_db),
+    locale: str = Depends(locale_dep),
 ) -> ArtifactOut:
     """Plain `def` (sync), not `async def` — same reasoning as `routers.
     curriculum.generate_curriculum_endpoint`: `generate_artifact` makes a
@@ -116,6 +121,10 @@ def generate_artifact_endpoint(
         artifact = generate_artifact(
             db, kind=payload.kind, prompt=payload.prompt,
             block_id=payload.block_id, ground=payload.ground,
+            # The spec's prose (a gear card's `why`, a tone recipe's steps) is
+            # written in the tutor's UI language; alphaTex/chord/gear names are
+            # not translated — see `app.i18n.language_directive`.
+            locale=locale,
         )
     except GuidedJSONError as e:
         raise HTTPException(

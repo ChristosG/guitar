@@ -10,11 +10,54 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ChatSessionCreate(BaseModel):
     student_id: UUID | None = None
+    # The UI language this conversation is being started in. Optional so every
+    # pre-existing caller (and every test written before Stage 5.6) still
+    # compiles — the column's own default, "el", is the app's default locale.
+    locale: str | None = Field(default=None, max_length=5)
+
+
+class ChatSessionUpdate(BaseModel):
+    """`PATCH /chat/{id}` — rename only. `min_length=1` after the router
+    strips: an all-whitespace title would render as a blank row in the
+    sidebar with nothing to click back to.
+    """
+    title: str = Field(min_length=1, max_length=200)
+
+
+class ChatSessionOut(BaseModel):
+    """One session, WITHOUT the transcript-derived fields (`GET /chat`'s
+    `ChatSessionSummary` below carries those). This is what `PATCH` answers
+    with: a rename cannot change a message count or a preview, and computing
+    them again for the one renamed row would mean re-running the list
+    endpoint's aggregate for a value the client already holds.
+    """
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    title: str | None = None
+    locale: str
+    student_id: UUID | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ChatSessionSummary(ChatSessionOut):
+    """One row of `GET /chat`'s sidebar list.
+
+    `message_count`/`preview`/`last_message_at` count only user+assistant
+    rows — the same filter `GET /chat/{id}` applies to the transcript itself
+    (tool rows are internal plumbing), so the count the tutor sees matches the
+    number of bubbles he'll get when he opens it, rather than silently
+    including the tool traffic of an approved mutation.
+    """
+    message_count: int
+    last_message_at: datetime
+    preview: str | None = None
 
 
 class ChatSessionCreated(BaseModel):

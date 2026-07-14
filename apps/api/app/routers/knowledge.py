@@ -6,12 +6,11 @@ small" for this PoC) — `POST /sources`/`POST /sources/upload` create the
 before responding, so the response already carries the final status
 ("ready"/"failed") rather than a client having to poll.
 
-No-auth PoC posture (accepted, not a gap to fix here): this router has no
-authentication/authorization — it deploys origin-locked behind Cloudflare for
-a single user. Because anyone who can reach it can trigger ingestion, the
-compensating controls actually enforced here are (a) `urlsafe.assert_public_
-url` blocking SSRF on the URL-ingestion path and (b) the upload/text/`k`/query
-bounds below guarding against resource exhaustion — not identity checks.
+Auth: every route here sits behind the `gt_session` password gate
+(`app/auth/middleware.py`) — a whole-API ASGI middleware, not a per-router
+dependency, so there is nothing to declare in this file. One tutor, one
+password; there is still no authorization model, because there is nobody to
+authorize against anybody else.
 """
 import logging
 import re
@@ -24,6 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.brain.ingest import IngestPayload, ingest_source
+from app.brain.reembed import reembed_all
 from app.brain.retrieve import answer as run_answer
 from app.brain.retrieve import search as run_search
 from app.brain.urlsafe import assert_public_url
@@ -253,9 +253,25 @@ def delete_source(source_id: UUID, db: Session = Depends(get_db)) -> None:
     db.commit()
 
 
+@router.post("/reindex")
+def reindex_endpoint(db: Session = Depends(get_db)) -> dict:
+    """Re-embed every chunk in place, from `chunk.text` (Plan 13, Stage 4.2).
+
+    The same work `scripts/reembed.py` does, reachable without a shell — because
+    the end state of this app is a local bundle on the tutor's iMac, where "run
+    this script inside the container" is not an instruction anybody is going to
+    follow. The next embedding-model change is then a button, not a support call.
+
+    Synchronous, like ingestion (see the module docstring): the whole 408-chunk
+    corpus re-embeds on the local CPU in well under a minute. It becomes a
+    `GenerationJob` the day the library is big enough for that to be false.
+    """
+    return reembed_all(db)
+
+
 @router.post("/search", response_model=SearchResponse)
 def search_endpoint(payload: SearchRequest, db: Session = Depends(get_db)) -> SearchResponse:
-    hits = run_search(db, payload.query, k=payload.k, domain=payload.domain, language=payload.language)
+    hits = run_search(db, payload.query, k=payload.k, source_ids=payload.source_ids)
     return SearchResponse(hits=[HitOut.model_validate(h, from_attributes=True) for h in hits])
 
 

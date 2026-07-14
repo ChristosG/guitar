@@ -1,7 +1,6 @@
 import uuid
 
-from sqlalchemy import JSON, String, Text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import JSON, String, Text, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -43,7 +42,18 @@ class GenerationJob(Base, PkMixin, TimestampMixin):
     # pending | running | succeeded | failed
     params: Mapped[dict] = mapped_column(JSON)
     result_root_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True)
+        Uuid(as_uuid=True), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_kind: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    # upstream | timeout | internal
+    # upstream | timeout | internal | auth | rate_limit
+    #
+    # Free-form job progress, for the ONE job that has any: the curriculum draft
+    # fan-out writes `{"phase": "drafting"}` here. Note what it does NOT hold —
+    # the drafted/total counts. Those are a GROUP BY over `block.meta ->
+    # draft_status` (see `app.curriculum.progress_report`), because the blocks are
+    # materialized at CONFIRM and are the truth about what is drafted. A count
+    # cached on this row would be a second truth, and the two would disagree the
+    # first time a lesson was deleted mid-draft.
+    #
+    # Plain sa.JSON, no MutableDict — reassign the whole dict, never mutate.
+    progress: Mapped[dict | None] = mapped_column(JSON, nullable=True)

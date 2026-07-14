@@ -16,9 +16,11 @@ class InterviewStartRequest(BaseModel):
     """`POST /curricula/interview`'s body — the one piece of context the
     interview does NOT ask about step-by-step (see
     `app.curriculum.interview.start_interview`'s docstring).
+
+    `domain` is GONE (Plan 13, Stage 6). It never did anything; the "scope" step's
+    free-text course brief is what it was pretending to be.
     """
     title: str
-    domain: str | None = None
 
 
 class InterviewAnswerRequest(BaseModel):
@@ -48,3 +50,7 @@ class InterviewStateOut(BaseModel):
     options: list[dict] | None = None
     findings: dict | None = None
     error: str | None = None
+    # Set once "confirm" materializes the tree: the board can be opened on
+    # `root_id` while `job_id` is still drafting into it.
+    root_id: UUID | None = None
+    job_id: UUID | None = None

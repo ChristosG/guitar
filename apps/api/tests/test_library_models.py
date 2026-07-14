@@ -1,4 +1,4 @@
-from app.models.knowledge import Chunk, Collection, KnowledgeSource, Page
+from app.models.knowledge import EMBED_DIM, Chunk, Collection, KnowledgeSource, Page
 
 
 def test_page_belongs_to_source_and_carries_scan_and_text(db):
@@ -23,7 +23,7 @@ def test_chunk_links_to_its_page(db):
     db.add(page); db.commit()
 
     chunk = Chunk(source_id=src.id, page_id=page.id, text="hi",
-                  embedding=[0.0] * 2560)
+                  embedding=[0.0] * EMBED_DIM)
     db.add(chunk); db.commit()
     assert db.get(Chunk, chunk.id).page_id == page.id
 

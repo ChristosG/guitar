@@ -7,9 +7,11 @@ two URL roots (`/curricula/...` and `/blocks/...`) — mirrors how
 `app/main.py` is told to "wire both routers" (this one + `students.router`),
 not one-router-per-prefix.
 
-No-auth PoC posture, same as `routers/knowledge.py` — no
-authentication/authorization here either; this deploys origin-locked behind
-Cloudflare for a single user.
+Auth: every route here sits behind the `gt_session` password gate
+(`app/auth/middleware.py`), which is a whole-API ASGI middleware rather than a
+per-router dependency — so there is nothing to declare in this file. One tutor,
+one password; there is still no authorization model, because there is nobody to
+authorize against anybody else.
 """
 from uuid import UUID
 
@@ -18,11 +20,17 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.curriculum import edit as edit_service
 from app.curriculum import interview as interview_service
 from app.curriculum.assign import clone_content_subtree
+from app.curriculum.draft import draft_progress
+from app.curriculum.refine import refine_block, undo_refine
 from app.curriculum.segment import segment_block
 from app.db import get_db
+from app.jobs.curriculum_draft import run_curriculum_draft_job
 from app.jobs.runner import run_curriculum_job
+from app.llm.factory import require_llm_configured
+from app.models.artifact import Artifact
 from app.models.block import Block
 from app.models.curriculum import Assignment
 from app.models.generation_job import GenerationJob
@@ -34,6 +42,11 @@ from app.schemas.curriculum import (
     BlockUpdate,
     CurriculumGenerateRequest,
     CurriculumListItem,
+    DraftProgressOut,
+    LessonCreate,
+    ModuleCreate,
+    RefineRequest,
+    ReorderRequest,
     SegmentRequest,
 )
 from app.schemas.interview import InterviewAnswerRequest, InterviewStartRequest, InterviewStateOut
@@ -42,20 +55,28 @@ from app.schemas.jobs import JobAccepted
 router = APIRouter(tags=["curriculum"])
 
 
-def block_to_tree(block: Block) -> dict:
-    """Recursively serialize a Block subtree into the nested shape every
-    route in this module returns: {id, kind, title, body, est_minutes,
-    order, language, plane, student_id, children: [...]}, children ordered
-    by `order`.
+def block_to_tree(block: Block, artifacts: dict[UUID, list] | None = None) -> dict:
+    """Recursively serialize a Block subtree, children ordered by `order`.
 
-    Deliberately takes a single already-loaded `Block` (no `db` parameter,
-    per the brief's exact signature) and walks `Block.children` — the ORM
-    relationship — to reach descendants. Empirically verified (see this
-    task's report) that this relationship resolves parent->children with
-    correct direction/cardinality but with NO guaranteed order (the model
-    declares no `order_by=` on it), hence the explicit `sorted(...,
-    key=...order)` below rather than trusting relationship/DB return order.
+    `meta` IS IN THE RESPONSE NOW, AND ITS ABSENCE WAS A REAL BUG. This function
+    used to serialize nine fields, and provenance was not among them. So the
+    citation chips, the grounding tiers and the gap badges were written to the
+    database by the generator and then silently dropped at the API boundary — the
+    board could not have rendered them if it had tried, because they were not in
+    the response. The feature existed everywhere except where the tutor could see
+    it.
+
+    `artifacts` is a PRE-FETCHED `{block_id: [Artifact]}` map, passed down rather
+    than queried per node. Every segment leaf used to fetch its own via `GET
+    /artifacts?block_id=` — about 120 parallel requests on one board render, which
+    is the actual cause of the "Could not load attached artifacts" error. One query
+    up front, zero on the way down.
+
+    Walks `Block.children` (the ORM relationship), which resolves parent->children
+    correctly but with NO guaranteed order — the model declares no `order_by=` —
+    hence the explicit `sorted`.
     """
+    artifacts = artifacts or {}
     return {
         "id": block.id,
         "kind": block.kind,
@@ -66,10 +87,38 @@ def block_to_tree(block: Block) -> dict:
         "language": block.language,
         "plane": block.plane,
         "student_id": block.student_id,
+        "meta": block.meta,
+        "artifacts": artifacts.get(block.id, []),
         "children": [
-            block_to_tree(child) for child in sorted(block.children, key=lambda b: b.order)
+            block_to_tree(child, artifacts)
+            for child in sorted(block.children, key=lambda b: b.order)
         ],
     }
+
+
+def _subtree_ids(block: Block) -> list[UUID]:
+    ids = [block.id]
+    for child in block.children:
+        ids.extend(_subtree_ids(child))
+    return ids
+
+
+def _artifacts_for(db: Session, block: Block) -> dict[UUID, list[Artifact]]:
+    """Every artifact attached anywhere in `block`'s subtree, in ONE query.
+
+    This is the whole fix for the artifacts N+1 (see `block_to_tree`). The `IN`
+    list is the subtree's block ids — a few hundred at the very worst, which is one
+    query Postgres does not notice, against ~120 HTTP round trips the browser very
+    much did.
+    """
+    ids = _subtree_ids(block)
+    if not ids:
+        return {}
+    rows = db.scalars(select(Artifact).where(Artifact.block_id.in_(ids))).all()
+    out: dict[UUID, list[Artifact]] = {}
+    for artifact in rows:
+        out.setdefault(artifact.block_id, []).append(artifact)
+    return out
 
 
 def _get_block_or_404(db: Session, block_id: UUID) -> Block:
@@ -105,7 +154,7 @@ def start_curriculum_interview(
     `app.curriculum.interview`'s module docstring for why this whole flow
     is a state machine in code, not a free-form chat.
     """
-    interview = interview_service.start_interview(db, title=payload.title, domain=payload.domain)
+    interview = interview_service.start_interview(db, title=payload.title)
     return interview_service.render_state(db, interview)
 
 
@@ -120,7 +169,14 @@ def get_curriculum_interview(interview_id: UUID, db: Session = Depends(get_db)) 
     return interview_service.render_state(db, interview)
 
 
-@router.post("/curricula/interview/{interview_id}/answer", response_model=None)
+@router.post(
+    "/curricula/interview/{interview_id}/answer",
+    response_model=None,
+    # Every step of the interview either calls the model synchronously (preview)
+    # or enqueues a job that will (confirm). Checking the key HERE means the
+    # tutor is told "open Settings" before he answers five questions.
+    dependencies=[Depends(require_llm_configured)],
+)
 def answer_curriculum_interview(
     interview_id: UUID,
     payload: InterviewAnswerRequest,
@@ -155,25 +211,44 @@ def answer_curriculum_interview(
         return interview_service.render_state(db, interview, error=result["error"])
 
     if result["done"]:
-        job = GenerationJob(kind="curriculum", status="pending", params=result["params"])
+        # The TREE ALREADY EXISTS by the time we get here — `_answer_confirm`
+        # materialized it, every lesson `queued`. So the 202 carries `root_id` as
+        # well as `job_id`, and the tutor's board opens INSTANTLY on a real
+        # curriculum with a progress bar, instead of on a spinner waiting for a job
+        # that will not produce anything to look at for four minutes.
+        job = GenerationJob(
+            kind="curriculum_draft",
+            status="pending",
+            params={"root_id": str(interview.root_id)},
+        )
         db.add(job)
-        # `job.id`'s `default=uuid.uuid4` is a client-side default that
-        # SQLAlchemy only actually generates at flush time — reading
-        # `job.id` any earlier returns `None` (bug caught by this task's own
-        # test: `interview.job_id` came back `None` after commit). Flush
-        # BEFORE reading `job.id`, so the id `interview.job_id` records
-        # below is the real one, not `None`.
+        # `job.id`'s `default=uuid.uuid4` is a client-side default SQLAlchemy only
+        # generates at FLUSH time — read it any earlier and it is None (a bug this
+        # module's tests caught once already). Flush before reading it.
         db.flush()
         interview.job_id = job.id
         db.commit()
         db.refresh(job)
-        background_tasks.add_task(run_curriculum_job, job.id)
-        return JSONResponse(status_code=202, content={"job_id": str(job.id), "status": job.status})
+        background_tasks.add_task(run_curriculum_draft_job, job.id)
+        return JSONResponse(
+            status_code=202,
+            content={
+                "job_id": str(job.id),
+                "root_id": str(interview.root_id),
+                "status": job.status,
+            },
+        )
 
     return interview_service.render_state(db, interview)
 
 
-@router.post("/curricula/generate", response_model=JobAccepted, status_code=202)
+@router.post(
+    "/curricula/generate",
+    response_model=JobAccepted,
+    status_code=202,
+    # 409 BEFORE the GenerationJob row exists — see `require_llm_configured`.
+    dependencies=[Depends(require_llm_configured)],
+)
 def generate_curriculum_endpoint(
     payload: CurriculumGenerateRequest,
     background_tasks: BackgroundTasks,
@@ -206,25 +281,22 @@ def generate_curriculum_endpoint(
         "title": payload.title,
         "language": payload.language,
         "profile": payload.profile,
-        "domain": payload.domain,
+        "brief": payload.brief,
+        "weeks": payload.weeks,
+        "sessions_per_week": payload.sessions_per_week,
+        "minutes_per_session": payload.minutes_per_session,
         "target_minutes_total": payload.target_minutes_total,
+        "gap_policy": payload.gap_policy,
+        "allow_general": payload.allow_general,
     }
-    # Only added when actually requested — keeps `params` byte-for-byte
-    # identical to the pre-Task-2 shape for callers that don't use them (see
-    # test_curriculum_generate_enqueue.py's
-    # ..._persists_request_params_verbatim_on_the_job).
-    #
-    # `is not None`, NOT truthiness (review fix, MINOR): `payload.source_ids`
-    # defaults to `None` (key omitted -> old/back-compat behaviour, unscoped
-    # retrieval) but an explicitly-passed `[]` means "ground in nothing" —
-    # `if payload.source_ids:` is falsy for BOTH, so it used to silently drop
-    # an explicit `[]` from `params` entirely, and `generate_curriculum` would
-    # then see its own `source_ids=None` default and fall back to whole-
-    # library retrieval — the opposite of what an explicit `[]` asked for.
+    # `is not None`, NOT truthiness: `source_ids` defaults to `None` ("everything
+    # in the library") but an explicit `[]` means "none of it" — and `if
+    # payload.source_ids:` is falsy for BOTH, so it used to drop the explicit `[]`
+    # and fall back to the whole library, i.e. the exact opposite of what was asked.
     if payload.source_ids is not None:
         params["source_ids"] = [str(s) for s in payload.source_ids]
-    if payload.allow_general:
-        params["allow_general"] = payload.allow_general
+    if payload.student_id is not None:
+        params["student_id"] = str(payload.student_id)
     job = GenerationJob(kind="curriculum", status="pending", params=params)
     db.add(job)
     db.commit()
@@ -237,12 +309,163 @@ def generate_curriculum_endpoint(
 
 @router.get("/curricula/{root_id}", response_model=BlockTreeOut)
 def get_curriculum(root_id: UUID, db: Session = Depends(get_db)) -> dict:
-    return block_to_tree(_get_block_or_404(db, root_id))
+    block = _get_block_or_404(db, root_id)
+    return block_to_tree(block, _artifacts_for(db, block))
+
+
+@router.get("/curricula/{root_id}/progress", response_model=DraftProgressOut)
+def get_curriculum_progress(root_id: UUID, db: Session = Depends(get_db)) -> dict:
+    """What the board polls while the lessons are being written.
+
+    A GROUP BY over the lesson blocks, computed fresh on every poll — NOT a counter
+    on the job row. The blocks are what the tutor is looking at; a cached count
+    would be a second truth, and it would disagree with the tree the first time he
+    deleted a lesson mid-draft.
+
+    Cheap on purpose: this runs every 2 seconds, and if it cannot get a database
+    connection it times out, and a timed-out progress poll looks exactly like the
+    flagship feature being broken. (See `jobs/curriculum_draft.py` on why the draft
+    workers hold no connection across the model call, and `config.db_pool_size`.)
+    """
+    _get_block_or_404(db, root_id)
+    return {"root_id": root_id, **draft_progress(db, root_id)}
+
+
+@router.post("/curricula/{root_id}/draft", response_model=JobAccepted, status_code=202,
+             dependencies=[Depends(require_llm_configured)])
+def resume_curriculum_draft(
+    root_id: UUID, background_tasks: BackgroundTasks, db: Session = Depends(get_db),
+) -> JobAccepted:
+    """RESUME: draft every lesson still `queued` under this curriculum.
+
+    This is a REQUEST, and that is the entire architecture of the recovery story. A
+    `BackgroundTask` can only be scheduled by a request — there is no worker
+    process (the compose `worker` service is a stub that sleeps) and this stage
+    deliberately did not add one. So: `jobs/sweep.py` puts interrupted `drafting`
+    lessons back to `queued` at boot, nothing is auto-enqueued, and the tutor
+    presses a button. It also covers the 429 case (a rate-limited lesson is
+    `queued`, not `failed`), a lesson he added to the outline after the fact, and a
+    failed lesson he wants retried — all the same code path, because they are all
+    the same state.
+    """
+    _get_block_or_404(db, root_id)
+    job = GenerationJob(
+        kind="curriculum_draft", status="pending", params={"root_id": str(root_id)},
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    background_tasks.add_task(run_curriculum_draft_job, job.id)
+    return JobAccepted(job_id=job.id, status=job.status)
+
+
+@router.post("/curricula/{root_id}/modules", response_model=BlockTreeOut, status_code=201)
+def add_curriculum_module(
+    root_id: UUID, payload: ModuleCreate, db: Session = Depends(get_db),
+) -> dict:
+    try:
+        module = edit_service.add_module(
+            db, root_id, title=payload.title, objective=payload.objective,
+            tier=payload.tier, after=payload.after,
+        )
+    except edit_service.EditError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    return block_to_tree(module)
+
+
+@router.post("/blocks/{module_id}/lessons", response_model=BlockTreeOut, status_code=201)
+def add_module_lesson(
+    module_id: UUID, payload: LessonCreate, db: Session = Depends(get_db),
+) -> dict:
+    """A new lesson, `queued`. The next Resume drafts it with the same cached
+    library prefix as the rest — which is what makes "I want one more lesson on
+    barre chords" a two-click operation rather than a regeneration."""
+    try:
+        lesson = edit_service.add_lesson(
+            db, module_id, title=payload.title, objective=payload.objective,
+            after=payload.after,
+        )
+    except edit_service.EditError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    return block_to_tree(lesson)
+
+
+@router.post("/blocks/{lesson_id}/deepen", response_model=JobAccepted, status_code=202,
+             dependencies=[Depends(require_llm_configured)])
+def deepen_lesson(
+    lesson_id: UUID, background_tasks: BackgroundTasks, db: Session = Depends(get_db),
+) -> JobAccepted:
+    """DEEPEN: "this one is thin — write it again, longer."
+
+    Deliberately NOT a second drafting pipeline. It puts the lesson back to `queued`
+    with a `deepen` flag and schedules the ordinary draft fan-out over its
+    curriculum — the same job, the same cached library prefix, the same per-lesson
+    failure isolation. The only thing the flag changes is this lesson's word target
+    (`jobs/curriculum_draft.DEEPEN_TARGET_RATIO`).
+
+    So: one route, no new job kind, and a lesson that is already `queued` because it
+    has never been drafted at all behaves identically — which is exactly what the
+    tutor means when he presses the button on it.
+    """
+    try:
+        root_id = edit_service.requeue_lesson(db, lesson_id, deepen=True)
+    except edit_service.EditError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+    job = GenerationJob(
+        kind="curriculum_draft", status="pending", params={"root_id": str(root_id)},
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    background_tasks.add_task(run_curriculum_draft_job, job.id)
+    return JobAccepted(job_id=job.id, status=job.status)
+
+
+@router.post("/blocks/{block_id}/reorder", response_model=BlockTreeOut)
+def reorder_curriculum_block(
+    block_id: UUID, payload: ReorderRequest, db: Session = Depends(get_db),
+) -> dict:
+    try:
+        block = edit_service.reorder_block(db, block_id, direction=payload.direction)
+    except edit_service.EditError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    return block_to_tree(block)
+
+
+@router.post("/blocks/{block_id}/refine", response_model=BlockTreeOut,
+             dependencies=[Depends(require_llm_configured)])
+def refine_curriculum_block(
+    block_id: UUID, payload: RefineRequest, db: Session = Depends(get_db),
+) -> dict:
+    """EXTEND WITH CHAT. *"change this and give more detail about the Amp"* — and
+    it actually follows the instruction.
+
+    Synchronous, unlike everything else that calls the model here: this is ONE
+    block, a few thousand tokens, and the tutor is sitting there watching. A job
+    row and a poll for a 10-second call would be infrastructure for its own sake.
+
+    The old body is stashed on `meta.prev_body` and `POST .../undo` puts it back.
+    """
+    block = _get_block_or_404(db, block_id)
+    refine_block(db, block, payload.instruction)
+    db.commit()
+    return block_to_tree(block, _artifacts_for(db, block))
+
+
+@router.post("/blocks/{block_id}/undo", response_model=BlockTreeOut)
+def undo_block_refine(block_id: UUID, db: Session = Depends(get_db)) -> dict:
+    block = _get_block_or_404(db, block_id)
+    if not undo_refine(block):
+        raise HTTPException(status_code=422, detail="nothing to undo on this block")
+    db.commit()
+    return block_to_tree(block, _artifacts_for(db, block))
 
 
 @router.get("/blocks/{block_id}", response_model=BlockTreeOut)
 def get_block(block_id: UUID, db: Session = Depends(get_db)) -> dict:
-    return block_to_tree(_get_block_or_404(db, block_id))
+    block = _get_block_or_404(db, block_id)
+    return block_to_tree(block, _artifacts_for(db, block))
 
 
 @router.patch("/blocks/{block_id}", response_model=BlockTreeOut)
@@ -275,9 +498,18 @@ def update_block(block_id: UUID, payload: BlockUpdate, db: Session = Depends(get
 
 @router.delete("/blocks/{block_id}", status_code=204, response_model=None)
 def delete_block(block_id: UUID, db: Session = Depends(get_db)) -> None:
-    block = _get_block_or_404(db, block_id)
-    db.delete(block)  # ORM cascade="all, delete-orphan" + DB ON DELETE CASCADE both remove descendants
-    db.commit()
+    """Delete a block and its subtree — and CLOSE THE HOLE IT LEAVES IN `order`.
+
+    The delete itself was always fine (ORM `cascade="all, delete-orphan"` plus the
+    DB's own `ON DELETE CASCADE`). What was missing was the renormalisation: this
+    left siblings at [0, 1, 3], which sorted correctly and looked harmless — right
+    up until Stage 6 made it possible to ADD a module, whose new `order` of
+    `len(siblings)` = 3 then collided with the survivor already sitting at 3. The
+    tie is broken by whatever Postgres feels like, so the tutor's new module lands
+    somewhere in the middle of his course.
+    """
+    _get_block_or_404(db, block_id)
+    edit_service.delete_block(db, block_id)
 
 
 @router.post("/blocks/{block_id}/segment", response_model=BlockTreeOut)

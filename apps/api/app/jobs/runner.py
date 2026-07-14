@@ -45,12 +45,35 @@ from app.brain.ingest import IngestPayload, ingest_source
 from app.brain.ocr import ocr_source
 from app.curriculum.generate import generate_curriculum
 from app.db import SessionLocal
+from app.jobs.curriculum_draft import run_curriculum_draft_job
+from app.i18n import DEFAULT_LOCALE
 from app.lessons.draft import draft_lesson_from_selection
-from app.llm.errors import GuidedJSONError
+from app.llm.errors import GuidedJSONError, LLMNotConfigured
 from app.models.generation_job import GenerationJob
 from app.models.knowledge import KnowledgeSource
 
 log = logging.getLogger(__name__)
+
+# What `generate_curriculum` actually accepts. A `GenerationJob.params` blob is a
+# WIRE FORMAT WITH NO VERSION: a row can be created moments before a deploy and
+# executed moments after it, and `domain` — which Stage 6 deleted — was in every
+# curriculum job this app has ever written. `generate_curriculum(db, **params)`
+# would `TypeError` on it, get caught by the broad `except Exception`, and be
+# recorded as `internal` ("our bug") on a job whose only sin was being enqueued
+# five seconds early. Filtering is one line and it makes a deploy survivable.
+_CURRICULUM_PARAMS = frozenset({
+    "title", "language", "profile", "brief", "gap_policy", "allow_general",
+    "weeks", "sessions_per_week", "minutes_per_session", "target_minutes_total",
+    "source_ids", "student_id",
+})
+
+
+def _curriculum_kwargs(params: dict) -> dict:
+    dropped = set(params) - _CURRICULUM_PARAMS
+    if dropped:
+        log.info("run_curriculum_job: ignoring params from an older deploy: %s",
+                 ", ".join(sorted(dropped)))
+    return {k: v for k, v in params.items() if k in _CURRICULUM_PARAMS}
 
 
 def run_curriculum_job(job_id: uuid.UUID) -> None:
@@ -73,7 +96,22 @@ def run_curriculum_job(job_id: uuid.UUID) -> None:
         db.commit()
 
         try:
-            root_id = generate_curriculum(db, **job.params)
+            root_id = generate_curriculum(db, **_curriculum_kwargs(job.params))
+        except LLMNotConfigured:
+            # The key was there when this job was enqueued (`require_llm_configured`
+            # gates every producer) and is gone now — the tutor cleared it, or the
+            # ENCRYPTION_SECRET was rotated mid-flight. Record it as "auth", the one
+            # error_kind that means "you can fix this yourself, in Settings",
+            # instead of letting the broad `except Exception` below file it under
+            # "internal" — i.e. "our bug" — with a traceback in `job.error`.
+            db.rollback()
+            job = db.get(GenerationJob, job_id)
+            if job is None:
+                return
+            job.status = "failed"
+            job.error_kind = "auth"
+            job.error = "No Anthropic API key is configured. Open Settings and paste your key."
+            db.commit()
         except GuidedJSONError:
             # rollback FIRST (review fix, CRITICAL): generation flushes each
             # already-drafted module's Blocks onto this Session as it goes
@@ -157,9 +195,22 @@ def run_curriculum_job(job_id: uuid.UUID) -> None:
                     exc_info=True,
                 )
         else:
-            job.status = "succeeded"
+            # The outline is persisted and every lesson is `queued`. The job is NOT
+            # done — it now hands off to the fan-out, which drafts them and does
+            # the finalizing. Splitting the two would mean a second job row and a
+            # second thing for the tutor to poll; keeping it one job means the
+            # board he opens is already watching the right id.
+            #
+            # `root_id` goes into `params` (not just `result_root_id`) because that
+            # is what `run_curriculum_draft_job` reads — the same params a RESUME
+            # click will later send, so the resume path and the first run are the
+            # same code with the same input.
             job.result_root_id = root_id
+            job.params = {**job.params, "root_id": str(root_id)}
             db.commit()
+            db.close()
+            run_curriculum_draft_job(job_id)
+            return
     finally:
         db.close()
 
@@ -205,8 +256,28 @@ def run_lesson_job(job_id: uuid.UUID) -> None:
                 page_from=job.params.get("page_from", job.params.get("page_no")),
                 page_to=job.params.get("page_to", job.params.get("page_no")),
                 text=job.params["text"],
-                language=job.params.get("language", "en"),
+                # `.get(..., DEFAULT_LOCALE)`, not `"en"` (Plan 13, Stage 5.5):
+                # `routers/lessons.py` and the chat approval path both put a real
+                # locale in `params` now, so this fallback only ever fires for a
+                # job row enqueued by an older deploy — and even then the honest
+                # default is the app's own default language, not English.
+                language=job.params.get("language", DEFAULT_LOCALE),
             )
+        except LLMNotConfigured:
+            # The key was there when this job was enqueued (`require_llm_configured`
+            # gates every producer) and is gone now — the tutor cleared it, or the
+            # ENCRYPTION_SECRET was rotated mid-flight. Record it as "auth", the one
+            # error_kind that means "you can fix this yourself, in Settings",
+            # instead of letting the broad `except Exception` below file it under
+            # "internal" — i.e. "our bug" — with a traceback in `job.error`.
+            db.rollback()
+            job = db.get(GenerationJob, job_id)
+            if job is None:
+                return
+            job.status = "failed"
+            job.error_kind = "auth"
+            job.error = "No Anthropic API key is configured. Open Settings and paste your key."
+            db.commit()
         except GuidedJSONError:
             job.status = "failed"
             job.error_kind = "upstream"
@@ -277,6 +348,21 @@ def run_ocr_job(job_id: uuid.UUID) -> None:
         db.commit()
         try:
             result = ocr_source(db, uuid.UUID(job.params["source_id"]))
+        except LLMNotConfigured:
+            # The key was there when this job was enqueued (`require_llm_configured`
+            # gates every producer) and is gone now — the tutor cleared it, or the
+            # ENCRYPTION_SECRET was rotated mid-flight. Record it as "auth", the one
+            # error_kind that means "you can fix this yourself, in Settings",
+            # instead of letting the broad `except Exception` below file it under
+            # "internal" — i.e. "our bug" — with a traceback in `job.error`.
+            db.rollback()
+            job = db.get(GenerationJob, job_id)
+            if job is None:
+                return
+            job.status = "failed"
+            job.error_kind = "auth"
+            job.error = "No Anthropic API key is configured. Open Settings and paste your key."
+            db.commit()
         except Exception:
             log.exception("run_ocr_job: job_id=%s failed", job_id)
             try:

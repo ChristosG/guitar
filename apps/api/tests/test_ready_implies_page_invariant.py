@@ -21,12 +21,12 @@ import fitz
 from app.brain import extract as extract_mod
 from app.brain.ingest import IngestPayload, ingest_source
 from app.config import settings
-from app.models.knowledge import KnowledgeSource, Page
+from app.models.knowledge import EMBED_DIM, KnowledgeSource, Page
 
 
 class _Provider:
     def embed(self, texts, *, is_query=False):
-        return [[0.1] * settings.embed_dim for _ in texts]
+        return [[0.1] * EMBED_DIM for _ in texts]
 
 
 def test_ready_text_source_always_has_at_least_one_page(db, monkeypatch):
@@ -34,7 +34,7 @@ def test_ready_text_source_always_has_at_least_one_page(db, monkeypatch):
     src = KnowledgeSource(type="text", title="Notes", status="ingesting")
     db.add(src); db.commit()
 
-    ingest_source(db, src.id, IngestPayload(kind="text", text="Humbuckers cancel hum."))
+    ingest_source(db, src.id, IngestPayload(kind="text", text="Humbuckers cancel mains hum by combining two coils wound in opposition."))
 
     got = db.get(KnowledgeSource, src.id)
     assert got.status == "ready"
@@ -44,7 +44,7 @@ def test_ready_text_source_always_has_at_least_one_page(db, monkeypatch):
 
 def test_ready_url_source_always_has_at_least_one_page(db, monkeypatch):
     monkeypatch.setattr("app.brain.ingest.get_embedder", lambda: _Provider())
-    fake_sections = [extract_mod.Section(heading=None, text="Real fetched tone content.", page=1)]
+    fake_sections = [extract_mod.Section(heading=None, text="Real fetched tone content about amplifiers, pickups and overdrive pedals.", page=1)]
     # paginate_source's single-Page path fetches (its own bound `extract_text`,
     # app.brain.paginate module) — same double-patch precedent as
     # test_ingest.py::test_ingest_caps_total_extracted_text_at_max_ingest_chars.
@@ -71,7 +71,7 @@ def test_ready_pdf_source_with_a_text_layer_always_has_at_least_one_page(db, tmp
 
     doc = fitz.open()
     page = doc.new_page(width=612, height=792)
-    page.insert_text((72, 72), "Tube Screamers clip asymmetrically.")
+    page.insert_text((72, 72), "Tube Screamers clip asymmetrically, with a midrange hump.")
     pdf_bytes = doc.tobytes()
     doc.close()
 

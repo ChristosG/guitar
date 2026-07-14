@@ -14,6 +14,13 @@ dependencies = [
   "anthropic>=0.69",
   "httpx>=0.27",
   "pymupdf>=1.24",
+  # The password gate (Plan 13 Task 3.1) and the at-rest encryption of the
+  # tutor's Anthropic key (3.4). Two SEPARATE secrets, hence two libraries:
+  # itsdangerous signs the session cookie with APP_SECRET, cryptography's
+  # Fernet encrypts the API key with ENCRYPTION_SECRET — rotating the session
+  # key must not brick the stored key.
+  "itsdangerous>=2.2",
+  "cryptography>=43",
   "trafilatura>=1.8",
   "python-multipart>=0.0.9",
   # Local CPU embeddings (multilingual-e5-small, 384-dim). NOT torch: the ONNX
@@ -23,6 +30,12 @@ dependencies = [
   "onnxruntime>=1.19",
   "tokenizers>=0.20",
   "numpy>=2.0",
+  # Snowball, for the BM25 arm's stemmer (app/brain/lexical.py). PyStemmer, not
+  # NLTK: NLTK's SnowballStemmer does not carry GREEK, and the tutor's default
+  # locale is Greek. PyStemmer wraps libstemmer, which does — verified:
+  # κιθάρας/κιθάρα both stem to κιθαρ. It is also a C extension with no data
+  # files to download at runtime, which matters for a bundled desktop app.
+  "PyStemmer>=2.2",
 ]
 
 [project.optional-dependencies]
@@ -35,5 +48,8 @@ dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "numpy>=2.0"]
 packages = ["app"]
 
 [tool.pytest.ini_options]
-markers = ["integration: hits live vLLM at :6888/:8090"]
+# Also exempts the test from conftest's autouse `_fake_embedder`: an `integration`
+# test gets the REAL embedder (the e5 weights baked into the image), which is the
+# whole reason it is marked.
+markers = ["integration: needs a live model — vLLM at :6888/:8090, or the real local e5 weights"]
 asyncio_mode = "auto"

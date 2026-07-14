@@ -29,7 +29,7 @@ from sqlalchemy import text
 from app.db import Base, SessionLocal, engine
 from app.main import app
 from app.models.generation_job import GenerationJob
-from app.models.knowledge import Chunk, Collection, KnowledgeSource, Page
+from app.models.knowledge import EMBED_DIM, Chunk, Collection, KnowledgeSource, Page
 
 # Skip cleanly (not error) when no DB is reachable — mirrors test_knowledge_router.py.
 try:
@@ -120,7 +120,7 @@ def test_missing_page_is_404(db):
 
 class _Provider:
     def embed(self, texts, *, is_query=False):
-        return [[0.1] * 2560 for _ in texts]
+        return [[0.1] * EMBED_DIM for _ in texts]
 
 
 def test_get_page_self_heals_a_ready_source_with_chunks_but_no_pages(db, monkeypatch):
@@ -133,7 +133,7 @@ def test_get_page_self_heals_a_ready_source_with_chunks_but_no_pages(db, monkeyp
                           char_count=len(original))
     db.add(src); db.commit()
     for draft in chunk_sections([Section(heading=None, text=original, page=None)]):
-        db.add(Chunk(source_id=src.id, text=draft.text, embedding=[0.0] * 2560))
+        db.add(Chunk(source_id=src.id, text=draft.text, embedding=[0.0] * EMBED_DIM))
     db.commit()
     assert db.query(Page).filter_by(source_id=src.id).count() == 0  # reproduces the bug
 
@@ -153,7 +153,7 @@ def test_list_pages_self_heals_a_ready_source_with_chunks_but_no_pages(db, monke
     src = KnowledgeSource(type="text", title="Course Spine", status="ready", char_count=20)
     db.add(src); db.commit()
     db.add(Chunk(source_id=src.id, text="Sixteen thousand chars of real tone notes.",
-                embedding=[0.0] * 2560))
+                embedding=[0.0] * EMBED_DIM))
     db.commit()
 
     r = client.get(f"/knowledge/sources/{src.id}/pages")
@@ -200,6 +200,12 @@ def test_media_endpoint_serves_the_scan_bytes(db, tmp_path, monkeypatch):
     assert r.status_code == 200
     assert r.content == b"\xff\xd8\xff\xe0fakejpeg"
     assert r.headers["content-type"] == "image/jpeg"
+    # Plan 13 Task 3.3 — Cloudflare edge-caches `.jpg` BY EXTENSION, cookie or
+    # no cookie. Without this header the first authenticated fetch populates the
+    # edge and the tutor's scanned book is then served to anyone who has the
+    # page id, never reaching the API and never reaching the auth middleware.
+    # The password gate is theatre without this one line.
+    assert r.headers["cache-control"] == "private, no-store"
 
 
 def test_media_endpoint_404s_when_file_missing_on_disk(db, tmp_path, monkeypatch):

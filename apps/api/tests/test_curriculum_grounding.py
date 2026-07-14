@@ -1,448 +1,663 @@
-"""Tests for Plan 12 Task 2 (G1/G3): retrieval-grounded, two-phase curriculum
-generation. Chris's central complaint about the deployed app was that
-"Generate a curriculum" only ever used the model's general knowledge —
-`generate_curriculum` never touched the library. This file proves the fix:
+"""Grounded curriculum authoring, v2 (Plan 13, Stage 6.5-6.7).
 
-  - `app.curriculum.ground.ground_topic`'s relevance floor actually excludes
-    junk (low score OR short text) and respects `source_ids` scoping.
-  - `generate_curriculum` is genuinely two-phase (plan, then ground+draft
-    PER MODULE), records real provenance on a grounded module, and the
-    retrieved passage text actually reaches the drafting call's prompt (a
-    "grounded" draft that never saw the passage is not grounded).
-  - a module with nothing above the floor is an honest, UNFILLED gap by
-    default, and is filled-but-labelled only when `allow_general=True`.
-  - the async job path (`run_curriculum_job`) still works end to end against
-    the real two-phase function, with only the LLM/`ground_topic` faked.
-  - THE LIVE ACCEPTANCE TEST at the bottom: a real curriculum plan, grounded
-    per-module against the REAL library (the `guitar` app db), with the real
-    model — read-only by contract, see that test's own docstring.
+THIS FILE WAS REWRITTEN, AND THE OLD SYMBOLS IT TESTED ARE GONE. It used to import
+`PLAN_SCHEMA`, `MODULE_SCHEMA`, `_build_plan_messages` and
+`_build_module_draft_messages` from `curriculum/generate.py` — the two-phase
+retrieval generator. All four are deleted. What replaced them, and why:
 
-Pure unit tests: fake provider (`get_provider`) + fake `ground_topic`/
-`search`, real `guitar_test` DB session — no live LLM, no live embed server.
-Mirrors `test_lesson_draft.py`/`test_agent_grounding.py`'s established
-pattern for this codebase (scripted fake provider recording every call's
-messages, monkeypatched module-level names).
+  * The planner had NEVER READ THE BOOK. It outlined from general knowledge and
+    only afterwards asked retrieval whether his library had anything to say. Now
+    the model reads all ~90K tokens of it and outlines FROM it.
+
+  * "Gap" was a COSINE FLOOR. On this corpus the measured margin between the
+    lowest COVERED topic (0.881) and the highest UNCOVERED one (0.860) is 0.021 —
+    a coin flip with a decimal point, deciding unattended whether 20 lessons come
+    from his book or the model's memory. Now the model reads the book and SAYS.
+
+  * One call per MODULE could not physically produce a real lesson: 4-5 x 2,200
+    words in Greek is 30-40k output tokens, straight through `max_tokens`, and a
+    truncated response surfaces as a JSON PARSE error — debugged in the wrong file.
+    The fan-out unit is the LESSON.
+
+What is tested here: the outline call sees the whole library; tiers are the
+model's and are clamped by the tutor's gap policy; the materialized tree is queued
+and carries its provenance on `meta`; and EVERY CITATION IS CHECKED — a page the
+model was never shown is a fabrication, and it renders as a chip the tutor CLICKS.
 """
-import os
 import uuid
 
 import pytest
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import select
 
-import app.curriculum.generate as generate_mod
-import app.curriculum.ground as ground_mod
+import app.curriculum.corpus as corpus_mod
+import app.curriculum.draft as draft_mod
+import app.curriculum.outline as outline_mod
 import app.jobs.runner as runner_mod
-from app.curriculum.generate import generate_curriculum
-from app.curriculum.ground import Passage, ground_topic
+from app.curriculum.corpus import LibraryContext, build_library_context
+from app.curriculum.depth import SECTIONS, SECTION_WEIGHTS
+from app.curriculum.draft import (
+    LessonContext,
+    draft_lesson,
+    invalid_citations,
+    persist_lesson,
+)
+from app.curriculum.outline import (
+    TIER_GAP,
+    TIER_GENERAL,
+    TIER_LIBRARY,
+    clamp_tier,
+    generate_outline,
+    materialize_outline,
+)
+from app.curriculum.shape import plan_shape
 from app.llm.errors import GuidedJSONError
 from app.models.block import Block
 from app.models.generation_job import GenerationJob
+from app.models.knowledge import KnowledgeSource, Page
+
+SHAPE = plan_shape(8, 1, 50)   # 8 lessons / 2 modules x 4 — small enough to script
 
 
 class _FakeProvider:
-    """`guided_json` returns the next scripted response each call (by call
-    order), and records every call's `messages`/`schema` — mirrors
-    `test_lesson_draft.py`'s `_FakeProvider` exactly, generalized to a
-    sequence since curriculum generation is now N+1 calls (1 plan + 1 per
-    module), not 1.
-    """
+    """Scripted `guided_json`, recording every call. Also serves `count_tokens`,
+    since `corpus.py` reaches for the same seam."""
 
     def __init__(self, responses):
         self._responses = list(responses)
         self.calls: list[dict] = []
 
-    def guided_json(self, messages, schema, *, temperature: float = 0.2):
-        self.calls.append({"messages": messages, "schema": schema})
+    def guided_json(self, messages, schema, *, temperature=0.2, role="spec", max_tokens=None):
+        self.calls.append({"messages": messages, "schema": schema, "role": role})
         idx = min(len(self.calls) - 1, len(self._responses) - 1)
         resp = self._responses[idx]
         if isinstance(resp, Exception):
             raise resp
         return resp
 
-
-_PLAN_ONE_MODULE = {
-    "title": "Tone Fundamentals",
-    "modules": [{"title": "Pickups and Tone", "objective": "Understand pickup types."}],
-}
-
-_MODULE_DRAFT = {
-    "lessons": [
-        {
-            "title": "Single-coil vs humbucker",
-            "objectives": ["Describe the tonal difference"],
-            "est_minutes": 30,
-            "segments": [
-                {
-                    "kind": "explanation",
-                    "title": "What the book says",
-                    "body": "UNIQUE_PASSAGE_MARKER: single-coils sound brighter.",
-                    "est_minutes": 15,
-                },
-            ],
-        },
-    ],
-}
+    def count_tokens(self, text: str) -> int:
+        return len(text) // 3 + 1
 
 
-def _passage(*, text="UNIQUE_PASSAGE_MARKER: single-coils sound brighter, humbuckers thicker.",
-             source_title="Getting Great Guitar Sounds", page_no=25, score=0.7) -> Passage:
-    return Passage(
-        text=text, source_id=uuid.uuid4(), source_title=source_title,
-        page_no=page_no, page_id=uuid.uuid4(), score=score,
-    )
+@pytest.fixture(autouse=True)
+def _tokens(monkeypatch):
+    monkeypatch.setattr(corpus_mod, "get_provider", lambda: _FakeProvider([]))
 
 
-def _modules(db, course_id) -> list[Block]:
+def _book(db, title="Getting Great Guitar Sounds") -> KnowledgeSource:
+    source = KnowledgeSource(type="pdf", title=title, language="en", status="ready")
+    db.add(source)
+    db.flush()
+    for page_no, text in [
+        (19, "UNIQUE_PAGE_19: the Tube Screamer is the most copied overdrive ever. " * 3),
+        (20, "UNIQUE_PAGE_20: a humbucker cancels hum by pairing opposed coils. " * 3),
+    ]:
+        db.add(Page(source_id=source.id, page_no=page_no, text=text, status="ready"))
+    db.commit()
+    return source
+
+
+def _outline_payload(tier=TIER_LIBRARY) -> dict:
+    return {
+        "title": "Tone Fundamentals",
+        "modules": [
+            {
+                "title": f"Module {i}",
+                "objective": "Understand tone.",
+                "tier": tier,
+                "coverage_note": "Covered on p.19-20.",
+                "lessons": [
+                    {"title": f"Lesson {i}.{j}", "objective": "o", "est_minutes": 50}
+                    for j in range(4)
+                ],
+            }
+            for i in range(2)
+        ],
+    }
+
+
+def _lesson_payload(*, words=400, citations=None) -> dict:
+    body = " ".join(["word"] * words)
+    lesson = {"title": "Single-coil vs humbucker", "summary": "Two sentences."}
+    for name in SECTIONS:
+        section = {"body": body, "citations": list(citations or [])}
+        if name == "exercises":
+            section["items"] = [{"title": "E1", "instructions": body, "est_minutes": 5}]
+        if name == "qa_prompts":
+            section["items"] = [{"question": "why?", "answer_key": body}]
+        lesson[name] = section
+    return lesson
+
+
+def _full_lesson(citations=None) -> dict:
+    """A lesson that clears the 1,760-word floor, so no deepen pass fires."""
+    lesson = {"title": "Single-coil vs humbucker", "summary": "Two sentences."}
+    for name in SECTIONS:
+        n = int(SECTION_WEIGHTS[name] * 2200)
+        section = {"body": " ".join(["word"] * n), "citations": list(citations or [])}
+        if name == "exercises":
+            section["items"] = []
+        if name == "qa_prompts":
+            section["items"] = [{"question": "why?", "answer_key": "because"}]
+        lesson[name] = section
+    return lesson
+
+
+def _modules(db, root_id) -> list[Block]:
     return db.scalars(
-        select(Block).where(Block.parent_id == course_id, Block.kind == "module")
+        select(Block).where(Block.parent_id == root_id, Block.kind == "module")
+        .order_by(Block.order)
     ).all()
 
 
 def _lessons(db, module_id) -> list[Block]:
     return db.scalars(
         select(Block).where(Block.parent_id == module_id, Block.kind == "lesson")
+        .order_by(Block.order)
     ).all()
 
 
 # ---------------------------------------------------------------------------
-# generate_curriculum: provenance + "the passage actually reaches the model"
+# The outline reads the WHOLE library — this is the change
 # ---------------------------------------------------------------------------
 
-def test_a_grounded_module_records_its_passages_in_provenance(db, monkeypatch):
-    fake_provider = _FakeProvider([_PLAN_ONE_MODULE, _MODULE_DRAFT])
-    monkeypatch.setattr(generate_mod, "get_provider", lambda: fake_provider)
+def test_the_outline_call_is_given_the_entire_library_not_a_retrieved_excerpt(db, monkeypatch):
+    """THE test that matters. The old planner never saw the library at all; the old
+    module drafter saw 5 retrieved passages. This one gets the book."""
+    source = _book(db)
+    provider = _FakeProvider([_outline_payload()])
+    monkeypatch.setattr(outline_mod, "get_provider", lambda: provider)
+    monkeypatch.setattr(corpus_mod, "get_provider", lambda: provider)
 
-    passage = _passage()
-    monkeypatch.setattr(generate_mod, "ground_topic", lambda *a, **k: [passage])
-
-    root_id = generate_curriculum(
-        db, title="Tone Fundamentals", language="en", profile={"level": "beginner"},
+    library = build_library_context(db, [source.id])
+    generate_outline(
+        db, title="Tone", brief=None, language="en", shape=SHAPE, library=library,
+        student_brief=None, gap_policy="general_knowledge",
     )
 
-    module = _modules(db, root_id)[0]
-    prov = module.target_profile["provenance"]["passages"]
-    assert prov == [{
-        "source_id": str(passage.source_id),
-        "source_title": passage.source_title,
-        "page_no": passage.page_no,
-    }]
-    assert "gap" not in module.target_profile
+    assert len(provider.calls) == 1, "the outline is ONE call over the whole library"
+    sent = " ".join(m["content"] for m in provider.calls[0]["messages"])
+    assert "UNIQUE_PAGE_19" in sent
+    assert "UNIQUE_PAGE_20" in sent
+    assert "[p.19]" in sent, "the page markers are what make a citation checkable"
+    assert provider.calls[0]["role"] == "plan"
 
 
-def test_the_retrieved_passage_text_actually_reaches_the_module_draft_prompt(db, monkeypatch):
-    # A "grounded" draft that never saw the passage is not grounded — this
-    # is THE test that matters (brief, verbatim).
-    fake_provider = _FakeProvider([_PLAN_ONE_MODULE, _MODULE_DRAFT])
-    monkeypatch.setattr(generate_mod, "get_provider", lambda: fake_provider)
-    monkeypatch.setattr(generate_mod, "ground_topic", lambda *a, **k: [_passage()])
-
-    generate_curriculum(db, title="Tone Fundamentals", language="en", profile={"level": "beginner"})
-
-    assert len(fake_provider.calls) == 2, "expected exactly 1 plan call + 1 module-draft call"
-    module_draft_call = fake_provider.calls[1]
-    sent = " ".join(m["content"] for m in module_draft_call["messages"])
-    assert "UNIQUE_PASSAGE_MARKER" in sent
-
-
-def test_phase_1_plan_call_carries_no_passage_context(db, monkeypatch):
-    # Phase 1 is titles-only planning — it must not itself be handed
-    # per-module CONTEXT (that's Phase 2's job, one retrieval per module).
-    fake_provider = _FakeProvider([_PLAN_ONE_MODULE, _MODULE_DRAFT])
-    monkeypatch.setattr(generate_mod, "get_provider", lambda: fake_provider)
-    monkeypatch.setattr(generate_mod, "ground_topic", lambda *a, **k: [_passage()])
-
-    generate_curriculum(db, title="Tone Fundamentals", language="en", profile={"level": "beginner"})
-
-    plan_call = fake_provider.calls[0]
-    sent = " ".join(m["content"] for m in plan_call["messages"])
-    assert "UNIQUE_PASSAGE_MARKER" not in sent
-
-
-# ---------------------------------------------------------------------------
-# PERFORMANCE — module drafts are embarrassingly parallel; must actually run
-# concurrently, not one-at-a-time behind a single shared DB Session.
-# ---------------------------------------------------------------------------
-
-def test_module_drafts_run_concurrently_not_sequentially(db, monkeypatch):
-    """Measured baseline: 267.8s for a 5-module curriculum, 6 sequential
-    model calls (~45s each) — the tutor watches a 4.5-minute spinner. Module
-    drafts (Phase 2, one guided_json call per planned module) have no
-    dependency on each other and must run in parallel.
-
-    Distinguishes the Phase 1 plan call from a Phase 2 module-draft call by
-    inspecting the system message text (`_build_plan_messages` says "module
-    outline"; `_build_module_draft_messages`/`_build_general_module_messages`
-    both say "module content") rather than counting calls — counting would
-    race against the very concurrency this test is proving exists.
-    """
-    import time
-
-    plan_four_modules = {
-        "title": "Tone Fundamentals",
-        "modules": [{"title": f"Module {i}", "objective": "obj"} for i in range(4)],
+def test_the_outline_is_shape_enforced_whatever_the_model_returns(db, monkeypatch):
+    """The model is TOLD the exact counts and then MADE to have them. The schema
+    cannot enforce them — Claude strips `minItems`."""
+    source = _book(db)
+    stingy = {
+        "title": "Tone",
+        "modules": [{
+            "title": "Only one", "objective": "o", "tier": TIER_LIBRARY,
+            "coverage_note": "", "lessons": [{"title": "L", "objective": "o", "est_minutes": 30}],
+        }],
     }
-    sleep_seconds = 0.3
+    provider = _FakeProvider([stingy])
+    monkeypatch.setattr(outline_mod, "get_provider", lambda: provider)
+    monkeypatch.setattr(corpus_mod, "get_provider", lambda: provider)
 
-    class _SlowFakeProvider:
-        def guided_json(self, messages, schema, *, temperature=0.2):
-            system = messages[0]["content"]
-            if "module outline" in system:
-                return plan_four_modules
-            time.sleep(sleep_seconds)
-            return _MODULE_DRAFT
-
-    monkeypatch.setattr(generate_mod, "get_provider", lambda: _SlowFakeProvider())
-    monkeypatch.setattr(generate_mod, "ground_topic", lambda *a, **k: [_passage()])
-
-    start = time.monotonic()
-    generate_curriculum(db, title="Tone Fundamentals", language="en", profile={"level": "beginner"})
-    elapsed = time.monotonic() - start
-
-    # 4 module drafts run sequentially would take >= 4 * 0.3s = 1.2s; run
-    # concurrently (bounded pool, width >= 4) they should all overlap and
-    # finish close to ONE sleep, comfortably under 3x one sleep.
-    assert elapsed < 3 * sleep_seconds, (
-        f"4 module drafts took {elapsed:.2f}s — expected them to run concurrently, "
-        f"not sequentially (sequential would be >= {4 * sleep_seconds:.2f}s)"
+    outline = generate_outline(
+        db, title="Tone", brief=None, language="en", shape=plan_shape(20, 1, 50),
+        library=build_library_context(db, [source.id]),
+        student_brief=None, gap_policy="general_knowledge",
     )
+
+    assert len(outline["modules"]) == 5
+    assert [len(m["lessons"]) for m in outline["modules"]] == [4, 4, 4, 4, 4]
+
+
+def test_the_course_brief_and_the_student_brief_both_reach_the_outline_prompt(db, monkeypatch):
+    source = _book(db)
+    provider = _FakeProvider([_outline_payload()])
+    monkeypatch.setattr(outline_mod, "get_provider", lambda: provider)
+    monkeypatch.setattr(corpus_mod, "get_provider", lambda: provider)
+
+    generate_outline(
+        db, title="Tone", brief="COURSE_BRIEF_MARKER", language="en", shape=SHAPE,
+        library=build_library_context(db, [source.id]),
+        student_brief="STUDENT_BRIEF_MARKER", gap_policy="general_knowledge",
+    )
+
+    sent = " ".join(m["content"] for m in provider.calls[0]["messages"])
+    assert "COURSE_BRIEF_MARKER" in sent
+    assert "STUDENT_BRIEF_MARKER" in sent
+
+
+def test_an_outline_with_no_modules_raises_rather_than_persisting_an_empty_course(db, monkeypatch):
+    provider = _FakeProvider([{"title": "Tone", "modules": []}])
+    monkeypatch.setattr(outline_mod, "get_provider", lambda: provider)
+
+    with pytest.raises(GuidedJSONError):
+        generate_outline(
+            db, title="Tone", brief=None, language="en", shape=SHAPE,
+            library=LibraryContext(text="", token_count=0, fits=True),
+            student_brief=None, gap_policy="general_knowledge",
+        )
 
 
 # ---------------------------------------------------------------------------
-# G3 — gaps are never silently filled
+# Tiers: the model's honest judgement, clamped by the tutor's policy
 # ---------------------------------------------------------------------------
 
-def test_a_topic_with_no_hits_above_the_floor_is_a_gap_and_is_not_filled(db, monkeypatch):
-    fake_provider = _FakeProvider([_PLAN_ONE_MODULE, _MODULE_DRAFT])
-    monkeypatch.setattr(generate_mod, "get_provider", lambda: fake_provider)
-    monkeypatch.setattr(generate_mod, "ground_topic", lambda *a, **k: [])  # nothing above floor
+@pytest.mark.parametrize(
+    "requested,policy,expect",
+    [
+        (TIER_LIBRARY, "library_only", TIER_LIBRARY),
+        (TIER_GENERAL, "library_only", TIER_GAP),      # NOT downgraded to "library"
+        ("web", "library_only", TIER_GAP),
+        (TIER_LIBRARY, "general_knowledge", TIER_LIBRARY),
+        (TIER_GENERAL, "general_knowledge", TIER_GENERAL),
+        ("web", "general_knowledge", TIER_GENERAL),
+        ("web", "web", "web"),
+        (None, "general_knowledge", TIER_GENERAL),     # unknown is never "library"
+        ("nonsense", "general_knowledge", TIER_GENERAL),
+    ],
+)
+def test_a_tier_the_tutor_did_not_allow_becomes_an_honest_gap_never_a_fake_citation(
+    requested, policy, expect,
+):
+    """G3, in one table. A module the model tiered `general_knowledge` under a
+    `library_only` policy does NOT become `library` — it becomes a GAP. "Your
+    library doesn't cover this" is a true and useful thing to tell a tutor;
+    "here is some content, from somewhere, unlabelled" is the bug he reported."""
+    assert clamp_tier(requested, policy) == expect
 
-    root_id = generate_curriculum(
-        db, title="Tone Fundamentals", language="en", profile={"level": "beginner"},
-        allow_general=False,
+
+def test_a_gap_module_is_persisted_unfilled_with_an_honest_body(db, monkeypatch):
+    source = _book(db)
+    provider = _FakeProvider([_outline_payload(tier=TIER_GENERAL)])
+    monkeypatch.setattr(outline_mod, "get_provider", lambda: provider)
+    monkeypatch.setattr(corpus_mod, "get_provider", lambda: provider)
+
+    library = build_library_context(db, [source.id])
+    outline = generate_outline(
+        db, title="Tone", brief=None, language="en", shape=SHAPE, library=library,
+        student_brief=None, gap_policy="library_only",
+    )
+    root_id = materialize_outline(
+        db, outline, title="Tone", language="en", shape=SHAPE, library=library,
+        gap_policy="library_only",
     )
 
-    module = _modules(db, root_id)[0]
-    assert module.target_profile == {"gap": True}
-    assert _lessons(db, module.id) == [], "a gap module must NOT be filled with invented content"
-    assert "doesn't cover" in module.body.lower()
-    # Only the plan call happened — no module-draft call for an unfilled gap.
-    assert len(fake_provider.calls) == 1
-
-
-def test_allow_general_fills_the_gap_but_labels_it_as_not_from_his_material(db, monkeypatch):
-    fake_provider = _FakeProvider([_PLAN_ONE_MODULE, _MODULE_DRAFT])
-    monkeypatch.setattr(generate_mod, "get_provider", lambda: fake_provider)
-    monkeypatch.setattr(generate_mod, "ground_topic", lambda *a, **k: [])
-
-    root_id = generate_curriculum(
-        db, title="Tone Fundamentals", language="en", profile={"level": "beginner"},
-        allow_general=True,
-    )
-
-    module = _modules(db, root_id)[0]
-    assert module.target_profile == {"gap": True, "general_knowledge": True}
-    lessons = _lessons(db, module.id)
-    assert lessons, "allow_general=True must fill the gap with content"
-    assert lessons[0].title == "Single-coil vs humbucker"
-    assert "general knowledge" in module.body.lower()
-    assert "not from your library" in module.body.lower()
-    # The general-knowledge draft call happened (unlike the unfilled case).
-    assert len(fake_provider.calls) == 2
-    general_call = fake_provider.calls[1]
-    sent = " ".join(m["content"] for m in general_call["messages"])
-    assert "CONTEXT" not in sent, "the general-knowledge fill must not fabricate a CONTEXT block"
+    for module in _modules(db, root_id):
+        assert module.meta["tier"] == TIER_GAP
+        assert "doesn't cover" in module.body.lower()
+        assert _lessons(db, module.id) == [], (
+            "a gap module must have NO lessons — nothing to draft, no call made, "
+            "no content invented"
+        )
 
 
 # ---------------------------------------------------------------------------
-# ground_topic: the relevance floor itself
+# materialize_outline: the tree exists BEFORE any lesson is drafted
 # ---------------------------------------------------------------------------
 
-def _hit(text, *, score, source_id=None, source_title="Some Source", page=1):
-    from app.brain.retrieve import Hit
-    return Hit(
-        chunk_id=uuid.uuid4(), source_id=source_id or uuid.uuid4(),
-        source_title=source_title, text=text, section_path=None,
-        page=page, score=score, page_id=uuid.uuid4(),
+def test_the_whole_tree_is_persisted_queued_so_the_board_opens_instantly(db, monkeypatch):
+    source = _book(db)
+    provider = _FakeProvider([_outline_payload()])
+    monkeypatch.setattr(outline_mod, "get_provider", lambda: provider)
+    monkeypatch.setattr(corpus_mod, "get_provider", lambda: provider)
+
+    library = build_library_context(db, [source.id])
+    outline = generate_outline(
+        db, title="Tone", brief=None, language="en", shape=SHAPE, library=library,
+        student_brief=None, gap_policy="general_knowledge",
+    )
+    root_id = materialize_outline(
+        db, outline, title="Tone", language="en", shape=SHAPE, library=library,
+        source_ids=[source.id], brief="a brief",
     )
 
+    course = db.get(Block, root_id)
+    assert course.kind == "course"
+    assert course.meta["shape"]["lessons_total"] == 8
+    assert course.meta["brief"] == "a brief"
+    assert course.meta["library"]["full_context"] is True
 
-def test_low_score_hits_are_excluded_even_if_long(db, monkeypatch):
-    junk = _hit("x" * 1000, score=0.1)  # long, but far below the score floor
-    monkeypatch.setattr(ground_mod, "search", lambda *a, **k: [junk])
-
-    assert ground_topic(db, "anything") == []
-
-
-def test_short_hits_are_excluded_even_if_high_scoring(db, monkeypatch):
-    # Mirrors the real junk found calibrating against the live library: an
-    # 86-char unrendered page-title chunk scored as high as 0.68 on a
-    # genuine tone-topic query — score alone does not exclude it, length does.
-    junk = _hit("Guitar Effects Survival Guide: Introduction - TrueFire", score=0.95)
-    monkeypatch.setattr(ground_mod, "search", lambda *a, **k: [junk])
-
-    assert ground_topic(db, "anything") == []
-
-
-def test_a_real_passage_above_both_floors_is_kept(db, monkeypatch):
-    good = _hit("A real, substantive passage about pickups and tone." * 8, score=0.65)
-    monkeypatch.setattr(ground_mod, "search", lambda *a, **k: [good])
-
-    result = ground_topic(db, "pickups and tone")
-    assert len(result) == 1
-    assert result[0].text == good.text
-    assert result[0].score == 0.65
+    modules = _modules(db, root_id)
+    assert len(modules) == 2
+    for module in modules:
+        assert module.meta["tier"] == TIER_LIBRARY
+        assert module.meta["coverage_note"]
+        lessons = _lessons(db, module.id)
+        assert len(lessons) == 4
+        for lesson in lessons:
+            assert lesson.meta["draft_status"] == "queued"
+            assert lesson.est_minutes == 50
 
 
-def test_domain_scopes_ground_topic_to_the_hard_sql_filter_not_a_soft_hint(db, monkeypatch):
-    """Review finding (IMPORTANT): the OLD generator called
-    `search(db, query, k=12, domain=domain)` — a HARD SQL filter on
-    `KnowledgeSource.domain`. `ground_topic` must restore that behaviour by
-    passing `domain` straight through to `search()` as a hard filter, not by
-    leaving `generate.py` to mash it into the free-text query as a soft
-    semantic hint (which lets an off-domain passage that merely scores well
-    slip through). Proven here against the REAL `search()` (not a fake), via
-    a fake `KnowledgeSource.domain` filter's own SQL WHERE clause: seed one
-    "theory"-domain chunk and one "tone"-domain chunk, both about the exact
-    same content, and confirm a domain="theory" grounding call NEVER returns
-    the "tone" chunk, however well it would otherwise score.
+def test_an_oversized_library_sets_the_honest_banner_flag_on_the_course(db, monkeypatch):
+    """`full_context: false` is what the board renders the banner from. Without it
+    the tutor's course is silently drafted from retrieval and he is never told —
+    which is the bug this entire stage exists to remove."""
+    monkeypatch.setattr(corpus_mod.settings, "full_context_budget", 10)
+    source = _book(db)
+    provider = _FakeProvider([_outline_payload()])
+    monkeypatch.setattr(outline_mod, "get_provider", lambda: provider)
+    monkeypatch.setattr(corpus_mod, "get_provider", lambda: provider)
+
+    library = build_library_context(db, [source.id])
+    assert not library.fits
+    root_id = materialize_outline(
+        db, _outline_payload(), title="Tone", language="en", shape=SHAPE, library=library,
+    )
+
+    assert db.get(Block, root_id).meta["library"]["full_context"] is False
+
+
+def test_meta_is_written_as_a_whole_dict_and_actually_survives_a_refetch(db, monkeypatch):
+    """`Block.meta` is plain `sa.JSON` with NO `MutableDict`. In-place mutation
+    (`block.meta["k"] = v`) appears to work in dev — the identity map hands you the
+    same dict back — and is SILENTLY NOT PERSISTED in production. The entire
+    live-progress model rests on this, so it gets a test that goes through the DB.
     """
-    from app.brain.ingest import IngestPayload, ingest_source
-    from app.models.knowledge import KnowledgeSource
-
-    text = (
-        "Chord voicings and scale theory: the major scale, its intervals, "
-        "and how triads are built from stacked thirds within it." * 4
-    )
-    theory_source = KnowledgeSource(type="text", title="Theory Source", language="en", domain="theory")
-    tone_source = KnowledgeSource(type="text", title="Tone Source", language="en", domain="tone")
-    db.add_all([theory_source, tone_source])
-    db.commit()
-    ingest_source(db, theory_source.id, IngestPayload(kind="text", text=text))
-    ingest_source(db, tone_source.id, IngestPayload(kind="text", text=text))
-    db.commit()
-
-    passages = ground_topic(db, "chord voicings and scale theory", domain="theory", k=10)
-
-    assert passages, "expected at least the theory-domain passage to ground"
-    assert all(p.source_title == "Theory Source" for p in passages), (
-        f"domain='theory' must hard-filter out the tone-domain source, got: "
-        f"{[p.source_title for p in passages]}"
+    source = _book(db)
+    library = build_library_context(db, [source.id])
+    root_id = materialize_outline(
+        db, _outline_payload(), title="Tone", language="en", shape=SHAPE, library=library,
     )
 
-
-def test_domain_scoped_ground_topic_still_grounds_against_an_unclassified_null_domain_source(db, monkeypatch):
-    """THE BUG, at the `ground_topic` layer: Chris's real 77-page book (and
-    11 of his other 12 real sources — 95% of his real library's characters)
-    has `domain=NULL`. That is UNCLASSIFIED, not "not tone" — a
-    `domain="tone"` grounding call must still be able to retrieve from it.
-    Real DB, real embeddings (`search` is NOT faked here) — this is the same
-    proof style as the "theory hard-excludes tone" test above, just for the
-    NULL-domain half of the same filter.
-    """
-    from app.brain.ingest import IngestPayload, ingest_source
-    from app.models.knowledge import KnowledgeSource
-
-    text = (
-        "Pick thickness changes the attack and brightness of a note: a "
-        "thin, flexible pick sounds softer and darker, while a thick, stiff "
-        "pick digs into the string for a brighter, more articulate attack "
-        "with more attack transient." * 4
-    )
-    book_source = KnowledgeSource(type="pdf", title="His Real Book", language="en", domain=None)
-    db.add(book_source)
-    db.commit()
-    ingest_source(db, book_source.id, IngestPayload(kind="text", text=text))
-    db.commit()
-    assert book_source.status == "ready", book_source.error
-
-    passages = ground_topic(db, "pick thickness and attack brightness", domain="tone", k=10)
-
-    assert passages, "domain='tone' must still ground against a NULL-domain (unclassified) source"
-    assert all(p.source_title == "His Real Book" for p in passages)
+    db.expire_all()   # nothing may be served from the identity map
+    course = db.get(Block, root_id)
+    assert course.meta["shape"]["modules"] == 2
+    lesson = _lessons(db, _modules(db, root_id)[0].id)[0]
+    assert lesson.meta["draft_status"] == "queued"
 
 
-def test_a_tone_module_is_grounded_not_a_gap_when_the_matching_source_is_domain_null(db, monkeypatch):
-    """End-to-end-ish reproduction of THE BUG at the `generate_curriculum`
-    layer (this is the shape of the bug Chris actually hit walking the live
-    interview): a real, on-topic source with `domain=NULL` must still ground
-    a "tone" module — NOT come back as a false gap. Real DB, real
-    embeddings: `ground_topic`/`search` are deliberately NOT faked (only the
-    LLM plan/draft calls are), so this exercises the real relevance floor
-    AND the real domain filter together, exactly like the live interview
-    does.
-    """
-    from app.brain.ingest import IngestPayload, ingest_source
-    from app.models.knowledge import KnowledgeSource
+# ---------------------------------------------------------------------------
+# CITATIONS — a fabricated page is worse than no page
+# ---------------------------------------------------------------------------
 
-    book_text = (
-        "Pickup type shapes guitar tone fundamentally: single-coil pickups "
-        "are brighter and thinner and pick up some audible 60-cycle mains "
-        "hum, while humbucker pickups cancel that hum in exchange for a "
-        "thicker, warmer, louder sound — the first tone trade-off every "
-        "guitarist learns about pickups and tone."
-    ) * 3
-    book_source = KnowledgeSource(type="pdf", title="His Real Book", language="en", domain=None)
-    db.add(book_source)
-    db.commit()
-    ingest_source(db, book_source.id, IngestPayload(kind="text", text=book_text))
-    db.commit()
-    assert book_source.status == "ready", book_source.error
+def test_a_citation_to_a_page_the_model_was_never_shown_is_caught(db):
+    source = _book(db)     # pages 19 and 20 only
+    library = build_library_context(db, [source.id])
 
-    plan = {
-        "title": "Tone Fundamentals",
-        "modules": [{"title": "Pickups and Tone", "objective": "How pickup type shapes guitar tone."}],
-    }
-    fake_provider = _FakeProvider([plan, _MODULE_DRAFT])
-    monkeypatch.setattr(generate_mod, "get_provider", lambda: fake_provider)
-    # Deliberately NOT monkeypatching ground_topic/search — this must go
-    # through the real relevance floor + real domain filter against the
-    # real (guitar_test) DB, exactly like the live interview does.
+    lesson = _full_lesson(citations=[{"source_id": "S1", "page": 412}])
+    bad = invalid_citations(lesson, library)
 
-    root_id = generate_curriculum(
-        db, title="Tone Fundamentals", language="en", profile={"level": "beginner"},
-        domain="tone",
+    assert bad, "p.412 of a 2-page book must not pass"
+    assert all(page == 412 for _section, _ref, page in bad)
+
+
+def test_a_citation_to_a_real_page_passes(db):
+    source = _book(db)
+    library = build_library_context(db, [source.id])
+
+    lesson = _full_lesson(citations=[{"source_id": "S1", "page": 19}])
+
+    assert invalid_citations(lesson, library) == []
+
+
+def test_a_hallucinated_citation_triggers_exactly_one_repair_retry(db, monkeypatch):
+    """The tutor CLICKS these chips. A wrong page number lands him on a page that
+    does not say what the lesson claims it says — and he would be right to stop
+    trusting every other chip on the screen after that, including the true ones."""
+    source = _book(db)
+    library = build_library_context(db, [source.id])
+
+    provider = _FakeProvider([
+        _full_lesson(citations=[{"source_id": "S1", "page": 412}]),   # fabricated
+        _full_lesson(citations=[{"source_id": "S1", "page": 19}]),    # repaired
+    ])
+    monkeypatch.setattr(draft_mod, "get_provider", lambda: provider)
+
+    lesson, _m = draft_lesson(
+        db, ctx=_ctx(), library=library, language="en",
     )
 
-    module = _modules(db, root_id)[0]
-    assert "gap" not in module.target_profile, (
-        f"module wrongly marked as a gap: {module.target_profile!r} — "
-        "domain='tone' must still retrieve from a domain=NULL source"
+    assert len(provider.calls) == 2, "one draft + one repair"
+    repair_text = provider.calls[1]["messages"][-1]["content"]
+    assert "412" in repair_text, "the repair must NAME the offending page"
+    assert "p.19" in repair_text or "19-20" in repair_text, "and say what is actually available"
+    assert invalid_citations(lesson, library) == []
+
+
+def test_a_citation_that_survives_the_repair_is_DROPPED_and_the_prose_is_kept(db, monkeypatch):
+    """After one repair, a false citation is the only part worth destroying. The
+    prose is almost certainly fine, and an uncited paragraph is an honest thing
+    while a false citation is not."""
+    source = _book(db)
+    library = build_library_context(db, [source.id])
+
+    provider = _FakeProvider([
+        _full_lesson(citations=[{"source_id": "S1", "page": 412}]),
+        _full_lesson(citations=[{"source_id": "S1", "page": 999}]),   # still wrong
+    ])
+    monkeypatch.setattr(draft_mod, "get_provider", lambda: provider)
+
+    lesson, _m = draft_lesson(db, ctx=_ctx(), library=library, language="en")
+
+    assert len(provider.calls) == 2, "still only ONE repair — not a retry loop"
+    assert invalid_citations(lesson, library) == []
+    assert lesson["theory"]["citations"] == []
+    assert lesson["theory"]["body"], "the prose survives"
+
+
+# ---------------------------------------------------------------------------
+# The deepen pass
+# ---------------------------------------------------------------------------
+
+def _ctx(tier=TIER_LIBRARY) -> LessonContext:
+    return LessonContext(
+        lesson_title="Single-coil vs humbucker", lesson_objective="hear the difference",
+        module_title="Pickups and Tone", module_objective="understand pickups",
+        course_title="Tone Fundamentals", tier=tier,
+        position="lesson 1 of 4 in module 1 of 2",
+        minutes=50, teaching_minutes=40, target_words=2200, floor_words=1760,
     )
-    assert module.target_profile["provenance"]["passages"][0]["source_title"] == "His Real Book"
 
 
-def test_source_ids_scopes_retrieval_to_the_tutors_chosen_sources(db, monkeypatch):
-    wanted_source = uuid.uuid4()
-    other_source = uuid.uuid4()
-    good_text = "A real, substantive passage about pickups and tone." * 8
-    hits = [
-        _hit(good_text, score=0.7, source_id=wanted_source, source_title="Wanted"),
-        _hit(good_text, score=0.8, source_id=other_source, source_title="Not chosen"),
+def test_a_thin_lesson_gets_exactly_one_deepen_pass_and_then_clears_the_floor(db, monkeypatch):
+    source = _book(db)
+    library = build_library_context(db, [source.id])
+
+    provider = _FakeProvider([_lesson_payload(words=20), _full_lesson()])
+    monkeypatch.setattr(draft_mod, "get_provider", lambda: provider)
+
+    _lesson, m = draft_lesson(db, ctx=_ctx(), library=library, language="en")
+
+    assert len(provider.calls) == 2, "one draft + exactly one deepen"
+    assert m.meets_floor, (m.total_words, m.floor)
+
+    deepen_prompt = provider.calls[1]["messages"][-1]["content"]
+    assert "theory" in deepen_prompt, "the deepen pass must NAME the thin sections"
+    assert "PREVIOUS DRAFT" in deepen_prompt
+
+
+def test_deepening_stops_after_one_pass_even_if_it_is_still_thin(db, monkeypatch):
+    """He is paying per token with his own card. A model that missed the floor twice
+    will pad, not improve. The lesson is persisted as it is, with its word count
+    visible and a Deepen button — not silently retried into a bill."""
+    source = _book(db)
+    library = build_library_context(db, [source.id])
+
+    provider = _FakeProvider([_lesson_payload(words=20), _lesson_payload(words=30)])
+    monkeypatch.setattr(draft_mod, "get_provider", lambda: provider)
+
+    _lesson, m = draft_lesson(db, ctx=_ctx(), library=library, language="en")
+
+    assert len(provider.calls) == 2
+    assert not m.meets_floor
+    assert m.total_words > 0
+
+
+def test_a_deepen_pass_that_came_back_SHORTER_is_discarded(db, monkeypatch):
+    """A "deepen" that shrinks the lesson has not deepened anything, and accepting
+    it would make the tutor's Deepen button able to make his lesson smaller."""
+    source = _book(db)
+    library = build_library_context(db, [source.id])
+
+    provider = _FakeProvider([_lesson_payload(words=100), _lesson_payload(words=5)])
+    monkeypatch.setattr(draft_mod, "get_provider", lambda: provider)
+
+    _lesson, m = draft_lesson(db, ctx=_ctx(), library=library, language="en")
+
+    first = _lesson_payload(words=100)
+    from app.curriculum.depth import measure
+    assert m.total_words == measure(first, teaching_minutes=40).total_words
+
+
+# ---------------------------------------------------------------------------
+# The lesson prompt
+# ---------------------------------------------------------------------------
+
+def test_a_general_knowledge_lesson_is_forbidden_from_citing_his_library(db, monkeypatch):
+    """The one thing that would make an honestly-labelled general-knowledge module
+    dishonest: a fabricated page number attached to it."""
+    source = _book(db)
+    library = build_library_context(db, [source.id])
+    provider = _FakeProvider([_full_lesson()])
+    monkeypatch.setattr(draft_mod, "get_provider", lambda: provider)
+
+    draft_lesson(db, ctx=_ctx(tier=TIER_GENERAL), library=library, language="en")
+
+    system = provider.calls[0]["messages"][0]["content"]
+    assert "cite" in system.lower()
+    assert "empty" in system.lower()
+    assert "LABELLED" in system or "labelled" in system
+
+
+def test_the_lesson_prompt_states_the_word_floor_because_the_schema_cannot(db, monkeypatch):
+    source = _book(db)
+    library = build_library_context(db, [source.id])
+    provider = _FakeProvider([_full_lesson()])
+    monkeypatch.setattr(draft_mod, "get_provider", lambda: provider)
+
+    draft_lesson(db, ctx=_ctx(), library=library, language="en")
+
+    system = provider.calls[0]["messages"][0]["content"]
+    assert "2,200" in system
+    assert "1,760" in system
+    assert provider.calls[0]["role"] == "draft"
+
+
+def test_the_lesson_knows_where_it_sits_in_the_course(db, monkeypatch):
+    """The model drafts one lesson with no sight of the other 19. Without its
+    position it re-teaches the basics in lesson 12 — it has no way to know lesson 1
+    already did."""
+    source = _book(db)
+    library = build_library_context(db, [source.id])
+    provider = _FakeProvider([_full_lesson()])
+    monkeypatch.setattr(draft_mod, "get_provider", lambda: provider)
+
+    draft_lesson(db, ctx=_ctx(), library=library, language="en")
+
+    sent = provider.calls[0]["messages"][-1]["content"]
+    assert "lesson 1 of 4 in module 1 of 2" in sent
+
+
+# ---------------------------------------------------------------------------
+# Persisting a drafted lesson
+# ---------------------------------------------------------------------------
+
+def test_a_drafted_lesson_becomes_segments_with_resolvable_citations(db):
+    source = _book(db)
+    library = build_library_context(db, [source.id])
+    root_id = materialize_outline(
+        db, _outline_payload(), title="Tone", language="en", shape=SHAPE, library=library,
+        source_ids=[source.id],
+    )
+    lesson_block = _lessons(db, _modules(db, root_id)[0].id)[0]
+
+    lesson = _full_lesson(citations=[{"source_id": "S1", "page": 19}])
+    from app.curriculum.depth import measure
+    persist_lesson(
+        db, lesson_block, lesson, measure(lesson, teaching_minutes=40), library,
+        qa_minutes=10, teaching_minutes=40,
+    )
+    db.commit()
+    db.expire_all()
+
+    lesson_block = db.get(Block, lesson_block.id)
+    assert lesson_block.meta["draft_status"] == "ready"
+    assert lesson_block.meta["meets_floor"] is True
+    assert lesson_block.meta["word_count"] > 1760
+
+    segments = sorted(lesson_block.children, key=lambda b: b.order)
+    assert [s.meta["section"] for s in segments] == list(SECTIONS)
+
+    theory = next(s for s in segments if s.meta["section"] == "theory")
+    [cite] = theory.meta["citations"]
+    assert cite["page"] == 19
+    # The REAL source id, not the "S1" prompt ref — the Reader deep-links off this.
+    assert cite["source_id"] == str(source.id)
+    assert cite["source_title"] == "Getting Great Guitar Sounds"
+
+
+def test_persisting_twice_replaces_the_segments_rather_than_duplicating_them(db):
+    """Idempotence is what makes Deepen, a re-draft, and a Resume that re-runs a
+    lesson whose worker died after the model call all safe."""
+    source = _book(db)
+    library = build_library_context(db, [source.id])
+    root_id = materialize_outline(
+        db, _outline_payload(), title="Tone", language="en", shape=SHAPE, library=library,
+    )
+    lesson_block = _lessons(db, _modules(db, root_id)[0].id)[0]
+
+    from app.curriculum.depth import measure
+    lesson = _full_lesson()
+    for _ in range(2):
+        persist_lesson(
+            db, lesson_block, lesson, measure(lesson, teaching_minutes=40), library,
+            qa_minutes=10, teaching_minutes=40,
+        )
+        db.commit()
+
+    db.expire_all()
+    segments = db.scalars(
+        select(Block).where(Block.parent_id == lesson_block.id)
+    ).all()
+    assert len(segments) == len(SECTIONS), "no duplicate theory sections"
+
+
+def test_the_qa_answer_keys_survive_into_the_persisted_segment(db):
+    """The tutor is holding this page while the student answers. A Q&A prompt
+    separated from its answer key is a prompt he cannot use."""
+    source = _book(db)
+    library = build_library_context(db, [source.id])
+    root_id = materialize_outline(
+        db, _outline_payload(), title="Tone", language="en", shape=SHAPE, library=library,
+    )
+    lesson_block = _lessons(db, _modules(db, root_id)[0].id)[0]
+
+    lesson = _full_lesson()
+    lesson["qa_prompts"]["items"] = [
+        {"question": "Why does a humbucker cancel hum?", "answer_key": "Opposed coils."},
     ]
-    monkeypatch.setattr(ground_mod, "search", lambda *a, **k: hits)
+    from app.curriculum.depth import measure
+    persist_lesson(
+        db, lesson_block, lesson, measure(lesson, teaching_minutes=40), library,
+        qa_minutes=10, teaching_minutes=40,
+    )
+    db.commit()
 
-    result = ground_topic(db, "pickups and tone", source_ids=[wanted_source])
-
-    assert len(result) == 1
-    assert result[0].source_id == wanted_source
-    assert result[0].source_title == "Wanted"
+    qa = next(s for s in lesson_block.children if s.meta["section"] == "qa_prompts")
+    assert "Why does a humbucker cancel hum?" in qa.body
+    assert "Opposed coils." in qa.body
+    assert qa.est_minutes == 10
 
 
 # ---------------------------------------------------------------------------
-# Regression: the async job path still works end to end with the REAL
-# (now two-phase) generate_curriculum — only the LLM and ground_topic are
-# faked, run_curriculum_job itself is untouched.
+# The job path still works end to end
 # ---------------------------------------------------------------------------
 
-def test_the_async_curriculum_job_still_succeeds_with_the_two_phase_generator(db, monkeypatch):
-    fake_provider = _FakeProvider([_PLAN_ONE_MODULE, _MODULE_DRAFT])
-    monkeypatch.setattr(generate_mod, "get_provider", lambda: fake_provider)
-    monkeypatch.setattr(generate_mod, "ground_topic", lambda *a, **k: [_passage()])
+def test_the_curriculum_job_outlines_materializes_and_hands_off_to_the_fan_out(
+    db, monkeypatch,
+):
+    source = _book(db)
+    provider = _FakeProvider([_outline_payload()])
+    monkeypatch.setattr(outline_mod, "get_provider", lambda: provider)
+    monkeypatch.setattr(corpus_mod, "get_provider", lambda: provider)
+    handed_off = []
+    monkeypatch.setattr(runner_mod, "run_curriculum_draft_job", handed_off.append)
 
     job = GenerationJob(
         kind="curriculum", status="pending",
-        params={"title": "Tone Fundamentals", "language": "en", "profile": {"level": "beginner"}},
+        params={
+            "title": "Tone Fundamentals", "language": "en", "profile": {"level": "beginner"},
+            "weeks": 8, "minutes_per_session": 50, "source_ids": [str(source.id)],
+        },
     )
     db.add(job)
     db.commit()
@@ -452,45 +667,33 @@ def test_the_async_curriculum_job_still_succeeds_with_the_two_phase_generator(db
 
     db.expire_all()
     finished = db.get(GenerationJob, job_id)
-    assert finished.status == "succeeded", (finished.error_kind, finished.error)
-    assert finished.result_root_id is not None
+    assert finished.result_root_id is not None, (finished.error_kind, finished.error)
+    assert handed_off == [job_id]
 
     root = db.get(Block, finished.result_root_id)
     assert root.kind == "course"
-    module = _modules(db, root.id)[0]
-    assert module.target_profile["provenance"]["passages"]
+    assert len(_modules(db, root.id)) == 2
+    assert all(
+        lesson.meta["draft_status"] == "queued"
+        for module in _modules(db, root.id)
+        for lesson in _lessons(db, module.id)
+    )
 
 
-_PLAN_TWO_MODULES = {
-    "title": "Tone Fundamentals",
-    "modules": [
-        {"title": "Pickups and Tone", "objective": "Understand pickup types."},
-        {"title": "Amp Gain Staging", "objective": "Understand amp gain."},
-    ],
-}
-
-
-def test_a_failed_second_module_draft_leaves_no_curriculum_visible_to_the_tutor(
-    db, monkeypatch, client,
-):
-    """Reviewer-reproduced CRITICAL finding: a failure on module 2's draft
-    call used to leave a committed course Block with only module 1 attached
-    — `GET /curricula` listed it as a real, selectable curriculum with no
-    indication it was a truncated fragment of a failed run. The invariant: a
-    failed curriculum job leaves NO curriculum visible to the tutor at all,
-    same as every other failure path in this job.
-    """
-    fake_provider = _FakeProvider([
-        _PLAN_TWO_MODULES,
-        _MODULE_DRAFT,  # module 1's draft succeeds and gets persisted
-        GuidedJSONError("guided_json: response truncated (finish_reason='length')"),
-    ])
-    monkeypatch.setattr(generate_mod, "get_provider", lambda: fake_provider)
-    monkeypatch.setattr(generate_mod, "ground_topic", lambda *a, **k: [_passage()])
+def test_a_failed_outline_leaves_no_curriculum_visible_to_the_tutor(db, monkeypatch, client):
+    """A failed job must leave NOTHING listed. The old generator flushed each
+    module's Blocks as it went, so a failure on module 2 left a committed course
+    with one module attached — listed as a real, selectable curriculum with no
+    indication it was the wreckage of a failed run."""
+    source = _book(db)
+    provider = _FakeProvider([GuidedJSONError("truncated")])
+    monkeypatch.setattr(outline_mod, "get_provider", lambda: provider)
+    monkeypatch.setattr(corpus_mod, "get_provider", lambda: provider)
 
     job = GenerationJob(
         kind="curriculum", status="pending",
-        params={"title": "Tone Fundamentals", "language": "en", "profile": {"level": "beginner"}},
+        params={"title": "Tone", "language": "en", "weeks": 8,
+                "source_ids": [str(source.id)]},
     )
     db.add(job)
     db.commit()
@@ -503,36 +706,29 @@ def test_a_failed_second_module_draft_leaves_no_curriculum_visible_to_the_tutor(
     assert finished.status == "failed"
     assert finished.error_kind == "upstream"
 
-    # (b) NO course Block exists at all — not even the half-built one from
-    # module 1, which was already flushed to the DB before module 2 blew up.
-    courses = db.scalars(select(Block).where(Block.kind == "course")).all()
-    assert courses == [], f"expected no course Block, found {[c.title for c in courses]}"
-
+    assert db.scalars(select(Block).where(Block.kind == "course")).all() == []
     r = client.get("/curricula")
-    assert r.status_code == 200, r.text
-    assert r.json() == [], "GET /curricula must not list a fragment of a failed run"
+    assert r.status_code == 200
+    assert r.json() == []
 
 
 # ---------------------------------------------------------------------------
-# THE LIVE ACCEPTANCE TEST — a REAL curriculum, planned and drafted against
-# the REAL library (Chris's book + his ingested course pages), with the real
-# model. Answers this task's own central question honestly: is a generated
-# curriculum actually built from his material, with real page citations, or
-# still generic?
+# THE LIVE ACCEPTANCE TESTS — the real library, the real model.
 #
-# Mirrors `test_library_live.py`/`test_agent_grounding.py`'s `app_db` pattern
-# EXACTLY (own engine against the REAL app db `guitar`, never `guitar_test` —
-# conftest.py force-pins `DATABASE_URL` to `guitar_test` process-wide).
-# READ-ONLY BY CONTRACT, deliberately NOT calling `generate_curriculum`
-# itself (which unconditionally `db.add()`s/`db.commit()`s a persisted Block
-# tree — exactly what must never happen against his live, deployed db while
-# he's not watching it). Instead this calls the SAME building blocks
-# `generate_curriculum` calls internally — `_build_plan_messages`,
-# `ground_topic` (itself just a `search()`, a SELECT), `_build_module_draft_
-# messages`, `get_provider().guided_json` — directly, so the result is
-# genuinely what production code would produce, without ever touching a
-# write path.
+# READ-ONLY BY CONTRACT against the app db. They call the same building blocks
+# production calls (`build_library_context` is a SELECT; `generate_outline` and
+# `draft_lesson` are LLM calls that touch no write path) — never
+# `materialize_outline`, which persists a tree and must not run against his live,
+# deployed database while he is not watching it.
+#
+# Mirrors `test_library_live.py`'s `app_db` pattern: its own engine against the
+# REAL `guitar` db, because conftest force-pins DATABASE_URL to `guitar_test`.
 # ---------------------------------------------------------------------------
+import os
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
 APP_DATABASE_URL = os.environ.get(
     "APP_DATABASE_URL", "postgresql+psycopg://guitar:guitar@localhost:5434/guitar",
 )
@@ -551,56 +747,132 @@ def app_db():
 
 
 @pytest.mark.integration
-def test_a_real_tone_curriculum_is_genuinely_grounded_in_his_library(app_db):
-    from app.curriculum.generate import (
-        MODULE_SCHEMA,
-        PLAN_SCHEMA,
-        _build_module_draft_messages,
-        _build_plan_messages,
+def test_his_real_library_fits_in_one_prompt(app_db):
+    """THE MEASUREMENT THE WHOLE ARCHITECTURE RESTS ON. ~359,000 chars ~= 90K
+    tokens = 9% of Sonnet 5's window. If this ever stops being true the app does
+    not break — it degrades to retrieval, honestly, with a banner — but the cost
+    model and the "no false gaps" guarantee both change, and we would want to know.
+    """
+    library = build_library_context(app_db, None)
+
+    print(f"\nLIBRARY: {library.summary()}")
+    for source in library.sources:
+        print(f"  {source['ref']}: {source['title']!r} — "
+              f"{source['pages']} pages, {source['chars']:,} chars")
+
+    assert not library.is_empty, "the real library is empty — is the app db seeded?"
+    assert library.fits, (
+        f"his library no longer fits whole ({library.token_count:,} tokens > "
+        f"{corpus_mod.settings.full_context_budget:,}) — authoring will now degrade "
+        f"to retrieval, which is exactly what Stage 6 exists to avoid"
     )
+    assert library.page_index, "no page markers — citations cannot be validated"
+
+
+@pytest.mark.integration
+def test_a_real_greek_curriculum_is_outlined_from_his_book_and_tiered_honestly(app_db):
+    """THE PROOF THAT THIS REDESIGN WAS WORTH IT.
+
+    A Greek outline, over his English book, with the model having READ it — and
+    tiering each module by what it found rather than by a cosine floor with a 0.021
+    separation margin. Under the old code a Greek query scored 0.10-0.22 lower than
+    its English twin, cleared no floor, and every module came back a false GAP. That
+    is, verbatim, the bug he reported.
+    """
     from app.llm.factory import get_provider
 
-    provider = get_provider()
-    title = "Getting a Great Guitar Tone"
-    profile = {"level": "beginner"}
+    library = build_library_context(app_db, None)
+    assert library.fits
 
-    plan_messages = _build_plan_messages(
-        title=title, language="en", profile=profile, domain=None, target_minutes_total=600,
+    shape = plan_shape(20, 1, 50)
+    outline = generate_outline(
+        app_db,
+        title="Πώς να βγάλω καλό ήχο από την κιθάρα μου",
+        brief="Θέλω να μάθει ο μαθητής να στήνει τον ήχο του: μικρόφωνα, ενισχυτής, πετάλια.",
+        language="el",
+        shape=shape,
+        library=library,
+        student_brief=None,
+        gap_policy="general_knowledge",
     )
-    plan = provider.guided_json(plan_messages, PLAN_SCHEMA)
 
-    modules_report = []
-    for module in plan["modules"]:
-        query = f"{module['title']} {module['objective']}"
-        passages = ground_topic(app_db, query, k=5)
-        entry = {"title": module["title"], "objective": module["objective"], "passages": passages}
-        if passages:
-            draft_messages = _build_module_draft_messages(
-                module_title=module["title"], objective=module["objective"],
-                language="en", passages=passages,
-            )
-            entry["draft"] = provider.guided_json(draft_messages, MODULE_SCHEMA)
-        modules_report.append(entry)
+    print(f"\nCOURSE: {outline['title']!r}")
+    for module in outline["modules"]:
+        print(f"  [{module['tier']}] {module['title']!r} — {module['coverage_note']}")
+        for lesson in module["lessons"]:
+            print(f"      - {lesson['title']}")
 
-    grounded = [m for m in modules_report if m["passages"]]
-    gaps = [m for m in modules_report if not m["passages"]]
+    assert len(outline["modules"]) == 5
+    assert sum(len(m["lessons"]) for m in outline["modules"]) == 20
 
-    print(f"\nPLAN TITLE: {plan['title']}")
-    print(f"{len(modules_report)} modules planned; {len(grounded)} grounded, {len(gaps)} gaps.\n")
-    for m in modules_report:
-        print(f"MODULE: {m['title']!r}  ({'GROUNDED' if m['passages'] else 'GAP'})")
-        print(f"  objective: {m['objective']}")
-        for p in m["passages"]:
-            print(f"  CITE: {p.source_title!r} p.{p.page_no} score={p.score:.3f}")
-            print(f"        {p.text[:160]!r}")
-        if "draft" in m:
-            for lesson in m["draft"]["lessons"]:
-                print(f"  lesson: {lesson['title']}  ({lesson['est_minutes']} min)")
-                for seg in lesson.get("segments") or []:
-                    print(f"    - {seg['title']}: {seg['body'][:160]!r}")
-        print()
+    # It is GREEK...
+    text = outline["title"] + " ".join(m["title"] for m in outline["modules"])
+    greek = sum(1 for ch in text if "Ͱ" <= ch <= "Ͽ" or "ἀ" <= ch <= "῿")
+    assert greek / max(1, len(text)) > 0.3, f"the outline came back in the wrong language: {text!r}"
 
-    assert grounded, "expected at least one module to genuinely ground in the real library"
-    for m in grounded:
-        assert all(p.source_title for p in m["passages"])
-        assert all(p.score >= ground_mod.SCORE_FLOOR for p in m["passages"])
+    # ...and at least one module is genuinely GROUNDED IN HIS BOOK, in Greek, which
+    # is precisely what does not happen today.
+    grounded = [m for m in outline["modules"] if m["tier"] == TIER_LIBRARY]
+    assert grounded, (
+        "every module came back as a gap on a topic his book is ABOUT — this is the "
+        "original bug, and the whole point of full-context authoring is that it "
+        "cannot happen"
+    )
+
+
+@pytest.mark.integration
+def test_a_real_lesson_is_drafted_to_length_in_greek_with_citations_that_resolve(app_db):
+    """~2,200 words of Greek, and every page it cites is a page it was actually
+    shown. The second call also proves the CACHE is being read — if
+    `cache_read_input_tokens` is zero, the prefix is not stable, every lesson is
+    re-writing 90K tokens at 1.25x, and nothing else looks any different.
+    """
+    from app.llm.factory import get_provider
+
+    library = build_library_context(app_db, None)
+    assert library.fits
+
+    provider = get_provider()
+    ctx = LessonContext(
+        lesson_title="Μικρόφωνα: single-coil και humbucker",
+        lesson_objective="Να ακούει ο μαθητής τη διαφορά και να ξέρει πότε να διαλέξει το καθένα.",
+        module_title="Ο ήχος της κιθάρας",
+        module_objective="Πώς διαμορφώνεται ο ήχος πριν φτάσει στον ενισχυτή.",
+        course_title="Πώς να βγάλω καλό ήχο από την κιθάρα μου",
+        tier=TIER_LIBRARY,
+        position="lesson 1 of 4 in module 1 of 5",
+        minutes=50, teaching_minutes=40, target_words=2200, floor_words=1760,
+    )
+
+    lesson, m = draft_lesson(app_db, ctx=ctx, library=library, language="el")
+
+    print(f"\nLESSON: {lesson['title']!r}")
+    print(f"  {m.total_words} words (target {m.target}, floor {m.floor}) — "
+          f"meets_floor={m.meets_floor}")
+    for name in SECTIONS:
+        cites = lesson[name].get("citations") or []
+        print(f"  {name}: {m.per_section[name]} words, "
+              f"{len(cites)} citation(s) {[(c['source_id'], c['page']) for c in cites]}")
+    usage = getattr(provider, "last_usage", {})
+    print(f"  usage: {usage}")
+
+    assert m.meets_floor, f"{m.total_words} words is under the {m.floor}-word floor"
+
+    body = " ".join(lesson[name].get("body") or "" for name in SECTIONS)
+    greek = sum(1 for ch in body if "Ͱ" <= ch <= "Ͽ" or "ἀ" <= ch <= "῿")
+    assert greek / max(1, len(body)) > 0.5, "the lesson did not come back in Greek"
+
+    assert invalid_citations(lesson, library) == [], "a cited page must actually exist"
+    assert any(lesson[name].get("citations") for name in SECTIONS), (
+        "a library-tier lesson that cites NOTHING is not grounded in his book"
+    )
+
+    # THE CACHE. This is the second call of the run (the draft's own retry aside),
+    # so the 90K-token prefix must be READ, not re-written. If this is 0 we are
+    # paying 10x and the only symptom is the invoice.
+    assert usage.get("cache_read_input_tokens", 0) > 0, (
+        "cache_read_input_tokens is ZERO — the library prefix is not stable, so "
+        "every one of the 20 lesson drafts is re-writing the whole book at 1.25x "
+        "instead of reading it at 0.1x. Nothing looks broken. It just costs ~$7 "
+        "instead of ~$2.72."
+    )

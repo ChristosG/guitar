@@ -1,32 +1,36 @@
-"""Gate 0.2 — capture the retrieval baseline of the CURRENT (Qwen3-Embedding-4B,
-2560-dim) index against the REAL deployed library, before the embedding swap
-replaces every vector.
+"""The retrieval harness — originally Gate 0.2's one-shot baseline of the OLD
+(Qwen3-Embedding-4B, 2560-dim, vector-only) index; now the GATE that Plan 13
+Stage 4's hybrid index has to clear.
 
-This measurement is available exactly once. Plan 13 replaces `chunk.embedding`
-with a 384/1024-dim local-CPU model; once that migration runs, there is no way
-to reconstruct what retrieval used to do, and therefore no way to answer the
-only question that matters afterwards: *did we make it worse?*
+Same query set, same axes, same three assertions. What changed underneath is the
+entire retrieval stack (e5-small 384-dim + Okapi BM25, fused with RRF, one floor
+inside `search()`), and the point of keeping this file comparable is that "did we
+make it worse?" stays an answerable question rather than a vibe.
 
 The query set is not invented — it is the one `app.curriculum.ground`'s own
-docstring calibrated its floors against, plus the axes that docstring never
+docstring calibrated its old floors against, plus the axes that docstring never
 tested:
 
-  - topical_en / topical_el : the queries `ground.py` used, and their Greek
-    equivalents (the tutor's default locale is `el`, his library is an ENGLISH
-    book — cross-lingual retrieval is load-bearing and was never measured).
-  - gear             : exact model names. The current index is vector-only, so
-    it has NO lexical channel; these are expected to do badly and are the
+  - topical_en / topical_el : the queries the old `ground.py` used, and their
+    Greek equivalents (the tutor's default locale is `el`, his library is an
+    ENGLISH book — cross-lingual retrieval is load-bearing and went unmeasured
+    until Stage 4).
+  - gear             : exact model names. The old index was vector-only, so it had
+    NO lexical channel; these were expected to do badly and are the entire
     justification for the BM25 arm.
   - uncovered        : topics the library genuinely does not cover. These MUST
-    keep returning nothing above the floor after the swap, or the curriculum
-    gap-detection (G3) silently reports every module as grounded.
+    keep returning nothing, or curriculum gap-detection (G3) silently reports
+    every module as grounded.
   - adversarial      : a query built from the junk sources' own vocabulary.
 
-`JUNK_SOURCE_IDS` are the three sources `ground.py` names as known junk, read
-back from the live DB by id so a re-seed can't silently invalidate them.
+THE THREE ASSERTIONS (Gate 4.6). All must pass:
 
-Run (host-side; the vLLM embed server's container hostname is not resolvable
-from here, hence the explicit EMBED_BASE_URL):
+  A1  no known-junk passage survives the floor, on any query.
+  A2  every "uncovered" topic returns ZERO. Gap detection survives the swap.
+  A3  every "gear" query retrieves a chunk that ACTUALLY CONTAINS the term —
+      not merely something that sounds like gear talk. This is what BM25 is for.
+
+Run (host-side, or in the container — the local embedder needs no network):
 
     docker compose exec -T api python - < scripts/retrieval_baseline.py
 """
@@ -35,15 +39,21 @@ from dataclasses import asdict
 
 from sqlalchemy import select
 
-from app.brain.retrieve import search
+from app.brain.lexical import get_index
+from app.brain.retrieve import (
+    MIN_PASSAGE_CHARS,
+    STRONG_COSINE,
+    WEAK_COSINE_FLOOR,
+    search,
+)
 from app.db import SessionLocal
 from app.models.knowledge import Chunk, KnowledgeSource
 
 TOP_K = 10
 
-# The three sources app/curriculum/ground.py's docstring identifies as junk.
-# Keyed by a stable substring of the URL rather than a uuid so this survives a
-# re-seed of the library.
+# The three sources app/curriculum/ground.py's docstring identified as junk.
+# Keyed by a stable substring of the URL rather than a uuid, so a re-seed cannot
+# silently invalidate them.
 JUNK_URL_FRAGMENTS = [
     "guitar-effects-survival-guide-introduction/v13776",  # 86-char page title
     "kings-of-tone/c176",                                 # {{video.title}} template
@@ -51,32 +61,33 @@ JUNK_URL_FRAGMENTS = [
 ]
 
 QUERIES: list[tuple[str, str]] = [
-    # (axis, query) — the four `ground.py` calibrated against:
     ("topical_en", "pickup types and how they shape guitar tone"),
     ("topical_en", "amplifier gain staging"),
     ("topical_en", "overdrive and distortion pedals"),
     ("topical_en", "how pick thickness affects tone"),
-    # Greek — the tutor's DEFAULT locale, never measured before:
     ("topical_el", "τύποι μαγνητών και πώς επηρεάζουν τον ήχο της κιθάρας"),
     ("topical_el", "ενίσχυση και gain staging στον ενισχυτή"),
     ("topical_el", "υπερφόρτωση και πετάλια παραμόρφωσης"),
-    # Exact gear names — vector-only has no lexical channel for these:
     ("gear", "Tube Screamer"),
     ("gear", "TS-808"),
     ("gear", "5150"),
     ("gear", "Stratocaster single coil"),
-    # Genuinely uncovered — MUST stay empty above the floor (gap detection):
     ("uncovered", "vibrato and legato technique"),
     ("uncovered", "reading guitar tablature notation"),
     ("uncovered", "fingerstyle arrangement of classical pieces"),
-    # Built from the junk sources' own vocabulary:
     ("adversarial", "kings of tone course video download"),
 ]
 
-# ground.py's current floors, applied here only to REPORT what survives them —
-# this script changes nothing.
-SCORE_FLOOR = 0.60
-LEN_FLOOR = 200
+# A3: the literal strings a retrieved chunk must CONTAIN for a gear query to count
+# as answered. Spelling variants are listed on purpose — `lexical.tokenize` is
+# built to make `TS-808`/`TS808`/`TS 808` one thing, and this is where that claim
+# gets checked against the tutor's real book.
+GEAR_TERMS: dict[str, list[str]] = {
+    "Tube Screamer": ["tube screamer"],
+    "TS-808": ["ts-808", "ts808", "ts 808"],
+    "5150": ["5150"],
+    "Stratocaster single coil": ["stratocaster"],
+}
 
 
 def main() -> None:
@@ -92,73 +103,95 @@ def main() -> None:
                 continue
             junk_source_ids[str(src.id)] = src.title
 
-        total_chunks = db.scalar(select(Chunk.id).limit(1)) is not None
+        non_empty = db.scalar(select(Chunk.id).limit(1)) is not None
+        index = get_index(db)
         print(f"junk sources resolved: {len(junk_source_ids)}/{len(JUNK_URL_FRAGMENTS)}")
-        print(f"corpus non-empty: {total_chunks}\n")
+        print(f"corpus: {index.n_docs} chunks, {len(index.df)} lexical terms, non_empty={non_empty}")
+        print(
+            f"floor: len>={MIN_PASSAGE_CHARS} AND cos>={WEAK_COSINE_FLOOR} AND "
+            f"(cos>={STRONG_COSINE} OR complete lexical coverage)\n"
+        )
 
         out: dict = {
-            "embedder": "qwen3-emb-4b (2560-dim)",
-            "floors": {"score": SCORE_FLOOR, "len": LEN_FLOOR},
+            "retriever": "multilingual-e5-small (384) + Okapi BM25, RRF(60)",
+            "floor": {
+                "min_chars": MIN_PASSAGE_CHARS,
+                "weak_cosine": WEAK_COSINE_FLOOR,
+                "strong_cosine": STRONG_COSINE,
+            },
             "junk_sources": junk_source_ids,
             "queries": [],
         }
 
+        print(f"{'axis':<12} {'query':<46} {'top_cos':>7} {'kept':>5} {'junk':>5} {'term?':>6}")
+        print("-" * 88)
+
         for axis, q in QUERIES:
-            hits = search(db, q, k=TOP_K)
-            rows = []
-            for rank, h in enumerate(hits, start=1):
-                d = asdict(h)
-                text = d.get("text") or ""
-                sid = str(d.get("source_id"))
-                rows.append(
-                    {
-                        "rank": rank,
-                        "score": round(float(d["score"]), 4),
-                        "len": len(text),
-                        "source_id": sid,
-                        "source_title": d.get("source_title"),
-                        "page": d.get("page_no"),
-                        "is_junk_source": sid in junk_source_ids,
-                        "passes_floor": float(d["score"]) >= SCORE_FLOOR
-                        and len(text) >= LEN_FLOOR,
-                        "preview": " ".join(text.split())[:110],
-                    }
+            kept = search(db, q, k=TOP_K)                       # the floor ON
+            raw = search(db, q, k=TOP_K, apply_floor=False)     # what the floor saw
+
+            rows = [
+                {
+                    "rank": rank,
+                    "rrf": round(float(asdict(h)["score"]), 4),
+                    "cos": round(h.vector_score, 4),
+                    "bm25": round(h.lexical_score, 2),
+                    "len": len(h.text or ""),
+                    "source_id": str(h.source_id),
+                    "source_title": h.source_title,
+                    "page": h.page,
+                    "is_junk_source": str(h.source_id) in junk_source_ids,
+                    "preview": " ".join((h.text or "").split())[:110],
+                }
+                for rank, h in enumerate(kept, start=1)
+            ]
+
+            junk_kept = [r for r in rows if r["is_junk_source"]]
+            term_ok = None
+            if axis == "gear":
+                needles = GEAR_TERMS[q]
+                term_ok = any(
+                    any(n in (h.text or "").lower() for n in needles) for h in kept
                 )
 
-            kept = [r for r in rows if r["passes_floor"]]
-            junk_kept = [r for r in kept if r["is_junk_source"]]
-            out["queries"].append(
-                {"axis": axis, "query": q, "hits": rows,
-                 "n_pass_floor": len(kept), "n_junk_past_floor": len(junk_kept)}
+            out["queries"].append({
+                "axis": axis, "query": q, "hits": rows,
+                "n_raw": len(raw), "n_kept": len(kept),
+                "n_junk_kept": len(junk_kept),
+                "contains_term": term_ok,
+            })
+
+            top_cos = max((h.vector_score for h in raw), default=0.0)
+            flag = "-" if term_ok is None else ("YES" if term_ok else "NO")
+            print(
+                f"{axis:<12} {q[:46]:<46} {top_cos:7.3f} {len(kept):5d} "
+                f"{len(junk_kept):5d} {flag:>6}"
             )
 
-            top = rows[0] if rows else None
-            print(f"[{axis:11}] {q[:52]:<52} "
-                  f"top={top['score'] if top else 0:.3f} "
-                  f"kept={len(kept):>2}/{len(rows)} "
-                  f"junk_past_floor={len(junk_kept)}")
-            if top:
-                print(f"{'':14} -> {top['source_title'][:70]}")
-
-        with open("/tmp/baseline.json", "w") as f:
+        with open("/tmp/baseline_e5.json", "w") as f:
             json.dump(out, f, ensure_ascii=False, indent=1)
-        print("\nwrote /tmp/baseline.json")
+        print("\nwrote /tmp/baseline_e5.json")
 
-        # The three assertions Gate 4.5 must reproduce on the NEW index.
-        print("\n=== BASELINE ASSERTIONS (what the new index must match or beat) ===")
-        junk_leaks = sum(q["n_junk_past_floor"] for q in out["queries"])
-        print(f"A1 junk passages past the floor, all queries : {junk_leaks}  (target: 0)")
+        print("\n=== GATE 4.6 — three assertions, all must pass ===")
+        junk_leaks = sum(q["n_junk_kept"] for q in out["queries"])
+        a1 = junk_leaks == 0
+        print(f"A1 known-junk passages past the floor      : {junk_leaks:>3}     (target 0)  {'PASS' if a1 else 'FAIL'}")
+
         unc = [q for q in out["queries"] if q["axis"] == "uncovered"]
-        print(f"A2 uncovered topics returning >0 past floor  : "
-              f"{sum(1 for q in unc if q['n_pass_floor'] > 0)}/{len(unc)}  (target: 0)")
+        unc_leaks = sum(1 for q in unc if q["n_kept"] > 0)
+        a2 = unc_leaks == 0
+        print(f"A2 uncovered topics returning anything     : {unc_leaks}/{len(unc)}     (target 0)  {'PASS' if a2 else 'FAIL'}")
+
         gear = [q for q in out["queries"] if q["axis"] == "gear"]
-        gear_ok = sum(1 for q in gear if q["n_pass_floor"] > 0)
-        print(f"A3 gear queries retrieving anything          : {gear_ok}/{len(gear)}"
-              f"  (this is the arm BM25 must fix)")
+        gear_ok = sum(1 for q in gear if q["contains_term"])
+        a3 = gear_ok == len(gear)
+        print(f"A3 gear queries retrieving the ACTUAL term : {gear_ok}/{len(gear)}     (target {len(gear)}) {'PASS' if a3 else 'FAIL'}")
+
         el = [q for q in out["queries"] if q["axis"] == "topical_el"]
-        el_ok = sum(1 for q in el if q["n_pass_floor"] > 0)
-        print(f"A4 GREEK topical queries retrieving anything : {el_ok}/{len(el)}"
-              f"  (cross-lingual — never measured before)")
+        el_ok = sum(1 for q in el if q["n_kept"] > 0)
+        print(f"   GREEK topical queries retrieving anything: {el_ok}/{len(el)}     (cross-lingual)")
+
+        print("\n" + ("ALL ASSERTIONS PASS" if (a1 and a2 and a3) else "*** GATE FAILED ***"))
     finally:
         db.close()
 

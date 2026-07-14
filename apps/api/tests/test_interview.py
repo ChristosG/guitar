@@ -1,38 +1,28 @@
-"""Tests for the guided curriculum-authoring interview (Plan 12 Task 3, G2):
-`app.curriculum.interview`'s state machine, and the three
-`/curricula/interview...` routes in `app.routers.curriculum`.
+"""The curriculum-authoring interview, v2 (Plan 13, Stage 6.8).
 
-Chris: "maybe llm can act as an assistant there bro, guiding him, and asking
-him questions or corrections throughout the process." This proves the
-state machine actually lives in CODE (never the model): every advance is a
-plain assertion on `interview.step`/`.answers`, and every "bad answer"
-test proves the SAME step re-asks rather than crashing or silently moving
-on — the model is only ever reached via the monkeypatched `get_provider`
-(the plan call) and `ground_topic` (the real retrieval, exercised for
-real in the tests that matter most, see below).
+REWRITTEN. The old five-step machine (who / duration / sources / preview /
+confirm) is gone, and so is the `domain` it carried.
 
-`get_provider`/`ground_topic` are patched on `app.curriculum.interview`'s
-OWN namespace (`interview_mod.get_provider`/`interview_mod.ground_topic`),
-NOT their origin modules (`app.llm.factory`/`app.curriculum.ground`) —
-`from ... import X` binds a new name into the importing module's namespace,
-so patching the origin wouldn't affect interview.py's already-bound
-reference (mirrors `test_curriculum_grounding.py`'s identical reasoning for
-`generate_mod.get_provider`).
+Chris, on the student: "this has to be optional dude.. the student part here has
+to be TOTALLY optional."
+Chris, on domain: "is domain playing any role? is it used somewhere or only for
+tagging?" — it was one line in one prompt plus a retrieval filter that could no
+longer exclude anything. A free-text COURSE BRIEF replaces it.
+Chris, on shape: "im making a curriculum with 20 weeks, and only 4 modules are
+here." — the duration step now ECHOES the derived shape back at him.
 
-KEY TEST GOTCHA (brief, verbatim): Starlette's `TestClient` runs
-`BackgroundTasks` AFTER the response, in-process — the "confirm" step
-enqueues a REAL `GenerationJob` and schedules `run_curriculum_job`, so every
-test that reaches "confirm" monkeypatches `app.routers.curriculum.
-run_curriculum_job` to a capturing no-op (mirrors
-`test_curriculum_generate_enqueue.py` exactly), or a real ~90s LLM
-generation would fire during the test run.
+The state machine still lives in CODE, never in the model's head: every advance
+below is an assertion on `interview.step`, and every bad-answer test proves the
+SAME step re-asks rather than crashing or silently moving on. The model is reached
+in exactly one place — the outline call.
 """
 import uuid
 
 import pytest
-from sqlalchemy import select
 
+import app.curriculum.corpus as corpus_mod
 import app.curriculum.interview as interview_mod
+import app.curriculum.outline as outline_mod
 import app.routers.curriculum as curriculum_router
 from app.curriculum.interview import (
     answer_interview,
@@ -40,143 +30,202 @@ from app.curriculum.interview import (
     render_state,
     start_interview,
 )
+from app.models.block import Block
 from app.models.generation_job import GenerationJob
 from app.models.interview import CurriculumInterview
-from app.models.knowledge import KnowledgeSource
+from app.models.knowledge import KnowledgeSource, Page
+from app.models.note import Note
 from app.models.student import Student
 
-_PLAN_ONE_MODULE = {
-    "title": "Tone Fundamentals",
-    "modules": [{"title": "Pickups and Tone", "objective": "Understand pickup types."}],
-}
 
-_PLAN_TWO_MODULES = {
+class _FakeProvider:
+    def __init__(self, outline=None):
+        self.outline = outline or _OUTLINE
+        self.calls: list[dict] = []
+
+    def guided_json(self, messages, schema, *, temperature=0.2, role="spec", max_tokens=None):
+        self.calls.append({"messages": messages, "role": role})
+        return self.outline
+
+    def count_tokens(self, text: str) -> int:
+        return len(text) // 3 + 1
+
+
+_OUTLINE = {
     "title": "Tone Fundamentals",
     "modules": [
-        {"title": "Pickups and Tone", "objective": "Understand pickup types."},
-        {"title": "Amp Gain Staging", "objective": "Understand amp gain."},
+        {
+            "title": f"Module {i}", "objective": "o", "tier": "library",
+            "coverage_note": "p.19",
+            "lessons": [
+                {"title": f"L{i}.{j}", "objective": "o", "est_minutes": 50}
+                for j in range(4)
+            ],
+        }
+        for i in range(2)
     ],
 }
 
 
-class _FakePlanProvider:
-    """Only ever asked for the Phase-1 plan (`_compute_preview` never drafts
-    module content — that's `generate_curriculum`'s own job, later, once
-    the real job runs) — a single scripted response is enough.
-    """
-
-    def __init__(self, plan):
-        self.plan = plan
-        self.calls: list[dict] = []
-
-    def guided_json(self, messages, schema, *, temperature: float = 0.2):
-        self.calls.append({"messages": messages, "schema": schema})
-        return self.plan
+@pytest.fixture(autouse=True)
+def _provider(monkeypatch):
+    provider = _FakeProvider()
+    monkeypatch.setattr(interview_mod, "generate_outline", _passthrough_outline(provider))
+    monkeypatch.setattr(outline_mod, "get_provider", lambda: provider)
+    monkeypatch.setattr(corpus_mod, "get_provider", lambda: provider)
+    return provider
 
 
-def _passage(*, source_title="Getting Great Guitar Sounds", page_no=56, score=0.7):
-    from app.curriculum.ground import Passage
-    return Passage(
-        text="UNIQUE_PASSAGE_MARKER: a real, substantive passage." * 3,
-        source_id=uuid.uuid4(), source_title=source_title, page_no=page_no,
-        page_id=uuid.uuid4(), score=score,
-    )
+def _passthrough_outline(provider):
+    """Keep the REAL `generate_outline` — shape enforcement and tier clamping are
+    part of what these tests are asserting — but let it reach the fake model."""
+    from app.curriculum.outline import generate_outline as real
+
+    return real
 
 
-def _make_source(db, *, title="Getting Great Guitar Sounds", char_count=62585, type_="pdf") -> KnowledgeSource:
-    source = KnowledgeSource(type=type_, title=title, language="en", char_count=char_count)
+def _source(db, *, title="Getting Great Guitar Sounds") -> KnowledgeSource:
+    source = KnowledgeSource(type="pdf", title=title, language="en",
+                             char_count=62585, status="ready")
     db.add(source)
+    db.flush()
+    db.add(Page(source_id=source.id, page_no=19,
+                text="A humbucker cancels hum by pairing opposed coils. " * 4,
+                status="ready"))
     db.commit()
-    db.refresh(source)
     return source
 
 
-def _start(db, *, title="Tone Fundamentals") -> CurriculumInterview:
-    return start_interview(db, title=title, domain=None)
+def _start(db, title="Tone Fundamentals") -> CurriculumInterview:
+    return start_interview(db, title=title)
+
+
+def _walk_to(db, interview, step, *, source_ids=None):
+    """Drive the machine up to (not through) `step`."""
+    if interview.step == "who":
+        answer_interview(db, interview, {"student_id": None, "level": "all_levels"})
+    if step == "duration":
+        return
+    if interview.step == "duration":
+        answer_interview(db, interview, {"weeks": 8, "sessions_per_week": 1,
+                                         "minutes_per_session": 50})
+    if step == "scope":
+        return
+    if interview.step == "scope":
+        answer_interview(db, interview, {"brief": "COURSE_BRIEF_MARKER",
+                                         "gap_policy": "general_knowledge"})
+    if step == "sources":
+        return
+    if interview.step == "sources":
+        answer_interview(db, interview, {"source_ids": source_ids or []})
+    if step == "outline":
+        return
+    if interview.step == "outline":
+        answer_interview(db, interview, {"regenerate": True})
+        answer_interview(db, interview, {"outline": interview.outline})
 
 
 # ---------------------------------------------------------------------------
-# The state machine advances deterministically through every step.
+# The whole machine
 # ---------------------------------------------------------------------------
 
-def test_the_state_machine_advances_deterministically_through_every_step(db, monkeypatch):
-    monkeypatch.setattr(interview_mod, "get_provider", lambda: _FakePlanProvider(_PLAN_ONE_MODULE))
-    monkeypatch.setattr(interview_mod, "ground_topic", lambda *a, **k: [_passage()])
-
-    student = Student(name="Nikos", level="beginner")
-    db.add(student); db.commit()
-    source = _make_source(db)
-
+def test_the_state_machine_advances_deterministically_through_every_step(db):
+    source = _source(db)
     interview = _start(db)
     assert interview.step == "who"
 
-    r = answer_interview(db, interview, {"student_id": str(student.id)})
-    assert r == {"ok": True, "error": None, "done": False, "params": None}
-    assert interview.step == "duration"
-    assert interview.answers["who"]["name"] == "Nikos"
-
-    r = answer_interview(db, interview, {"weeks": 8, "minutes_per_session": 45})
+    r = answer_interview(db, interview, {"student_id": None, "level": "beginner"})
     assert r["ok"] and not r["done"]
+    assert interview.step == "duration"
+
+    r = answer_interview(db, interview, {"weeks": 20, "sessions_per_week": 1,
+                                         "minutes_per_session": 50})
+    assert r["ok"]
+    assert interview.step == "scope"
+
+    r = answer_interview(db, interview, {"brief": "get him playing blues",
+                                         "gap_policy": "general_knowledge"})
+    assert r["ok"]
     assert interview.step == "sources"
-    assert interview.answers["duration"] == {"weeks": 8, "minutes_per_session": 45}
+    assert interview.brief == "get him playing blues"
 
     r = answer_interview(db, interview, {"source_ids": [str(source.id)]})
-    assert r["ok"] and not r["done"]
-    assert interview.step == "preview"
-    assert interview.preview is not None, "sources->preview must compute the preview"
+    assert r["ok"]
+    assert interview.step == "outline"
 
-    r = answer_interview(db, interview, {"proceed": True})
-    assert r["ok"] and not r["done"]
+    r = answer_interview(db, interview, {"regenerate": True})
+    assert r["ok"] and r.get("stay") is True
+    assert interview.step == "outline", "generating the outline keeps him ON the step"
+    assert interview.outline is not None
+
+    r = answer_interview(db, interview, {"outline": interview.outline})
+    assert r["ok"]
     assert interview.step == "confirm"
 
-    r = answer_interview(db, interview, {"approved": True, "allow_general": False})
+    r = answer_interview(db, interview, {"approved": True})
     assert r["ok"] and r["done"]
     assert interview.step == "done"
-    assert r["params"] == {
-        "title": "Tone Fundamentals", "language": "el", "domain": None,
-        "target_minutes_total": 8 * 45,
-        "profile": {
-            "student_name": "Nikos", "student_id": str(student.id), "level": "beginner",
-            "weeks": 8, "minutes_per_session": 45,
-        },
-        "source_ids": [str(source.id)], "allow_general": False,
+    assert interview.root_id is not None, "confirm MATERIALIZES the tree"
+
+
+# ---------------------------------------------------------------------------
+# "who" — the student is TOTALLY optional
+# ---------------------------------------------------------------------------
+
+def test_no_student_is_a_first_class_answer_not_a_blank_field(db):
+    """Chris, verbatim: "this has to be optional dude.. the student part here has to
+    be TOTALLY optional"."""
+    interview = _start(db)
+
+    r = answer_interview(db, interview, {"student_id": None, "level": "all_levels"})
+
+    assert r["ok"]
+    assert interview.step == "duration"
+    assert interview.answers["who"] == {
+        "student_id": None, "name": None, "level": "all_levels", "language": "el",
     }
 
 
-# ---------------------------------------------------------------------------
-# "who": real students offered as options; free-text name also accepted.
-# ---------------------------------------------------------------------------
+def test_the_who_step_offers_no_student_as_an_explicit_option_with_a_level_selector(db):
+    db.add(Student(name="Elena", level="intermediate"))
+    db.commit()
 
-def test_who_step_offers_his_real_students_as_options(db):
-    student = Student(name="Elena", level="intermediate")
-    db.add(student); db.commit()
-
-    interview = _start(db)
-    state = render_state(db, interview)
+    state = render_state(db, _start(db))
 
     assert state["step"] == "who"
-    assert {"value": str(student.id), "label": "Elena (intermediate)"} in state["options"]
+    assert {"value": "none", "label": "No particular student — a course for anyone",
+            "kind": "none"} in state["options"]
+    assert any(o["label"] == "Elena (intermediate)" for o in state["options"])
+    assert "all_levels" in state["findings"]["levels"]
 
 
-def test_who_step_accepts_a_free_text_name_for_someone_new(db):
+def test_picking_a_real_student_inherits_his_level_and_his_language(db):
+    student = Student(name="Nikos", level="beginner", preferred_language="el")
+    db.add(student)
+    db.commit()
+
     interview = _start(db)
-    r = answer_interview(db, interview, {"name": "Someone New", "level": "beginner"})
-    assert r["ok"]
-    assert interview.answers["who"] == {
-        "student_id": None, "name": "Someone New", "level": "beginner", "language": "en",
-    }
+    answer_interview(db, interview, {"student_id": str(student.id)})
+
+    who = interview.answers["who"]
+    assert who["student_id"] == str(student.id)
+    assert who["name"] == "Nikos"
+    assert who["level"] == "beginner"
+    assert who["language"] == "el"
 
 
-# ---------------------------------------------------------------------------
-# Validation — a bad/blank answer RE-ASKS, never crashes, never advances.
-# ---------------------------------------------------------------------------
-
-def test_a_blank_who_answer_reasks_and_does_not_advance(db):
+def test_an_unknown_student_id_reasks(db):
     interview = _start(db)
-    r = answer_interview(db, interview, {})
+    r = answer_interview(db, interview, {"student_id": str(uuid.uuid4())})
     assert r["ok"] is False
-    assert r["error"]
-    assert interview.step == "who", "step must not advance on a blank answer"
+    assert interview.step == "who"
+
+
+def test_an_unknown_level_reasks(db):
+    interview = _start(db)
+    r = answer_interview(db, interview, {"student_id": None, "level": "wizard"})
+    assert r["ok"] is False
+    assert interview.step == "who"
 
 
 def test_who_step_with_garbage_answer_types_does_not_crash(db):
@@ -187,84 +236,247 @@ def test_who_step_with_garbage_answer_types_does_not_crash(db):
         assert interview.step == "who"
 
 
-def test_an_unknown_student_id_reasks(db):
+# ---------------------------------------------------------------------------
+# "duration" — the step that makes "20 weeks, 4 modules" impossible
+# ---------------------------------------------------------------------------
+
+def test_the_sources_step_echoes_the_derived_shape_back_at_him(db):
+    """He agrees to a SIZE before we spend his money on it. "20 sessions -> 5
+    modules x 4 lessons -> ~2,200 words each"."""
     interview = _start(db)
-    r = answer_interview(db, interview, {"student_id": str(uuid.uuid4())})
-    assert r["ok"] is False
-    assert interview.step == "who"
+    answer_interview(db, interview, {"student_id": None})
+    answer_interview(db, interview, {"weeks": 20, "sessions_per_week": 1,
+                                     "minutes_per_session": 50})
+
+    state = describe_step(db, interview.__class__ and interview)
+    # the shape is echoed at the next step the tutor lands on
+    assert interview.step == "scope"
+    _walk_to(db, interview, "sources")
+    state = describe_step(db, interview)
+
+    assert "20 sessions" in state["findings"]["shape"]
+    assert "5 modules" in state["findings"]["shape"]
+    assert "2,200 words" in state["findings"]["shape"]
 
 
-def test_duration_step_rejects_non_positive_or_missing_values(db):
+@pytest.mark.parametrize("bad", [
+    {},
+    {"weeks": 0, "minutes_per_session": 45},
+    {"weeks": 8, "minutes_per_session": -1},
+    {"weeks": "eight", "minutes_per_session": 45},
+    {"weeks": True, "minutes_per_session": 45},          # bool is an int subclass
+    {"weeks": 8, "sessions_per_week": 0, "minutes_per_session": 45},
+])
+def test_duration_step_rejects_a_nonsense_course(db, bad):
     interview = _start(db)
-    answer_interview(db, interview, {"name": "X"})
+    answer_interview(db, interview, {"student_id": None})
     assert interview.step == "duration"
 
-    for bad in [{}, {"weeks": 0, "minutes_per_session": 45}, {"weeks": 8, "minutes_per_session": -1},
-                {"weeks": "eight", "minutes_per_session": 45}, {"weeks": True, "minutes_per_session": 45}]:
-        r = answer_interview(db, interview, bad)
-        assert r["ok"] is False, f"expected reask for {bad!r}"
-        assert interview.step == "duration"
+    r = answer_interview(db, interview, bad)
 
-    r = answer_interview(db, interview, {"weeks": 6, "minutes_per_session": 30})
+    assert r["ok"] is False, f"expected a re-ask for {bad!r}"
+    assert interview.step == "duration"
+
+
+# ---------------------------------------------------------------------------
+# "scope" — where `domain` died
+# ---------------------------------------------------------------------------
+
+def test_the_scope_step_takes_a_free_text_brief_and_a_gap_policy(db):
+    interview = _start(db)
+    _walk_to(db, interview, "scope")
+
+    r = answer_interview(db, interview, {
+        "brief": "He wants to play 12-bar blues at his sister's wedding.",
+        "gap_policy": "library_only",
+    })
+
     assert r["ok"]
     assert interview.step == "sources"
+    assert interview.brief == "He wants to play 12-bar blues at his sister's wedding."
+    assert interview.gap_policy == "library_only"
 
 
-def test_sources_step_rejects_an_unknown_or_malformed_source_id(db):
+def test_an_empty_brief_reasks_because_it_is_what_the_course_gets_written_from(db):
     interview = _start(db)
-    answer_interview(db, interview, {"name": "X"})
-    answer_interview(db, interview, {"weeks": 4, "minutes_per_session": 30})
-    assert interview.step == "sources"
+    _walk_to(db, interview, "scope")
 
-    for bad in [{}, {"source_ids": "not-a-list"}, {"source_ids": ["not-a-uuid"]},
-                {"source_ids": [str(uuid.uuid4())]}]:
-        r = answer_interview(db, interview, bad)
-        assert r["ok"] is False, f"expected reask for {bad!r}"
-        assert interview.step == "sources"
-
-
-def test_sources_step_accepts_an_explicit_empty_list_as_a_deliberate_choice(db, monkeypatch):
-    monkeypatch.setattr(interview_mod, "get_provider", lambda: _FakePlanProvider(_PLAN_ONE_MODULE))
-    monkeypatch.setattr(interview_mod, "ground_topic", lambda *a, **k: [])
-
-    interview = _start(db)
-    answer_interview(db, interview, {"name": "X"})
-    answer_interview(db, interview, {"weeks": 4, "minutes_per_session": 30})
-    r = answer_interview(db, interview, {"source_ids": []})
-    assert r["ok"]
-    assert interview.step == "preview"
-    assert interview.answers["sources"] == {"source_ids": []}
-
-
-def test_preview_step_rejects_anything_but_an_explicit_proceed(db, monkeypatch):
-    monkeypatch.setattr(interview_mod, "get_provider", lambda: _FakePlanProvider(_PLAN_ONE_MODULE))
-    monkeypatch.setattr(interview_mod, "ground_topic", lambda *a, **k: [_passage()])
-
-    interview = _start(db)
-    answer_interview(db, interview, {"name": "X"})
-    answer_interview(db, interview, {"weeks": 4, "minutes_per_session": 30})
-    answer_interview(db, interview, {"source_ids": []})
-    assert interview.step == "preview"
-
-    for bad in [{}, {"proceed": False}, {"proceed": "yes"}, None]:
+    for bad in [{}, {"brief": ""}, {"brief": "   "}, {"brief": 42}, None]:
         r = answer_interview(db, interview, bad)
         assert r["ok"] is False
-        assert interview.step == "preview"
+        assert interview.step == "scope"
 
-    r = answer_interview(db, interview, {"proceed": True})
+
+def test_an_unknown_gap_policy_reasks(db):
+    interview = _start(db)
+    _walk_to(db, interview, "scope")
+
+    r = answer_interview(db, interview, {"brief": "b", "gap_policy": "vibes"})
+
+    assert r["ok"] is False
+    assert interview.step == "scope"
+
+
+def test_the_interview_no_longer_has_a_domain_anywhere(db):
+    """`domain` is DEAD. It was one dead prompt line and a filter that couldn't
+    filter."""
+    interview = _start(db)
+    assert not hasattr(interview, "domain")
+    with pytest.raises(TypeError):
+        start_interview(db, title="X", domain="tone")
+
+
+# ---------------------------------------------------------------------------
+# "sources" — measured, not guessed
+# ---------------------------------------------------------------------------
+
+def test_the_sources_step_measures_the_selection_and_tells_him_if_it_fits(db):
+    """"3 sources · 92,400 tokens · fits whole" — because we MEASURE it with
+    count_tokens, which is free and exact, rather than hoping."""
+    source = _source(db)
+    interview = _start(db)
+    _walk_to(db, interview, "sources")
+
+    r = answer_interview(db, interview, {"source_ids": [str(source.id)]})
+
     assert r["ok"]
-    assert interview.step == "confirm"
+    measured = interview.answers["sources"]["measured"]
+    assert measured["token_count"] > 0
+    assert measured["fits"] is True
+    assert "fits whole" in measured["summary"]
 
 
-def test_confirm_without_approval_reasks_and_does_not_enqueue(db, monkeypatch):
-    monkeypatch.setattr(interview_mod, "get_provider", lambda: _FakePlanProvider(_PLAN_ONE_MODULE))
-    monkeypatch.setattr(interview_mod, "ground_topic", lambda *a, **k: [_passage()])
+def test_the_sources_step_lists_every_source_and_pre_selects_only_substantive_ones(db):
+    _source(db, title="A Real Book")
+    tiny = KnowledgeSource(type="text", title="A Stub", language="en", char_count=12)
+    db.add(tiny)
+    db.commit()
 
     interview = _start(db)
-    answer_interview(db, interview, {"name": "X"})
-    answer_interview(db, interview, {"weeks": 4, "minutes_per_session": 30})
-    answer_interview(db, interview, {"source_ids": []})
-    answer_interview(db, interview, {"proceed": True})
+    _walk_to(db, interview, "sources")
+    state = describe_step(db, interview)
+
+    labels = {o["label"]: o["default_selected"] for o in state["options"]}
+    assert labels["A Real Book"] is True
+    assert labels["A Stub"] is False, "a suggestion — but it is still LISTED, never hidden"
+
+
+@pytest.mark.parametrize("bad", [
+    {}, {"source_ids": "not-a-list"}, {"source_ids": ["not-a-uuid"]},
+])
+def test_sources_step_rejects_a_malformed_selection(db, bad):
+    interview = _start(db)
+    _walk_to(db, interview, "sources")
+
+    r = answer_interview(db, interview, bad)
+
+    assert r["ok"] is False
+    assert interview.step == "sources"
+
+
+def test_sources_step_rejects_a_source_that_does_not_exist(db):
+    interview = _start(db)
+    _walk_to(db, interview, "sources")
+
+    r = answer_interview(db, interview, {"source_ids": [str(uuid.uuid4())]})
+
+    assert r["ok"] is False
+    assert interview.step == "sources"
+
+
+def test_an_explicit_empty_list_is_a_deliberate_choice_and_is_accepted(db):
+    interview = _start(db)
+    _walk_to(db, interview, "sources")
+
+    r = answer_interview(db, interview, {"source_ids": []})
+
+    assert r["ok"]
+    assert interview.step == "outline"
+    assert interview.answers["sources"]["source_ids"] == []
+
+
+# ---------------------------------------------------------------------------
+# "outline" — the step Chris said was missing: he EDITS it
+# ---------------------------------------------------------------------------
+
+def test_the_outline_is_generated_from_the_whole_library_and_the_brief(db, _provider):
+    source = _source(db)
+    interview = _start(db)
+    _walk_to(db, interview, "outline", source_ids=[str(source.id)])
+
+    answer_interview(db, interview, {"regenerate": True})
+
+    assert len(_provider.calls) == 1
+    sent = " ".join(m["content"] for m in _provider.calls[0]["messages"])
+    assert "COURSE_BRIEF_MARKER" in sent
+    assert "humbucker" in sent, "the WHOLE library reaches the outline call"
+    assert interview.outline["modules"]
+
+
+def test_THE_EDITED_OUTLINE_IS_THE_ONE_THAT_GETS_BUILT_not_the_models_original(db):
+    """The whole point of the step. Chris's complaint was that the app gave him
+    something to accept or reject, not something to work on."""
+    source = _source(db)
+    interview = _start(db)
+    _walk_to(db, interview, "outline", source_ids=[str(source.id)])
+    answer_interview(db, interview, {"regenerate": True})
+
+    edited = {
+        "title": "MY OWN TITLE",
+        "modules": [{
+            "title": "MY OWN MODULE", "objective": "mine", "tier": "library",
+            "coverage_note": "", "lessons": [
+                {"title": "MY OWN LESSON", "objective": "mine", "est_minutes": 50},
+            ],
+        }],
+    }
+    answer_interview(db, interview, {"outline": edited})
+    assert interview.step == "confirm"
+
+    answer_interview(db, interview, {"approved": True})
+
+    course = db.get(Block, interview.root_id)
+    assert course.title == "MY OWN TITLE"
+    modules = [c for c in course.children if c.kind == "module"]
+    assert [m.title for m in modules] == ["MY OWN MODULE"]
+    lessons = [c for c in modules[0].children if c.kind == "lesson"]
+    assert [l.title for l in lessons] == ["MY OWN LESSON"]
+
+
+def test_a_refresh_never_re_runs_the_expensive_outline_call(db, _provider):
+    source = _source(db)
+    interview = _start(db)
+    _walk_to(db, interview, "outline", source_ids=[str(source.id)])
+    answer_interview(db, interview, {"regenerate": True})
+    assert len(_provider.calls) == 1
+
+    state = render_state(db, interview)
+
+    assert state["step"] == "outline"
+    assert state["findings"] == interview.outline
+    assert len(_provider.calls) == 1, "a refresh must not re-run a 90K-token call"
+
+
+def test_an_outline_with_no_modules_is_rejected_rather_than_confirmed(db):
+    source = _source(db)
+    interview = _start(db)
+    _walk_to(db, interview, "outline", source_ids=[str(source.id)])
+    answer_interview(db, interview, {"regenerate": True})
+
+    r = answer_interview(db, interview, {"outline": {"title": "X", "modules": []}})
+
+    assert r["ok"] is False
+    assert interview.step == "outline"
+
+
+# ---------------------------------------------------------------------------
+# "confirm" — materialize, then enqueue
+# ---------------------------------------------------------------------------
+
+def test_confirm_without_approval_reasks_and_materializes_nothing(db):
+    source = _source(db)
+    interview = _start(db)
+    _walk_to(db, interview, "confirm", source_ids=[str(source.id)])
     assert interview.step == "confirm"
 
     for bad in [{}, {"approved": False}, {"approved": "true"}, None]:
@@ -272,282 +484,124 @@ def test_confirm_without_approval_reasks_and_does_not_enqueue(db, monkeypatch):
         assert r["ok"] is False
         assert r["done"] is False
         assert interview.step == "confirm"
+        assert interview.root_id is None
 
 
-def test_answering_an_already_finished_interview_reasks_without_crashing(db, monkeypatch):
-    monkeypatch.setattr(interview_mod, "get_provider", lambda: _FakePlanProvider(_PLAN_ONE_MODULE))
-    monkeypatch.setattr(interview_mod, "ground_topic", lambda *a, **k: [_passage()])
+def test_answering_a_finished_interview_reasks_without_crashing(db):
+    source = _source(db)
+    interview = _start(db)
+    _walk_to(db, interview, "confirm", source_ids=[str(source.id)])
+    answer_interview(db, interview, {"approved": True})
+    assert interview.step == "done"
+
+    r = answer_interview(db, interview, {"approved": True})
+
+    assert r["ok"] is False
+    assert interview.step == "done"
+
+
+def test_the_student_reaches_the_course_meta_so_every_lesson_draft_can_see_him(db):
+    """The bug this fixes: `level`/`name` used to appear in the OUTLINE prompt and
+    NOWHERE ELSE, so every lesson body ever generated by this app was written with
+    zero knowledge of the learner."""
+    student = Student(name="Nikos", level="beginner")
+    db.add(student)
+    db.add(Note(title="Barre chords", body="He cannot barre yet.", tags=["struggle"],
+                student_id=student.id))
+    db.commit()
+    source = _source(db)
 
     interview = _start(db)
-    answer_interview(db, interview, {"name": "X"})
-    answer_interview(db, interview, {"weeks": 4, "minutes_per_session": 30})
-    answer_interview(db, interview, {"source_ids": []})
-    answer_interview(db, interview, {"proceed": True})
-    r = answer_interview(db, interview, {"approved": True})
-    assert r["done"]
-    assert interview.step == "done"
+    answer_interview(db, interview, {"student_id": str(student.id)})
+    answer_interview(db, interview, {"weeks": 8, "sessions_per_week": 1,
+                                     "minutes_per_session": 50})
+    answer_interview(db, interview, {"brief": "b", "gap_policy": "general_knowledge"})
+    answer_interview(db, interview, {"source_ids": [str(source.id)]})
+    answer_interview(db, interview, {"regenerate": True})
+    answer_interview(db, interview, {"outline": interview.outline})
+    answer_interview(db, interview, {"approved": True})
 
-    r2 = answer_interview(db, interview, {"approved": True})
-    assert r2["ok"] is False
-    assert interview.step == "done"
+    course = db.get(Block, interview.root_id)
+    assert course.meta["student_id"] == str(student.id)
 
 
 # ---------------------------------------------------------------------------
-# THE step that matters: preview really calls ground_topic and returns REAL
-# passages with source+page; a module with nothing above the floor is a GAP.
+# The HTTP routes
 # ---------------------------------------------------------------------------
 
-def test_preview_step_really_calls_ground_topic_and_returns_real_passages_with_source_and_page(
-    db, monkeypatch,
-):
-    from app.brain.ingest import IngestPayload, ingest_source
-
-    monkeypatch.setattr(interview_mod, "get_provider", lambda: _FakePlanProvider(_PLAN_ONE_MODULE))
-
-    source = KnowledgeSource(type="text", title="Getting Great Guitar Sounds", language="en")
-    db.add(source); db.commit()
-    ingest_source(db, source.id, IngestPayload(
-        kind="text",
-        text=(
-            "Single-coil pickups sound bright and glassy, while humbuckers "
-            "sound thicker and warmer because they cancel hum by pairing two "
-            "coils wound in opposite directions. Pickup height and magnet "
-            "type both shape the resulting tone as well."
-        ) * 4,
-    ))
+def test_post_curricula_interview_starts_at_who(client, db):
+    db.add(Student(name="Maria", level="advanced"))
     db.commit()
 
-    interview = _start(db)
-    answer_interview(db, interview, {"name": "X"})
-    answer_interview(db, interview, {"weeks": 4, "minutes_per_session": 30})
-    answer_interview(db, interview, {"source_ids": [str(source.id)]})
-
-    assert interview.step == "preview"
-    modules = interview.preview["modules"]
-    assert len(modules) == 1
-    module = modules[0]
-    assert module["gap"] is False, f"expected a real grounded hit, got: {module}"
-    assert module["passages"], "expected at least one real retrieved passage"
-    passage = module["passages"][0]
-    assert passage["source_title"] == "Getting Great Guitar Sounds"
-    assert passage["page_no"] == 1  # D2: a non-paginated text source gets exactly one Page(page_no=1)
-    assert isinstance(passage["score"], float)
-
-
-def test_a_module_with_no_passages_above_the_floor_is_flagged_as_a_gap(db, monkeypatch):
-    monkeypatch.setattr(interview_mod, "get_provider", lambda: _FakePlanProvider(_PLAN_TWO_MODULES))
-    # Real ground_topic, real (empty) library — nothing above the floor for
-    # EITHER module, since nothing has been ingested for this fresh db.
-    interview = _start(db=db)
-    answer_interview(db, interview, {"name": "X"})
-    answer_interview(db, interview, {"weeks": 4, "minutes_per_session": 30})
-    answer_interview(db, interview, {"source_ids": []})
-
-    preview = interview.preview
-    assert preview["gap_count"] == 2
-    assert all(m["gap"] for m in preview["modules"])
-    assert all(m["passages"] == [] for m in preview["modules"])
-
-
-# ---------------------------------------------------------------------------
-# GET is refresh-safe: it returns the current state and never recomputes
-# the (cached) preview.
-# ---------------------------------------------------------------------------
-
-def test_get_interview_returns_current_state_without_recomputing_preview(db, monkeypatch):
-    provider = _FakePlanProvider(_PLAN_ONE_MODULE)
-    monkeypatch.setattr(interview_mod, "get_provider", lambda: provider)
-    monkeypatch.setattr(interview_mod, "ground_topic", lambda *a, **k: [_passage()])
-
-    interview = _start(db)
-    answer_interview(db, interview, {"name": "X"})
-    answer_interview(db, interview, {"weeks": 4, "minutes_per_session": 30})
-    answer_interview(db, interview, {"source_ids": []})
-    assert len(provider.calls) == 1, "the plan call should have run exactly once, at the sources step"
-
-    # A GET-equivalent read (describe_step/render_state) must not call the
-    # model again — it only reads the cached `interview.preview` column.
-    state = render_state(db, interview)
-    assert state["step"] == "preview"
-    assert state["findings"] == interview.preview
-    assert len(provider.calls) == 1, "a refresh must not re-run the plan LLM call"
-
-
-# ---------------------------------------------------------------------------
-# The HTTP routes.
-# ---------------------------------------------------------------------------
-
-def test_post_curricula_interview_starts_at_who_with_options(client, db):
-    student = Student(name="Maria", level="advanced")
-    db.add(student); db.commit()
-
     r = client.post("/curricula/interview", json={"title": "Tone Fundamentals"})
+
     assert r.status_code == 201, r.text
     body = r.json()
     assert body["step"] == "who"
-    assert body["question"]
-    assert {"value": str(student.id), "label": "Maria (advanced)"} in body["options"]
-    interview_id = body["interview_id"]
+    assert any(o["label"] == "Maria (advanced)" for o in body["options"])
 
-    r2 = client.get(f"/curricula/interview/{interview_id}")
-    assert r2.status_code == 200, r2.text
+    r2 = client.get(f"/curricula/interview/{body['interview_id']}")
+    assert r2.status_code == 200
     assert r2.json()["step"] == "who"
 
 
 def test_get_unknown_interview_404s(client):
     r = client.get(f"/curricula/interview/{uuid.uuid4()}")
-    assert r.status_code == 404, r.text
+    assert r.status_code == 404
 
 
 def test_answer_route_reasks_on_a_bad_answer_without_advancing(client):
-    r = client.post("/curricula/interview", json={"title": "Tone Fundamentals"})
+    r = client.post("/curricula/interview", json={"title": "Tone"})
     interview_id = r.json()["interview_id"]
 
-    r2 = client.post(f"/curricula/interview/{interview_id}/answer", json={"answer": {}})
+    r2 = client.post(f"/curricula/interview/{interview_id}/answer",
+                     json={"answer": {"level": "wizard"}})
+
     assert r2.status_code == 200, r2.text
-    body = r2.json()
-    assert body["step"] == "who"
-    assert body["error"]
+    assert r2.json()["step"] == "who"
+    assert r2.json()["error"]
 
 
-def test_answer_route_advances_through_sources_and_computes_a_real_preview(client, db, monkeypatch):
-    monkeypatch.setattr(interview_mod, "get_provider", lambda: _FakePlanProvider(_PLAN_ONE_MODULE))
-    monkeypatch.setattr(interview_mod, "ground_topic", lambda *a, **k: [_passage()])
-
-    r = client.post("/curricula/interview", json={"title": "Tone Fundamentals"})
-    interview_id = r.json()["interview_id"]
-
-    client.post(f"/curricula/interview/{interview_id}/answer", json={"answer": {"name": "X"}})
-    client.post(
-        f"/curricula/interview/{interview_id}/answer",
-        json={"answer": {"weeks": 4, "minutes_per_session": 30}},
-    )
-    r = client.post(
-        f"/curricula/interview/{interview_id}/answer", json={"answer": {"source_ids": []}},
-    )
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["step"] == "preview"
-    assert body["findings"]["modules"][0]["passages"][0]["source_title"] == "Getting Great Guitar Sounds"
-
-
-def test_confirm_step_enqueues_the_job_with_chosen_source_ids_and_allow_general_and_returns_202(
-    client, db, monkeypatch,
-):
-    """THE test the brief calls out by name: confirm must enqueue a REAL
-    `GenerationJob` carrying the tutor's chosen `source_ids`/`allow_general`,
-    and return 202 — reusing the EXISTING enqueue/poll machinery untouched.
-    `run_curriculum_job` is monkeypatched on `app.routers.curriculum` (the
-    KEY TEST GOTCHA, see this module's docstring) so no real ~90s LLM
-    generation fires during this test.
-    """
-    scheduled_job_ids = []
-    monkeypatch.setattr(curriculum_router, "run_curriculum_job", scheduled_job_ids.append)
-    monkeypatch.setattr(interview_mod, "get_provider", lambda: _FakePlanProvider(_PLAN_ONE_MODULE))
-    monkeypatch.setattr(interview_mod, "ground_topic", lambda *a, **k: [_passage()])
-
-    source = _make_source(db)
+def test_confirm_returns_202_with_BOTH_a_job_id_and_a_root_id(client, db, monkeypatch):
+    """The tree already EXISTS by the time the 202 lands — so the board opens
+    instantly on a real curriculum with a progress bar, instead of on a spinner
+    waiting for a job that will not produce anything to look at for four minutes."""
+    scheduled = []
+    monkeypatch.setattr(curriculum_router, "run_curriculum_draft_job", scheduled.append)
+    source = _source(db)
 
     r = client.post("/curricula/interview", json={"title": "Tone Fundamentals"})
-    interview_id = r.json()["interview_id"]
-    client.post(f"/curricula/interview/{interview_id}/answer", json={"answer": {"name": "X"}})
-    client.post(
-        f"/curricula/interview/{interview_id}/answer",
-        json={"answer": {"weeks": 4, "minutes_per_session": 30}},
-    )
-    client.post(
-        f"/curricula/interview/{interview_id}/answer",
-        json={"answer": {"source_ids": [str(source.id)]}},
-    )
-    client.post(f"/curricula/interview/{interview_id}/answer", json={"answer": {"proceed": True}})
+    iid = r.json()["interview_id"]
+    post = lambda answer: client.post(  # noqa: E731
+        f"/curricula/interview/{iid}/answer", json={"answer": answer})
 
-    r = client.post(
-        f"/curricula/interview/{interview_id}/answer",
-        json={"answer": {"approved": True, "allow_general": True}},
-    )
+    post({"student_id": None, "level": "all_levels"})
+    post({"weeks": 8, "sessions_per_week": 1, "minutes_per_session": 50})
+    post({"brief": "get him playing blues", "gap_policy": "general_knowledge"})
+    post({"source_ids": [str(source.id)]})
+    post({"regenerate": True})
+    state = client.get(f"/curricula/interview/{iid}").json()
+    post({"outline": state["findings"]})
+
+    r = post({"approved": True})
+
     assert r.status_code == 202, r.text
-    job_id = uuid.UUID(r.json()["job_id"])
-    assert scheduled_job_ids == [job_id]
+    body = r.json()
+    job_id = uuid.UUID(body["job_id"])
+    root_id = uuid.UUID(body["root_id"])
+    assert scheduled == [job_id]
 
     job = db.get(GenerationJob, job_id)
-    assert job is not None
-    assert job.kind == "curriculum"
-    assert job.params["source_ids"] == [str(source.id)]
-    assert job.params["allow_general"] is True
+    assert job.kind == "curriculum_draft"
+    assert job.params["root_id"] == str(root_id)
+
+    # And the board can already be opened on it.
+    tree = client.get(f"/curricula/{root_id}")
+    assert tree.status_code == 200, tree.text
+    assert tree.json()["children"], "the tree is materialized BEFORE the draft runs"
 
     db.expire_all()
-    interview = db.get(CurriculumInterview, uuid.UUID(interview_id))
+    interview = db.get(CurriculumInterview, uuid.UUID(iid))
     assert interview.step == "done"
     assert interview.job_id == job_id
-
-
-# ---------------------------------------------------------------------------
-# THE LIVE ACCEPTANCE TEST — walks the interview's grounding step against the
-# REAL library (the `guitar` app db) with the REAL model. READ-ONLY BY
-# CONTRACT: `_compute_preview` only ever calls `ground_topic` (a SELECT) and
-# `get_provider().guided_json` (an LLM call) — it never `db.add()`s/
-# `db.commit()`s anything, so this test constructs its `CurriculumInterview`
-# purely in memory (never `db.add()`ed) and never persists it — mirrors
-# `test_curriculum_grounding.py`'s own live test's reasoning for why it calls
-# the building blocks directly rather than the full (write-performing)
-# `generate_curriculum`/interview-creation path against the real app db.
-# ---------------------------------------------------------------------------
-import os
-
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
-APP_DATABASE_URL = os.environ.get(
-    "APP_DATABASE_URL", "postgresql+psycopg://guitar:guitar@localhost:5434/guitar",
-)
-
-
-@pytest.fixture(scope="module")
-def app_db():
-    engine = create_engine(APP_DATABASE_URL)
-    Session = sessionmaker(bind=engine)
-    session = Session()
-    try:
-        yield session
-    finally:
-        session.close()
-        engine.dispose()
-
-
-@pytest.mark.integration
-def test_a_real_interview_preview_is_genuinely_grounded_in_his_library(app_db):
-    substantive_ids = app_db.scalars(
-        select(KnowledgeSource.id).where(
-            KnowledgeSource.char_count.is_not(None),
-            KnowledgeSource.char_count >= interview_mod.LEN_FLOOR,
-        )
-    ).all()
-    assert substantive_ids, "expected at least one substantive source in the real library"
-
-    interview = CurriculumInterview(
-        title="Getting a Great Guitar Tone", domain=None, step="preview",
-        answers={
-            "who": {"student_id": None, "name": "Live Test Student", "level": "beginner", "language": "en"},
-            "duration": {"weeks": 10, "minutes_per_session": 45},
-            "sources": {"source_ids": [str(s) for s in substantive_ids]},
-        },
-    )
-
-    preview = interview_mod._compute_preview(app_db, interview)
-
-    print(f"\nCOURSE TITLE: {preview['course_title']}")
-    print(f"{len(preview['modules'])} modules; {preview['gap_count']} gap(s).\n")
-    for m in preview["modules"]:
-        tag = "GAP" if m["gap"] else "GROUNDED"
-        print(f"MODULE: {m['title']!r}  ({tag})")
-        print(f"  objective: {m['objective']}")
-        for p in m["passages"]:
-            print(f"  CITE: {p['source_title']!r} p.{p['page_no']} score={p['score']}")
-        print()
-
-    grounded = [m for m in preview["modules"] if not m["gap"]]
-    gaps = [m for m in preview["modules"] if m["gap"]]
-    assert grounded, "expected at least one module to genuinely ground in the real library"
-    for m in grounded:
-        assert all(p["source_title"] for p in m["passages"])
-    assert preview["gap_count"] == len(gaps)
+    assert interview.root_id == root_id

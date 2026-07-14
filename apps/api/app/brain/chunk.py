@@ -19,6 +19,31 @@ _SENTENCE_ENDERS = (". ", "! ", "? ", ".\n", "!\n", "?\n")
 # caller in _chunk_one_section.
 _MIN_BOUNDARY_LOOKBACK = 120
 
+# STOP CREATING JUNK (Plan 13, Stage 4.6). A chunk this short cannot answer
+# anything, but it CAN be retrieved, cited, and shown to the tutor as if it were
+# evidence — and it has been. The live index contains a 19-character chunk whose
+# entire text is "PART ONE The Guitar" (a heading OCR'd off an otherwise blank
+# page); it scores 0.64 against real tone queries and has been handed to the
+# model as grounding. A 38-char sibling reads "There is no visible text on this
+# page."
+#
+# `retrieve.py`'s floor already refuses to RETRIEVE these (MIN_PASSAGE_CHARS=200,
+# calibrated with a wide margin). This is the other half: stop CREATING them, so
+# they are not in the corpus at all — where they otherwise still distort BM25's
+# IDF and document-length statistics for every other query.
+#
+# 40, not 200: this is a "carries no information whatsoever" cut, not the
+# relevance floor. The two numbers answer different questions and are deliberately
+# not the same constant.
+#
+# APPLIED TO THE SECTION, NOT TO EACH DRAFT. Dropping short *drafts* would also
+# discard the trailing window of a legitimately long section whenever the tail
+# happens to land short — silently losing real text from the end of a real page.
+# The junk this exists to kill is not a short tail; it is an entire extracted
+# section that contains nothing (a blank scan, a stray heading), and that is what
+# gets filtered.
+MIN_CHUNK_CHARS = 40
+
 
 @dataclass
 class ChunkDraft:
@@ -35,7 +60,8 @@ def chunk_sections(
     Never merges text across a Section boundary: each Section is windowed on
     its own, and its heading/page are carried through unchanged as every
     resulting draft's section_path/page. A Section shorter than target_chars
-    yields exactly one draft; an empty/whitespace-only Section yields none.
+    yields exactly one draft; an empty/whitespace-only Section yields none —
+    and so does one shorter than `MIN_CHUNK_CHARS` (see that constant).
     """
     if target_chars <= 0:
         raise ValueError("target_chars must be positive")
@@ -44,6 +70,8 @@ def chunk_sections(
 
     drafts: list[ChunkDraft] = []
     for section in sections:
+        if len(section.text.strip()) < MIN_CHUNK_CHARS:
+            continue
         drafts.extend(_chunk_one_section(section, target_chars, overlap_chars))
     return drafts
 

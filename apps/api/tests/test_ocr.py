@@ -1,6 +1,6 @@
 import pytest
 from app.brain.ocr import OCR_PROMPT, ocr_source
-from app.models.knowledge import Chunk, KnowledgeSource, Page
+from app.models.knowledge import EMBED_DIM, Chunk, KnowledgeSource, Page
 
 
 class _Vision:
@@ -17,7 +17,7 @@ class _Vision:
         return r
 
     def embed(self, texts, *, is_query=False):
-        return [[0.1] * 2560 for _ in texts]
+        return [[0.1] * EMBED_DIM for _ in texts]
 
 
 class _VisionWithFailingEmbed(_Vision):
@@ -32,7 +32,7 @@ class _VisionWithFailingEmbed(_Vision):
         self.embed_calls += 1
         if self.embed_calls in self.fail_calls:
             raise RuntimeError("embed service hiccup")
-        return [[0.1] * 2560 for _ in texts]
+        return [[0.1] * EMBED_DIM for _ in texts]
 
 
 def _src_with_pending_pages(db, n):
@@ -51,7 +51,7 @@ def test_transcribes_each_pending_page_and_embeds_chunks_linked_to_it(db, tmp_pa
     for i in (1, 2):
         p = tmp_path / str(src.id); p.mkdir(exist_ok=True)
         (p / f"{i:04d}.jpg").write_bytes(b"jpeg")
-    fake = _Vision(["Page one about humbuckers.", "Page two about tube screamers."])
+    fake = _Vision(["Page one, about humbuckers and how their two coils cancel mains hum.", "Page two, about Tube Screamer overdrive pedals and their midrange hump."])
     monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
@@ -77,7 +77,7 @@ def test_a_failing_page_is_retried_once_then_marked_failed_without_losing_good_p
         p = tmp_path / str(src.id); p.mkdir(exist_ok=True)
         (p / f"{i:04d}.jpg").write_bytes(b"jpeg")
     # page 1 succeeds; page 2 fails twice (initial + one retry)
-    fake = _Vision(["Good page.", RuntimeError("vl timeout"), RuntimeError("vl timeout")])
+    fake = _Vision(["A good page of transcribed text about amplifier gain staging.", RuntimeError("vl timeout"), RuntimeError("vl timeout")])
     monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
@@ -86,7 +86,7 @@ def test_a_failing_page_is_retried_once_then_marked_failed_without_losing_good_p
     assert (result.total, result.ready, result.failed) == (2, 1, 1)
     pages = db.query(Page).filter_by(source_id=src.id).order_by(Page.page_no).all()
     assert pages[0].status == "ready"          # page 1 survived page 2's failure
-    assert pages[0].text == "Good page."
+    assert pages[0].text == "A good page of transcribed text about amplifier gain staging."
     assert pages[1].status == "failed"
     assert "vl timeout" in pages[1].ocr_error
     assert fake.calls == 3                     # 1 + (1 initial + 1 retry)
@@ -170,7 +170,7 @@ def test_embed_failure_on_one_page_does_not_abort_the_batch(db, tmp_path, monkey
         p = tmp_path / str(src.id); p.mkdir(exist_ok=True)
         (p / f"{i:04d}.jpg").write_bytes(b"jpeg")
     fake = _VisionWithFailingEmbed(
-        ["Page one text.", "Page two text.", "Page three text."],
+        ["Page one text, transcribed from the scan and long enough to chunk.", "Page two text, transcribed from the scan and long enough to chunk.", "Page three text, transcribed from the scan and long enough to chunk."],
         fail_calls={1},   # embed() raises only for page 1's chunks
     )
     monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
@@ -207,7 +207,7 @@ def test_invariant_ready_pages_always_have_chunks(db, tmp_path, monkeypatch):
         p = tmp_path / str(src.id); p.mkdir(exist_ok=True)
         (p / f"{i:04d}.jpg").write_bytes(b"jpeg")
     # page 1's embed fails; page 2 succeeds fully
-    fake = _VisionWithFailingEmbed(["Page one.", "Page two."], fail_calls={1})
+    fake = _VisionWithFailingEmbed(["Page one of the book, transcribed in full and quite legible.", "Page two of the book, transcribed in full and also legible."], fail_calls={1})
     monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
@@ -255,7 +255,7 @@ def test_missing_jpeg_on_disk_yields_a_clear_error_not_a_raw_traceback(db, tmp_p
     # only page 2's jpeg exists on disk; page 1's is missing entirely
     p = tmp_path / str(src.id); p.mkdir(exist_ok=True)
     (p / "0002.jpg").write_bytes(b"jpeg")
-    fake = _Vision(["Page two text."])
+    fake = _Vision(["Page two text, transcribed from the scan and long enough to chunk."])
     monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
@@ -286,7 +286,7 @@ def test_ocr_source_rolls_up_to_ready_with_summed_char_count(db, tmp_path, monke
     for i in (1, 2):
         p = tmp_path / str(src.id); p.mkdir(exist_ok=True)
         (p / f"{i:04d}.jpg").write_bytes(b"jpeg")
-    fake = _Vision(["Page one about humbuckers.", "Page two about tube screamers."])
+    fake = _Vision(["Page one, about humbuckers and how their two coils cancel mains hum.", "Page two, about Tube Screamer overdrive pedals and their midrange hump."])
     monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
@@ -328,7 +328,7 @@ def test_ocr_source_partial_success_rolls_up_to_ready_counting_only_ready_pages(
         p = tmp_path / str(src.id); p.mkdir(exist_ok=True)
         (p / f"{i:04d}.jpg").write_bytes(b"jpeg")
     # page 1 succeeds; page 2 fails twice (initial + one retry)
-    fake = _Vision(["Good page text.", RuntimeError("vl timeout"), RuntimeError("vl timeout")])
+    fake = _Vision(["Good page text, transcribed from the scan and long enough to chunk.", RuntimeError("vl timeout"), RuntimeError("vl timeout")])
     monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
@@ -353,7 +353,7 @@ def test_ocr_source_rollup_failure_does_not_undo_committed_page_work(db, tmp_pat
     monkeypatch.setattr("app.brain.ocr.settings.media_dir", str(tmp_path))
     p = tmp_path / str(src.id); p.mkdir(exist_ok=True)
     (p / "0001.jpg").write_bytes(b"jpeg")
-    fake = _Vision(["Some transcribed text."])
+    fake = _Vision(["Some transcribed text from a real page of the tutor's book."])
     monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
@@ -375,7 +375,7 @@ def test_ocr_source_rollup_failure_does_not_undo_committed_page_work(db, tmp_pat
     assert (result.total, result.ready, result.failed) == (1, 1, 0)
     page = db.query(Page).filter_by(source_id=src.id).one()
     assert page.status == "ready"           # already-committed page work survives
-    assert page.text == "Some transcribed text."
+    assert page.text == "Some transcribed text from a real page of the tutor's book."
 
 
 # --- Review fix (minor): a page stuck at ocr_running (process killed
@@ -393,7 +393,7 @@ def test_a_page_stuck_at_ocr_running_is_resumed_on_the_next_run(db, tmp_path, mo
     monkeypatch.setattr("app.brain.ocr.settings.media_dir", str(tmp_path))
     p = tmp_path / str(src.id); p.mkdir(exist_ok=True)
     (p / "0001.jpg").write_bytes(b"jpeg")
-    fake = _Vision(["Recovered page text."])
+    fake = _Vision(["Recovered page text, transcribed from the scan and long enough to chunk."])
     monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
@@ -403,4 +403,4 @@ def test_a_page_stuck_at_ocr_running_is_resumed_on_the_next_run(db, tmp_path, mo
     assert fake.calls == 1
     reloaded = db.get(Page, page.id)
     assert reloaded.status == "ready"
-    assert reloaded.text == "Recovered page text."
+    assert reloaded.text == "Recovered page text, transcribed from the scan and long enough to chunk."

@@ -153,23 +153,30 @@ def test_the_retrieved_passage_actually_reaches_the_model(db, monkeypatch):
     assert sent[-1]["role"] == "user"
 
 
-def test_low_relevance_hits_are_treated_as_no_hits(db, monkeypatch):
-    """A hit that clears no meaningful relevance floor (near-zero cosine
-    similarity — i.e. essentially unrelated to the query) must not be
-    presented as grounding: "he searched pick thickness and got noise" is a
-    worse product than "his library doesn't cover this."
-    """
-    def _fake_search(db_, q, k=5):
-        return [_hit("completely unrelated passage about capos", page=99, score=0.0)]
+def test_the_pre_hop_no_longer_owns_a_relevance_floor(db, monkeypatch):
+    """The floor MOVED (Plan 13, Stage 4.4). `loop.py` used to own
+    `_RELEVANCE_FLOOR = 0.15` and filter `search()`'s hits itself — the third
+    of three floors in the codebase, disagreeing with the other two, and a raw
+    cosine threshold that would have become meaningless the moment `Hit.score`
+    turned into an RRF fusion score topping out near 0.033.
 
-    monkeypatch.setattr(agent_loop, "search", _fake_search)
+    So the pre-hop now cites exactly what `search()` returns, and `search()` is
+    the one place that decides what is worth returning (`retrieve._passes_floor`,
+    which has the measured table). This test pins that: an irrelevant passage is
+    NOT filtered here — if it ever reaches this point, that is a `search()` bug,
+    and it must be fixed there rather than papered over in the agent loop.
+    """
+    junk = _hit("completely unrelated passage about capos", page=99, score=0.0)
+    monkeypatch.setattr(agent_loop, "search", lambda db_, q, k=5: [junk])
     turn = AssistantTurn(content="General answer.", tool_calls=[])
-    fake_provider = _FakeProvider([turn])
-    monkeypatch.setattr(agent_loop, "get_provider", lambda: fake_provider)
+    monkeypatch.setattr(agent_loop, "get_provider", lambda: _FakeProvider([turn]))
 
     result = run_agent_turn(db, [{"role": "user", "content": "what does pick thickness do to tone?"}])
 
-    assert result.citations == []
+    assert len(result.citations) == 1, (
+        "the pre-hop must cite what search() returned — it no longer re-filters, "
+        "and a floor re-introduced here would be the fourth one"
+    )
 
 
 # ---------------------------------------------------------------------------

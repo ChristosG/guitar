@@ -179,21 +179,16 @@
     "tree": {
       "estMinutes": "{count} min",
       "editTitlePlaceholder": "Block title",
-      "save": "Save",
       "cancel": "Cancel",
       "delete": "Delete",
-      "deleting": "Deleting…",
       "deleteError": "Could not delete this block.",
       "updateError": "Could not save this title.",
       "segmentAction": "Segment into sessions",
-      "noChildren": "Nothing here yet.",
       "collapse": "Collapse",
       "expand": "Expand",
       "deliveryHeading": "Delivery sessions",
       "attachArtifactAction": "Add artifact",
       "attachedArtifactsHeading": "Attached artifacts",
-      "artifactsLoading": "Loading artifacts…",
-      "artifactsError": "Could not load attached artifacts.",
       "kinds": {
         "course": "Course",
         "module": "Module",
@@ -210,7 +205,29 @@
         "rootWarning": "This is the whole curriculum. It took the model hours to write and none of it can be brought back.",
         "irreversible": "This cannot be undone.",
         "confirm": "Delete"
-      }
+      },
+      "moveUp": "Move up",
+      "moveDown": "Move down",
+      "reorderError": "Could not reorder this.",
+      "addModule": "Add a module",
+      "addModuleError": "Could not add the module.",
+      "addLesson": "Add a lesson",
+      "addLessonError": "Could not add the lesson.",
+      "newModuleTitle": "New module",
+      "newLessonTitle": "New lesson",
+      "deepen": "Deepen",
+      "deepenError": "Could not deepen this lesson.",
+      "wordCount": "{count, number} words",
+      "citation": "{source}, p. {page}",
+      "draftStatus": {
+        "queued": "Queued",
+        "drafting": "Writing",
+        "ready": "Drafted",
+        "failed": "Failed"
+      },
+      "libraryWhole": "Written from {sources, plural, one {# source} other {# sources}} of your library — {tokens, number} tokens, read whole.",
+      "libraryDegraded": "Your library ({tokens, number} tokens) was too large to read whole — the lessons were drafted from per-module search instead of the full text.",
+      "shapeWords": "~{words, number} words per lesson"
     },
     "segmentDialog": {
       "heading": "Segment into sessions",
@@ -241,8 +258,6 @@
       "introDescription": "Tell me the course title, and I'll guide you through the rest — one question at a time.",
       "titleLabel": "Course title",
       "titlePlaceholder": "e.g. Getting a Great Guitar Tone",
-      "domainLabel": "Domain (optional)",
-      "domainPlaceholder": "tone, technique, theory…",
       "startSubmit": "Start",
       "startError": "Could not start the interview.",
       "answerError": "Could not save that answer.",
@@ -251,40 +266,111 @@
       "steps": {
         "who": {
           "heading": "Who is this curriculum for?",
-          "newStudentToggle": "Someone new",
-          "namePlaceholder": "Student's name",
-          "levelPlaceholder": "Level (optional)",
-          "languagePlaceholder": "Language code (optional)"
+          "noStudent": "No one in particular",
+          "levelHint": "Then just tell me the level.",
+          "levels": {
+            "all_levels": "All levels",
+            "beginner": "Beginner",
+            "intermediate": "Intermediate",
+            "advanced": "Advanced"
+          }
         },
         "duration": {
-          "heading": "How long should this run?",
+          "heading": "How long does this run?",
           "weeksLabel": "Weeks",
+          "perWeekLabel": "Sessions/week",
           "minutesLabel": "Minutes per session"
         },
-        "sources": {
-          "heading": "Which of your library sources should this draw on?",
-          "hint": "Shown with type and character count so you can tell real material from filler — nothing is pre-excluded.",
-          "empty": "Your library is empty — proceeding will draw on general knowledge only.",
-          "charCount": "{count} chars"
+        "scope": {
+          "heading": "In your own words: what is this course FOR?",
+          "hint": "This is what the model reads before it writes a line — and re-reads for every single lesson.",
+          "briefPlaceholder": "What should the student be able to do at the end? What do you want covered?",
+          "policyHeading": "And when your library doesn't cover something?",
+          "policies": {
+            "library_only": "Only my library. Show me the gaps instead of filling them.",
+            "general_knowledge": "Fill the gaps from your general knowledge, clearly labelled.",
+            "web": "Search the web where it's needed, with the sources in front of me."
+          }
         },
-        "preview": {
-          "heading": "Here's what your library actually supports",
-          "gapCountZero": "Every module is grounded in your library.",
-          "gapSummary": "{count} of {total} modules have nothing in your library.",
-          "gapLabel": "Nothing in your library for this module.",
-          "citation": "{source}, p.{page}",
-          "proceed": "Looks good — continue"
+        "sources": {
+          "heading": "Which of your library sources should this be built from?",
+          "hint": "I read them WHOLE — not a search over them. What you pick here is literally what the model reads.",
+          "empty": "Your library is empty — this will draw on general knowledge only.",
+          "charCount": "{count, number} chars"
+        },
+        "outline": {
+          "working": "Reading your whole library and writing the course — this takes a moment…"
         },
         "confirm": {
-          "heading": "Ready to generate \"{title}\"?",
-          "allowGeneralLabel": "Fill gap modules from general knowledge (clearly labelled as not from your material)",
-          "approve": "Generate curriculum",
-          "generating": "Generating your curriculum — this can take a minute…",
-          "stillGenerating": "Still generating — reopen this dialog later to check on it.",
-          "error": "Could not generate the curriculum.",
-          "startOver": "Start a new interview"
+          "heading": "Ready? I'll write “{title}”.",
+          "summary": "{modules, plural, one {# module} other {# modules}} · {lessons, plural, one {# lesson} other {# lessons}} · ~{words, number} words · est. ${cost}",
+          "lessonCount": "{count, plural, =0 {no lessons} one {# lesson} other {# lessons}}",
+          "backgroundHint": "The lessons are written in the background. The board opens immediately — you can read module 1 while module 5 is still being written.",
+          "approve": "Write the lessons"
         }
       }
+    },
+    "tier": {
+      "library": "Your library",
+      "general_knowledge": "Claude's knowledge",
+      "web": "Web-researched",
+      "gap": "Gap"
+    },
+    "progress": {
+      "count": "{ready, number} of {total, number} lessons written",
+      "states": "{drafting, number} writing · {queued, number} queued · {failed, number} failed",
+      "resume": "Resume",
+      "resumeError": "Could not resume writing.",
+      "pollError": "Lost contact with the server — the lessons are still being written.",
+      "failedHint": "{failed, plural, one {# lesson could not be written} other {# lessons could not be written}}. Press Resume to retry it — the rest are safe."
+    },
+    "outline": {
+      "heading": "Here is the course. Change anything you like.",
+      "hint": "Rename, add, delete, reorder. Not a word has been drafted yet — this is the cheap moment to change your mind.",
+      "moduleTitleLabel": "Module title",
+      "objectiveLabel": "Objective",
+      "objectivePlaceholder": "What should the student be able to do after this module?",
+      "tierLabel": "Where this comes from",
+      "tiers": {
+        "library": "📚 From my library",
+        "general_knowledge": "🧠 From Claude's knowledge",
+        "web": "🌐 Search the web",
+        "gap": "⚠️ Leave it empty"
+      },
+      "gapWarning": "Your library doesn't cover this and you asked for your own material only — no content will be written for it. Change where it comes from, or delete the module.",
+      "lessonTitleLabel": "Lesson title",
+      "minutesLabel": "Minutes",
+      "lessonWords": "~{words, number} w.",
+      "deleteModule": "Delete module",
+      "deleteLesson": "Delete lesson",
+      "addModule": "Add a module",
+      "addLesson": "Add a lesson",
+      "newModuleTitle": "New module",
+      "newLessonTitle": "New lesson",
+      "moveUp": "Move up",
+      "moveDown": "Move down",
+      "footer": "{modules, plural, one {# module} other {# modules}} · {lessons, plural, one {# lesson} other {# lessons}} · ~{words, number} words · est. ${cost}",
+      "regenerate": "Rewrite it",
+      "accept": "Continue",
+      "confirmDeleteModule": {
+        "title": "Delete the module “{title}”?",
+        "body": "{count, plural, =0 {It has no lessons yet.} one {Its # lesson goes with it.} other {Its # lessons go with it.}} Nothing has been drafted yet, so no work is lost.",
+        "confirm": "Delete"
+      },
+      "confirmDeleteLesson": {
+        "title": "Delete the lesson “{title}”?",
+        "confirm": "Delete"
+      }
+    },
+    "extend": {
+      "trigger": "Extend with chat",
+      "placeholder": "e.g. change this and give more detail about the amp",
+      "submit": "Rewrite it",
+      "cancel": "Cancel",
+      "undo": "Undo",
+      "undoError": "Could not undo that.",
+      "error": "Could not rewrite this block.",
+      "working": "Rewriting…"
     }
   },
   "library": {

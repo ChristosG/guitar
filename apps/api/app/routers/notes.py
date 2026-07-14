@@ -1,8 +1,10 @@
 """`/notes` routes: CRUD for free-form teaching notes + promote-to-Brain.
 
-No-auth PoC posture, same as `routers/artifacts.py`/`routers/students.py` —
-no authentication/authorization here either; this deploys origin-locked
-behind Cloudflare for a single user.
+Auth: every route here sits behind the `gt_session` password gate
+(`app/auth/middleware.py`) — a whole-API ASGI middleware, not a per-router
+dependency, so there is nothing to declare in this file. One tutor, one
+password; there is still no authorization model, because there is nobody to
+authorize against anybody else.
 """
 from uuid import UUID
 

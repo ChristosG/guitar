@@ -24,12 +24,12 @@ retrieve, so it invented answers instead. Two independent causes, pinned here:
    `httpx.stream`, which no longer sits on this path at all.
 """
 from app.brain.ingest import IngestPayload, ingest_source
-from app.models.knowledge import KnowledgeSource, Page
+from app.models.knowledge import EMBED_DIM, KnowledgeSource, Page
 
 
 class _Provider:
     def embed(self, texts, *, is_query=False):
-        return [[0.1] * 2560 for _ in texts]
+        return [[0.1] * EMBED_DIM for _ in texts]
 
 
 def test_zero_character_ingest_is_empty_never_ready(db, monkeypatch):
@@ -53,7 +53,7 @@ def test_real_content_still_becomes_ready_with_a_page(db, monkeypatch):
     db.add(src)
     db.commit()
 
-    ingest_source(db, src.id, IngestPayload(kind="text", text="Humbuckers cancel hum."))
+    ingest_source(db, src.id, IngestPayload(kind="text", text="Humbuckers cancel mains hum by combining two coils wound in opposition."))
 
     got = db.get(KnowledgeSource, src.id)
     assert got.status == "ready"
@@ -73,7 +73,7 @@ def test_chunks_carry_a_real_page_id_after_ingest(db, monkeypatch):
     db.add(src)
     db.commit()
 
-    ingest_source(db, src.id, IngestPayload(kind="text", text="Humbuckers cancel hum."))
+    ingest_source(db, src.id, IngestPayload(kind="text", text="Humbuckers cancel mains hum by combining two coils wound in opposition."))
 
     chunks = db.query(Chunk).filter_by(source_id=src.id).all()
     assert len(chunks) >= 1

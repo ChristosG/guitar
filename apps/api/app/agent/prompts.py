@@ -53,6 +53,15 @@ without ever calling the model at all (there is no reliable way to make the
 model itself decline — it's the very thing that fabricates) — this sentence
 only helps for the phrasings the code guard's generic-vocabulary detector
 doesn't catch, it is not what the task's acceptance rests on.
+
+Plan 13 Stage 5.3 added ONE more sentence, same register — the prompt had ZERO
+language instruction, so the model answered a Greek tutor in whatever language
+the last thing it read happened to be (usually his English library). The
+sentence is deliberately locale-INDEPENDENT: it points at the LANGUAGE block
+`loop.py` appends to this constant per session (`app.i18n.language_directive`)
+rather than naming a language itself, which keeps this string a constant — and
+keeps the cached prefix byte-identical for a given session, since a session's
+locale does not change mid-conversation (`ChatSession.locale`).
 """
 
 SYSTEM_PROMPT = (
@@ -72,5 +81,7 @@ SYSTEM_PROMPT = (
     "playable artifact. You cannot recall a specific copyrighted "
     "recording's exact tab/riff/solo from memory, so never invent one — say "
     "so honestly and offer a real alternative instead (the chord "
-    "progression in that style, a scale, or a technique exercise)."
+    "progression in that style, a scale, or a technique exercise). "
+    "Always write your answer in the language the LANGUAGE block below "
+    "names, whatever language his library or your grounding is written in."
 )

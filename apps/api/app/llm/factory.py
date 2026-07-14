@@ -1,30 +1,84 @@
-from functools import lru_cache
+from fastapi import HTTPException
 
-from app.config import settings
 from app.llm.base import LLMProvider
 from app.llm.claude import ClaudeProvider
+from app.llm.errors import LLMNotConfigured
 from app.llm.qwen import QwenVLLM
+from app.settings_store import LLMConfig, resolve_llm_config
+
+# Fingerprint -> provider. NOT an `lru_cache(maxsize=1)`, and that change is the
+# whole of Plan 13 Task 3.4's runtime half.
+#
+# THE TRAP THIS REPLACES: the key now arrives at RUNTIME, from a web form. A
+# process-lifetime cache keyed on nothing would keep serving a provider built
+# from the OLD key until someone restarted the container — so the tutor pastes
+# the corrected key, clicks Test, and watches it fail *with the same error*.
+# That is precisely the moment a non-technical user concludes the software is
+# broken and stops. The cache is therefore keyed on the CONTENT of the config —
+# `(provider, model, sha256(key)[:16])` — so a stale entry is not merely
+# unlikely, it is unreachable: a changed key is a different dict key.
+# `clear_provider_cache()` (called on every write in `settings_store`) is belt
+# to that braces, not the mechanism.
+#
+# Unbounded in principle; in practice it holds one entry per distinct key the
+# tutor has pasted in this process's lifetime — a handful at the very worst.
+_PROVIDERS: dict[tuple[str, str, str], LLMProvider] = {}
 
 
-@lru_cache(maxsize=1)
+def _build(cfg: LLMConfig) -> LLMProvider:
+    if cfg.provider == "claude":
+        return ClaudeProvider(api_key=cfg.api_key, model=cfg.model)
+    if cfg.provider == "qwen":
+        return QwenVLLM()
+    raise ValueError(
+        f"Unknown LLM_PROVIDER: {cfg.provider!r} (expected 'claude' or 'qwen')"
+    )
+
+
 def get_provider() -> LLMProvider:
     """The chat/vision provider. Embeddings come from `llm/embed_factory.py`
     (Claude has no embeddings endpoint — see `llm/base.py`).
 
-    THE `lru_cache` IS A TRAP AND IT IS SCHEDULED FOR REMOVAL (Plan 13, Task
-    3.4). The tutor will paste his Anthropic key into a Settings screen at
-    runtime; a process-lifetime cache keyed on nothing would keep serving a
-    provider built from the OLD key until someone restarted the container — so
-    "I fixed my key" would appear not to work, which is precisely the moment a
-    non-technical user gives up. Task 3.4 replaces this with a dict cache keyed
-    on `(provider, model, sha256(key)[:16])`, so even a missed invalidation
-    cannot serve a stale key indefinitely. The zero-arg signature stays, so no
-    call site changes.
+    ZERO-ARG SIGNATURE, DELIBERATELY UNCHANGED. Ten call sites — `agent/loop.py`,
+    `curriculum/generate.py`, `artifacts/generate.py`, `brain/ocr.py`,
+    `brain/retrieve.py`, `lessons/draft.py` — call this with no arguments and
+    not one of them knows a Settings screen exists. Threading a config through
+    all of them would push the tutor's API key into six modules that have no
+    business holding it.
+
+    Raises `LLMNotConfigured` when the provider is Claude and no key has been
+    pasted. `main.py` turns that into a 409, never a 500.
     """
-    if settings.llm_provider == "claude":
-        return ClaudeProvider()
-    if settings.llm_provider == "qwen":
-        return QwenVLLM()
-    raise ValueError(
-        f"Unknown LLM_PROVIDER: {settings.llm_provider!r} (expected 'claude' or 'qwen')"
-    )
+    cfg = resolve_llm_config()
+    fp = cfg.fingerprint
+    provider = _PROVIDERS.get(fp)
+    if provider is None:
+        provider = _build(cfg)
+        _PROVIDERS[fp] = provider
+    return provider
+
+
+def clear_provider_cache() -> None:
+    _PROVIDERS.clear()
+
+
+def require_llm_configured() -> None:
+    """A FastAPI dependency for the routes that ENQUEUE a `GenerationJob`.
+
+    The synchronous paths need nothing: they call `get_provider()` inside the
+    request, so an unconfigured key surfaces as a 409 on the spot via the
+    exception handler. The BACKGROUND paths are the problem — by the time
+    `run_curriculum_job` calls `get_provider()`, the request is gone, the 202 has
+    been returned, and the only place left to put the failure is `job.error`. The
+    tutor gets a red curriculum instead of an answer, and nothing tells him the
+    fix is two clicks away in Settings.
+
+    So: check first, enqueue second. No key means no job row at all.
+    """
+    try:
+        resolve_llm_config()
+    except LLMNotConfigured as e:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "llm_not_configured", "message": str(e)},
+        ) from e
