@@ -94,6 +94,8 @@ message avoids having to define "immediately around" as its own fuzzy rule.
 """
 import re
 
+from app.text.normalize import fold
+
 # Shape 1: the string-line shape (Chris's exact bluff). Standard-tuning
 # string letters ONLY (e/E/A/D/G/B) — not every letter of the alphabet —
 # immediately followed by `|`, so a markdown table cell (always separated by
@@ -144,6 +146,11 @@ def looks_like_tablature(text: str) -> bool:
 _TRIGGER_WORDS = {
     "riff", "riffs", "solo", "solos", "lick", "licks", "tab", "tabs",
     "intro", "outro", "chorus", "bridge", "verse",
+    # Greek (folded — see app/text/normalize.py). Without these, a fully-Greek
+    # request («φτιάξε μου την ταμπλατούρα του ...») contains no trigger at all
+    # and the guard never even looks at it.
+    "ταμπλατουρα", "ταμπλατουρες", "ταμπλατουρα", "ριφ", "σολο",
+    "εισαγωγη", "ρεφρεν",
 }
 
 # The closed, curated GENERIC vocabulary — see this module's own top-level
@@ -181,12 +188,91 @@ _GENERIC_MUSIC_TERMS = {
     "punk", "ambient", "acoustic", "electric",
     # the trigger words themselves are neutral in context
     *_TRIGGER_WORDS,
+
+    # -- GREEK (Plan 13, Task 5.2) -----------------------------------------
+    #
+    # `_WORD_RE` used to be `[a-z0-9]...` — ASCII-ONLY. Greek text was
+    # therefore INVISIBLE to this guard, with a consequence nobody noticed:
+    #
+    #   «δώσε μου το tab του Ζεϊμπέκικο της Ευδοκίας»  -> NOT declined.
+    #
+    # A Greek-titled song sailed straight through and the model fabricated a
+    # tab for it. For a GREEK tutor whose students ask for GREEK songs, the
+    # guard was wide open in exactly the language that matters most — while
+    # working perfectly for "Smells Like Teen Spirit", which is why every test
+    # passed.
+    #
+    # Making `_WORD_RE` Unicode-aware fixes that, but it inverts the risk: with
+    # Greek words suddenly visible, EVERY Greek word missing from this list
+    # reads as "evidence of a song title", and the guard would false-decline
+    # ordinary requests — making `generate_artifact` unreachable in the default
+    # locale, which is far worse than the bug we are fixing.
+    #
+    # So this list is the closed generic Greek vocabulary, folded (unaccented,
+    # lowercase — see `app/text/normalize.py`, because the accent MOVES under
+    # inflection). `tests/test_greek_guards.py` asserts a broad set of
+    # legitimate Greek requests are NOT declined; if a word is missing, that
+    # test fails rather than the tutor discovering it.
+    #
+    # stopwords / articles / pronouns / prepositions
+    "ο", "η", "το", "οι", "τα", "του", "της", "των", "τον", "την", "τους", "τις",
+    "ενα", "μια", "ενας", "μιας", "ενος", "μου", "σου", "μας", "σας",
+    "με", "σε", "για", "απο", "και", "στη", "στην", "στο", "στον", "στους",
+    "στις", "στα", "που", "ως", "ειναι", "θελω", "θα", "να", "μπορεις",
+    "παρακαλω", "καποιο", "καποια", "λιγο", "πιο", "οπως", "σαν", "χωρις",
+    # imperative verbs — how a tutor actually asks
+    "φτιαξε", "δωσε", "γραψε", "δειξε", "παιξε", "κανε", "δημιουργησε",
+    "ετοιμασε", "βαλε", "εξηγησε", "μαθε",
+    # note names (solfège — Greek uses these, not letters)
+    "ντο", "ρε", "μι", "φα", "σολ", "λα", "σι",
+    # qualities
+    "διεση", "υφεση", "ματζορε", "μινορε", "μειζονα", "ελασσονα", "μειζων",
+    "ελασσων",
+    # scales / modes
+    "κλιμακα", "κλιμακες", "πεντατονικη", "πεντατονικης", "μπλουζ",
+    "τροπος", "τροποι", "δωριος", "μιξολυδιος", "λυδιος", "φρυγιος",
+    "αρμονικη", "μελωδικη", "χρωματικη", "γκαμα",
+    # chords / progressions
+    "συγχορδια", "συγχορδιες", "συγχορδιων", "αρπεζ", "αρπισμος",
+    "ακολουθια", "προοδος",
+    # techniques
+    "ασκηση", "ασκησεις", "τεχνικη", "τεχνικες", "ρυθμος", "ρυθμο",
+    "μοτιβο", "ζεσταμα", "προθερμανση", "δαχτυλα", "πενα", "χορδη", "χορδες",
+    "ταστο", "νοτα", "νοτες", "μελωδια", "αρμονια",
+    # generic musical objects / levels
+    "τραγουδι", "κομματι", "υφος", "στυλ", "μουσικη", "αρχαριος", "αρχαριο",
+    "αρχαριους", "μεσαιο", "προχωρημενο", "επιπεδο",
+    # inflected forms the tutor actually types (Greek declines everything)
+    "ελασσονος", "μειζονος", "τεχνικης", "ασκησης", "κλιμακας", "πεντατονικης",
+    "συγχορδιας", "χορδης", "ρυθμου", "υφους", "τραγουδιου", "κομματιου",
+    "εναλλακτικη", "εναλλακτικο", "δωριο", "μιξολυδιο", "λυδιο", "φρυγιο",
+    "αργο", "γρηγορο", "απλο", "ευκολο", "δυσκολο",
 }
+
+# FOLD THE VOCABULARY ITSELF, at import.
+#
+# The sets above are written the way a human writes Greek — with accents, and
+# with the final sigma (ς). The INPUT, however, is folded before it is matched
+# (`fold()` strips accents, unifies ς->σ, casefolds), because Greek accents move
+# under inflection. So a literal `"της"` in the set could NEVER match the folded
+# input `"τησ"`, and a literal `"ύφος"` could never match `"υφοσ"`.
+#
+# That is not a hypothetical: the first version of this list was hand-written
+# and six legitimate Greek requests were false-declined by exactly this
+# mismatch. Folding the vocabulary at load time is the fix, and it also means
+# nobody adding a word later has to remember to hand-fold it — which they would
+# not, and the failure would be a silent false decline.
+_TRIGGER_WORDS = {fold(w) for w in _TRIGGER_WORDS}
+_GENERIC_MUSIC_TERMS = {fold(w) for w in _GENERIC_MUSIC_TERMS}
 
 # Word tokens: letters plus internal hyphens/apostrophes (so "hammer-on",
 # "12-bar", "warm-up" tokenize as one word each, matching the multi-word
 # entries above once digits are allowed too).
-_WORD_RE = re.compile(r"[a-z0-9][a-z0-9'-]*")
+#
+# `\w` with `re.UNICODE` (Python's default for str) matches GREEK letters too.
+# It used to be `[a-z0-9]`, which made every Greek word invisible to this guard
+# — see the long note in `_GENERIC_MUSIC_TERMS` above for what that cost.
+_WORD_RE = re.compile(r"[^\W_][\w'-]*", re.UNICODE)
 
 
 
@@ -214,7 +300,11 @@ def looks_like_named_song_request(text: str) -> bool:
     """
     if not text:
         return False
-    for clause in _CLAUSE_SPLIT_RE.split(text.lower()):
+    # FOLD, don't `.lower()`. Greek accents move under inflection (ταμπλατούρα
+    # -> ταμπλατούρας) and `.lower()` keeps the accent, so an accented word
+    # never matches an unaccented vocabulary entry. `fold` also unifies the
+    # final sigma (ς/σ), without which every Greek word ending in -s misses.
+    for clause in _CLAUSE_SPLIT_RE.split(fold(text)):
         words = _WORD_RE.findall(clause)
         if not any(w in _TRIGGER_WORDS for w in words):
             continue

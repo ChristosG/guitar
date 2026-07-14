@@ -108,6 +108,7 @@ from app.brain.retrieve import search
 from app.llm.errors import ToolArgsError
 from app.llm.factory import get_provider
 from app.llm.tools_types import ToolCall
+from app.text.normalize import fold, has_greek
 
 log = logging.getLogger(__name__)
 
@@ -191,10 +192,44 @@ _TAB_BLUFF_FALLBACK_MESSAGE = (
 # requested in prose. See `tests/test_agent_grounding.py`'s "TEST BOTH
 # SIDES" section for the concrete cases this is pinned against (small talk,
 # entity instructions, and genuine content questions).
+#
+# PLAN 13, TASK 5.2 — THE RULE WAS ENGLISH-ONLY, AND THE APP'S DEFAULT LOCALE
+# IS GREEK (`apps/web/src/i18n/routing.ts`: `defaultLocale: "el"`).
+#
+# `_QUESTION_RE` matched `?` and the English wh-words. A GREEK QUESTION ENDS IN
+# `;`, not `?` — and begins «Τι», not "what". So `_is_content_bearing` returned
+# False for every question the tutor actually asks, the forced-retrieval pre-hop
+# never fired, and every Greek content question was answered from the model's
+# general knowledge with NO library search at all. This is not a hypothetical:
+# it is the mechanism behind Chris's report that the app "just uses the llm
+# general knowledge", and it has been live since `el` became the default.
+#
+# Two Greek-specific traps, both handled by folding the text first
+# (`app/text/normalize.py::fold`) and writing the patterns unaccented:
+#
+#   - THE ACCENT MOVES UNDER INFLECTION. μάθημα -> μαθήματα (the tonos jumps
+#     from the alpha to the eta). A pattern written `μάθημ` matches the singular
+#     and misses the plural. Folding strips accents, so `μαθημ` matches both.
+#   - THERE ARE TWO QUESTION MARKS. The Greek question mark is U+037E (·;·), but
+#     nearly every keyboard emits the ASCII semicolon U+003B instead. Both must
+#     match, and a bare `;` in Latin text is a statement separator — which is
+#     why the `;` alternative is gated on the text actually containing Greek.
+#
+# THE GREEK LISTS ARE EXACT MIRRORS OF THE ENGLISH ONES — no more, no less. It
+# is tempting to "improve" them (the English `scales?` exclusion is arguably
+# over-broad: "what is the pentatonic scale?" is a real library question that it
+# suppresses). Resist it here. A divergent rule means the app behaves
+# differently depending on which language the tutor typed in, which is a far
+# worse bug than a shared over-broadness — and `tests/test_greek_grounding.py`
+# pins the mirror by asserting EN and EL give the SAME answer for translated
+# pairs. Fix the over-broadness once, for both, or not at all.
 _SMALL_TALK_RE = re.compile(
     r"^\s*(hi|hey|hello|yo|sup|thanks|thank you|ok|okay|cool|bye|goodbye|"
     r"good\s+(morning|afternoon|evening|night)|how'?s?\s+it\s+going|"
-    r"how\s+are\s+you|what'?s\s+up)\b",
+    r"how\s+are\s+you|what'?s\s+up"
+    # Greek mirror (folded: unaccented, lowercase, final-sigma unified)
+    r"|γεια|καλημερα|καλησπερα|καληνυχτα|ευχαριστω|ενταξει|τι κανεις|"
+    r"αντιο|χαιρετω)\b",
     re.IGNORECASE,
 )
 
@@ -202,9 +237,19 @@ _SMALL_TALK_RE = re.compile(
 # notes/progress) or a structured artifact request (tab/chord diagram/scale)
 # — exactly the domain `SYSTEM_PROMPT` already routes to a read/mutation
 # tool rather than a knowledge question about the library.
+#
+# The Greek stems are truncated before the inflectional ending on purpose
+# (`μαθητ` covers μαθητής/μαθητή/μαθητές/μαθητών/μαθήτρια; `κλιμακ` covers
+# κλίμακα/κλίμακες/κλιμάκων), which is what makes a stem-list work at all
+# against an inflected language. `\b` is unreliable at a Greek word boundary
+# after folding, so these are matched as stems with a trailing `\w*`.
 _ENTITY_OR_ARTIFACT_RE = re.compile(
     r"\b(students?|curricul(?:um|a)\w*|lessons?|sessions?|notes?|progress|"
-    r"artifacts?|chord\s+diagrams?|diagrams?|tabs?|scales?)\b",
+    r"artifacts?|chord\s+diagrams?|diagrams?|tabs?|scales?)\b"
+    # Greek mirror, stem-matched (folded)
+    r"|(μαθητ\w*|μαθητρι\w*|προγραμμ\w*\s+σπουδων|curriculum|μαθημ\w*|"
+    r"συνεδρι\w*|σημειωσ\w*|σημειωσε\w*|προοδ\w*|"
+    r"ταμπλατουρ\w*|διαγραμμ\w*|κλιμακ\w*)",
     re.IGNORECASE,
 )
 
@@ -215,7 +260,20 @@ _ENTITY_OR_ARTIFACT_RE = re.compile(
 # openers ("do three things") as they are real questions, so including them
 # produced false positives on exactly the entity-instruction turns category
 # 2 above exists to exclude.
-_QUESTION_RE = re.compile(r"\?|^\s*(what|why|how|when|where|which)\b", re.IGNORECASE)
+#
+# Greek: the wh-words (folded, so «Πώς» -> `πως` and «Γιατί» -> `γιατι`), plus
+# the two question marks. `;` (U+003B) and `;` (U+037E) are both "the Greek
+# question mark" in practice — see the block comment above.
+_QUESTION_RE = re.compile(
+    r"\?|^\s*(what|why|how|when|where|which)\b"
+    r"|^\s*(τι|γιατι|πως|ποτε|που|ποιος|ποια|ποιο|ποιες|ποιοι|ποσο|ποσα)\b",
+    re.IGNORECASE,
+)
+
+# The Greek question mark, in both the forms a keyboard actually produces.
+# Gated on the text containing Greek: a bare `;` in Latin text is a statement
+# separator, not a question ("do this; then that").
+_GREEK_QUESTION_MARK_RE = re.compile(r"[;;]")
 
 # Conservative on purpose: this PoC has no calibration data for what a
 # "genuinely relevant" cosine score looks like against this corpus/embedder,
@@ -229,15 +287,28 @@ def _is_content_bearing(text: str) -> bool:
     """True iff `text` plausibly asks a guitar technique/theory/gear/tone
     question — see the module-level comment block above for the full rule
     and its defence.
+
+    Matches against the FOLDED text (`app/text/normalize.py`): accents stripped,
+    case folded, final sigma unified. That is what lets one unaccented Greek
+    stem match every inflected form of a word whose accent moves (μάθημα ->
+    μαθήματα), and it also means a tutor who types without accents — as people
+    actually do — gets the same behaviour as one who doesn't.
     """
-    stripped = (text or "").strip()
-    if not stripped:
+    raw = (text or "").strip()
+    if not raw:
         return False
-    if _SMALL_TALK_RE.match(stripped):
+    folded = fold(raw)
+    if _SMALL_TALK_RE.match(folded):
         return False
-    if _ENTITY_OR_ARTIFACT_RE.search(stripped):
+    if _ENTITY_OR_ARTIFACT_RE.search(folded):
         return False
-    return bool(_QUESTION_RE.search(stripped))
+    if _QUESTION_RE.search(folded):
+        return True
+    # The Greek question mark, ONLY when the text is actually Greek — a bare `;`
+    # in Latin text is a statement separator ("do this; then that"), not a
+    # question, and treating it as one would force a library search on every
+    # multi-clause English command.
+    return bool(has_greek(raw) and _GREEK_QUESTION_MARK_RE.search(raw))
 
 
 def _snippet(text: str, limit: int = 300) -> str:
