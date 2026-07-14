@@ -248,6 +248,50 @@ git -C /mnt/nvme2TB/guitar_tutor log -1 --format='%h %cd'
 
 ---
 
+## ⚠️ Never rebuild `web` or `api` for prod without the override
+
+```bash
+# ALWAYS, for anything that touches the deployed site:
+docker compose -f docker-compose.yml -f deploy/docker-compose.public.yml up -d --build web api
+```
+
+A plain `docker compose up -d --build web` **silently breaks the live site**, and
+the failure is invisible from the server:
+
+- `NEXT_PUBLIC_API_BASE` is inlined into the **client bundle at build time**. The
+  base compose bakes `http://localhost:8791`, so the deployed JavaScript tells
+  **the visitor's browser to call the visitor's own localhost**. Every API call
+  fails with a connection error; the API logs show nothing, because nothing ever
+  arrives. The user sees *"Couldn't reach the server."*
+- Since the password gate, `api` needs the override too: `COOKIE_DOMAIN` must be
+  `.cgrigoriadis.online` so one cookie covers **both** `guitar.` and
+  `guitar-api.`. A host-only cookie authorises the API fine but is invisible to
+  the Next.js middleware on the other subdomain — which reads it to decide
+  whether to bounce to `/login`. The result is a redirect loop for a user who is
+  actually logged in.
+
+Verify the bake before trusting a deploy:
+
+```bash
+docker compose exec -T web sh -c \
+  'grep -rho "https://guitar-api[a-z0-9.-]*\|http://localhost:8791" .next/static/chunks/*.js | sort -u'
+# MUST print: https://guitar-api.cgrigoriadis.online
+```
+
+And the one that is easy to forget, because it works right up until it doesn't:
+
+```bash
+# the Reader's <img> cannot send an Authorization header — it must work on the
+# cookie alone, AND must not be edge-cached by Cloudflare
+curl -sI -b jar.txt https://guitar-api.cgrigoriadis.online/media/pages/<page_id>.jpg \
+  | grep -iE 'HTTP|cache-control|cf-cache-status'
+# MUST show: 200 · cache-control: private, no-store · cf-cache-status: DYNAMIC
+# Without `no-store`, Cloudflare caches the tutor's scanned book and serves it to
+# anyone with a page id — cookie or not. The gate becomes theatre.
+```
+
+---
+
 ## Rollback
 
 - **nginx**: `sudo rm /etc/nginx/sites-enabled/guitar.conf /etc/nginx/sites-enabled/guitar-api.conf && sudo nginx -t && sudo systemctl reload nginx`

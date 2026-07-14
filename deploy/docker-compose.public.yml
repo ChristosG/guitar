@@ -3,19 +3,43 @@
 # unchanged and any other local session running plain `docker compose up` is
 # unaffected — same convention as /mnt/nvme2TB/gdpr/deploy/docker-compose.public.yml.
 #
-# This app has no auth/OIDC (unlike Θέμις's public override, which also has to
-# coordinate Keycloak + API issuer/CORS) — the ONE thing that needs to change for
-# prod is `NEXT_PUBLIC_API_BASE`, which Next.js inlines into the client bundle at
-# BUILD time (apps/web/Dockerfile's own comment: "runtime env_file is too late for
-# client bundles"). `cors_origins` on the API side already defaults to include
-# https://guitar.cgrigoriadis.online (apps/api/app/config.py) — no API-side change
-# needed here at all, so this override touches ONLY the `web` service's build args.
+# TWO things differ in prod, and BOTH fail SILENTLY on the server if you forget
+# them. This file used to say "the ONE thing that needs to change is
+# NEXT_PUBLIC_API_BASE"; the password gate (Plan 13 Stage 3) added the second.
+#
+# 1. NEXT_PUBLIC_API_BASE — Next.js inlines this into the CLIENT BUNDLE at BUILD
+#    time (apps/web/Dockerfile: "runtime env_file is too late for client
+#    bundles"). The base compose bakes `http://localhost:8791`, which is right on
+#    a dev box and catastrophic in production: the deployed JS then tells the
+#    VISITOR'S browser to call the visitor's OWN localhost. Nothing errors
+#    server-side. The user just sees "Couldn't reach the server."
+#
+#    Not hypothetical — it is exactly what a plain `docker compose up -d --build
+#    web` did to the live site after the auth work. Rebuild `web` WITHOUT this
+#    override and you break production, and the only symptom is in the browser.
+#
+# 2. THE COOKIE DOMAIN. Prod serves the app from TWO subdomains — `guitar.`
+#    (Next.js) and `guitar-api.` (FastAPI) — and the session cookie is set by the
+#    API. A HOST-ONLY cookie (the localhost default) would still be sent back to
+#    `guitar-api.` on every XHR, so the API would authorise perfectly well... but
+#    it is INVISIBLE to the Next.js middleware running on `guitar.`, which reads
+#    the cookie to decide whether to bounce to /login. Result: a permanent
+#    redirect loop for a user who is, in fact, logged in.
+#
+#    `.cgrigoriadis.online` (leading dot) makes ONE cookie cover both hosts.
+#    SameSite=Lax still works — the two are same-SITE (same eTLD+1) — and Secure
+#    is on because prod is HTTPS-only.
+#
+#    Deliberately NOT in `.env`: that file is shared with local dev, and a
+#    `Domain=.cgrigoriadis.online` cookie is not settable from `localhost` at
+#    all. Pinning it there would fix prod by breaking every dev login.
+#
+# `cors_origins` already defaults to include https://guitar.cgrigoriadis.online
+# (apps/api/app/config.py), so nothing else needs overriding.
 #
 # Usage (see deploy/README.md step 3 for the full go-live sequence):
 #   docker compose -f docker-compose.yml -f deploy/docker-compose.public.yml \
-#       build web
-#   docker compose -f docker-compose.yml -f deploy/docker-compose.public.yml \
-#       up -d --no-deps web
+#       up -d --build web api
 #
 # Roll back to the dev-local build: re-run with base compose only (drop the -f
 # override) and rebuild — `docker compose build web` restores the
@@ -26,3 +50,10 @@ services:
     build:
       args:
         NEXT_PUBLIC_API_BASE: https://guitar-api.cgrigoriadis.online
+
+  api:
+    environment:
+      # See note 2. The leading dot is the whole point — it is what makes this
+      # one cookie visible to BOTH guitar. and guitar-api.
+      COOKIE_DOMAIN: .cgrigoriadis.online
+      COOKIE_SECURE: "true"
