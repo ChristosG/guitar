@@ -40,3 +40,7 @@ models/
 
 # SDD scratch (ledger, briefs, diffs)
 .superpowers/
+
+# Claude tooling state (session-local)
+.claudeview/
+.playwright-mcp/

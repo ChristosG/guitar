@@ -299,7 +299,7 @@
           "shape": "{lessons} lessons -> {modules} modules ({perModule}) -> ~{words} words each ({taught} min taught + {qa} min Q&A)"
         },
         "outline": {
-          "working": "Reading your whole library and writing the course — this takes a moment…"
+          "working": "Reading your whole library and writing the course — this can take a couple of minutes…"
         },
         "confirm": {
           "heading": "Ready? I'll write “{title}”.",

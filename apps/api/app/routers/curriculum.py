@@ -28,7 +28,7 @@ from app.curriculum.refine import refine_block, undo_refine
 from app.curriculum.segment import segment_block
 from app.db import get_db
 from app.jobs.curriculum_draft import run_curriculum_draft_job
-from app.jobs.runner import run_curriculum_job
+from app.jobs.runner import run_curriculum_job, run_outline_job
 from app.llm.factory import require_llm_configured
 from app.models.artifact import Artifact
 from app.models.block import Block
@@ -209,6 +209,35 @@ def answer_curriculum_interview(
 
     if not result["ok"]:
         return interview_service.render_state(db, interview, error=result["error"])
+
+    if result.get("generate_outline"):
+        # The outline call reads the whole library and runs ~3 min — past
+        # Cloudflare's ~100s edge cap, so it runs OFF this request exactly like the
+        # draft job below (and `generate_curriculum_endpoint`). Enqueue and return
+        # 202 with NO root_id: nothing is materialized yet, so the frontend polls the
+        # job and then re-fetches the outline — it must NOT open the board, which is
+        # what the root_id-bearing confirm 202 signals. `interview.job_id` holds this
+        # outline job's id (the draft job does not exist until confirm, so the column
+        # is free), which lets a refresh mid-run resume the poll via
+        # `render_state`'s `job_id`. `run_outline_job` is imported at module level so
+        # tests can monkeypatch `app.routers.curriculum.run_outline_job` — same reason
+        # as `run_curriculum_draft_job`; Starlette's TestClient runs BackgroundTasks
+        # in-process after the response, so an unpatched test would fire the real call.
+        job = GenerationJob(
+            kind="curriculum_outline",
+            status="pending",
+            params={"interview_id": str(interview.id)},
+        )
+        db.add(job)
+        db.flush()  # client-side uuid default is generated at FLUSH — see the draft branch
+        interview.job_id = job.id
+        db.commit()
+        db.refresh(job)
+        background_tasks.add_task(run_outline_job, job.id)
+        return JSONResponse(
+            status_code=202,
+            content={"job_id": str(job.id), "status": job.status},
+        )
 
     if result["done"]:
         # The TREE ALREADY EXISTS by the time we get here — `_answer_confirm`

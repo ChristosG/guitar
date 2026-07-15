@@ -22,6 +22,24 @@ class Settings(BaseSettings):
     # point at a gateway that speaks the Anthropic Messages API.
     anthropic_base_url: str = ""
 
+    # ---- claude_cli provider: Claude on the SUBSCRIPTION, via `claude -p` ----
+    #
+    # A THIRD wallet, and the distinction is the whole point. `llm_api_key` buys
+    # Anthropic API tokens. A Claude Max subscription buys ZERO of those — it
+    # authenticates the Claude Code CLI, and nothing else. `LLM_PROVIDER=claude_cli`
+    # spends the subscription instead of the card (see app/llm/claude_cli.py).
+    #
+    # The CLI does not run in THIS container and its credentials are not mounted
+    # here. It runs in the sibling `claude-bridge` service (docker-compose.yml),
+    # which is the only container that ever sees ~/.claude — this one is the
+    # web-facing process and deliberately gets nothing. Plain compose DNS: the
+    # service name resolves on `appnet`.
+    claude_bridge_url: str = "http://claude-bridge:8799"
+    # Shared secret. The bridge binds a TCP port that SPENDS MONEY, so it refuses
+    # to start without one, and refuses any request that does not carry it. Must be
+    # byte-identical to the value the bridge was started with.
+    claude_bridge_token: str = ""
+
     # ---- Embeddings (a SEPARATE seam from the chat provider — Claude has no
     # embeddings endpoint; see app/llm/embedder.py's docstring) -------------
     #

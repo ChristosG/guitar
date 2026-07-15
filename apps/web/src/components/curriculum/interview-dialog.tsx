@@ -20,9 +20,12 @@ import { Label } from "@/components/ui/label";
 import {
   ApiError,
   answerInterview,
+  getInterview,
+  getJob,
   isJobAccepted,
   startInterview,
   type InterviewStateOut,
+  type JobOut,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { InterviewWhoStep } from "./interview-who-step";
@@ -63,6 +66,22 @@ function StepTrail({ currentStep }: { currentStep: string }) {
       ))}
     </div>
   );
+}
+
+/** Poll a `GenerationJob` to a terminal state, ~2s cadence (matching the board's
+ * progress poll). The outline call reads the WHOLE library and can run ~3 minutes —
+ * well past Cloudflare's ~100s edge cap, which is exactly why it is a background job
+ * now instead of a blocking request. The deadline is a backstop so a wedged job
+ * cannot spin the dialog forever; hitting it throws, and `handleAnswer`'s catch
+ * shows the generic answer error. */
+async function pollOutlineJob(jobId: string): Promise<JobOut> {
+  const DEADLINE_MS = Date.now() + 6 * 60 * 1000;
+  for (;;) {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const job = await getJob(jobId);
+    if (job.status === "succeeded" || job.status === "failed") return job;
+    if (Date.now() > DEADLINE_MS) throw new ApiError(504, "");
+  }
 }
 
 /** The guided curriculum-authoring interview, v2 — who -> duration -> scope ->
@@ -129,7 +148,7 @@ export function InterviewDialog({ onMaterialized }: InterviewDialogProps) {
 
       // THE OUTLINE CALL IS FIRED HERE, AND ONLY HERE. The API advances to the
       // "outline" step with nothing to show — deliberately: generating the outline
-      // is the expensive call (the whole library, ~30-60s, ~$0.35) and it belongs to
+      // is the expensive call (the whole library, ~3 min, ~$1.30) and it belongs to
       // the step that DISPLAYS its result, so a tutor who backs out of the sources
       // step and re-picks does not pay for an outline he never saw
       // (`_answer_outline`'s own docstring). Landing on an empty editor and making
@@ -140,10 +159,26 @@ export function InterviewDialog({ onMaterialized }: InterviewDialogProps) {
       }
 
       if (isJobAccepted(result)) {
-        // The tree exists NOW. Hand the board its root and get out of the way.
-        if (result.root_id) onMaterialized(result.root_id);
-        reset();
-        setOpen(false);
+        if (result.root_id) {
+          // CONFIRM's 202: the tree exists NOW (every lesson `queued`). Hand the
+          // board its root and get out of the way.
+          onMaterialized(result.root_id);
+          reset();
+          setOpen(false);
+          return;
+        }
+        // THE OUTLINE JOB's 202 (no root_id). The full-library call runs OFF the
+        // request now — past the ~100s Cloudflare edge cap that used to 524 it and
+        // surface "could not save the answer" while the model worked on for nobody.
+        // Poll it, then re-fetch the interview so the (now cached) outline is what
+        // the editor renders. On failure, still land him on the outline step — an
+        // empty editor keeps its Regenerate button — and show the job's own reason
+        // (e.g. "open Settings and paste your key"). `submitting` stays true across
+        // the poll, so the "working" indicator shows and the dialog can't be closed
+        // out from under it.
+        const job = await pollOutlineJob(result.job_id);
+        setState(await getInterview(interviewId));
+        if (job.status === "failed") setError(job.error ?? t("answerError"));
         return;
       }
       setState(result);

@@ -152,6 +152,17 @@ class LLMConfig:
         )
 
 
+def _model_from_db() -> str:
+    """The model the tutor picked in Settings, or the default. Never raises."""
+    try:
+        with SessionLocal() as db:
+            row = load(db)
+            return row.model if row.model in MODELS else DEFAULT_MODEL
+    except Exception:
+        log.warning("settings_store: could not read app_setting model; using default", exc_info=True)
+        return DEFAULT_MODEL
+
+
 def resolve_llm_config() -> LLMConfig:
     """What provider should we build RIGHT NOW.
 
@@ -160,12 +171,35 @@ def resolve_llm_config() -> LLMConfig:
     env-configured Qwen config untouched, and every existing test keeps passing
     without ever touching `app_setting`.
 
+    `claude_cli` needs no key EITHER, and that is not a loophole — it is the
+    entire proposition. It spends the tutor's Claude *subscription* through the
+    `claude` CLI (see `llm/claude_cli.py`), and a subscription is not an API key:
+    a Max plan buys zero API credits. So "no key" is the correct, working,
+    steady state for this provider, and raising `LLMNotConfigured` at it — which
+    is what the `claude` branch below does, correctly, for its own case — would
+    409 a perfectly healthy install and send the tutor to a Settings screen to
+    paste something he does not have and does not need.
+
+    It still reads the MODEL from the database, so the Settings screen's picker
+    (Sonnet vs Haiku) keeps working across both Claude providers. It must NOT
+    fall through to `settings.llm_model` the way `qwen` does: that value is
+    `/models/Qwen3.5-9B`, a vLLM filesystem path, and handing it to
+    `ClaudeCLIProvider` is a `ValueError` at construction.
+
     For `claude` the DATABASE WINS over the environment. `ANTHROPIC_API_KEY` in
     the env is a bootstrap/CI convenience (and what Stage 0's smoke test used);
     a key the tutor pasted into the UI is his explicit, most recent intent, and
     an env var that silently overrode it would make the Settings screen a lie.
     """
     provider = settings.llm_provider
+
+    if provider == "claude_cli":
+        # api_key="" — there is nothing to hold. The fingerprint still keys the
+        # provider cache on (provider, model, sha256("")), so switching Sonnet ->
+        # Haiku in Settings still builds a fresh provider rather than serving a
+        # stale one, exactly as it does for `claude`.
+        return LLMConfig(provider=provider, model=_model_from_db(), api_key="")
+
     if provider != "claude":
         return LLMConfig(provider=provider, model=settings.llm_model, api_key=settings.llm_api_key)
 

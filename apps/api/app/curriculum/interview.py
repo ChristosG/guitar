@@ -423,38 +423,72 @@ def _answer_outline(db: Session, interview: CurriculumInterview, answer) -> dict
     if not isinstance(answer, dict):
         return _reask('Send {"regenerate": true} to draft the outline, or {"outline": {...}} to accept it.')
 
-    if answer.get("regenerate") is True or interview.outline is None:
-        shape = _shape_of(interview)
-        if shape is None:
-            return _reask("I don't have the course length yet — go back to the duration step.")
-        who = interview.answers.get("who") or {}
-        source_ids = [
-            uuid.UUID(s) for s in (interview.answers.get("sources") or {}).get("source_ids") or []
-        ]
-        student_id = _parse_uuid(who.get("student_id")) if who.get("student_id") else None
+    # ACCEPTING AN EDIT takes priority, and is decided by the PRESENCE of an
+    # "outline" key — never by whether `interview.outline` is set. It used to be
+    # gated on `interview.outline is None` meaning "(re)generate", which worked only
+    # because generation was SYNCHRONOUS and left `interview.outline` populated
+    # before any edit could arrive. Now generation is a background job (see below),
+    # so `interview.outline` is None right up until that job writes it — and an edit
+    # submitted against a None outline would have been misread as a regenerate
+    # request. Whatever comes back here in `answer["outline"]` is what
+    # `materialize_outline` persists at confirm; THE EDITED OUTLINE IS THE ONE THAT
+    # GETS BUILT, which is the entire point of the step.
+    if "outline" in answer:
+        edited = answer.get("outline")
+        if not isinstance(edited, dict) or not isinstance(edited.get("modules"), list):
+            return _reask('Send the outline back as {"outline": {"title": ..., "modules": [...]}}.')
+        if not edited["modules"]:
+            return _reask("An outline with no modules isn't a course. Add at least one.")
+        interview.outline = edited
+        return _ok()
 
-        library = build_library_context(db, source_ids)
-        interview.outline = generate_outline(
-            db,
-            title=interview.title,
-            brief=interview.brief,
-            language=who.get("language") or DEFAULT_LOCALE,
-            shape=shape,
-            library=library,
-            student_brief=build_student_brief(db, student_id),
-            gap_policy=interview.gap_policy or POLICY_GENERAL,
-        )
-        # Stay on "outline" — he has to look at it.
-        return {"ok": True, "error": None, "done": False, "stay": True}
+    # Otherwise: (RE)GENERATE. The outline call reads the WHOLE library (~340K chars)
+    # and runs for up to ~3 minutes — past Cloudflare's ~100s edge timeout under
+    # orange-cloud, the exact reason `generate_curriculum_endpoint` and the confirm
+    # step already run their model calls OFF the request path. So this no longer
+    # GENERATES here; like `_answer_confirm`, it hands the work to the ROUTER, which
+    # has the `BackgroundTasks` this function does not: the router enqueues a
+    # `GenerationJob(kind="curriculum_outline")` and schedules `run_outline_job`
+    # (`app.jobs.runner`), and the tutor polls it. Validate what that job will need
+    # NOW, so a missing shape is an immediate re-ask instead of a job that only fails
+    # three minutes later.
+    if _shape_of(interview) is None:
+        return _reask("I don't have the course length yet — go back to the duration step.")
+    # Stay on "outline"; the job populates `interview.outline`, then he looks at it.
+    return {"ok": True, "error": None, "done": False, "stay": True, "generate_outline": True}
 
-    edited = answer.get("outline")
-    if not isinstance(edited, dict) or not isinstance(edited.get("modules"), list):
-        return _reask('Send the outline back as {"outline": {"title": ..., "modules": [...]}}.')
-    if not edited["modules"]:
-        return _reask("An outline with no modules isn't a course. Add at least one.")
 
-    interview.outline = edited
-    return _ok()
+def generate_interview_outline(db: Session, interview: CurriculumInterview) -> dict:
+    """Run the interview's expensive full-library outline call and return the outline.
+
+    Called OFF the request path by `app.jobs.runner.run_outline_job` — see
+    `routers/curriculum.py::answer_curriculum_interview` for why the outline step is
+    async (the call reads the whole library and outlives Cloudflare's ~100s edge
+    timeout). Rebuilds exactly the inputs the old synchronous `_answer_outline`
+    branch used, from the persisted interview row, so the first run and any refresh
+    read the same source of truth. Does NOT commit or assign `interview.outline` —
+    the caller owns the transaction (it commits the outline and the job status
+    together, so a crash between them can't leave one written without the other)."""
+    shape = _shape_of(interview)
+    if shape is None:
+        # Guarded at enqueue time by `_answer_outline`; defensive only.
+        raise ValueError("interview has no course shape yet")
+    who = interview.answers.get("who") or {}
+    source_ids = [
+        uuid.UUID(s) for s in (interview.answers.get("sources") or {}).get("source_ids") or []
+    ]
+    student_id = _parse_uuid(who.get("student_id")) if who.get("student_id") else None
+    library = build_library_context(db, source_ids)
+    return generate_outline(
+        db,
+        title=interview.title,
+        brief=interview.brief,
+        language=who.get("language") or DEFAULT_LOCALE,
+        shape=shape,
+        library=library,
+        student_brief=build_student_brief(db, student_id),
+        gap_policy=interview.gap_policy or POLICY_GENERAL,
+    )
 
 
 def _answer_confirm(db: Session, interview: CurriculumInterview, answer) -> dict:

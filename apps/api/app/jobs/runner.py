@@ -44,12 +44,14 @@ import openai
 from app.brain.ingest import IngestPayload, ingest_source
 from app.brain.ocr import ocr_source
 from app.curriculum.generate import generate_curriculum
+from app.curriculum.interview import generate_interview_outline
 from app.db import SessionLocal
 from app.jobs.curriculum_draft import run_curriculum_draft_job
 from app.i18n import DEFAULT_LOCALE
 from app.lessons.draft import draft_lesson_from_selection
 from app.llm.errors import GuidedJSONError, LLMNotConfigured
 from app.models.generation_job import GenerationJob
+from app.models.interview import CurriculumInterview
 from app.models.knowledge import KnowledgeSource
 
 log = logging.getLogger(__name__)
@@ -211,6 +213,103 @@ def run_curriculum_job(job_id: uuid.UUID) -> None:
             db.close()
             run_curriculum_draft_job(job_id)
             return
+    finally:
+        db.close()
+
+
+def run_outline_job(job_id: uuid.UUID) -> None:
+    """Generate the interview's outline off the request path, and write it onto the
+    interview row. Mirrors `run_curriculum_job` EXACTLY (own session, same
+    pending->running->succeeded|failed lifecycle, same `error_kind` classification,
+    same best-effort nested failure guard).
+
+    WHY THIS EXISTS: the outline call reads the WHOLE library and runs ~3 minutes —
+    past Cloudflare's ~100s edge timeout under orange-cloud. Run synchronously inside
+    `POST /curricula/interview/{id}/answer` it produced a 524 at the edge and a
+    "could not save the answer" toast, while the model kept working for nobody. This
+    is the same off-request treatment `generate_curriculum` and the draft fan-out
+    already get; only the outline step was still synchronous.
+
+    `params["interview_id"]` is all it stores: `generate_interview_outline` rebuilds
+    the (large, DB-derived) inputs itself, so nothing expensive or version-fragile
+    is frozen into the job row."""
+    db = SessionLocal()
+    try:
+        job = db.get(GenerationJob, job_id)
+        if job is None:
+            log.warning("run_outline_job: job_id=%s not found, skipping", job_id)
+            return
+
+        job.status = "running"
+        db.commit()
+
+        try:
+            interview_id = uuid.UUID(str(job.params["interview_id"]))
+            interview = db.get(CurriculumInterview, interview_id)
+            if interview is None:
+                raise ValueError(f"CurriculumInterview {interview_id!r} not found")
+            # Assigned but NOT committed here — the `else` branch commits the outline
+            # and job.status="succeeded" in one transaction (see the docstring of
+            # `generate_interview_outline`): a crash between them writes neither.
+            interview.outline = generate_interview_outline(db, interview)
+        except LLMNotConfigured:
+            # Key vanished mid-flight — the one error_kind that says "you can fix this
+            # in Settings", not "our bug". Same handling as run_curriculum_job.
+            db.rollback()
+            job = db.get(GenerationJob, job_id)
+            if job is None:
+                return
+            job.status = "failed"
+            job.error_kind = "auth"
+            job.error = "No Anthropic API key is configured. Open Settings and paste your key."
+            db.commit()
+        except GuidedJSONError:
+            # `enforce_shape` raises this when the model returns no modules, as does a
+            # truncated/invalid structured response. rollback first so the half-written
+            # `interview.outline` assignment above is discarded, not committed.
+            db.rollback()
+            job = db.get(GenerationJob, job_id)
+            if job is None:
+                return
+            job.status = "failed"
+            job.error_kind = "upstream"
+            job.error = (
+                "Outline generation failed (model returned invalid/truncated output). Try again."
+            )
+            db.commit()
+        except (openai.APIConnectionError, httpx.TransportError):
+            db.rollback()
+            job = db.get(GenerationJob, job_id)
+            if job is None:
+                return
+            job.status = "failed"
+            job.error_kind = "timeout"
+            job.error = "Outline generation timed out. Try again."
+            db.commit()
+        except Exception:
+            log.exception("run_outline_job: job_id=%s failed unexpectedly", job_id)
+            try:
+                db.rollback()
+                job = db.get(GenerationJob, job_id)
+                if job is None:
+                    log.warning(
+                        "run_outline_job: job_id=%s gone during failure recovery", job_id)
+                    return
+                job.status = "failed"
+                job.error_kind = "internal"
+                job.error = "Outline generation failed unexpectedly. Try again."
+                db.commit()
+            except Exception:
+                log.warning(
+                    "run_outline_job: failed to record failure status for job_id=%s",
+                    job_id,
+                    exc_info=True,
+                )
+        else:
+            # One commit for both the outline (assigned above) and the terminal status.
+            job.status = "succeeded"
+            job.error = None
+            db.commit()
     finally:
         db.close()
 

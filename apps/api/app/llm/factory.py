@@ -2,6 +2,7 @@ from fastapi import HTTPException
 
 from app.llm.base import LLMProvider
 from app.llm.claude import ClaudeProvider
+from app.llm.claude_cli import ClaudeCLIProvider
 from app.llm.errors import LLMNotConfigured
 from app.llm.qwen import QwenVLLM
 from app.settings_store import LLMConfig, resolve_llm_config
@@ -28,10 +29,15 @@ _PROVIDERS: dict[tuple[str, str, str], LLMProvider] = {}
 def _build(cfg: LLMConfig) -> LLMProvider:
     if cfg.provider == "claude":
         return ClaudeProvider(api_key=cfg.api_key, model=cfg.model)
+    if cfg.provider == "claude_cli":
+        # Claude on the tutor's SUBSCRIPTION, via the `claude` CLI on the host.
+        # No API key — a Max plan buys none. See `llm/claude_cli.py`.
+        return ClaudeCLIProvider(model=cfg.model)
     if cfg.provider == "qwen":
         return QwenVLLM()
     raise ValueError(
-        f"Unknown LLM_PROVIDER: {cfg.provider!r} (expected 'claude' or 'qwen')"
+        f"Unknown LLM_PROVIDER: {cfg.provider!r} "
+        f"(expected 'claude', 'claude_cli' or 'qwen')"
     )
 
 

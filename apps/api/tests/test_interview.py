@@ -27,6 +27,7 @@ import app.routers.curriculum as curriculum_router
 from app.curriculum.interview import (
     answer_interview,
     describe_step,
+    generate_interview_outline,
     render_state,
     start_interview,
 )
@@ -121,7 +122,12 @@ def _walk_to(db, interview, step, *, source_ids=None):
     if step == "outline":
         return
     if interview.step == "outline":
-        answer_interview(db, interview, {"regenerate": True})
+        r = answer_interview(db, interview, {"regenerate": True})
+        # Regenerate now hands off to a background job (see run_outline_job) instead
+        # of generating inline; do the job's work here so the walk still produces a
+        # real outline to accept.
+        if r.get("generate_outline"):
+            interview.outline = generate_interview_outline(db, interview)
         answer_interview(db, interview, {"outline": interview.outline})
 
 
@@ -155,7 +161,12 @@ def test_the_state_machine_advances_deterministically_through_every_step(db):
 
     r = answer_interview(db, interview, {"regenerate": True})
     assert r["ok"] and r.get("stay") is True
+    assert r.get("generate_outline") is True, "the outline is generated OFF the request now"
     assert interview.step == "outline", "generating the outline keeps him ON the step"
+    assert interview.outline is None, "the service no longer generates synchronously — the job does"
+
+    # Simulate the background job the router would have scheduled (run_outline_job).
+    interview.outline = generate_interview_outline(db, interview)
     assert interview.outline is not None
 
     r = answer_interview(db, interview, {"outline": interview.outline})
@@ -420,7 +431,11 @@ def test_the_outline_is_generated_from_the_whole_library_and_the_brief(db, _prov
     interview = _start(db)
     _walk_to(db, interview, "outline", source_ids=[str(source.id)])
 
-    answer_interview(db, interview, {"regenerate": True})
+    # The regenerate answer only SIGNALS now; the generation itself is what
+    # run_outline_job calls off the request path.
+    r = answer_interview(db, interview, {"regenerate": True})
+    assert r.get("generate_outline") is True
+    interview.outline = generate_interview_outline(db, interview)
 
     assert len(_provider.calls) == 1
     sent = " ".join(m["content"] for m in _provider.calls[0]["messages"])
@@ -436,6 +451,7 @@ def test_THE_EDITED_OUTLINE_IS_THE_ONE_THAT_GETS_BUILT_not_the_models_original(d
     interview = _start(db)
     _walk_to(db, interview, "outline", source_ids=[str(source.id)])
     answer_interview(db, interview, {"regenerate": True})
+    interview.outline = generate_interview_outline(db, interview)
 
     edited = {
         "title": "MY OWN TITLE",
@@ -464,6 +480,7 @@ def test_a_refresh_never_re_runs_the_expensive_outline_call(db, _provider):
     interview = _start(db)
     _walk_to(db, interview, "outline", source_ids=[str(source.id)])
     answer_interview(db, interview, {"regenerate": True})
+    interview.outline = generate_interview_outline(db, interview)
     assert len(_provider.calls) == 1
 
     state = render_state(db, interview)
@@ -471,6 +488,110 @@ def test_a_refresh_never_re_runs_the_expensive_outline_call(db, _provider):
     assert state["step"] == "outline"
     assert state["findings"] == interview.outline
     assert len(_provider.calls) == 1, "a refresh must not re-run a 90K-token call"
+
+
+# ---------------------------------------------------------------------------
+# The outline call is ASYNC now — it outlives Cloudflare's ~100s edge cap, so it
+# runs off the request path as a GenerationJob (Plan 13 follow-up). These pin the
+# job runner and the endpoint's 202, the same way the draft job's own tests do.
+# ---------------------------------------------------------------------------
+
+def test_run_outline_job_generates_the_outline_and_marks_the_job_succeeded(db, _provider):
+    from app.jobs.runner import run_outline_job
+
+    source = _source(db)
+    interview = _start(db)
+    _walk_to(db, interview, "outline", source_ids=[str(source.id)])
+    assert interview.step == "outline" and interview.outline is None
+    job = GenerationJob(
+        kind="curriculum_outline",
+        status="pending",
+        params={"interview_id": str(interview.id)},
+    )
+    db.add(job)
+    # run_outline_job opens its OWN SessionLocal — the interview and the source must
+    # be COMMITTED for it to see them, exactly like the draft-job tests.
+    db.commit()
+
+    run_outline_job(job.id)
+
+    db.expire_all()
+    job = db.get(GenerationJob, job.id)
+    interview = db.get(CurriculumInterview, interview.id)
+    assert job.status == "succeeded"
+    assert job.error is None
+    assert interview.outline is not None and interview.outline["modules"], (
+        "the job writes the outline back onto the interview row"
+    )
+
+
+def test_a_failing_outline_job_records_the_reason_and_leaves_the_outline_empty(db, monkeypatch):
+    from app.jobs.runner import run_outline_job
+    from app.llm.errors import LLMNotConfigured
+
+    def _boom(*a, **k):
+        raise LLMNotConfigured("no key")
+
+    monkeypatch.setattr("app.jobs.runner.generate_interview_outline", _boom)
+
+    source = _source(db)
+    interview = _start(db)
+    _walk_to(db, interview, "outline", source_ids=[str(source.id)])
+    job = GenerationJob(
+        kind="curriculum_outline", status="pending",
+        params={"interview_id": str(interview.id)},
+    )
+    db.add(job)
+    db.commit()
+
+    run_outline_job(job.id)
+
+    db.expire_all()
+    job = db.get(GenerationJob, job.id)
+    interview = db.get(CurriculumInterview, interview.id)
+    assert job.status == "failed"
+    assert job.error_kind == "auth", "a missing key is a fix-it-in-Settings error, not 'our bug'"
+    assert interview.outline is None, "a failed generation must not half-write the outline"
+
+
+def test_the_outline_answer_endpoint_returns_202_without_a_root_id_and_schedules_the_job(
+    db, client, monkeypatch
+):
+    """The 202 the FRONTEND must tell apart from confirm's: no `root_id` means
+    'nothing is materialized — poll the job, then re-fetch the outline', NOT 'the
+    tree exists, open the board'."""
+    from app.llm.factory import require_llm_configured
+
+    scheduled: list = []
+    monkeypatch.setattr(curriculum_router, "run_outline_job", lambda job_id: scheduled.append(job_id))
+    client.app.dependency_overrides[require_llm_configured] = lambda: None
+    try:
+        source = _source(db)
+        interview = _start(db)
+        _walk_to(db, interview, "outline", source_ids=[str(source.id)])
+        db.commit()
+
+        resp = client.post(
+            f"/curricula/interview/{interview.id}/answer",
+            json={"answer": {"regenerate": True}},
+        )
+    finally:
+        client.app.dependency_overrides.clear()
+
+    assert resp.status_code == 202
+    body = resp.json()
+    assert body["status"] == "pending"
+    assert body.get("root_id") is None, "an outline job must NOT carry a root_id"
+    assert len(scheduled) == 1, "the background job was scheduled"
+
+    db.expire_all()
+    job = db.get(GenerationJob, uuid.UUID(body["job_id"]))
+    assert job is not None and job.kind == "curriculum_outline"
+    assert job.params["interview_id"] == str(interview.id)
+    interview = db.get(CurriculumInterview, interview.id)
+    assert str(interview.job_id) == body["job_id"], (
+        "the outline job id is parked on the interview so a refresh can resume the poll"
+    )
 
 
 def test_an_outline_with_no_modules_is_rejected_rather_than_confirmed(db):
@@ -534,6 +655,7 @@ def test_the_student_reaches_the_course_meta_so_every_lesson_draft_can_see_him(d
     answer_interview(db, interview, {"brief": "b", "gap_policy": "general_knowledge"})
     answer_interview(db, interview, {"source_ids": [str(source.id)]})
     answer_interview(db, interview, {"regenerate": True})
+    interview.outline = generate_interview_outline(db, interview)  # the async job's work
     answer_interview(db, interview, {"outline": interview.outline})
     answer_interview(db, interview, {"approved": True})
 
@@ -578,10 +700,15 @@ def test_answer_route_reasks_on_a_bad_answer_without_advancing(client):
     assert r2.json()["error"]
 
 
-def test_confirm_returns_202_with_BOTH_a_job_id_and_a_root_id(client, db, monkeypatch):
+def test_confirm_returns_202_with_BOTH_a_job_id_and_a_root_id(client, db, monkeypatch, _provider):
     """The tree already EXISTS by the time the 202 lands — so the board opens
     instantly on a real curriculum with a progress bar, instead of on a spinner
-    waiting for a job that will not produce anything to look at for four minutes."""
+    waiting for a job that will not produce anything to look at for four minutes.
+
+    `_provider` is here because `post({"regenerate": True})` now schedules the REAL
+    `run_outline_job` as a BackgroundTask (TestClient runs it before the POST
+    returns), so the outline is genuinely generated — with the fake provider — and
+    the follow-up GET sees real findings to accept."""
     scheduled = []
     monkeypatch.setattr(curriculum_router, "run_curriculum_draft_job", scheduled.append)
     source = _source(db)
@@ -595,8 +722,11 @@ def test_confirm_returns_202_with_BOTH_a_job_id_and_a_root_id(client, db, monkey
     post({"weeks": 8, "sessions_per_week": 1, "minutes_per_session": 50})
     post({"brief": "get him playing blues", "gap_policy": "general_knowledge"})
     post({"source_ids": [str(source.id)]})
-    post({"regenerate": True})
+    outline_202 = post({"regenerate": True})
+    assert outline_202.status_code == 202, outline_202.text
+    assert outline_202.json().get("root_id") is None, "the outline 202 must not carry a root_id"
     state = client.get(f"/curricula/interview/{iid}").json()
+    assert state["findings"] and state["findings"]["modules"], "the outline job populated it"
     post({"outline": state["findings"]})
 
     r = post({"approved": True})
