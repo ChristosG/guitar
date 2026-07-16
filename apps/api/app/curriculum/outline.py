@@ -335,7 +335,11 @@ def materialize_outline(
             "brief": brief,
             "gap_policy": gap_policy,
             "student_id": str(student_id) if student_id else None,
-            "source_ids": [str(s) for s in (source_ids or [])],
+            # None-vs-[] is preserved: None means "unscoped — the whole
+            # library", [] means "the tutor deliberately picked none". The old
+            # `or []` collapsed both to [], and the draft job's own coercion
+            # then read the tutor's explicit "none" as "everything".
+            "source_ids": None if source_ids is None else [str(s) for s in source_ids],
             "shape": {
                 "lessons_total": shape.lessons_total,
                 "modules": shape.modules,

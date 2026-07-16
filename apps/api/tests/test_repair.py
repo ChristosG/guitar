@@ -201,6 +201,10 @@ def test_repair_pageless_url_source_refetches_its_stored_url_instead_of_reassemb
         return [Section(heading=None, text="Freshly refetched tone tips.", page=1)]
 
     monkeypatch.setattr("app.brain.paginate.extract_text", _fake_extract)
+    # The repair PRE-FLIGHTS the fetch before deleting anything (review fix:
+    # a dead URL used to destroy the only remaining copy of the text on a
+    # GET) — patch its import point too, so the pre-flight sees a live URL.
+    monkeypatch.setattr("app.brain.extract.extract_text", _fake_extract)
 
     src = KnowledgeSource(type="url", title="Tone Tips", status="ready",
                           url="https://example.com/tone-tips")
@@ -220,3 +224,40 @@ def test_repair_pageless_url_source_refetches_its_stored_url_instead_of_reassemb
     assert pages[0].text == "Freshly refetched tone tips."
     chunks = db.query(Chunk).filter_by(source_id=src.id).all()
     assert not any(c.text == "stale leftover text" for c in chunks)  # orphan not carried forward
+
+
+def test_repair_of_a_dead_url_preserves_the_chunks_and_reassembles_instead(db, monkeypatch):
+    """THE DATA-LOSS GUARD (review fix): this repair runs off a GET — merely
+    opening the source in the Reader — and used to delete the chunks FIRST and
+    discover the URL was dead second, rolling the source up 'empty' with the
+    only remaining copy of its text gone. A dead URL now falls through to the
+    chunk-reassembly path: the text we still have beats the text we might fetch."""
+    monkeypatch.setattr("app.brain.ingest.get_embedder", lambda: _Provider())
+
+    # The pre-flight's fetch yields nothing (dead link).
+    monkeypatch.setattr("app.brain.extract.extract_text", lambda kind, **kw: [])
+
+    # The reassembly path re-ingests as kind="text" through paginate's seam.
+    captured = {}
+
+    def _fake_extract(kind, **kwargs):
+        captured["kind"] = kind
+        return [Section(heading=None, text=kwargs.get("text") or "", page=1)]
+
+    monkeypatch.setattr("app.brain.paginate.extract_text", _fake_extract)
+
+    src = KnowledgeSource(type="url", title="Dead Link", status="ready",
+                          url="https://example.com/404s-now")
+    db.add(src); db.commit()
+    db.add(Chunk(source_id=src.id, text="the only surviving copy of the text",
+                 embedding=[0.0] * EMBED_DIM))
+    db.commit()
+
+    healed = repair_pageless_source(db, src)
+
+    assert healed is True
+    assert captured["kind"] == "text"   # reassembled, not refetched
+    db.expire_all()
+    pages = db.query(Page).filter_by(source_id=src.id).all()
+    assert len(pages) == 1
+    assert "the only surviving copy of the text" in pages[0].text

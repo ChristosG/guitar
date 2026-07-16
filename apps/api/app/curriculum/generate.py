@@ -116,9 +116,12 @@ def generate_curriculum(
     which is exactly `library_only`.
     """
     profile = profile or {}
-    source_ids = [
-        s if isinstance(s, uuid.UUID) else uuid.UUID(str(s)) for s in (source_ids or [])
-    ] or None
+    # None-vs-[] preserved (see outline.materialize_outline): [] is a
+    # deliberate "draw on none of my sources", not a synonym for "everything".
+    if source_ids is not None:
+        source_ids = [
+            s if isinstance(s, uuid.UUID) else uuid.UUID(str(s)) for s in source_ids
+        ]
     if student_id is not None and not isinstance(student_id, uuid.UUID):
         student_id = uuid.UUID(str(student_id))
 

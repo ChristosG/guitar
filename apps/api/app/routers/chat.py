@@ -37,6 +37,7 @@ from app.agent.transcript import messages_to_wire, persist_new_messages, window_
 from app.db import get_db
 from app.i18n import normalize_locale
 from app.jobs.runner import run_curriculum_job, run_lesson_job
+from app.llm.errors import LLMError
 from app.models.chat import ApprovalRequest, ChatSession, Message
 from app.models.generation_job import GenerationJob
 from app.schemas.chat import (
@@ -432,7 +433,19 @@ def post_message(session_id: UUID, payload: ChatMessageIn, db: Session = Depends
     persist_new_messages(db, session_id, [{"role": "user", "content": payload.content}])
 
     wire = window_wire(messages_to_wire(_ordered_messages(db, session_id)))
-    result = run_agent_turn(db, wire, locale=session.locale)
+    try:
+        result = run_agent_turn(db, wire, locale=session.locale)
+    except LLMError as e:
+        # A provider failure mid-turn used to escape as a raw 500 — "Internal
+        # Server Error" in a non-technical user's browser for a 429 he only
+        # needed to wait out. The user's message row is already persisted
+        # (above), so after the wait his Send simply retries the turn. The
+        # status codes match the taxonomy the frontend already translates.
+        status = {"rate_limit": 429, "auth": 409, "timeout": 504}.get(e.kind, 502)
+        raise HTTPException(
+            status_code=status,
+            detail=str(e) or f"the model provider failed ({e.kind}) — try again",
+        ) from e
 
     return _respond_to_turn(db, session_id, wire, result)
 

@@ -309,10 +309,16 @@ def run_curriculum_draft_job(job_id: uuid.UUID) -> None:
 
         meta = course.meta or {}
         shape = meta.get("shape") or {}
-        source_ids = [uuid.UUID(s) for s in (meta.get("source_ids") or [])]
+        # `[]` and `None` are DIFFERENT answers and stay different all the way
+        # down: the interview documents [] as "deliberately none of my sources"
+        # (an honest, ungrounded course), while None/missing means "everything".
+        # The old `or None` coercion silently turned the tutor's explicit
+        # "none" into "read the whole library" — and billed him for it.
+        raw_sources = meta.get("source_ids")
+        source_ids = None if raw_sources is None else [uuid.UUID(s) for s in raw_sources]
         student_id = uuid.UUID(meta["student_id"]) if meta.get("student_id") else None
 
-        library = build_library_context(db, source_ids or None)
+        library = build_library_context(db, source_ids)
         student_brief = build_student_brief(db, student_id)
 
         lesson_ids = _queued_lesson_ids(db, root_id)
@@ -322,7 +328,7 @@ def run_curriculum_draft_job(job_id: uuid.UUID) -> None:
             "library": library,
             "student_brief": student_brief,
             "course_brief": meta.get("brief"),
-            "source_ids": source_ids or None,
+            "source_ids": source_ids,
             "positions": positions,
             "minutes_per_lesson": shape.get("minutes_per_lesson", 50),
             "teaching_minutes": shape.get("teaching_minutes", 40),

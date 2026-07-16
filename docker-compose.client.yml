@@ -1,0 +1,75 @@
+# THE CLIENT BUNDLE — what actually ships to the tutor's iMac.
+#
+#   docker compose -f docker-compose.client.yml up -d
+#
+# Differences from the dev docker-compose.yml, each one load-bearing:
+#   - NO `platform-net` external network: it only exists to reach the dev
+#     vLLM box, and `docker compose up` HARD-FAILS on any machine where the
+#     network doesn't pre-exist.
+#   - NO `worker` service: it is a stub (all jobs run in-process in `api`).
+#   - NO `claude-bridge`: it bind-mounts the DEVELOPER's ~/.claude OAuth
+#     credentials. The client uses his own Anthropic API key via Settings
+#     (LLM_PROVIDER=claude), which is the only external service he needs.
+#   - `restart: unless-stopped` on EVERYTHING: after a power cut or a Docker
+#     restart the app must come back with nobody there to type commands.
+#     (Also enable Docker Desktop's "Start Docker Desktop when you sign in".)
+#   - Auth baked ON in the web image (NEXT_PUBLIC_* are build-time inlined).
+#
+# State lives in the `pgdata` + `media` volumes — they survive image updates.
+# Backups: ../scripts/backup.sh (schedule it; point it at an external disk).
+#
+# BUILD THE IMAGES FOR THE IMAC'S CPU (Intel = amd64, Apple Silicon = arm64):
+#   docker buildx build --platform linux/arm64 ...   # confirm with the client!
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: guitar
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-guitar}
+      POSTGRES_DB: guitar
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U guitar -d guitar"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: ./apps/api
+    image: guitar-tutor-api:client
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg://guitar:${POSTGRES_PASSWORD:-guitar}@postgres:5432/guitar
+      LLM_PROVIDER: claude
+      AUTH_ENABLED: "1"
+      APP_PASSWORD: ${APP_PASSWORD:?set APP_PASSWORD in .env}
+      ENCRYPTION_SECRET: ${ENCRYPTION_SECRET:?set ENCRYPTION_SECRET in .env}
+    volumes:
+      - media:/media
+    ports:
+      - "127.0.0.1:8791:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ./apps/web
+      args:
+        NEXT_PUBLIC_AUTH_ENABLED: "1"
+        # NEXT_PUBLIC_API_BASE stays UNSET — lib/api.ts derives localhost:8791
+        # from the browser origin, which is exactly the bundle topology.
+    image: guitar-tutor-web:client
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8790:3000"
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
+  media:

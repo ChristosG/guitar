@@ -512,10 +512,13 @@ def test_a_general_knowledge_lesson_is_forbidden_from_citing_his_library(db, mon
 
     draft_lesson(db, ctx=_ctx(tier=TIER_GENERAL), library=library, language="en")
 
-    system = provider.calls[0]["messages"][0]["content"]
-    assert "cite" in system.lower()
-    assert "empty" in system.lower()
-    assert "LABELLED" in system or "labelled" in system
+    # The tier directive lives in the volatile TAIL now, not the system message
+    # — a per-tier system string was silently minting a fresh 90K-token cache
+    # entry per variant (see corpus.CURRICULUM_SYSTEM).
+    tail = provider.calls[0]["messages"][-1]["content"]
+    assert "cite" in tail.lower()
+    assert "empty" in tail.lower()
+    assert "LABELLED" in tail or "labelled" in tail
 
 
 def test_the_lesson_prompt_states_the_word_floor_because_the_schema_cannot(db, monkeypatch):
@@ -526,9 +529,11 @@ def test_the_lesson_prompt_states_the_word_floor_because_the_schema_cannot(db, m
 
     draft_lesson(db, ctx=_ctx(), library=library, language="en")
 
-    system = provider.calls[0]["messages"][0]["content"]
-    assert "2,200" in system
-    assert "1,760" in system
+    # Length enforcement rides the volatile tail (recency-strongest position),
+    # never the shared cached system message.
+    tail = provider.calls[0]["messages"][-1]["content"]
+    assert "2,200" in tail
+    assert "1,760" in tail
     assert provider.calls[0]["role"] == "draft"
 
 

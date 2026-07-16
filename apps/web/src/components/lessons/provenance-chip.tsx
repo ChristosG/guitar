@@ -28,6 +28,11 @@ function fetchSourceTitle(sourceId: string): Promise<string> {
   let cached = titleCache.get(sourceId);
   if (!cached) {
     cached = getSource(sourceId).then((s) => s.title);
+    // FAILURES ARE EVICTED, successes stay. A rejected promise left in the
+    // cache is a permanent failure: one fetch that happened to land during an
+    // API restart used to blank that book's title on every chip for the rest
+    // of the SPA's lifetime.
+    cached.catch(() => titleCache.delete(sourceId));
     titleCache.set(sourceId, cached);
   }
   return cached;

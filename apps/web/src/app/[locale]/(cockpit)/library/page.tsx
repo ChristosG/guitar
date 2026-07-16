@@ -255,7 +255,11 @@ export default function LibraryPage() {
         </p>
       )}
 
-      {!loading && !error && sources.length > 0 && (
+      {/* The tree renders whenever there ARE sources — a transient refresh
+          failure (e.g. the automatic one when an OCR job finishes) used to
+          unmount the entire library behind one error line, even though the
+          state still held perfectly renderable data. */}
+      {!loading && sources.length > 0 && (
         <CollectionTree
           groups={groups}
           locale={locale}

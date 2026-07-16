@@ -1,9 +1,21 @@
 "use client";
 
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { Badge } from "@/components/ui/badge";
 import { BlockTitle } from "@/components/students/block-title";
 import type { LessonLogOut } from "@/lib/api";
+
+/** ISO "YYYY-MM-DD" → the UI locale's own format ("16/07/2026" for el).
+ * Rendered raw, a machine date was the one non-Greek thing on the page.
+ * Parsed manually (not `new Date(iso)`) to stay timezone-proof: an ISO date
+ * string is parsed as UTC midnight, which formats as the PREVIOUS day in any
+ * negative-offset zone. */
+function formatDate(iso: string, locale: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
+  if (!m) return iso;
+  const date = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return new Intl.DateTimeFormat(locale, { dateStyle: "medium" }).format(date);
+}
 
 interface LessonLogListProps {
   lessons: LessonLogOut[];
@@ -15,6 +27,7 @@ interface LessonLogListProps {
  * instead of a list+row pair. */
 export function LessonLogList({ lessons }: LessonLogListProps) {
   const t = useTranslations("students.detail.lessons");
+  const locale = useLocale();
 
   if (lessons.length === 0) {
     return (
@@ -40,7 +53,7 @@ export function LessonLogList({ lessons }: LessonLogListProps) {
             <div className="flex items-center gap-1.5">
               {log.date && (
                 <Badge variant="outline" data-testid="lesson-date">
-                  {log.date}
+                  {formatDate(log.date, locale)}
                 </Badge>
               )}
               <Badge variant={log.taught ? "default" : "secondary"} data-testid="lesson-taught">

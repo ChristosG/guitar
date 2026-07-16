@@ -152,7 +152,15 @@ def test_padding_is_honestly_labelled_rather_than_invented():
     padded = fixed["modules"][4]
     assert padded["lessons"] == [] or len(padded["lessons"]) == 4
     assert padded["tier"] == "general_knowledge", "a placeholder must never claim to be from his library"
-    assert "rename" in padded["coverage_note"]
+    # Default locale is GREEK — the padded placeholder speaks it (review fix:
+    # "Module 5" in the middle of a Greek course read as a bug, not a hole).
+    assert "μετονόμασέ" in padded["coverage_note"]
+    assert padded["title"] == "Ενότητα 5"
+
+    # And English courses still pad in English.
+    fixed_en = enforce_shape(_outline(3, 4), shape, language="en")
+    assert "rename" in fixed_en["modules"][4]["coverage_note"]
+    assert fixed_en["modules"][4]["title"] == "Module 5"
 
 
 def test_every_lesson_gets_the_session_length_the_tutor_actually_booked():

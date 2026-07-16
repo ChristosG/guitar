@@ -15,10 +15,14 @@ A single bulk `UPDATE`, not a fetch-then-loop — mirrors `app.curriculum.
 segment`'s own bulk `delete(Block)...` for a whole-set mutation that needs no
 already-loaded ORM object, and is one round-trip regardless of row count.
 """
-from sqlalchemy import select, update
+from datetime import datetime, timedelta, timezone
+
+from sqlalchemy import delete, select, update
 
 from app.models.block import Block
+from app.models.chat import ChatSession, Message
 from app.models.generation_job import GenerationJob
+from app.models.interview import CurriculumInterview
 
 
 def sweep_interrupted_lessons(db) -> int:
@@ -69,3 +73,46 @@ def sweep_orphaned_jobs(db) -> int:
     )
     db.commit()
     return result.rowcount
+
+
+# Retention windows. Generous on purpose: these tables are audit/debugging
+# records worth keeping for a while, not worth keeping FOREVER — this app's
+# contract is "runs unattended for years", and these were its only unbounded
+# tables (a job row per OCR press/draft/resume, an invisible empty chat
+# session per visit to /chat before the first message ever lands, an
+# interview row per opened dialog).
+_JOB_RETENTION_DAYS = 30
+_EMPTY_SESSION_RETENTION_DAYS = 7
+_INTERVIEW_RETENTION_DAYS = 30
+
+
+def sweep_expired_records(db) -> dict:
+    """Boot-time retention: terminal job rows past their window, chat sessions
+    that never got a message, and interviews that finished (or were abandoned)
+    weeks ago. Returns per-table counts. Boot-time (not a cron) for the same
+    reason the other sweeps are: a restart is the one moment guaranteed to
+    happen on a machine with no operator, and daily granularity is plenty."""
+    now = datetime.now(timezone.utc)
+
+    jobs = db.execute(
+        delete(GenerationJob).where(
+            GenerationJob.status.in_(("succeeded", "failed")),
+            GenerationJob.created_at < now - timedelta(days=_JOB_RETENTION_DAYS),
+        )
+    ).rowcount
+
+    empty_sessions = db.execute(
+        delete(ChatSession).where(
+            ChatSession.created_at < now - timedelta(days=_EMPTY_SESSION_RETENTION_DAYS),
+            ~ChatSession.id.in_(select(Message.session_id).distinct()),
+        )
+    ).rowcount
+
+    interviews = db.execute(
+        delete(CurriculumInterview).where(
+            CurriculumInterview.updated_at < now - timedelta(days=_INTERVIEW_RETENTION_DAYS),
+        )
+    ).rowcount
+
+    db.commit()
+    return {"jobs": jobs, "empty_sessions": empty_sessions, "interviews": interviews}

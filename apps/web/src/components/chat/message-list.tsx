@@ -130,7 +130,7 @@ export function MessageList({ messages, sessionId }: MessageListProps) {
 
   return (
     <div className="flex flex-col gap-3" data-testid="message-list">
-      {messages.map((message) => (
+      {messages.map((message, index) => (
         <div
           key={message.id}
           data-testid="chat-message"
@@ -169,6 +169,12 @@ export function MessageList({ messages, sessionId }: MessageListProps) {
                   content={message.content}
                   citations={message.citations}
                   sessionId={sessionId}
+                  question={
+                    messages
+                      .slice(0, index)
+                      .reverse()
+                      .find((m) => m.role === "user")?.content
+                  }
                 />
               </div>
             )}

@@ -296,8 +296,11 @@ def generate_module(db, root_id: uuid.UUID, *, topic: str | None = None) -> Bloc
     from app.curriculum.corpus import build_library_context
 
     meta = course.meta or {}
-    source_ids = [uuid.UUID(s) for s in (meta.get("source_ids") or [])]
-    library = build_library_context(db, source_ids or None)
+    # Same None-vs-[] rule as the draft fan-out: [] is the tutor's explicit
+    # "none of my sources" and must NOT widen to the whole library.
+    raw_sources = meta.get("source_ids")
+    source_ids = None if raw_sources is None else [uuid.UUID(s) for s in raw_sources]
+    library = build_library_context(db, source_ids)
 
     module_json = generate_module_json(db, course=course, library=library, topic=topic)
     return materialize_module(db, course, module_json)

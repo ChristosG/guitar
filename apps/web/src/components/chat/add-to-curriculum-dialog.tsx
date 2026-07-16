@@ -34,12 +34,18 @@ interface AddToCurriculumDialogProps {
   content: string;
   citations?: ChatCitation[] | null;
   sessionId?: string;
+  /** The user message this answer replied to — the best default lesson title
+   * there is ("Ασκήσεις για δύναμη δαχτύλων" beats the answer's own first
+   * line, which for library-gap answers is a general-knowledge disclaimer). */
+  question?: string;
 }
 
-/** A sensible default lesson title out of a chat answer: its first real line,
- * stripped of markdown chrome, clamped. The tutor edits it in the dialog —
- * this is a starting point, not a decision. */
-function deriveTitle(content: string): string {
+/** A sensible default lesson title: the tutor's own question when we have it,
+ * else the answer's first real line, stripped of markdown chrome, clamped.
+ * The tutor edits it in the dialog — this is a starting point, not a decision. */
+function deriveTitle(content: string, question?: string): string {
+  const q = (question ?? "").replace(/\s+/g, " ").trim();
+  if (q) return q.replace(/[;?·]+\s*$/, "").slice(0, 120);
   const line = content
     .split("\n")
     .map((l) => l.replace(/^[#>\-*\s]+/, "").replace(/\*\*/g, "").trim())
@@ -57,7 +63,7 @@ function deriveTitle(content: string): string {
  * turn's citations into the board's provenance chips. The board's Deepen button
  * is the later "write this out to full length" upgrade.
  */
-export function AddToCurriculumDialog({ content, citations, sessionId }: AddToCurriculumDialogProps) {
+export function AddToCurriculumDialog({ content, citations, sessionId, question }: AddToCurriculumDialogProps) {
   const t = useTranslations("chat.addToCurriculum");
   const locale = useLocale();
 
@@ -111,7 +117,7 @@ export function AddToCurriculumDialog({ content, citations, sessionId }: AddToCu
     if (submitting) return;
     setOpen(next);
     if (next) {
-      setTitle(deriveTitle(content));
+      setTitle(deriveTitle(content, question));
       setDone(false);
       setError(null);
       void loadCurricula();

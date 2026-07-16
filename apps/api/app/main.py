@@ -13,7 +13,11 @@ from app.db import SessionLocal
 from app.i18n import LOCALE_HEADER
 
 log = logging.getLogger(__name__)
-from app.jobs.sweep import sweep_interrupted_lessons, sweep_orphaned_jobs
+from app.jobs.sweep import (
+    sweep_expired_records,
+    sweep_interrupted_lessons,
+    sweep_orphaned_jobs,
+)
 from app.llm.errors import LLMNotConfigured
 from app.routers import (
     artifacts,
@@ -68,6 +72,7 @@ async def lifespan(app: FastAPI):
         sweep_orphaned_jobs(db)
         sweep_interrupted_lessons(db)
         sweep_orphaned_media(db)
+        sweep_expired_records(db)
         warm_index(db)
     finally:
         db.close()
