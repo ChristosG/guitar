@@ -190,14 +190,36 @@ def repair_pageless_source(db: Session, source: KnowledgeSource) -> bool:
     from app.brain.ingest import IngestPayload, ingest_source
 
     if source.type == "url" and source.url:
-        log.info(
-            "repair_pageless_source: source_id=%s is type=url with a stored "
-            "url — re-fetching it directly rather than reassembling chunks",
+        # PRE-FLIGHT THE FETCH BEFORE DELETING ANYTHING. This repair runs off
+        # a GET (merely opening the source in the Reader), and it used to
+        # delete the chunks FIRST and find out the URL was dead second —
+        # `extract_text` never raises, a 404'd page yields [], and the
+        # source rolled up "empty" with the only remaining copy of its text
+        # gone. The population this repair targets is pre-Plan-9 rows that
+        # can be YEARS old; their URLs being dead is the expected case, not
+        # the edge. A dead URL now falls through to the chunk-reassembly
+        # path below — the text we still have beats the text we might fetch.
+        from app.brain.extract import extract_text
+
+        try:
+            sections = extract_text("url", url=source.url)
+        except Exception:
+            sections = []
+        if sections and any((s.text or "").strip() for s in sections):
+            log.info(
+                "repair_pageless_source: source_id=%s is type=url and its "
+                "stored url still serves content — re-fetching it directly",
+                source.id,
+            )
+            _delete_orphaned_chunks(db, source.id)
+            ingest_source(db, source.id, IngestPayload(kind="url", url=source.url))
+            return True
+        log.warning(
+            "repair_pageless_source: source_id=%s stored url yields nothing "
+            "(dead link?) — preserving the existing chunks and reassembling "
+            "them instead",
             source.id,
         )
-        _delete_orphaned_chunks(db, source.id)
-        ingest_source(db, source.id, IngestPayload(kind="url", url=source.url))
-        return True
 
     chunks = (
         db.query(Chunk)

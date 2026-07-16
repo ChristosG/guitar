@@ -222,7 +222,11 @@ def test_search_returns_chunks_with_and_without_pages(db):
 def test_query_normalisation_falls_back_to_the_raw_query_when_the_llm_is_down(db, monkeypatch):
     """A retrieval path that can 500 because a translation hiccuped would be a
     strictly worse trade than the one `normalize_query` exists to make."""
-    from app.brain.retrieve import _translate_to_english, normalize_query
+    from app.brain.retrieve import (
+        _translate_call,
+        normalize_query,
+        reset_translation_breaker,
+    )
 
     _seed(db, _REAL_PASSAGE)
 
@@ -230,11 +234,31 @@ def test_query_normalisation_falls_back_to_the_raw_query_when_the_llm_is_down(db
         raise RuntimeError("no API key")
 
     monkeypatch.setattr("app.brain.retrieve.get_provider", _boom)
-    _translate_to_english.cache_clear()
+    _translate_call.cache_clear()
+    reset_translation_breaker()
 
     greek = "τι είναι το humbucker;"
     assert normalize_query(db, greek) == greek          # unchanged, not raised
     assert search(db, greek, k=5, apply_floor=False)    # and search still works
+
+    # The breaker is TIME-based now, not a permanent latch: one failure must
+    # not disable translation for the process lifetime (that silently
+    # collapsed Greek retrieval quality until a restart). A settings change
+    # re-arms it immediately.
+    import app.brain.retrieve as retrieve_mod
+
+    assert retrieve_mod._translation_blocked_until > 0
+    reset_translation_breaker()
+    assert retrieve_mod._translation_blocked_until == 0.0
+    # And the failed lookup was NOT memoized: with the provider healthy again,
+    # the same query gets a real translation attempt (lru_cache only stores
+    # successes — a cached failure would pin the raw query forever).
+    class _OkProvider:
+        def chat(self, messages, **kw):
+            return "what is a humbucker"
+
+    monkeypatch.setattr("app.brain.retrieve.get_provider", lambda: _OkProvider())
+    assert normalize_query(db, greek) == "what is a humbucker"
 
 
 def test_an_english_query_is_never_sent_to_the_translator(db, monkeypatch):

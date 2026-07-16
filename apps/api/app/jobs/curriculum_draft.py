@@ -66,6 +66,13 @@ def _queued_lesson_ids(db, root_id: uuid.UUID) -> list[uuid.UUID]:
     Order matters for a reason the tutor sees: he opens the board and reads module
     1 while module 5 is still being written. Drafting in tree order is what makes
     the first thing he looks at the first thing that finishes.
+
+    `failed` IS included. Every surface — the job error ("press Resume to
+    retry"), the progress bar's failedHint, this module's own docstring — tells
+    the tutor Resume retries failed lessons, and `_claim` has always accepted
+    them; this list was the one link in the chain that silently filtered them
+    out, so the button the UI pointed at did nothing for exactly the lessons it
+    was pointed at for.
     """
     module = aliased(Block)
     rows = db.execute(
@@ -81,7 +88,7 @@ def _queued_lesson_ids(db, root_id: uuid.UUID) -> list[uuid.UUID]:
     return [
         lesson_id
         for lesson_id, meta in rows
-        if (meta or {}).get("draft_status", "queued") == "queued"
+        if (meta or {}).get("draft_status", "queued") in ("queued", "failed")
     ]
 
 
@@ -89,15 +96,28 @@ def _claim(db, lesson_id: uuid.UUID) -> tuple[Block, bool] | None:
     """Transaction 1: `queued` -> `drafting`. Returns `(lesson, deepen)`, or None if
     somebody else already has it.
 
+    THE ROW IS LOCKED FOR THE CHECK. This used to be a plain read-check-write,
+    which held between two overlapping fan-outs (a double-clicked Resume, or
+    Deepen pressed while the confirm fan-out was still running): both read
+    `queued` in the same few milliseconds, both flipped it to `drafting`, and
+    the same 60-120s, 32k-output Claude call was made — and billed — twice.
+    `WITH FOR UPDATE` serializes the claimers; the loser re-reads `drafting`
+    and walks away. The lock spans only this transaction (microseconds), so the
+    "no connection held during the model call" discipline is untouched.
+
     The `deepen` flag (set by `POST /blocks/{id}/deepen`) is CONSUMED here rather
     than read later: it is an instruction for exactly this draft, and a flag left
     on the row would silently make every future Resume redraft this lesson long.
     """
-    lesson = db.get(Block, lesson_id)
+    lesson = db.execute(
+        select(Block).where(Block.id == lesson_id).with_for_update()
+    ).scalar_one_or_none()
     if lesson is None:
+        db.rollback()
         return None
     meta = lesson.meta or {}
     if meta.get("draft_status", "queued") not in ("queued", "failed"):
+        db.rollback()
         return None
     deepen = bool(meta.get("deepen"))
     lesson.meta = {

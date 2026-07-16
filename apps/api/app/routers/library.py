@@ -293,6 +293,16 @@ def retry_source(
     source = _source_or_404(db, source_id)
 
     if source.type == "pdf":
+        # AN EXPLICIT RETRY MEANS "I INSIST". Pages that exhausted their
+        # per-run attempt budget (MAX_PAGE_ATTEMPTS) are excluded from every
+        # automatic pickup — without this reset, a book whose pages burned
+        # their attempts during a rate-limit window was permanently
+        # un-OCR-able, with this very button silently processing 0 pages.
+        db.query(Page).filter(
+            Page.source_id == source_id,
+            Page.status == "failed",
+        ).update({Page.ocr_attempts: 0}, synchronize_session=False)
+        db.commit()
         return _enqueue_ocr(db, background, source_id)
 
     if source.type == "url":

@@ -294,3 +294,82 @@ def test_exact_round_trip_mixed_transcript():
     reloaded_wire = messages_to_wire(_reload_ordered(session.id))
 
     assert reloaded_wire == original_wire
+
+
+# ---------------------------------------------------------------------------
+# window_wire — the context cap (review fix: unbounded history eventually
+# overflowed the model window and permanently bricked the session)
+# ---------------------------------------------------------------------------
+
+from app.agent.transcript import window_wire  # noqa: E402
+
+
+def _turn(i: int) -> list[dict]:
+    return [
+        {"role": "user", "content": f"q{i}"},
+        {"role": "assistant", "content": f"a{i}"},
+    ]
+
+
+def test_window_wire_passes_short_transcripts_through_unchanged():
+    wire = _turn(1) + _turn(2)
+    assert window_wire(wire, limit=60) is wire
+
+
+def test_window_wire_caps_and_starts_at_a_user_turn():
+    wire: list[dict] = []
+    for i in range(100):
+        wire += _turn(i)
+    out = window_wire(wire, limit=60)
+    assert len(out) <= 60
+    assert out[0]["role"] == "user"
+    # The most recent turn always survives.
+    assert out[-1]["content"] == "a99"
+
+
+def test_window_wire_never_orphans_a_tool_result():
+    """The window's left edge must not cut between an assistant tool_calls
+    message and the tool rows that answer it — that transcript shape raises
+    DanglingToolUseError at the Anthropic wire layer."""
+    wire: list[dict] = []
+    for i in range(30):
+        wire += [
+            {"role": "user", "content": f"q{i}"},
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": f"c{i}", "type": "function",
+                             "function": {"name": "find_lesson", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": f"c{i}", "content": "[]"},
+            {"role": "assistant", "content": f"a{i}"},
+        ]
+    out = window_wire(wire, limit=10)
+    assert out[0]["role"] == "user"
+    # Every tool row in the window is preceded (somewhere after the window
+    # start) by the assistant message carrying its tool_call id.
+    seen_calls: set[str] = set()
+    for m in out:
+        if m["role"] == "assistant" and m.get("tool_calls"):
+            seen_calls.update(c["id"] for c in m["tool_calls"])
+        if m["role"] == "tool":
+            assert m["tool_call_id"] in seen_calls, "orphaned tool result in window"
+
+
+def test_citations_attach_to_the_last_assistant_row_even_when_tools_follow(db_session=None):
+    """The suspend path's tail legitimately ends with tool rows; citations must
+    land on the assistant row inside the tail, not be dropped."""
+    db = SessionLocal()
+    try:
+        session = ChatSession()
+        db.add(session)
+        db.commit()
+        tail = [
+            {"role": "assistant", "content": "grounded answer",
+             "tool_calls": [{"id": "c1", "type": "function",
+                             "function": {"name": "find_lesson", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "[]"},
+        ]
+        cites = [{"source_id": "s1", "source_title": "Book", "page_no": 12}]
+        rows = persist_new_messages(db, session.id, tail, citations=cites)
+        assert rows[-1].role == "tool"
+        assert rows[0].citations == cites
+    finally:
+        db.close()

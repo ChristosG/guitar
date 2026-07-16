@@ -208,7 +208,18 @@
       "moveUp": "Move up",
       "moveDown": "Move down",
       "reorderError": "Could not reorder this.",
+      "rename": "Rename",
+      "moreActions": "More actions",
+      "editContent": "Edit",
+      "editSave": "Save",
+      "editBodyError": "Could not save this text.",
+      "lessonCount": "{count, plural, one {# lesson} other {# lessons}}",
       "addModule": "Add a module",
+      "addModuleTopicPlaceholder": "Optional: what should it cover? e.g. pedals & effects",
+      "addModuleGenerate": "Generate with AI",
+      "addModuleEmpty": "Add empty module",
+      "addModuleWorking": "Planning the new module from your library… its lessons will be written right after.",
+      "addModuleTimeout": "This is taking longer than expected. The module may still appear — reload in a minute.",
       "addModuleError": "Could not add the module.",
       "addLesson": "Add a lesson",
       "addLessonError": "Could not add the lesson.",
@@ -620,6 +631,12 @@
       "confirm": "Delete"
     }
   },
+  "jobErrors": {
+    "auth": "Your Anthropic API key is missing or was rejected. Open Settings and check your key, then try again.",
+    "rate_limit": "The model is rate-limited right now. Wait a minute, then try again.",
+    "timeout": "The model took too long to answer. Try again.",
+    "generic": "This failed unexpectedly. Try again."
+  },
   "chat": {
     "heading": "Chat",
     "subheading": "Ask the copilot to look things up or make changes to your students and curricula — every change needs your approval before it runs.",
@@ -628,6 +645,25 @@
     "empty": "Say hello to get started — the copilot can look things up or, with your approval, make changes.",
     "sessionError": "Could not start a chat session.",
     "error": "Could not send that message.",
+    "streamInterrupted": "The connection dropped mid-answer. If the answer isn't shown above, press Send to try again.",
+    "addToCurriculum": {
+      "trigger": "Add to curriculum",
+      "heading": "Add this answer to a curriculum",
+      "description": "The answer is saved word-for-word as a lesson in the module you pick. Use Deepen on the board later to have it written out in full.",
+      "loading": "Loading your curricula…",
+      "loadError": "Could not load your curricula.",
+      "empty": "No curricula yet — create one on the Curricula page first.",
+      "curriculumLabel": "Curriculum",
+      "moduleLabel": "Module",
+      "noModules": "This curriculum has no modules yet.",
+      "titleLabel": "Lesson title",
+      "titlePlaceholder": "Name the new lesson",
+      "cancel": "Cancel",
+      "submit": "Add lesson",
+      "done": "Added! The lesson is on the board.",
+      "openBoard": "Open Curricula",
+      "error": "Could not add the lesson."
+    },
     "citations": {
       "pageLabel": "p. {page}"
     },

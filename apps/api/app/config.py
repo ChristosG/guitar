@@ -65,7 +65,15 @@ class Settings(BaseSettings):
     embed_batch_size: int = 16
 
     # Comma-separated allowlist of browser origins the API accepts (CORS).
-    cors_origins: str = "http://localhost:3000,http://localhost:8790,https://guitar.cgrigoriadis.online"
+    # `127.0.0.1` variants are NOT redundant with `localhost`: the browser
+    # compares CORS origins as strings, and a tutor who types 127.0.0.1:8790
+    # into the address bar gets a login page whose every API call fails
+    # preflight — same app, same machine, "Couldn't reach the server."
+    cors_origins: str = (
+        "http://localhost:3000,http://localhost:8790,"
+        "http://127.0.0.1:3000,http://127.0.0.1:8790,"
+        "https://guitar.cgrigoriadis.online"
+    )
 
     media_dir: str = "/media"     # page scans live here; mounted volume
 

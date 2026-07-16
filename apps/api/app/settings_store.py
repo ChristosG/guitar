@@ -37,6 +37,7 @@ import logging
 from dataclasses import dataclass
 
 from cryptography.fernet import Fernet, InvalidToken
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -103,12 +104,22 @@ def mask_key(plaintext: str) -> str:
 def load(db: Session) -> AppSetting:
     """The singleton, created on first read. Idempotent by construction — the
     fixed primary key means a concurrent creator collides rather than forking a
-    second row (see `models/setting.py`)."""
+    second row (see `models/setting.py`). The COLLISION ITSELF is handled: two
+    first-reads racing (the web app's first page load fires several requests
+    that all resolve settings) used to 500 the loser with a raw IntegrityError
+    — in the very first minutes of first use, where a confusing error costs
+    the most trust. The loser now rolls back and reads the winner's row."""
     row = db.get(AppSetting, SINGLETON_ID)
     if row is None:
         row = AppSetting(id=SINGLETON_ID, model=DEFAULT_MODEL)
         db.add(row)
-        db.commit()
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            row = db.get(AppSetting, SINGLETON_ID)
+            if row is None:  # pragma: no cover — the loser must see the winner
+                raise
     return row
 
 

@@ -3,6 +3,7 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { BookOpen } from "lucide-react";
 import { useLocale, useTranslations } from "next-intl";
+import { AddToCurriculumDialog } from "@/components/chat/add-to-curriculum-dialog";
 import type { ChatCitation } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -30,6 +31,11 @@ export interface ChatDisplayMessage {
 
 interface MessageListProps {
   messages: ChatDisplayMessage[];
+  /** The session these messages belong to — carried onto the per-message
+   * "add to curriculum" action for provenance (`meta.chat_session_id` on the
+   * created lesson). Optional: history rows synthesized client-side render
+   * fine without it. */
+  sessionId?: string;
 }
 
 /** Markdown renderer for an assistant bubble (Plan 11 Task 3, C4 — Chris's
@@ -110,7 +116,7 @@ function CitationChips({ citations, locale }: { citations: ChatCitation[]; local
  * `awaiting_approval` case, which renders as `ApprovalCard` instead of a
  * plain message here — see that component's own docstring for why it isn't
  * duplicated in both places); this only renders the resulting list. */
-export function MessageList({ messages }: MessageListProps) {
+export function MessageList({ messages, sessionId }: MessageListProps) {
   const t = useTranslations("chat");
   const locale = useLocale();
 
@@ -131,26 +137,40 @@ export function MessageList({ messages }: MessageListProps) {
           data-role={message.role}
           className={cn("flex", message.role === "user" ? "justify-end" : "justify-start")}
         >
-          <div
-            className={cn(
-              "max-w-[80%] rounded-2xl px-3.5 py-2 text-sm",
-              message.role === "user"
-                ? "whitespace-pre-wrap bg-primary text-primary-foreground"
-                : "bg-muted text-foreground",
-            )}
-          >
-            {message.role === "assistant" ? <MarkdownContent text={message.content} /> : message.content}
-            {message.role === "assistant" && message.citations && message.citations.length > 0 && (
-              <CitationChips citations={message.citations} locale={locale} />
-            )}
-            {message.link && (
-              <Link
-                href={message.link.href}
-                data-testid="chat-message-link"
-                className="mt-1 block underline underline-offset-2"
-              >
-                {message.link.label}
-              </Link>
+          <div className={cn("flex max-w-[80%] flex-col", message.role === "user" ? "items-end" : "items-start")}>
+            <div
+              className={cn(
+                "rounded-2xl px-3.5 py-2 text-sm",
+                message.role === "user"
+                  ? "whitespace-pre-wrap bg-primary text-primary-foreground"
+                  : "bg-muted text-foreground",
+              )}
+            >
+              {message.role === "assistant" ? <MarkdownContent text={message.content} /> : message.content}
+              {message.role === "assistant" && message.citations && message.citations.length > 0 && (
+                <CitationChips citations={message.citations} locale={locale} />
+              )}
+              {message.link && (
+                <Link
+                  href={message.link.href}
+                  data-testid="chat-message-link"
+                  className="mt-1 block underline underline-offset-2"
+                >
+                  {message.link.label}
+                </Link>
+              )}
+            </div>
+            {/* The per-answer action row. Only real, non-empty assistant prose
+                gets it — an approval hand-off line or an empty placeholder is
+                not a lesson. */}
+            {message.role === "assistant" && message.content.trim().length > 0 && (
+              <div className="mt-0.5">
+                <AddToCurriculumDialog
+                  content={message.content}
+                  citations={message.citations}
+                  sessionId={sessionId}
+                />
+              </div>
             )}
           </div>
         </div>

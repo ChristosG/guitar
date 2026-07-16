@@ -21,6 +21,7 @@ from app.brain.chunk import chunk_sections
 from app.brain.extract import Section
 from app.config import settings
 from app.llm.embed_factory import get_embedder
+from app.llm.errors import LLMError
 from app.llm.factory import get_provider
 from app.models.generation_job import GenerationJob
 from app.models.knowledge import Chunk, KnowledgeSource, Page
@@ -204,6 +205,33 @@ def ocr_source(db, source_id) -> OcrResult:
         db.commit()
         try:
             text = _transcribe_with_retry(provider, page)
+        except LLMError as e:
+            if e.kind == "rate_limit":
+                # THE 429 RULE, same as the draft fan-out's: a rate limit is
+                # not a bad page. Refund the attempt (it must not burn the
+                # permanent budget), put the page back to pending, and STOP
+                # the run — every page after this one is about to hit the
+                # same limit, and a 77-page book can otherwise exhaust its
+                # entire per-page budget inside one rate-limit window,
+                # becoming permanently un-OCR-able with a Retry button that
+                # silently does nothing.
+                db.rollback()
+                page = db.get(Page, page.id)
+                page.ocr_attempts = max(0, (page.ocr_attempts or 1) - 1)
+                page.status = "pending"
+                page.ocr_error = "rate limited — retry in a few minutes"
+                db.commit()
+                log.warning("ocr: rate-limited at page %s — stopping this run; "
+                            "the remaining pages stay pending", page.page_no)
+                break
+            log.warning("ocr: page %s failed permanently", page.page_no, exc_info=True)
+            db.rollback()
+            page = db.get(Page, page.id)
+            page.status = "failed"
+            page.ocr_error = str(e)
+            db.commit()
+            failed += 1
+            continue
         except Exception as e:
             log.warning("ocr: page %s failed permanently", page.page_no, exc_info=True)
             db.rollback()
@@ -449,6 +477,15 @@ def _transcribe_with_retry(provider, page: Page) -> str:
                     "not decode"
                 )
             return text
+        except LLMError as e:
+            if e.kind == "rate_limit":
+                # Do NOT spend the in-call retries on a 429 — two instant
+                # re-fires into the same rate-limit window can only fail the
+                # same way. Propagate immediately; `ocr_source` refunds the
+                # attempt and parks the run.
+                raise
+            last = e
+            log.info("ocr: page %s attempt %d failed", page.page_no, attempt)
         except Exception as e:                       # noqa: BLE001 — retry boundary
             last = e
             log.info("ocr: page %s attempt %d failed", page.page_no, attempt)

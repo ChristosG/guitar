@@ -189,6 +189,9 @@ _DECLINE_EXAMPLES = [
     "smells like teen spirit riff tabs",
     "tab out the intro to Stairway to Heaven",
     "the solo from Comfortably Numb",
+    # Greek: a named song is a named song in the default locale too.
+    "tab για το Smoke on the Water",
+    "το σόλο από το Comfortably Numb",
 ]
 
 _WORKS_EXAMPLES = [
@@ -196,6 +199,14 @@ _WORKS_EXAMPLES = [
     "a blues shuffle in E",
     "a 12-bar blues progression",
     "an exercise for alternate picking",
+    # Greek: generic requests in the product's own language. The first is the
+    # exact Greek twin of the pinned English clause-split regression below —
+    # the splitter ran on English conjunctions only, so «και» never split and
+    # «μαθητές» (an unrelated clause's word) counted as song-title evidence.
+    "δείξε μου τους μαθητές και φτιάξε μια ταμπλατούρα για την πεντατονική κλίμακα",
+    "φτιάξε μια ταμπλατούρα για την πεντατονική κλίμακα",
+    "ένα riff δωδεκάμετρου μπλουζ",
+    "γράψε μου ένα tab για ζέσταμα",
 ]
 
 

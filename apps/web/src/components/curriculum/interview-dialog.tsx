@@ -27,6 +27,7 @@ import {
   type InterviewStateOut,
   type JobOut,
 } from "@/lib/api";
+import { jobErrorText } from "@/lib/job-errors";
 import { cn } from "@/lib/utils";
 import { InterviewWhoStep } from "./interview-who-step";
 import { InterviewDurationStep } from "./interview-duration-step";
@@ -105,6 +106,7 @@ async function pollOutlineJob(jobId: string): Promise<JobOut> {
  */
 export function InterviewDialog({ onMaterialized }: InterviewDialogProps) {
   const t = useTranslations("curricula.interview");
+  const tJobErrors = useTranslations("jobErrors");
 
   const [open, setOpen] = useState(false);
   const [phase, setPhase] = useState<"intro" | "interview">("intro");
@@ -113,6 +115,12 @@ export function InterviewDialog({ onMaterialized }: InterviewDialogProps) {
   const [state, setState] = useState<InterviewStateOut | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Bumped every time an outline JOB completes. It exists to remount the outline
+  // editor: the old key was `modules.length + title`, and BOTH are stable across
+  // a regenerate (the count is shape-enforced, the title is what the tutor
+  // typed) — so "Rewrite it" ran a paid full-library job and then showed him the
+  // outline he had just rejected.
+  const [outlineEpoch, setOutlineEpoch] = useState(0);
 
   function reset() {
     setPhase("intro");
@@ -121,6 +129,7 @@ export function InterviewDialog({ onMaterialized }: InterviewDialogProps) {
     setState(null);
     setSubmitting(false);
     setError(null);
+    setOutlineEpoch(0);
   }
 
   async function handleStart(e: FormEvent) {
@@ -178,12 +187,30 @@ export function InterviewDialog({ onMaterialized }: InterviewDialogProps) {
         // out from under it.
         const job = await pollOutlineJob(result.job_id);
         setState(await getInterview(interviewId));
-        if (job.status === "failed") setError(job.error ?? t("answerError"));
+        setOutlineEpoch((n) => n + 1);
+        if (job.status === "failed") setError(jobErrorText(job, tJobErrors));
         return;
       }
       setState(result);
     } catch (err) {
-      setError(err instanceof ApiError ? err.detail : t("answerError"));
+      // `err.detail` can legitimately be EMPTY (the poll deadline's synthetic
+      // 504) — and `{error && ...}` treats "" as nothing to render, which used
+      // to make a six-minute timeout end in a silent spinner-stop. Fall back
+      // to the generic message whenever there is no real detail.
+      const detail = err instanceof ApiError ? err.detail : null;
+      setError(detail || t("answerError"));
+      // Best-effort re-sync: the server may have advanced the interview (e.g.
+      // to the outline step) even though this round-trip died — leaving the
+      // dialog on the old step makes the tutor re-answer a question the
+      // server considers done, and its re-ask is not even localized.
+      if (interviewId) {
+        try {
+          setState(await getInterview(interviewId));
+          setOutlineEpoch((n) => n + 1);
+        } catch {
+          // The re-sync is a bonus, not a requirement — the error above stands.
+        }
+      }
     } finally {
       setSubmitting(false);
     }
@@ -308,11 +335,12 @@ export function InterviewDialog({ onMaterialized }: InterviewDialogProps) {
             )}
             {state.step === "outline" && (
               <InterviewOutlineStep
-                // Keyed on the outline's identity so REGENERATE remounts the editor
-                // on the new one. Without this the editor keeps its own `draft`
-                // state (a `useState` initializer runs exactly once) and the tutor
-                // pays for a fresh outline and is shown the old one.
-                key={`outline-${findings?.modules?.length ?? 0}-${findings?.title ?? ""}`}
+                // Keyed on the JOB EPOCH so REGENERATE remounts the editor on the
+                // new outline. It was keyed on `modules.length + title` — both
+                // stable across a regenerate (the count is shape-enforced, the
+                // title is the tutor's own) — so the editor kept its `useState`
+                // draft and the paid fresh outline was silently discarded.
+                key={`outline-${outlineEpoch}`}
                 // `modules: []` is NOT unreachable, and rendering nothing for it was
                 // a dead end: if the outline call fails (a bad key, a 429, a
                 // truncated response) the API keeps the tutor on this step with

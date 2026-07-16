@@ -66,6 +66,12 @@ def get_provider() -> LLMProvider:
 
 def clear_provider_cache() -> None:
     _PROVIDERS.clear()
+    # A settings change also re-arms retrieval's query-translation breaker: a
+    # freshly pasted key deserves a fresh try, not the tail of the dead key's
+    # cooldown. Local import — retrieve.py imports this module.
+    from app.brain.retrieve import reset_translation_breaker
+
+    reset_translation_breaker()
 
 
 def require_llm_configured() -> None:

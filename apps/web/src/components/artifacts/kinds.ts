@@ -6,11 +6,13 @@
  * and label-key mapping are defined exactly once instead of duplicated.
  *
  * Order: the 6 rendered kinds (see `artifact.tsx`), in the same order Task
- * 2/3's demo sections used, then the unrendered "gear_card" last. "gear_card"
- * stays in the picker despite having no client renderer yet — it's a fully
- * valid, generatable/persistable kind server-side, and `artifact.tsx`'s own
- * "unsupported kind" placeholder is the documented, graceful landing spot
- * for it (see types.ts), not a bug to hide from the UI.
+ * 2/3's demo sections used. "gear_card" is deliberately NOT offered: it has
+ * no client renderer, so picking it spent one (sometimes two, with the repair
+ * retry) billed model calls to produce a card that can only ever display the
+ * "unsupported kind" placeholder — forever, not transitionally. The kind
+ * stays valid server-side and in `ARTIFACT_KIND_LABEL_KEY` below (existing
+ * persisted gear_cards still need their label); it returns to this list the
+ * day it gets a renderer in `artifact.tsx`.
  */
 import type { ArtifactKind } from "./types";
 
@@ -21,7 +23,6 @@ export const ARTIFACT_KINDS: ArtifactKind[] = [
   "signal_chain",
   "amp_settings",
   "tone_recipe",
-  "gear_card",
 ];
 
 /** kind -> the `artifacts.sections.*` message key already used to label each

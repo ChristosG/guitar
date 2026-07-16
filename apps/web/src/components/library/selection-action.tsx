@@ -6,6 +6,7 @@ import { useLocale, useTranslations } from "next-intl";
 import { Loader2, Quote } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { authorFromSelection, getJob } from "@/lib/api";
+import { jobErrorText } from "@/lib/job-errors";
 
 /** Poll cadence + cap while a lesson-drafting job is in flight — same
  * `POLL_INTERVAL_MS`/2s cadence and `MAX_POLLS`/150-poll (~5 min) cap as
@@ -84,6 +85,7 @@ function readerPageOf(node: Node | null): number | null {
  * what gets sent. */
 export function SelectionAction({ sourceId }: SelectionActionProps) {
   const t = useTranslations("library.reader");
+  const tJobErrors = useTranslations("jobErrors");
   const locale = useLocale();
   const router = useRouter();
   const [selection, setSelection] = useState<Selection | null>(null);
@@ -97,6 +99,19 @@ export function SelectionAction({ sourceId }: SelectionActionProps) {
   useEffect(() => {
     statusRef.current = status;
   }, [status]);
+
+  // Unmount latch for the author-poll below: the loop runs for up to five
+  // minutes, and Next's router instance is stable — so a poll that outlived
+  // this Reader used to `router.push` the tutor to the new lesson MINUTES
+  // after he had navigated elsewhere, mid-whatever he was typing. On failure
+  // it also setState'd into the void, so a failed draft surfaced nowhere.
+  const aliveRef = useRef(true);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     function handleSelectionChange() {
@@ -144,10 +159,12 @@ export function SelectionAction({ sourceId }: SelectionActionProps) {
       let job = await getJob(job_id);
       let polls = 1;
       while (job.status !== "succeeded" && job.status !== "failed" && polls < MAX_POLLS) {
+        if (!aliveRef.current) return; // Reader left — the job finishes server-side
         await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
         job = await getJob(job_id);
         polls++;
       }
+      if (!aliveRef.current) return;
 
       if (job.status === "succeeded" && job.result_root_id) {
         router.push(`/${locale}/lessons/${job.result_root_id}`);
@@ -157,7 +174,7 @@ export function SelectionAction({ sourceId }: SelectionActionProps) {
         // page to stay on.
       } else if (job.status === "failed") {
         setStatus("error");
-        setError(job.error ?? t("authorError"));
+        setError(jobErrorText(job, tJobErrors));
       } else {
         // Cap exceeded — the job keeps running server-side (same posture as
         // `generate-dialog.tsx`'s `stillGenerating`); give up waiting here

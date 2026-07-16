@@ -21,6 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.curriculum import edit as edit_service
+from app.curriculum import from_chat as from_chat_service
 from app.curriculum import interview as interview_service
 from app.curriculum.assign import clone_content_subtree
 from app.curriculum.draft import draft_progress
@@ -28,6 +29,7 @@ from app.curriculum.refine import refine_block, undo_refine
 from app.curriculum.segment import segment_block
 from app.db import get_db
 from app.jobs.curriculum_draft import run_curriculum_draft_job
+from app.jobs.module_generate import run_module_generate_job
 from app.jobs.runner import run_curriculum_job, run_outline_job
 from app.llm.factory import require_llm_configured
 from app.models.artifact import Artifact
@@ -44,7 +46,9 @@ from app.schemas.curriculum import (
     CurriculumListItem,
     DraftProgressOut,
     LessonCreate,
+    LessonFromChat,
     ModuleCreate,
+    ModuleGenerateRequest,
     RefineRequest,
     ReorderRequest,
     SegmentRequest,
@@ -402,6 +406,31 @@ def add_curriculum_module(
     return block_to_tree(module)
 
 
+@router.post("/curricula/{root_id}/modules/generate", response_model=JobAccepted,
+             status_code=202, dependencies=[Depends(require_llm_configured)])
+def generate_curriculum_module(
+    root_id: UUID, payload: ModuleGenerateRequest,
+    background_tasks: BackgroundTasks, db: Session = Depends(get_db),
+) -> JobAccepted:
+    """AI ADD-MODULE: plan one module that fits this course (optionally about
+    `topic`), persist it with its lessons `queued`, then chain the ordinary draft
+    fan-out. 202 + a job id — the planning call alone runs 20-60s over the full
+    library, which is exactly the timeout class the job table exists for.
+    """
+    course = _get_block_or_404(db, root_id)
+    if course.kind != "course":
+        raise HTTPException(status_code=404, detail="not a curriculum root")
+    job = GenerationJob(
+        kind="module_generate", status="pending",
+        params={"root_id": str(root_id), "topic": payload.topic},
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    background_tasks.add_task(run_module_generate_job, job.id)
+    return JobAccepted(job_id=job.id, status=job.status)
+
+
 @router.post("/blocks/{module_id}/lessons", response_model=BlockTreeOut, status_code=201)
 def add_module_lesson(
     module_id: UUID, payload: LessonCreate, db: Session = Depends(get_db),
@@ -416,6 +445,29 @@ def add_module_lesson(
         )
     except edit_service.EditError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
+    return block_to_tree(lesson)
+
+
+@router.post("/blocks/{module_id}/lessons/from-chat", response_model=BlockTreeOut,
+             status_code=201)
+def add_lesson_from_chat_endpoint(
+    module_id: UUID, payload: LessonFromChat, db: Session = Depends(get_db),
+) -> dict:
+    """THE CHAT→CURRICULUM BRIDGE: the answer the tutor is reading in chat lands
+    as a real lesson under the module he picked. No LLM call — the approved
+    content is stored verbatim, with the chat turn's citations mapped to the
+    board's provenance chips. Deepen is the later "now write it out properly"
+    upgrade path."""
+    try:
+        lesson = from_chat_service.add_lesson_from_chat(
+            db, module_id,
+            title=payload.title, content=payload.content,
+            citations=payload.citations, chat_session_id=payload.chat_session_id,
+        )
+    except from_chat_service.FromChatError as e:
+        raise HTTPException(
+            status_code=404 if "not found" in str(e) else 422, detail=str(e),
+        ) from e
     return block_to_tree(lesson)
 
 
@@ -519,6 +571,13 @@ def update_block(block_id: UUID, payload: BlockUpdate, db: Session = Depends(get
     updates = payload.model_dump(exclude_unset=True, exclude_none=True)
     if updates.get("title") == "":
         raise HTTPException(status_code=422, detail="title cannot be empty")
+    # `est_minutes: 0` means CLEAR. The drop-nulls rule above is what protects
+    # NOT NULL columns, but it also made "remove this session's time estimate"
+    # unexpressible — the frontend's clear silently no-op'd. Zero is not a
+    # meaningful duration, so it is the sentinel: it lands as NULL.
+    if updates.get("est_minutes") == 0:
+        updates.pop("est_minutes")
+        block.est_minutes = None
     for field, value in updates.items():
         setattr(block, field, value)
     db.commit()

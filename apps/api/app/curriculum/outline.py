@@ -33,7 +33,7 @@ from __future__ import annotations
 import logging
 import uuid
 
-from app.curriculum.corpus import LibraryContext, library_message
+from app.curriculum.corpus import LibraryContext, prefix_messages
 from app.curriculum.shape import Shape, enforce_shape
 from app.i18n import answer_in, language_directive
 from app.llm.factory import get_provider
@@ -139,44 +139,31 @@ def build_outline_messages(
     counts = ", ".join(
         f"module {i + 1}: {n} lessons" for i, n in enumerate(shape.lessons_per_module)
     )
-    system = (
-        "You are designing a guitar curriculum for a working guitar teacher, from "
-        "his OWN library, which you are about to read in full.\n\n"
-        "Output ONLY the JSON outline matching the schema — no prose, no markdown, "
-        "no commentary outside the JSON object. Titles and one-sentence objectives "
-        "only: you are NOT writing lesson content here.\n\n"
-        "THE COUNTS ARE NOT NEGOTIABLE AND THEY ARE NOT SUGGESTIONS. Produce "
+
+    # THE STABLE PREFIX (`corpus.prefix_messages`). Nothing above the tail varies
+    # between the outline call, the lesson drafts, and an add-module call — the
+    # shape counts and the language used to live in a bespoke system message here,
+    # which made this call's 90K-token cache write unreadable by every draft that
+    # followed it (a different system is a different cache key).
+    messages = prefix_messages(library)
+
+    # --- everything from here down is VOLATILE and must stay outside the cache ---
+    tail = [
+        "YOUR TASK: design the outline of a course — titles and one-sentence "
+        "objectives only. You are NOT writing lesson content here.",
+        f"\nTHE COUNTS ARE NOT NEGOTIABLE AND THEY ARE NOT SUGGESTIONS. Produce "
         f"EXACTLY {shape.modules} modules and EXACTLY {shape.lessons_total} lessons "
         f"in total, distributed as: {counts}. Every lesson is "
-        f"{shape.minutes_per_lesson} minutes.\n\n"
-        "TIER EVERY MODULE HONESTLY. You will have read his entire library; you are "
+        f"{shape.minutes_per_lesson} minutes.",
+        "\nTIER EVERY MODULE HONESTLY. You have read his entire library; you are "
         "the only one who can say whether it actually covers a topic. A module "
         "tiered 'library' will be drafted from his pages and cited to them — if it "
         "is not really in there, that citation is a lie the tutor will click on. "
         "Say 'general_knowledge' instead. That is not a failure; an unlabelled "
-        "gap is.\n\n"
-        f"{language_directive(language)}"
-    )
-
-    messages: list[dict] = [{"role": "system", "content": system}]
-
-    # THE STABLE PREFIX. Nothing above this line varies between the outline call
-    # and any of the lesson drafts that follow it.
-    if not library.is_empty:
-        messages.append(library_message(library))
-    else:
-        messages.append({
-            "role": "user",
-            "content": (
-                "The tutor selected NO library sources for this course (or they "
-                "contain no readable text). You have nothing of his to read, so "
-                "tier every module honestly as 'general_knowledge' — never as "
-                "'library'."
-            ),
-        })
-
-    # --- everything from here down is VOLATILE and must stay outside the cache ---
-    tail = [f"COURSE TITLE: {title}"]
+        "gap is.",
+        f"\n{language_directive(language)}",
+        f"\nCOURSE TITLE: {title}",
+    ]
     if brief:
         tail.append(f"\nWHAT THE TUTOR WANTS FROM THIS COURSE, IN HIS OWN WORDS:\n{brief}")
     if student_brief:
@@ -262,7 +249,8 @@ def generate_outline(
         library=library, student_brief=student_brief, gap_policy=gap_policy,
     )
     raw = get_provider().guided_json(messages, OUTLINE_SCHEMA, role="plan")
-    outline = enforce_shape(raw, shape)   # raises GuidedJSONError when there are no modules
+    # raises GuidedJSONError when there are no modules
+    outline = enforce_shape(raw, shape, language=language)
 
     for module in outline["modules"]:
         requested = module.get("tier")
@@ -272,15 +260,30 @@ def generate_outline(
     return outline
 
 
-# The body a GAP module carries. Plain, unambiguous, and no invented content
-# anywhere near it — the tutor asked for his library and his library does not have
-# this. Same principle Plan 11 used for chat: general knowledge is not the danger,
-# UNLABELLED general knowledge is.
-GAP_BODY = (
-    "Your library doesn't cover this topic, and you asked for this course to be "
-    "drawn only from your own material — so no lesson content was generated for "
-    "it. Add a source on this topic, change this module's tier, or delete it."
-)
+# The body a GAP module carries — in the COURSE's language (it lands on
+# Block.body in front of a Greek tutor). Plain, unambiguous, and no invented
+# content anywhere near it — the tutor asked for his library and his library
+# does not have this. Same principle Plan 11 used for chat: general knowledge
+# is not the danger, UNLABELLED general knowledge is.
+_GAP_BODIES = {
+    "el": (
+        "Η βιβλιοθήκη σου δεν καλύπτει αυτό το θέμα, και ζήτησες το πρόγραμμα να "
+        "βασιστεί μόνο στο δικό σου υλικό — οπότε δεν γράφτηκε περιεχόμενο. "
+        "Πρόσθεσε μια πηγή για το θέμα, άλλαξε την προέλευση της ενότητας, ή "
+        "διάγραψέ τη."
+    ),
+    "en": (
+        "Your library doesn't cover this topic, and you asked for this course to "
+        "be drawn only from your own material — so no lesson content was generated "
+        "for it. Add a source on this topic, change this module's tier, or delete it."
+    ),
+}
+# Kept for existing imports/tests; Greek default per i18n.py's rule.
+GAP_BODY = _GAP_BODIES["el"]
+
+
+def gap_body(language: str) -> str:
+    return _GAP_BODIES.get(language, _GAP_BODIES["el"])
 
 
 def _est_minutes(value, default: int) -> int:
@@ -364,7 +367,7 @@ def materialize_outline(
         module_block = Block(
             kind="module",
             title=module["title"],
-            body=GAP_BODY if is_gap else (module.get("objective") or None),
+            body=gap_body(language) if is_gap else (module.get("objective") or None),
             order=m_i,
             parent_id=course.id,
             language=language,

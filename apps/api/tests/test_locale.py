@@ -209,29 +209,26 @@ def test_every_prompt_building_module_actually_calls_language_directive(module):
 
 
 @pytest.mark.parametrize("locale", ["el", "en"])
-def test_all_five_builders_put_the_directive_in_the_system_prompt(locale):
+def test_every_builder_carries_the_directive_and_curriculum_keeps_it_out_of_the_prefix(locale):
+    """Every prompt builder must carry `language_directive` SOMEWHERE — and for
+    the two full-context curriculum builders, that somewhere must NOT be the
+    system message: the system message is part of the shared cached prefix
+    (`corpus.CURRICULUM_SYSTEM`), and a per-locale/per-lesson system string is
+    exactly the silent cache-miss-per-variant bug the prefix refactor removed.
+    The directive rides the volatile tail instead (which is also the strongest
+    position — recency — with a 90K-token book in the middle)."""
     directive = language_directive(locale)
     hits = [
         Hit(chunk_id="c1", source_id="s1", source_title="Book", text="A tube amp breaks up.",
             section_path=None, page=12, score=0.9),
     ]
 
-    class _Passage:
-        text = "A tube amp breaks up."
-
+    # Non-curriculum builders: the directive still lives in the system prompt.
     systems = [
         build_grounded_messages("τι είναι το overdrive;", hits, locale=locale)[0]["content"],
         build_lesson_messages(
             text="Open position chords.", page_from=1, page_to=1,
             source_title="Book", language=locale,
-        )[0]["content"],
-        build_outline_messages(
-            title="Blues", brief=None, language=locale, shape=_SHAPE,
-            library=_EMPTY_LIBRARY, student_brief=None, gap_policy="general_knowledge",
-        )[0]["content"],
-        build_curriculum_lesson_messages(
-            ctx=_lesson_ctx(), library=_EMPTY_LIBRARY, language=locale,
-            student_brief=None, course_brief=None,
         )[0]["content"],
         build_refine_messages(
             instruction="more detail about the Amp", title="Tone", body="A tube amp breaks up.",
@@ -241,6 +238,22 @@ def test_all_five_builders_put_the_directive_in_the_system_prompt(locale):
     ]
     for system in systems:
         assert directive in system
+
+    # Full-context curriculum builders: directive in the tail, NEVER the system.
+    for messages in (
+        build_outline_messages(
+            title="Blues", brief=None, language=locale, shape=_SHAPE,
+            library=_EMPTY_LIBRARY, student_brief=None, gap_policy="general_knowledge",
+        ),
+        build_curriculum_lesson_messages(
+            ctx=_lesson_ctx(), library=_EMPTY_LIBRARY, language=locale,
+            student_brief=None, course_brief=None,
+        ),
+    ):
+        assert directive not in messages[0]["content"], (
+            "a locale-dependent system message re-breaks the shared cache prefix"
+        )
+        assert directive in messages[-1]["content"]
 
 
 @pytest.mark.parametrize("locale", ["el", "en"])

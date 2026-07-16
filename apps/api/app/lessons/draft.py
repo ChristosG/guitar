@@ -31,6 +31,7 @@ prompt.
 import uuid
 
 from app.i18n import DEFAULT_LOCALE, answer_in, language_directive
+from app.llm.errors import GuidedJSONError
 from app.llm.factory import get_provider
 from app.models.block import Block
 from app.models.knowledge import KnowledgeSource
@@ -251,6 +252,20 @@ def draft_lesson_from_selection(
         source_title=source.title, language=language,
     )
     tree = get_provider().guided_json(messages, LESSON_SCHEMA)
+
+    # SCHEMA-VALID IS NOT SUBSTANTIVE. Structured outputs cannot enforce
+    # minItems (`llm/schema.py` strips it before the call), so `{"title": ...,
+    # "sessions": []}` is a perfectly valid response — and it used to persist
+    # as a SUCCEEDED job: a billed call, a lesson editor with nothing in it,
+    # and no error explaining why. Same guard class as curriculum's
+    # `enforce_shape` and the artifacts' G6 spec checks: an empty tree is a
+    # failed generation, said out loud.
+    sessions = tree.get("sessions") or []
+    if not sessions or not any(s.get("items") for s in sessions if isinstance(s, dict)):
+        raise GuidedJSONError(
+            "the model returned a lesson with no sessions/items — the paid call "
+            "produced nothing to teach; try a longer or cleaner selection"
+        )
 
     lesson = _persist_tree(
         db, tree, source_id=source_id, page_from=page_from, page_to=page_to,

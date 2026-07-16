@@ -138,7 +138,26 @@ def plan_shape(weeks: int, sessions_per_week: int = 1, minutes: int = 50) -> Sha
     )
 
 
-def enforce_shape(outline: dict, shape: Shape) -> dict:
+# Placeholder copy for padded modules/lessons, in the COURSE's language. These
+# strings land on Block.title / the outline editor in front of a Greek tutor —
+# "Module 3" in the middle of his Greek course reads as a bug, not a hole.
+_PAD_LABELS = {
+    "el": {
+        "module": "Ενότητα {n}",
+        "lesson": "Μάθημα {n}",
+        "coverage": "Η ενότητα προστέθηκε για να συμπληρωθεί το ζητούμενο μέγεθος "
+                    "του προγράμματος — μετονόμασέ τη και όρισε τον στόχο της.",
+    },
+    "en": {
+        "module": "Module {n}",
+        "lesson": "Lesson {n}",
+        "coverage": "This module was added to complete the requested course "
+                    "length — rename it and set its objective.",
+    },
+}
+
+
+def enforce_shape(outline: dict, shape: Shape, language: str = "el") -> dict:
     """Make `outline` (an `OUTLINE_SCHEMA` payload straight off the model) have
     EXACTLY `shape`'s module and lesson counts. Returns a new dict.
 
@@ -167,16 +186,17 @@ def enforce_shape(outline: dict, shape: Shape) -> dict:
             "an empty curriculum"
         )
 
+    labels = _PAD_LABELS.get(language, _PAD_LABELS["el"])
+
     modules = modules[: shape.modules]
     while len(modules) < shape.modules:
         n = len(modules) + 1
         modules.append(
             {
-                "title": f"Module {n}",
+                "title": labels["module"].format(n=n),
                 "objective": "",
                 "tier": "general_knowledge",
-                "coverage_note": "This module was added to complete the requested "
-                                 "course length — rename it and set its objective.",
+                "coverage_note": labels["coverage"],
                 "lessons": [],
             }
         )
@@ -187,7 +207,7 @@ def enforce_shape(outline: dict, shape: Shape) -> dict:
         while len(lessons) < wanted:
             lessons.append(
                 {
-                    "title": f"Lesson {len(lessons) + 1}",
+                    "title": labels["lesson"].format(n=len(lessons) + 1),
                     "objective": "",
                     "est_minutes": shape.minutes_per_lesson,
                 }

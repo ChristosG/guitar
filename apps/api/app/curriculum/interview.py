@@ -65,7 +65,7 @@ from app.curriculum.outline import (
     materialize_outline,
 )
 from app.curriculum.shape import plan_shape
-from app.i18n import DEFAULT_LOCALE
+from app.i18n import DEFAULT_LOCALE, normalize_locale
 from app.models.interview import CurriculumInterview
 from app.models.knowledge import KnowledgeSource
 from app.models.student import Student
@@ -304,7 +304,11 @@ def _answer_who(db: Session, interview: CurriculumInterview, answer) -> dict:
             # file — the selector exists for the case where there is no student to
             # ask. `all_levels` from the picker is not an override, it is a default.
             "level": student.level or (level if level != "all_levels" else None),
-            "language": student.preferred_language or DEFAULT_LOCALE,
+            # Normalized: `preferred_language` is free text the agent tools can
+            # write ("el-GR", "EL"), and un-normalized it lands verbatim on
+            # Block.language, where anything not exactly "el"/"en" used to flip
+            # the persisted section headings to English.
+            "language": normalize_locale(student.preferred_language),
         }
 
     interview.answers = {**interview.answers, "who": who}

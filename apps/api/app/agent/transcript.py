@@ -20,6 +20,34 @@ import uuid
 
 from app.models.chat import Message
 
+# The context window cap, in MESSAGES (not tokens — counting tokens would need
+# a provider call on the hot path; at ~60 messages even generous Greek turns
+# stay well inside the model window). Without a cap, every turn resent the
+# ENTIRE session history, so a long-lived conversation grew until the provider
+# rejected the context outright — at which point every subsequent turn also
+# overflowed and the session was permanently bricked, with the tutor's own
+# history as the poison.
+MAX_WIRE_MESSAGES = 60
+
+
+def window_wire(wire: list[dict], limit: int = MAX_WIRE_MESSAGES) -> list[dict]:
+    """The transcript's most recent `limit`-ish messages, starting at a clean
+    USER turn. Starting anywhere else can orphan a tool result from the
+    assistant tool_call it answers — `anthropic_wire.py` raises
+    `DanglingToolUseError` on exactly that — so the window's left edge advances
+    to the next plain user message. Old turns fall out of the model's context;
+    they remain in the DB and the UI untouched."""
+    if len(wire) <= limit:
+        return wire
+    start = len(wire) - limit
+    while start < len(wire) and wire[start].get("role") != "user":
+        start += 1
+    if start >= len(wire):
+        # Degenerate transcript (no user row in the tail at all) — better the
+        # full history than an empty prompt.
+        return wire
+    return wire[start:]
+
 
 def messages_to_wire(rows: list[Message]) -> list[dict]:
     """Rebuild the OpenAI wire-shape transcript from persisted `Message`
@@ -105,7 +133,15 @@ def persist_new_messages(
         db.add(row)
         db.commit()
         persisted.append(row)
-    if citations and persisted and persisted[-1].role == "assistant":
-        persisted[-1].citations = citations
-        db.commit()
+    # Attached to the last ASSISTANT row in the tail — not "the last row, if it
+    # happens to be assistant". On the suspend path the tail legitimately ends
+    # with tool-result rows (read tools dispatched before the mutation
+    # suspended), and the old condition silently dropped the grounding of
+    # exactly those turns: a cited answer rendered with no chips.
+    if citations:
+        for row in reversed(persisted):
+            if row.role == "assistant":
+                row.citations = citations
+                db.commit()
+                break
     return persisted

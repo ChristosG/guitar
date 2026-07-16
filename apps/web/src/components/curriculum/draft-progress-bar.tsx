@@ -18,10 +18,18 @@ interface DraftProgressBarProps {
    * "4 of 4 ready", there is no previous count to be greater than, so no refetch
    * fires — and every row still reads "queued" under a full progress bar. */
   readyInTree: number;
+  /** How many lessons the rendered tree shows as `queued`. Its ONE job is to be an
+   * effect dependency: when it RISES (an AI-added module landed, a lesson was
+   * added, Deepen re-queued one), a poll loop that had parked itself on `done`
+   * re-arms — every enqueue path revives the bar through the same signal, the
+   * tree itself. */
+  queuedInTree: number;
   /** Called when a poll shows more lessons finished than the board is showing — it
-   * refetches the tree, and the tutor watches module 1 fill in while module 5 is
-   * still being written. */
-  onLessonReady: () => void;
+   * refetches the tree. Returns whether the refetch actually landed: the poll only
+   * advances its baseline on success, so a refetch that failed is retried on the
+   * next tick instead of being silently skipped forever (which mattered most on
+   * the FINAL tick — `done` used to park the loop with the board still stale). */
+  onLessonReady: () => Promise<boolean> | boolean;
 }
 
 /** THE FLAGSHIP PROOF, RENDERED: he can read module 1 while module 5 is still
@@ -45,7 +53,7 @@ interface DraftProgressBarProps {
  * outline after the fact, and a lesson he wants deepened: all the same state, all
  * one button.
  */
-export function DraftProgressBar({ rootId, readyInTree, onLessonReady }: DraftProgressBarProps) {
+export function DraftProgressBar({ rootId, readyInTree, queuedInTree, onLessonReady }: DraftProgressBarProps) {
   const t = useTranslations("curricula.progress");
 
   const [progress, setProgress] = useState<DraftProgress | null>(null);
@@ -62,9 +70,14 @@ export function DraftProgressBar({ rootId, readyInTree, onLessonReady }: DraftPr
       setProgress(next);
       setError(null);
       const shown = lastReady.current ?? readyInTree;
-      if (next.ready > shown) onLessonReady();
-      lastReady.current = next.ready;
-      return next;
+      // The baseline only advances when the board ACTUALLY refetched. A failed
+      // refetch keeps the old baseline, so the very next tick tries again — and
+      // `synced=false` below refuses to park, so there IS a next tick even when
+      // this poll also said `done`.
+      let synced = true;
+      if (next.ready > shown) synced = (await onLessonReady()) !== false;
+      if (synced) lastReady.current = next.ready;
+      return { next, synced };
     } catch (err) {
       // A failed poll is not a failed draft. Say nothing loud, keep polling — the
       // lessons are being written by a background task that does not care whether
@@ -79,10 +92,10 @@ export function DraftProgressBar({ rootId, readyInTree, onLessonReady }: DraftPr
     let timer: ReturnType<typeof setTimeout> | undefined;
 
     async function tick() {
-      const next = await poll();
+      const result = await poll();
       if (!alive) return;
-      // Park when there is nothing in flight. Resume re-arms it below.
-      if (next && next.done) return;
+      // Park only when nothing is in flight AND the board is showing it all.
+      if (result && result.next.done && result.synced) return;
       timer = setTimeout(tick, POLL_INTERVAL_MS);
     }
     tick();
@@ -91,11 +104,12 @@ export function DraftProgressBar({ rootId, readyInTree, onLessonReady }: DraftPr
       alive = false;
       if (timer) clearTimeout(timer);
     };
-    // `resuming` is in the deps ON PURPOSE: pressing Resume flips it true then
-    // false, which re-runs this effect and re-arms a poll loop that had parked
-    // itself on `done`. Without it the bar would sit at "12 of 20" showing nothing
-    // while the lessons he just re-enqueued were actually being written.
-  }, [poll, resuming]);
+    // `resuming` and `queuedInTree` are in the deps ON PURPOSE: pressing Resume,
+    // an AI-generated module landing, a hand-added lesson, or a Deepen click all
+    // put lessons back in flight after this loop may have parked itself on
+    // `done` — each one changes a dep and re-arms the poll. Without them the bar
+    // would sit frozen while the lessons were actually being written.
+  }, [poll, resuming, queuedInTree]);
 
   if (!progress || progress.total === 0) return null;
 

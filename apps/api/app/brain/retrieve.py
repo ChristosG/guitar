@@ -118,6 +118,7 @@ retrieval, it uses `source_ids` — which the TUTOR chooses.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from functools import lru_cache
 from uuid import UUID
@@ -210,53 +211,76 @@ _TRANSLATE_SYSTEM = (
 # timeout (plus the SDK's retries) BEFORE the search it was only ever going to
 # improve. Search still worked — `_translate_to_english` swallows everything — it
 # just took thirty seconds to do it, which to the tutor is indistinguishable from
-# broken. So the first failure trips the breaker and every subsequent query skips
-# the call outright.
+# broken. So a failure trips the breaker and subsequent queries skip the call.
 #
-# Deliberately NOT time-based, and deliberately not reset on success: the failure
-# modes this guards (no API key, wrong base URL, no network) are all persistent,
-# and a cooldown timer would just re-pay the timeout every N minutes for the whole
-# session. It resets when the process restarts — which is also when a corrected key
-# takes effect anyway (`clear_provider_cache`).
-_translation_available = True
+# TIME-BASED after all (review fix): the permanent latch treated every failure
+# as "no key / wrong URL / no network" — but ONE transient 429 or a two-second
+# network blip also latched it, silently collapsing Greek retrieval quality
+# (raw-Greek BM25 against an English corpus) for the remaining LIFETIME of the
+# process, on an app that is meant to run for months. A 10-minute cooldown
+# keeps the original economics — a genuinely dead provider re-pays one timeout
+# every ten minutes, not per query — while a hiccup self-heals. The breaker
+# also resets when the tutor saves a new key (`reset_translation_breaker`,
+# called from the provider-cache clear).
+_TRANSLATION_COOLDOWN_S = 600.0
+_translation_blocked_until = 0.0
+
+
+def reset_translation_breaker() -> None:
+    """Re-arm query translation immediately — called when the LLM settings
+    change: a freshly pasted key deserves a fresh try, not the tail of the old
+    key's cooldown."""
+    global _translation_blocked_until
+    _translation_blocked_until = 0.0
 
 
 @lru_cache(maxsize=512)
-def _translate_to_english(query: str) -> str:
-    """Greek query -> English query. Cached, because the tutor asks about the same
-    dozen topics over and over and this is a network call on the retrieval hot path.
-
-    NEVER raises. An unconfigured key, a rate limit, a timeout — every one of them
-    means "search with the query we already have", which is merely the pre-Stage-4
-    behaviour, not a broken app. A retrieval path that can 500 because a translation
-    hiccuped would be a strictly worse trade than the one this function makes.
-    """
-    global _translation_available
-    if not _translation_available:
-        return query
-    try:
-        out = get_provider().chat(
-            [
-                {"role": "system", "content": _TRANSLATE_SYSTEM},
-                {"role": "user", "content": query},
-            ],
-            temperature=0.0,
-            enable_thinking=False,
-        )
-    except Exception:
-        _translation_available = False
-        log.warning(
-            "query translation failed; searching with the raw query and not trying "
-            "again in this process (see the circuit-breaker note in retrieve.py)",
-            exc_info=True,
-        )
-        return query
+def _translate_call(query: str) -> str:
+    """The RAISING inner call, cached. `lru_cache` does not memoize raised
+    exceptions — which is the entire reason for this split: with the try/except
+    inside the cached function, a query that failed ONCE (during an outage, a
+    429) had its raw-query fallback cached FOREVER, so that exact query stayed
+    untranslated for the process lifetime even after the provider recovered."""
+    out = get_provider().chat(
+        [
+            {"role": "system", "content": _TRANSLATE_SYSTEM},
+            {"role": "user", "content": query},
+        ],
+        temperature=0.0,
+        enable_thinking=False,
+    )
     out = (out or "").strip()
     # A model that answers a translation request with a paragraph has not
     # translated anything. Guard on length rather than trusting the prompt to hold.
     if not out or len(out) > 4 * len(query) + 40:
         return query
     return out
+
+
+def _translate_to_english(query: str) -> str:
+    """Greek query -> English query. Cached (successes only), because the tutor
+    asks about the same dozen topics over and over and this is a network call on
+    the retrieval hot path.
+
+    NEVER raises. An unconfigured key, a rate limit, a timeout — every one of them
+    means "search with the query we already have", which is merely the pre-Stage-4
+    behaviour, not a broken app. A retrieval path that can 500 because a translation
+    hiccuped would be a strictly worse trade than the one this function makes.
+    """
+    global _translation_blocked_until
+    if time.monotonic() < _translation_blocked_until:
+        return query
+    try:
+        return _translate_call(query)
+    except Exception:
+        _translation_blocked_until = time.monotonic() + _TRANSLATION_COOLDOWN_S
+        log.warning(
+            "query translation failed; searching with the raw query for the next "
+            "%d minutes (see the circuit-breaker note in retrieve.py)",
+            int(_TRANSLATION_COOLDOWN_S // 60),
+            exc_info=True,
+        )
+        return query
 
 
 def _corpus_is_greek(db) -> bool:
@@ -490,13 +514,30 @@ def build_grounded_messages(query: str, hits: list[Hit], *, locale: str) -> list
     context block because that context is the last thing the model reads before
     writing, and it is entirely in the wrong language.
     """
-    system = (
-        "Answer strictly from the provided context. Cite sources as [n]. If the "
-        "context does not contain the answer, say so.\n\n"
-        f"{language_directive(locale)}"
-    )
-    context = "\n\n".join(f"[{i}] {hit.text}" for i, hit in enumerate(hits, start=1))
-    user = f"{query}\n\nContext:\n{context}\n\n{answer_in(locale)}"
+    if hits:
+        system = (
+            "Answer strictly from the provided context. Cite sources as [n]. If the "
+            "context does not contain the answer, say so.\n\n"
+            f"{language_directive(locale)}"
+        )
+        context = "\n\n".join(f"[{i}] {hit.text}" for i, hit in enumerate(hits, start=1))
+        user = f"{query}\n\nContext:\n{context}\n\n{answer_in(locale)}"
+    else:
+        # ZERO HITS IS NOT A REFUSAL SCRIPT. The old prompt still said "answer
+        # strictly from the provided context" over an EMPTY context — a billed
+        # call whose only possible output was "it's not in there". The tutor's
+        # explicit product rule is the opposite: when his library is silent,
+        # the model takes over — LABELLED. So: answer from general knowledge,
+        # open by saying the library doesn't cover it, cite nothing.
+        system = (
+            "The tutor's own library was searched and contains NOTHING relevant "
+            "to this question. Answer it well from your general knowledge of "
+            "guitar teaching. START your answer by saying, in the answer's own "
+            "language, that his library does not cover this and what follows is "
+            "general knowledge. Do NOT cite any sources — you were shown none.\n\n"
+            f"{language_directive(locale)}"
+        )
+        user = f"{query}\n\n{answer_in(locale)}"
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": user},

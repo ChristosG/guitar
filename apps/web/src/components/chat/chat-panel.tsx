@@ -20,6 +20,7 @@ import {
   type ChatMessageOut,
   type ChatTurnOut,
 } from "@/lib/api";
+import { jobErrorText } from "@/lib/job-errors";
 
 /** Poll cadence + cap while a `generate_curriculum` job is in flight after an
  * approval — same convention (and same constants) as `curriculum/
@@ -98,6 +99,7 @@ function toDisplayMessage(row: ChatMessageOut): ChatDisplayMessage | null {
  */
 export function ChatPanel({ sessionId }: ChatPanelProps) {
   const t = useTranslations("chat");
+  const tJobErrors = useTranslations("jobErrors");
   const locale = useLocale();
   const { refresh: refreshSessions } = useChatSessions();
 
@@ -213,7 +215,7 @@ export function ChatPanel({ sessionId }: ChatPanelProps) {
           href: `/${locale}/curricula`,
         });
       } else if (job.status === "failed") {
-        setComposerError(job.error ?? t("job.failed"));
+        setComposerError(jobErrorText(job, tJobErrors));
       } else {
         // Cap exceeded — the job keeps running server-side; give up waiting
         // and tell the tutor to check the Curricula page later instead of
@@ -268,16 +270,39 @@ export function ChatPanel({ sessionId }: ChatPanelProps) {
       });
 
       if (outcome.status === "done") {
+        if (!streamedAnything) {
+          // "done" with zero rendered deltas (an empty answer, or every delta
+          // block failed to parse): an empty grey bubble is not a transcript
+          // entry. Drop it and re-hydrate — the persisted turn is the truth.
+          setMessages((prev) => prev.filter((m) => m.id !== streamId));
+          await hydrate();
+          return;
+        }
         setMessages((prev) =>
           prev.map((m) => (m.id === streamId ? { ...m, citations: outcome.citations } : m)),
         );
         return;
       }
 
-      // "fallback": drop the (possibly partial) streamed placeholder — it
-      // was never persisted server-side either (see `streamChatMessage`'s
-      // docstring) — and resolve this turn the exact same way this
-      // component always did, pre-streaming.
+      if (outcome.status === "error") {
+        // TRANSPORT death mid-turn. The server may have finished and
+        // persisted the whole billed answer with only the response lost —
+        // an automatic REST resend here used to re-run the full
+        // retrieval+generation on the tutor's own API key (~2x cost per
+        // network blip) and could duplicate the turn. Re-sync from history
+        // instead; if the turn didn't land, the composer gets the text back
+        // for a one-click manual retry.
+        setMessages((prev) => prev.filter((m) => m.id !== streamId));
+        await hydrate();
+        setDraft((current) => current || content);
+        setComposerError(t("streamInterrupted"));
+        return;
+      }
+
+      // "fallback": the SERVER declined to stream this turn (tool call,
+      // guard trip) and guarantees it persisted nothing — the REST resend is
+      // safe and is the designed path. Drop the placeholder and resolve the
+      // turn the exact same way this component always did, pre-streaming.
       setMessages((prev) => prev.filter((m) => m.id !== streamId));
       const turn = await sendChatMessage(sessionId, content);
       applyTurn(turn);
@@ -327,7 +352,7 @@ export function ChatPanel({ sessionId }: ChatPanelProps) {
           <Loader2 className="size-4 animate-spin" />
         </div>
       ) : (
-        <MessageList messages={messages} />
+        <MessageList messages={messages} sessionId={sessionId} />
       )}
 
       {pendingApproval && (

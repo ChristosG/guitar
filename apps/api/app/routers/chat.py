@@ -33,7 +33,7 @@ from sqlalchemy.orm import Session
 
 from app.agent.loop import AgentResult, run_agent_turn, stream_plain_turn
 from app.agent.tools import TOOLS, with_locale
-from app.agent.transcript import messages_to_wire, persist_new_messages
+from app.agent.transcript import messages_to_wire, persist_new_messages, window_wire
 from app.db import get_db
 from app.i18n import normalize_locale
 from app.jobs.runner import run_curriculum_job, run_lesson_job
@@ -431,7 +431,7 @@ def post_message(session_id: UUID, payload: ChatMessageIn, db: Session = Depends
     _ensure_title(session, payload.content)
     persist_new_messages(db, session_id, [{"role": "user", "content": payload.content}])
 
-    wire = messages_to_wire(_ordered_messages(db, session_id))
+    wire = window_wire(messages_to_wire(_ordered_messages(db, session_id)))
     result = run_agent_turn(db, wire, locale=session.locale)
 
     return _respond_to_turn(db, session_id, wire, result)
@@ -478,7 +478,7 @@ def post_message_stream(session_id: UUID, payload: ChatMessageIn, db: Session = 
             detail="an approval is pending — resolve it before sending a new message",
         )
 
-    prior_wire = messages_to_wire(_ordered_messages(db, session_id))
+    prior_wire = window_wire(messages_to_wire(_ordered_messages(db, session_id)))
     user_wire = {"role": "user", "content": payload.content}
     wire = prior_wire + [user_wire]
 
@@ -533,7 +533,7 @@ def resolve_approval(
     if approval.status != "pending":
         raise HTTPException(status_code=409, detail=f"approval already {approval.status}")
 
-    wire = messages_to_wire(_ordered_messages(db, session_id))
+    wire = window_wire(messages_to_wire(_ordered_messages(db, session_id)))
     tool_call_id = approval.tool_call_id
 
     if payload.decision == "reject":

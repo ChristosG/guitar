@@ -93,7 +93,12 @@ export function SessionCard({ session, lessonId, index, nextSession, applyTree, 
     if (parsed === session.est_minutes) return;
     setMinutesError(null);
     try {
-      await updateBlock(session.id, { est_minutes: parsed });
+      // An emptied input means CLEAR. The API's PATCH drops explicit nulls
+      // for every field (a NOT NULL-safety rule), so `est_minutes: null` was
+      // a silent no-op and the old value snapped back with no error. `0` is
+      // the documented clear sentinel (`update_block` maps it to NULL) — a
+      // zero-minute session isn't a meaningful value anyway.
+      await updateBlock(session.id, { est_minutes: parsed === null ? 0 : parsed });
       await refreshTree();
     } catch (err) {
       setDraftMinutes(String(session.est_minutes ?? ""));
@@ -224,7 +229,14 @@ export function SessionCard({ session, lessonId, index, nextSession, applyTree, 
           ) : (
             <button
               type="button"
-              onClick={() => setEditingTitle(true)}
+              onClick={() => {
+                // Re-seed from the CURRENT prop on open: this instance
+                // survives merges/splits (keyed by id), so a mount-time seed
+                // can be stale — the editor used to open showing the
+                // pre-merge value and a blur would PATCH it back.
+                setDraftTitle(session.title);
+                setEditingTitle(true);
+              }}
               data-testid="session-title"
               className="min-w-32 flex-1 truncate text-left text-sm font-medium hover:underline"
             >
@@ -247,7 +259,13 @@ export function SessionCard({ session, lessonId, index, nextSession, applyTree, 
           ) : (
             <button
               type="button"
-              onClick={() => setEditingMinutes(true)}
+              onClick={() => {
+                // Same re-seed-on-open as the title above: after "merge
+                // down" the summed est_minutes lives on the prop, not in
+                // this instance's mount-time state.
+                setDraftMinutes(String(session.est_minutes ?? ""));
+                setEditingMinutes(true);
+              }}
               data-testid="session-minutes"
               className="shrink-0 text-xs text-muted-foreground hover:underline"
             >

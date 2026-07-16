@@ -230,6 +230,49 @@ def _count_tokens(text: str) -> int:
         return len(text) // 3 + 1
 
 
+# THE ONE SYSTEM MESSAGE for every full-context curriculum call — outline, lesson
+# draft, deepen, add-module. The cache key covers tools + system + messages up to
+# the breakpoint, so a system string that varies BETWEEN calls (the old drafts
+# baked each lesson's word target and tier directive into theirs) silently mints a
+# separate 90K-token cache entry at 1.25x per variant. Nothing breaks; the invoice
+# is just bigger. Task-specific instructions (counts, length, tier, language) all
+# live in the volatile tail AFTER the library block — which is also the strongest
+# position for them: with a 90K-token book in the middle, the model weighs the end
+# of the prompt hardest.
+CURRICULUM_SYSTEM = (
+    "You are writing curriculum for a working guitar teacher, from his OWN "
+    "library, which you are about to read in full. After the library you will "
+    "be given ONE specific task — outline a course, design a module, or write "
+    "out a complete lesson.\n\n"
+    "Output ONLY the JSON matching the schema you are given — no prose, no "
+    "markdown, no commentary outside the JSON object."
+)
+
+
+def prefix_messages(library: LibraryContext) -> list[dict]:
+    """`[system, cached library]` — THE stable prefix, byte-identical across every
+    full-context curriculum call. Build on top of this; never edit the result.
+
+    When the library is empty there is nothing to cache and the caller gets an
+    honest substitute block instead, so downstream prompts can still say "tier
+    honestly — you read nothing of his".
+    """
+    messages: list[dict] = [{"role": "system", "content": CURRICULUM_SYSTEM}]
+    if not library.is_empty:
+        messages.append(library_message(library))
+    else:
+        messages.append({
+            "role": "user",
+            "content": (
+                "The tutor selected NO library sources for this course (or they "
+                "contain no readable text). You have nothing of his to read, so "
+                "tier every module honestly as 'general_knowledge' — never as "
+                "'library'."
+            ),
+        })
+    return messages
+
+
 def library_message(library: LibraryContext) -> dict:
     """The library as ONE cached user message — THE STABLE PREFIX.
 

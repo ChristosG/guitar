@@ -23,6 +23,11 @@ class JobOut(BaseModel):
     result_root_id: UUID | None = None
     error: str | None = None
     error_kind: str | None = None
+    # Free-form runner progress (`GenerationJob.progress`), e.g. the draft
+    # fan-out's `{"phase": "drafting"}` or add-module's `{"phase": "drafting",
+    # "module_id": "..."}` — the module id is how the board knows which row to
+    # highlight when the poll comes back succeeded.
+    progress: dict | None = None
     created_at: datetime
     updated_at: datetime
 

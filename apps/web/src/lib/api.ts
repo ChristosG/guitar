@@ -545,6 +545,10 @@ export interface JobOut {
   result_root_id: string | null;
   error: string | null;
   error_kind: string | null;
+  /** Free-form runner progress — e.g. the draft fan-out's `{phase: "drafting"}`,
+   * or add-module's `{phase: "drafting", module_id: "..."}` (the id of the module
+   * it just planted, so the board can highlight it). */
+  progress: { phase?: string; module_id?: string } | null;
   created_at: string;
   updated_at: string;
 }
@@ -616,8 +620,45 @@ export function addModule(rootId: string, input: AddModuleInput): Promise<BlockN
   });
 }
 
+export interface GenerateModuleInput {
+  /** The tutor's optional steer ("πετάλια και εφέ"). Empty/null = let the model
+   * pick the module the course is most obviously missing. */
+  topic?: string | null;
+}
+
+/** AI ADD-MODULE. 202 + a job to poll: the planning call reads the whole library
+ * (20-60s), lands ONE module that fits the existing course with its lessons
+ * `queued`, then chains the ordinary draft fan-out over them. By the time the job
+ * reports `succeeded` the module exists; the lessons fill in behind the same
+ * progress bar the original generation used. */
+export function generateModule(rootId: string, input: GenerateModuleInput): Promise<JobAccepted> {
+  return request<JobAccepted>(`/curricula/${rootId}/modules/generate`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
 export function addLesson(moduleId: string, input: AddLessonInput): Promise<BlockNode> {
   return request<BlockNode>(`/blocks/${moduleId}/lessons`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export interface LessonFromChatInput {
+  title: string;
+  /** The assistant answer, verbatim — stored as the lesson's one segment, no
+   * LLM call anywhere on this path. */
+  content: string;
+  citations?: ChatCitation[] | null;
+  chat_session_id?: string | null;
+}
+
+/** THE CHAT→CURRICULUM BRIDGE: land a chat answer as a real (ready) lesson
+ * under a module the tutor picked from the database. Deepen on the board is
+ * the later "write it out to full length" upgrade path. */
+export function addLessonFromChat(moduleId: string, input: LessonFromChatInput): Promise<BlockNode> {
+  return request<BlockNode>(`/blocks/${moduleId}/lessons/from-chat`, {
     method: "POST",
     body: JSON.stringify(input),
   });
@@ -1271,7 +1312,14 @@ export function sendChatMessage(sessionId: string, content: string): Promise<Cha
  * only ever handles the safe common case). */
 export type ChatStreamOutcome =
   | { status: "done"; citations: ChatCitation[] | null }
-  | { status: "fallback"; reason: string };
+  | { status: "fallback"; reason: string }
+  /** A TRANSPORT failure — fetch rejected, or the stream died mid-body. Unlike
+   * "fallback" (the server's own event, guaranteeing it persisted nothing),
+   * here the server MAY have completed and persisted the whole billed turn
+   * with only the response lost in transit. Callers must NOT auto-resend on
+   * this — that re-runs the full retrieval+generation on the client's own API
+   * key (~2x cost) and can duplicate the turn. Re-sync from history instead. */
+  | { status: "error" };
 
 /** One parsed `event: <name>\ndata: <json>\n\n` block off the stream — see
  * `app/routers/chat.py`'s `post_message_stream` for the exact 3 event names
@@ -1346,11 +1394,16 @@ export async function streamChatMessage(
       credentials: "include",
     });
   } catch {
-    return { status: "fallback", reason: "error" };
+    // The POST may have REACHED the server even though we never saw a
+    // response — "error", not "fallback": a resend could double-bill.
+    return { status: "error" };
   }
   if (!res.ok || !res.body) {
     if (res?.status === 401) handleUnauthorized("/chat");
-    return { status: "fallback", reason: "error" };
+    // A non-2xx means the server refused BEFORE starting the turn — nothing
+    // persisted, nothing billed; the REST fallback is safe and will surface
+    // a proper error message.
+    return { status: "fallback", reason: "http" };
   }
 
   const reader = res.body.getReader();
@@ -1383,11 +1436,13 @@ export async function streamChatMessage(
       }
     }
   } catch {
-    return { status: "fallback", reason: "error" };
+    // Mid-stream death: the server-side generation was running and may have
+    // finished + persisted. NOT safe to resend.
+    return { status: "error" };
   }
-  // The body ended without a "done"/"fallback" event — treat as a fallback
-  // rather than silently returning nothing.
-  return { status: "fallback", reason: "error" };
+  // The body ended without a "done"/"fallback" event — same ambiguity as a
+  // mid-stream death: the turn may exist server-side. Not a resend.
+  return { status: "error" };
 }
 
 /** Resolves one pending approval: reject narrates the refusal and hands

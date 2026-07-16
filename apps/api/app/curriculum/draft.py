@@ -36,7 +36,7 @@ import logging
 import uuid
 from dataclasses import dataclass
 
-from app.curriculum.corpus import LibraryContext, library_message
+from app.curriculum.corpus import LibraryContext, prefix_messages
 from app.curriculum.depth import (
     DEEPEN_MAX_PASSES,
     LESSON_DRAFT_SCHEMA,
@@ -111,43 +111,36 @@ def build_lesson_messages(
 ) -> list[dict]:
     """The messages for one lesson draft. Pure.
 
-    THE FIRST TWO ENTRIES ARE BYTE-IDENTICAL TO `outline.build_outline_messages`'s
-    library block, and that is not a coincidence to be tidied away later — it is
-    what makes the prompt cache hit. Everything about THIS lesson goes after it.
+    THE PREFIX IS `corpus.prefix_messages` — byte-identical to the outline call's
+    and the add-module call's, and that is not a coincidence to be tidied away
+    later: it is what makes the prompt cache hit. EVERYTHING about this lesson —
+    including its word target and its module's tier directive — goes after it.
+    (They used to live in a per-lesson system message, which silently gave every
+    distinct tier/length combination its own 90K-token cache write at 1.25x.)
 
     `deepen`/`previous` turn this into the deepen prompt: same prefix (still a
     cache hit), plus the previous draft and the sections that came back thin.
     """
-    system = (
-        "You are writing ONE complete lesson for a working guitar teacher — the "
-        "actual pages he will teach from, not a plan for them.\n\n"
-        "Output ONLY the JSON lesson matching the schema. No prose or markdown "
-        "outside the JSON object.\n\n"
-        f"LENGTH IS NOT OPTIONAL. This lesson is {ctx.teaching_minutes} minutes of "
-        f"teaching plus a Q&A block, and it must run to about "
-        f"{ctx.target_words:,} words in total across its sections — roughly four to "
-        f"five pages. A lesson under {ctx.floor_words:,} words is a rejected lesson: "
-        "it will be sent back to you to be written properly. Write the theory out in "
-        "full, in real paragraphs. Do not write bullet points and call them a "
-        "lesson.\n\n"
-        f"{_tier_directive(ctx.tier)}\n\n"
-        f"{language_directive(language)}"
-    )
-
-    messages: list[dict] = [{"role": "system", "content": system}]
-
-    # THE STABLE PREFIX — identical to the outline call's, which wrote the cache.
-    if not library.is_empty:
-        messages.append(library_message(library))
+    messages = prefix_messages(library)
 
     # ---- volatile, and strictly after the cache breakpoint ----
     tail = [
-        f"COURSE: {ctx.course_title}",
+        "YOUR TASK: write ONE complete lesson — the actual pages the tutor will "
+        "teach from, not a plan for them.",
+        f"\nCOURSE: {ctx.course_title}",
         f"MODULE: {ctx.module_title} — {ctx.module_objective}",
         f"LESSON: {ctx.lesson_title} — {ctx.lesson_objective}",
         f"POSITION: {ctx.position}. Do not re-teach what earlier lessons covered; "
         f"build on it.",
-        f"LENGTH: ~{ctx.target_words:,} words, floor {ctx.floor_words:,}.",
+        f"\nLENGTH IS NOT OPTIONAL. This lesson is {ctx.teaching_minutes} minutes "
+        f"of teaching plus a Q&A block, and it must run to about "
+        f"{ctx.target_words:,} words in total across its sections — roughly four to "
+        f"five pages. A lesson under {ctx.floor_words:,} words is a rejected "
+        "lesson: it will be sent back to you to be written properly. Write the "
+        "theory out in full, in real paragraphs. Do not write bullet points and "
+        "call them a lesson.",
+        f"\n{_tier_directive(ctx.tier)}",
+        f"\n{language_directive(language)}",
     ]
     if course_brief:
         tail.append(f"\nWHAT THE TUTOR WANTS FROM THIS COURSE:\n{course_brief}")
@@ -427,7 +420,10 @@ def persist_lesson(
         db.delete(old)
     db.flush()
 
-    lang = lesson_block.language if lesson_block.language in SECTION_LABELS else "en"
+    # Fallback is "el", not "en" — i18n.py's own rule: anything in this codebase
+    # still defaulting to English is a bug. A student row carrying "el-GR" used
+    # to make a Greek lesson persist English section headings.
+    lang = lesson_block.language if lesson_block.language in SECTION_LABELS else "el"
     citations_all: list[dict] = []
 
     order = 0

@@ -68,6 +68,15 @@ def clone_content_subtree(db: Session, node: Block, *, parent_id: UUID | None, s
         target_profile=dict(node.target_profile) if node.target_profile else None,
         student_id=student_id,
         plane=node.plane,
+        # `meta` was the ONE field this clone dropped, and everything Stage 6
+        # hangs on meta went with it: segment `section`/`citations` (the
+        # provenance chips), module `tier`/`coverage_note` (the badges), lesson
+        # `draft_status`/`word_count` — so an assigned copy of a fully-drafted
+        # curriculum rendered bare AND read as 0-of-20 'queued' to
+        # draft_progress, whose Resume button would then re-draft all twenty
+        # cloned lessons at full price. Independent dict copy, same
+        # anti-aliasing instinct as `target_profile` above.
+        meta=dict(node.meta) if node.meta else None,
     )
     db.add(clone)
     db.flush()

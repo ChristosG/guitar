@@ -413,3 +413,25 @@ def test_a_deleted_curriculum_fails_the_job_cleanly_rather_than_crashing(db):
     job = db.get(GenerationJob, job_id)
     assert job.status == "failed"
     assert "no longer exists" in job.error
+
+
+def test_resume_retries_failed_lessons_the_way_every_surface_promises(db, _provider):
+    """The job error, the progress bar's failedHint, and the module docstring
+    all tell the tutor "press Resume to retry" a failed lesson — but the
+    fan-out's work list used to filter on `queued` only, so the button did
+    nothing for exactly the lessons it was pointed at."""
+    root_id = _course(db)
+    run_curriculum_draft_job(_job(db, root_id))
+
+    lessons = _lessons(db, root_id)
+    failed = lessons[3]
+    failed.meta = {**(failed.meta or {}), "draft_status": "failed", "error": "boom"}
+    db.commit()
+
+    before = len(_provider.drafted)
+    run_curriculum_draft_job(_job(db, root_id))
+    db.expire_all()
+
+    assert (db.get(Block, failed.id).meta or {})["draft_status"] == "ready"
+    # And ONLY the failed one was re-billed — the ready nineteen were not.
+    assert len(_provider.drafted) == before + 1

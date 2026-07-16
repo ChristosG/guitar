@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -10,6 +11,8 @@ from app.brain.media import sweep_orphaned_media
 from app.config import settings
 from app.db import SessionLocal
 from app.i18n import LOCALE_HEADER
+
+log = logging.getLogger(__name__)
 from app.jobs.sweep import sweep_interrupted_lessons, sweep_orphaned_jobs
 from app.llm.errors import LLMNotConfigured
 from app.routers import (
@@ -68,6 +71,26 @@ async def lifespan(app: FastAPI):
         warm_index(db)
     finally:
         db.close()
+
+    # WARM THE EMBEDDER — the check `llm/embedder.py`'s docstring has always
+    # promised ("fails at STARTUP with a clear error rather than at the tutor's
+    # first question") but nothing actually performed. An image built without
+    # the baked ONNX weights used to boot green and then 500 on the first
+    # search and fail every ingest, days after the broken build. Loud in the
+    # log, but NON-FATAL: chat/curriculum (BM25 + full-context) still work
+    # without dense embeddings, and a dead app helps the tutor even less than
+    # a degraded one.
+    try:
+        from app.llm.embed_factory import get_embedder
+
+        get_embedder().embed(["warm-up"], is_query=True)
+        log.info("embedding model warmed OK")
+    except Exception:
+        log.exception(
+            "EMBEDDING MODEL FAILED TO LOAD — dense retrieval is DOWN "
+            "(search/grounding degrade to BM25). Rebuild the image with the "
+            "baked e5 weights (see apps/api/Dockerfile)."
+        )
     yield
 
 

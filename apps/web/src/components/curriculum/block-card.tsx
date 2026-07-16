@@ -1,12 +1,14 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type FormEvent } from "react";
 import { useTranslations } from "next-intl";
 import {
   ChevronDown,
   ChevronRight,
   ChevronUp,
   Loader2,
+  MoreVertical,
+  Pencil,
   Plus,
   Sparkles,
   Trash2,
@@ -15,7 +17,15 @@ import { Artifact } from "@/components/artifacts/artifact";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { useConfirm } from "@/components/ui/confirm";
 import { AttachArtifactDialog } from "@/components/curriculum/attach-artifact-dialog";
 import { SegmentDialog } from "@/components/curriculum/segment-dialog";
@@ -60,15 +70,6 @@ function countSubtree(nodes: BlockNode[]): SubtreeCounts {
   );
 }
 
-/** THE VISUAL TIERING. Chris: "the component is neat but a bit messy, some more
- * spacing might be needed."
- *
- * Four kinds of thing were rendering as one kind of card, so a course, a module, a
- * lesson and a 500-word segment all looked equally important and the board read as
- * a flat wall of boxes. Now the hierarchy is legible before a single word is: the
- * course is a page heading, a module is a titled card, a lesson is a row inside it,
- * and a segment is prose in a reading column. Spacing carries the structure — which
- * is what spacing is FOR. */
 const KIND_TITLE_CLASS: Record<string, string> = {
   course: "text-xl font-semibold tracking-tight",
   module: "text-base font-semibold",
@@ -97,41 +98,39 @@ const DRAFT_STATUS_CLASS: Record<DraftStatus, string> = {
 interface BlockCardProps {
   node: BlockNode;
   locale: string;
-  /** True only for the node `TreeBoard` mounts. Passed explicitly rather than
-   * sniffed from `kind === "course"` because the ONLY thing that makes this node
-   * special is that nothing above it survives its deletion — a fact about its
-   * position, not its kind. */
   isRoot?: boolean;
   index?: number;
   siblingCount?: number;
   onChanged: (node: BlockNode) => void;
   onRemoved: (id: string) => void;
-  /** Refetch the whole tree. Used by the two mutations whose result this client
-   * cannot honestly guess at: reorder and add-lesson both RENORMALISE every
-   * sibling's `order` server-side, and a local splice would be inventing the
-   * outcome of that. One request beats a wrong tree. */
   onRefresh?: () => void;
 }
 
 /** One node of the curriculum tree, rendered recursively.
  *
- * WHAT IS NEW HERE IS EVERYTHING THE TUTOR COULD NOT SEE:
+ * THE TUTOR-FRIENDLY REWRITE (Chris: "everything is expanded and a chaos"):
  *
- *  - a TIER BADGE on every module (his library / Claude's own knowledge / the web /
- *    an honest gap) — the standing answer to his question, "what happens with the
- *    ones saying nothing in your library for this module?"
- *  - PROVENANCE CHIPS on every segment, deep-linking into the Reader at the cited
- *    page. This data was already in the database; it was being dropped at the API
- *    boundary and thrown away.
- *  - a per-lesson DRAFT STATE and WORD COUNT, so "queued / drafting / 2,340 words"
- *    is a fact on the row instead of a mystery.
- *  - DEEPEN, on a lesson that came back thin.
- *  - EXTEND WITH CHAT, on anything with prose in it.
+ *  - COLLAPSED BY DEFAULT. Only the course root opens expanded, so a curriculum
+ *    opens as a list of module rows — a table of contents, not a 45,000-word
+ *    wall. A module opens to its lesson rows; a lesson opens to its full prose.
+ *  - THE WHOLE ROW IS THE TOGGLE. Clicking anywhere on a header expands or
+ *    collapses it — not just the 16px chevron. Buttons inside the row stop
+ *    propagation, so actions never accidentally fold the tree.
+ *  - RENAME IS AN ACTION, NOT A TITLE CLICK. Clicking a title used to open the
+ *    rename input, which is why "click the row" could never work and why the
+ *    tutor believed only titles were editable. Rename now lives in the ⋯ menu.
+ *  - THE BODY IS EDITABLE. Every module objective, lesson objective and segment's
+ *    prose gets an Edit button (`PATCH /blocks/{id}` has accepted `body` all
+ *    along — the UI just never offered it).
+ *  - THE ACTION CLUTTER IS FOLDED into one ⋯ menu per row (rename / move /
+ *    add lesson / delete). What stays visible is what the tutor actually reads:
+ *    tier badges, draft status, word counts — and Deepen, the one-click fix for
+ *    a thin lesson.
  *
- * And artifacts are NOT fetched here any more. They arrive embedded in the tree
- * (`node.artifacts`); the old per-segment `GET /artifacts?block_id=` fired ~120
- * times in parallel on one board render, which is the actual cause of the "Could
- * not load attached artifacts" error.
+ * Artifacts arrive embedded in the tree (`node.artifacts`); ones attached THIS
+ * session land in `added`, deduped against the embedded list — the board refetches
+ * the whole tree on every draft-poll tick, and without the dedupe every attached
+ * artifact rendered twice as soon as the refetch landed.
  */
 export function BlockCard({
   node,
@@ -148,10 +147,13 @@ export function BlockCard({
 
   const [editing, setEditing] = useState(false);
   const [draftTitle, setDraftTitle] = useState(node.title);
-  const [expanded, setExpanded] = useState(true);
+  // Collapsed by default — the root is the only node that opens expanded, so the
+  // board reads as a table of contents.
+  const [expanded, setExpanded] = useState(isRoot);
+  const [editingBody, setEditingBody] = useState(false);
+  const [draftBody, setDraftBody] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Artifacts attached from THIS session's dialog, on top of the embedded ones.
   const [added, setAdded] = useState<ArtifactOut[]>([]);
 
   const meta = node.meta ?? {};
@@ -163,8 +165,13 @@ export function BlockCard({
   const contentChildren = node.children.filter((c) => c.plane === "content");
   const deliveryChildren = node.children.filter((c) => c.plane !== "content");
   const hasChildren = node.children.length > 0;
+  const lessonCount = contentChildren.filter((c) => c.kind === "lesson").length;
 
-  const artifacts = [...added, ...(node.artifacts ?? [])];
+  const embedded = node.artifacts ?? [];
+  const artifacts = [
+    ...added.filter((a) => !embedded.some((e) => e.id === a.id)),
+    ...embedded,
+  ];
   const draftStatus = meta.draft_status;
   const wordCount = meta.word_count;
 
@@ -193,6 +200,22 @@ export function BlockCard({
     await run(async () => {
       onChanged(await updateBlock(node.id, { title: next }));
     }, t("updateError"));
+  }
+
+  function startBodyEdit() {
+    setDraftBody(node.body ?? "");
+    setEditingBody(true);
+    setExpanded(true);
+  }
+
+  async function commitBody(e: FormEvent) {
+    e.preventDefault();
+    const next = draftBody;
+    setEditingBody(false);
+    if (next === (node.body ?? "")) return;
+    await run(async () => {
+      onChanged(await updateBlock(node.id, { body: next }));
+    }, t("editBodyError"));
   }
 
   async function handleDelete() {
@@ -235,10 +258,6 @@ export function BlockCard({
     }, t("addLessonError"));
   }
 
-  /** DEEPEN. The lesson goes back to `queued` with a raised word target, and the
-   * ordinary fan-out redrafts it against the same cached library prefix. The row
-   * flips to `queued` immediately, so his click visibly did something; the next
-   * progress poll shows it drafting. */
   async function handleDeepen() {
     await run(async () => {
       await deepenLesson(node.id);
@@ -246,13 +265,27 @@ export function BlockCard({
     }, t("deepenError"));
   }
 
+  function toggle() {
+    if (hasChildren && !editing) setExpanded((v) => !v);
+  }
+
   const header = (
-    <div className="flex min-w-0 flex-wrap items-center gap-2">
+    <div
+      className={cn(
+        "flex min-w-0 flex-wrap items-center gap-2",
+        // THE WHOLE ROW IS THE TOGGLE — with a hover tint so it reads as
+        // clickable before the first click.
+        hasChildren && "-m-1.5 cursor-pointer rounded-lg p-1.5 transition-colors hover:bg-muted/50",
+      )}
+      data-testid="block-card-header"
+      onClick={toggle}
+    >
       {hasChildren ? (
         <CollapsibleTrigger
           aria-label={expanded ? t("collapse") : t("expand")}
           data-testid="block-card-toggle"
           className="shrink-0 text-muted-foreground hover:text-foreground"
+          onClick={(e) => e.stopPropagation()}
         >
           {expanded ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
         </CollapsibleTrigger>
@@ -265,6 +298,7 @@ export function BlockCard({
           autoFocus
           value={draftTitle}
           onChange={(e) => setDraftTitle(e.target.value)}
+          onClick={(e) => e.stopPropagation()}
           onBlur={commitTitle}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
@@ -280,23 +314,24 @@ export function BlockCard({
           className="h-8 min-w-0 flex-1"
         />
       ) : (
-        <button
-          type="button"
-          onClick={() => {
-            setDraftTitle(node.title);
-            setEditing(true);
-          }}
+        <span
           data-testid="block-card-title"
           className={cn(
-            "min-w-0 flex-1 truncate text-left hover:underline",
+            "min-w-0 flex-1 truncate text-left",
             KIND_TITLE_CLASS[node.kind] ?? "text-sm font-medium",
           )}
         >
           {node.title}
-        </button>
+        </span>
       )}
 
       {isModule && <TierBadge tier={meta.tier} coverageNote={meta.coverage_note} />}
+
+      {isModule && !expanded && lessonCount > 0 && (
+        <Badge variant="outline" data-testid="module-lesson-count">
+          {t("lessonCount", { count: lessonCount })}
+        </Badge>
+      )}
 
       {isLesson && draftStatus && (
         <span
@@ -330,42 +365,10 @@ export function BlockCard({
         </Badge>
       )}
 
-      <div className="ml-auto flex shrink-0 items-center gap-1">
-        {reorderable && (
-          <>
-            <Button
-              type="button" variant="ghost" size="icon-sm"
-              data-testid="block-card-up"
-              aria-label={t("moveUp")}
-              disabled={busy || index === 0}
-              onClick={() => handleReorder("up")}
-            >
-              <ChevronUp />
-            </Button>
-            <Button
-              type="button" variant="ghost" size="icon-sm"
-              data-testid="block-card-down"
-              aria-label={t("moveDown")}
-              disabled={busy || index === siblingCount - 1}
-              onClick={() => handleReorder("down")}
-            >
-              <ChevronDown />
-            </Button>
-          </>
-        )}
-
-        {isModule && (
-          <Button
-            type="button" variant="ghost" size="icon-sm"
-            data-testid="block-card-add-lesson"
-            aria-label={t("addLesson")}
-            disabled={busy}
-            onClick={handleAddLesson}
-          >
-            <Plus />
-          </Button>
-        )}
-
+      <div
+        className="ml-auto flex shrink-0 items-center gap-1"
+        onClick={(e) => e.stopPropagation()}
+      >
         {isLesson && (
           <Button
             type="button" variant="ghost" size="sm"
@@ -389,39 +392,116 @@ export function BlockCard({
           />
         )}
 
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          data-testid="block-card-delete"
-          disabled={busy}
-          onClick={handleDelete}
-          aria-label={t("delete")}
-        >
-          {busy ? <Loader2 className="animate-spin" /> : <Trash2 />}
-        </Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            render={
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                data-testid="block-card-menu"
+                aria-label={t("moreActions")}
+                disabled={busy}
+              />
+            }
+          >
+            {busy ? <Loader2 className="animate-spin" /> : <MoreVertical />}
+          </DropdownMenuTrigger>
+          <DropdownMenuContent>
+            <DropdownMenuItem
+              data-testid="menu-rename"
+              onClick={() => {
+                setDraftTitle(node.title);
+                setEditing(true);
+              }}
+            >
+              <Pencil />
+              {t("rename")}
+            </DropdownMenuItem>
+            {reorderable && (
+              <>
+                <DropdownMenuItem
+                  data-testid="menu-move-up"
+                  disabled={index === 0}
+                  onClick={() => handleReorder("up")}
+                >
+                  <ChevronUp />
+                  {t("moveUp")}
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  data-testid="menu-move-down"
+                  disabled={index === siblingCount - 1}
+                  onClick={() => handleReorder("down")}
+                >
+                  <ChevronDown />
+                  {t("moveDown")}
+                </DropdownMenuItem>
+              </>
+            )}
+            {isModule && (
+              <DropdownMenuItem data-testid="menu-add-lesson" onClick={handleAddLesson}>
+                <Plus />
+                {t("addLesson")}
+              </DropdownMenuItem>
+            )}
+            <DropdownMenuSeparator />
+            <DropdownMenuItem destructive data-testid="menu-delete" onClick={handleDelete}>
+              <Trash2 />
+              {t("delete")}
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
     </div>
   );
 
+  const canEditBody = isSegment || isModule || isLesson;
+
   const body = (
     <div className="flex flex-col gap-3">
-      {/* A lesson's `body` is a one-line objective; a segment's is 500 words of
-          prose. Same column, two jobs — so the segment gets the reading treatment
-          and the lesson gets a caption. */}
-      {node.body && (
-        <p
-          data-testid="block-card-body"
-          className={cn(
-            "whitespace-pre-wrap",
-            isSegment ? "text-sm leading-relaxed" : "text-xs text-muted-foreground",
-          )}
-        >
-          {node.body}
-        </p>
+      {editingBody ? (
+        <form onSubmit={commitBody} className="flex flex-col gap-2" data-testid="body-edit-form">
+          <Textarea
+            autoFocus
+            value={draftBody}
+            onChange={(e) => setDraftBody(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") setEditingBody(false);
+            }}
+            rows={Math.min(18, Math.max(4, draftBody.split("\n").length + 1))}
+            data-testid="body-edit-textarea"
+            disabled={busy}
+            className={cn(isSegment && "text-sm leading-relaxed")}
+          />
+          <div className="flex items-center gap-2 self-end">
+            <Button
+              type="button" size="sm" variant="outline"
+              disabled={busy}
+              onClick={() => setEditingBody(false)}
+            >
+              {t("cancel")}
+            </Button>
+            <Button type="submit" size="sm" disabled={busy} data-testid="body-edit-save">
+              {busy && <Loader2 className="animate-spin" />}
+              {t("editSave")}
+            </Button>
+          </div>
+        </form>
+      ) : (
+        node.body && (
+          <p
+            data-testid="block-card-body"
+            className={cn(
+              "whitespace-pre-wrap",
+              isSegment ? "text-sm leading-relaxed" : "text-xs text-muted-foreground",
+            )}
+          >
+            {node.body}
+          </p>
+        )
       )}
 
-      {isSegment && <ProvenanceChips citations={meta.citations} locale={locale} />}
+      {isSegment && !editingBody && <ProvenanceChips citations={meta.citations} locale={locale} />}
 
       {isLesson && meta.error && (
         <p role="alert" data-testid="lesson-error" className="text-xs text-destructive">
@@ -444,12 +524,23 @@ export function BlockCard({
         </div>
       )}
 
-      {/* Extend-with-chat, on anything that HAS prose to extend. Not on the course
-          root (its body is a title, and "rewrite this block" over a whole course
-          means nothing), and not on an undrafted lesson — there is nothing there
-          yet, and the button for that one is Deepen. */}
-      {(isSegment || isModule || (isLesson && draftStatus === "ready")) && (
-        <ExtendWithChat blockId={node.id} canUndo={Boolean(meta.prev_body)} onRefined={onChanged} />
+      {!editingBody && (canEditBody || isSegment || isModule || (isLesson && draftStatus === "ready")) && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          {canEditBody && (
+            <Button
+              type="button" size="sm" variant="ghost"
+              data-testid="body-edit-trigger"
+              disabled={busy}
+              onClick={startBodyEdit}
+            >
+              <Pencil />
+              {t("editContent")}
+            </Button>
+          )}
+          {(isSegment || isModule || (isLesson && draftStatus === "ready")) && (
+            <ExtendWithChat blockId={node.id} canUndo={Boolean(meta.prev_body)} onRefined={onChanged} />
+          )}
+        </div>
       )}
 
       {error && (
@@ -466,8 +557,6 @@ export function BlockCard({
         <div
           className={cn(
             "flex flex-col",
-            // The vertical rhythm IS the hierarchy: modules breathe, lessons sit
-            // closer together, segments are a stack of paragraphs.
             node.kind === "course" ? "gap-4" : node.kind === "module" ? "gap-3" : "gap-2",
             node.kind !== "course" && "border-l border-border pl-4",
           )}

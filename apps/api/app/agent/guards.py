@@ -247,6 +247,12 @@ _GENERIC_MUSIC_TERMS = {
     "συγχορδιας", "χορδης", "ρυθμου", "υφους", "τραγουδιου", "κομματιου",
     "εναλλακτικη", "εναλλακτικο", "δωριο", "μιξολυδιο", "λυδιο", "φρυγιο",
     "αργο", "γρηγορο", "απλο", "ευκολο", "δυσκολο",
+    # genre names as the tutor actually writes them — Greek transliterations.
+    # "ενα riff δωδεκαμετρου μπλουζ" is as generic as "a 12-bar blues riff",
+    # and "μπλουζ" not being in this set made it read as a song title.
+    "μπλουζ", "ροκ", "τζαζ", "μεταλ", "φανκ", "ποπ", "ρεγκε", "σουινγκ",
+    "δωδεκαμετρο", "δωδεκαμετρου", "οκταμετρο", "οκταμετρου",
+    "σαφλ", "μπαλαντα", "μπαλαντας",
 }
 
 # FOLD THE VOCABULARY ITSELF, at import.
@@ -285,7 +291,20 @@ _WORD_RE = re.compile(r"[^\W_][\w'-]*", re.UNICODE)
 # scanning the clause that actually contains the trigger word keeps the
 # check scoped to the part of the message that's actually naming a piece of
 # music, not an unrelated command chained onto the same turn.
-_CLAUSE_SPLIT_RE = re.compile(r"[.,;]+|\band\b|\bbut\b|\bthen\b", re.IGNORECASE)
+#
+# GREEK CONJUNCTIONS SPLIT TOO — this ran on English ones only, so the exact
+# Greek equivalent of the pinned English regression («δείξε μου τους μαθητές
+# ΚΑΙ φτιάξε μια ταμπλατούρα...») scanned as ONE clause and the unrelated
+# first half's words ("μαθητές") counted as song-title evidence: falsely
+# declined in the default locale, fine in English. The input is folded before
+# splitting, so the alternatives are folded forms (και, αλλα, μετα, ...); '·'
+# (ano teleia) is Greek's clause-level punctuation and belongs with [.,;].
+_CLAUSE_SPLIT_RE = re.compile(
+    r"[.,;·]+"
+    r"|\band\b|\bbut\b|\bthen\b"
+    r"|\bκαι\b|\bαλλα\b|\bμετα\b|\bεπειτα\b|\bυστερα\b|\bοποτε\b",
+    re.IGNORECASE,
+)
 
 
 def looks_like_named_song_request(text: str) -> bool:

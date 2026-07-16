@@ -1,12 +1,20 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useState, type FormEvent } from "react";
 import { useTranslations } from "next-intl";
-import { AlertTriangle, BookOpen, Loader2, Plus } from "lucide-react";
+import { AlertTriangle, BookOpen, Loader2, Plus, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { BlockCard } from "@/components/curriculum/block-card";
 import { DraftProgressBar } from "@/components/curriculum/draft-progress-bar";
-import { ApiError, addModule, getCurriculum, type BlockNode } from "@/lib/api";
+import {
+  ApiError,
+  addModule,
+  generateModule,
+  getCurriculum,
+  getJob,
+  type BlockNode,
+} from "@/lib/api";
 
 interface TreeBoardProps {
   root: BlockNode;
@@ -37,43 +45,46 @@ function removeNode(node: BlockNode, id: string): BlockNode {
   return changed ? { ...node, children } : node;
 }
 
-/** THE BOARD. Chris: "the component is neat but a bit messy, some more spacing
- * might be needed."
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+// The add-module planning call reads the whole library — 20-60s in the normal
+// case. Six minutes is the same ceiling the interview's outline poll uses.
+const MODULE_POLL_INTERVAL_MS = 2000;
+const MODULE_POLL_DEADLINE_MS = 6 * 60_000;
+
+/** THE BOARD. A `max-w-3xl` reading column that OWNS the tree; every mutation
+ * flows back up to it, and the draft-progress poll refetches into it.
  *
- * A `max-w-3xl` reading column, because this is PROSE now — 2,200 words a lesson,
- * not a title and a badge. A curriculum spread across a 27-inch iMac is a
- * spreadsheet; it should read like the book he is writing.
- *
- * THE BOARD OWNS THE TREE, and every mutation flows back up to it. `BlockCard` used
- * to keep its own `children` state, which was fine while nothing outside it could
- * change a block — and became wrong the moment lessons started arriving from a
- * background draft while he was reading them. One tree, one owner, and the progress
- * poll refetches into it.
- *
- * The whole tree's artifacts arrive EMBEDDED (`BlockNode.artifacts`, from one
- * `WHERE block_id IN (...)`). No leaf fetches anything. That stampede of ~120
- * parallel `GET /artifacts?block_id=` requests IS the "Could not load attached
- * artifacts" error he kept seeing.
+ * "ADD A MODULE" IS AN AI ACTION NOW. The button opens a one-line form: an
+ * optional topic ("πετάλια και εφέ"), and Generate. The API plans ONE module that
+ * fits the existing course (same full-library call the outline used), lands it
+ * with its lessons `queued`, and chains the ordinary draft fan-out — so the new
+ * module fills in exactly the way the original curriculum did, progress bar and
+ * all. The old create-an-empty-box behaviour survives as the quiet secondary
+ * button, because sometimes the tutor just wants a container.
  */
 export function TreeBoard({ root, locale, onRootDeleted }: TreeBoardProps) {
   const t = useTranslations("curricula.tree");
 
-  // The board OWNS the tree from here on. `root` is the seed, not the source of
-  // truth — a draft poll landing a new lesson, a rename, a delete all mutate this
-  // copy. Switching curricula is a REMOUNT (`key={root.id}` at the call site), not a
-  // prop sync: syncing props into state inside an effect is a cascading render, and
-  // this tree is ~120 nodes deep.
   const [tree, setTree] = useState<BlockNode>(root);
-  const [adding, setAdding] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
+  const [topic, setTopic] = useState("");
+  const [adding, setAdding] = useState(false);       // the plain empty-module POST
+  const [generating, setGenerating] = useState(false); // the AI job, enqueue → done
   const [error, setError] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => {
+  /** Refetch the whole tree. Returns whether it landed — the progress bar's poll
+   * uses that to decide if its baseline may advance (a failed refetch is retried
+   * on the next tick rather than silently skipped, which mattered most on the
+   * FINAL tick of a draft run). */
+  const refresh = useCallback(async (): Promise<boolean> => {
     try {
       setTree(await getCurriculum(root.id));
+      return true;
     } catch {
-      // A failed refetch is not worth a banner: the lessons are being written by a
-      // background task that does not care whether this tab can reach the API, the
-      // progress bar has its own error line, and the next poll tries again.
+      return false;
     }
   }, [root.id]);
 
@@ -92,15 +103,45 @@ export function TreeBoard({ root, locale, onRootDeleted }: TreeBoardProps) {
     [root.id, onRootDeleted],
   );
 
-  async function handleAddModule() {
+  async function handleGenerateModule(e: FormEvent) {
+    e.preventDefault();
+    setGenerating(true);
+    setError(null);
+    try {
+      const accepted = await generateModule(tree.id, { topic: topic.trim() || null });
+      const deadline = performance.now() + MODULE_POLL_DEADLINE_MS;
+      while (performance.now() < deadline) {
+        await sleep(MODULE_POLL_INTERVAL_MS);
+        const job = await getJob(accepted.job_id);
+        if (job.status === "succeeded") {
+          // The module + its queued lessons exist; the chained draft fan-out is
+          // already writing them. The refetched tree's rising `queued` count
+          // re-arms the progress bar's poll loop.
+          await refresh();
+          setTopic("");
+          setAddOpen(false);
+          return;
+        }
+        if (job.status === "failed") {
+          setError(job.error ?? t("addModuleError"));
+          return;
+        }
+      }
+      setError(t("addModuleTimeout"));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.detail : t("addModuleError"));
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  async function handleAddEmptyModule() {
     setAdding(true);
     setError(null);
     try {
       await addModule(tree.id, { title: t("newModuleTitle") });
-      // Refetch rather than splice: `add_module` renormalises every sibling's
-      // `order` server-side, and a client-side splice would be guessing at the
-      // result of that.
       await refresh();
+      setAddOpen(false);
     } catch (err) {
       setError(err instanceof ApiError ? err.detail : t("addModuleError"));
     } finally {
@@ -108,19 +149,21 @@ export function TreeBoard({ root, locale, onRootDeleted }: TreeBoardProps) {
     }
   }
 
-  // What the board is ALREADY showing as drafted — the progress bar's baseline for
-  // its very first poll (see its `readyInTree` prop).
+  // What the board is ALREADY showing — the progress bar's baseline (ready) and
+  // its wake-up signal (queued: a rise re-arms a parked poll loop).
   const readyInTree = tree.children.reduce(
     (n, module) =>
       n + module.children.filter((lesson) => lesson.meta?.draft_status === "ready").length,
     0,
   );
+  const queuedInTree = tree.children.reduce(
+    (n, module) =>
+      n + module.children.filter((lesson) => lesson.meta?.draft_status === "queued").length,
+    0,
+  );
 
   const library = tree.meta?.library;
   const shape = tree.meta?.shape;
-  // FALSE means the library did NOT fit whole and the lessons were drafted from
-  // per-module retrieval instead. He is told, in words. A silent downgrade to
-  // retrieval is the exact failure this stage exists to remove.
   const degraded = library != null && library.full_context === false;
 
   return (
@@ -155,7 +198,12 @@ export function TreeBoard({ root, locale, onRootDeleted }: TreeBoardProps) {
           </div>
         )}
 
-        <DraftProgressBar rootId={tree.id} readyInTree={readyInTree} onLessonReady={refresh} />
+        <DraftProgressBar
+          rootId={tree.id}
+          readyInTree={readyInTree}
+          queuedInTree={queuedInTree}
+          onLessonReady={refresh}
+        />
       </header>
 
       <BlockCard
@@ -168,19 +216,66 @@ export function TreeBoard({ root, locale, onRootDeleted }: TreeBoardProps) {
         onRefresh={refresh}
       />
 
-      <footer className="flex flex-col gap-1.5">
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          className="self-start"
-          data-testid="board-add-module"
-          disabled={adding}
-          onClick={handleAddModule}
-        >
-          {adding ? <Loader2 className="animate-spin" /> : <Plus />}
-          {t("addModule")}
-        </Button>
+      <footer className="flex flex-col gap-2">
+        {!addOpen ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="self-start"
+            data-testid="board-add-module"
+            onClick={() => {
+              setAddOpen(true);
+              setError(null);
+            }}
+          >
+            <Sparkles />
+            {t("addModule")}
+          </Button>
+        ) : (
+          <form
+            onSubmit={handleGenerateModule}
+            className="flex flex-col gap-2 rounded-2xl border border-border bg-card p-3 ring-1 ring-foreground/5"
+            data-testid="board-add-module-form"
+          >
+            <Input
+              autoFocus
+              value={topic}
+              onChange={(e) => setTopic(e.target.value)}
+              placeholder={t("addModuleTopicPlaceholder")}
+              data-testid="add-module-topic"
+              disabled={generating || adding}
+            />
+            <div className="flex flex-wrap items-center gap-2">
+              <Button type="submit" size="sm" disabled={generating || adding} data-testid="add-module-generate">
+                {generating ? <Loader2 className="animate-spin" /> : <Sparkles />}
+                {t("addModuleGenerate")}
+              </Button>
+              <Button
+                type="button" size="sm" variant="ghost"
+                data-testid="add-module-empty"
+                disabled={generating || adding}
+                onClick={handleAddEmptyModule}
+              >
+                {adding ? <Loader2 className="animate-spin" /> : <Plus />}
+                {t("addModuleEmpty")}
+              </Button>
+              <Button
+                type="button" size="sm" variant="ghost"
+                className="ml-auto"
+                disabled={generating}
+                onClick={() => setAddOpen(false)}
+              >
+                {t("cancel")}
+              </Button>
+            </div>
+            {generating && (
+              <p className="text-xs text-muted-foreground" data-testid="add-module-working">
+                {t("addModuleWorking")}
+              </p>
+            )}
+          </form>
+        )}
         {error && (
           <p role="alert" data-testid="board-add-error" className="text-xs text-destructive">
             {error}

@@ -38,4 +38,11 @@ ENV HF_HUB_OFFLINE=1
 # the host .venv/caches out of the context.
 COPY . .
 RUN pip install --no-cache-dir -e ".[dev]"
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# MIGRATIONS RUN AT BOOT, BEFORE THE SERVER — `alembic upgrade head` is
+# idempotent (a no-op on an already-current schema) and the chain is linear.
+# Without this, every image update that carries a new migration boots uvicorn
+# cleanly against a stale schema and 500s on first touch of the new column —
+# on a machine (the client's iMac) with nobody there to `docker compose exec`.
+# The README's manual step remains valid; this just stops it being load-bearing.
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"]

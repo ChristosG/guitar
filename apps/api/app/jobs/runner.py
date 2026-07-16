@@ -49,7 +49,7 @@ from app.db import SessionLocal
 from app.jobs.curriculum_draft import run_curriculum_draft_job
 from app.i18n import DEFAULT_LOCALE
 from app.lessons.draft import draft_lesson_from_selection
-from app.llm.errors import GuidedJSONError, LLMNotConfigured
+from app.llm.errors import GuidedJSONError, LLMError, LLMNotConfigured
 from app.models.generation_job import GenerationJob
 from app.models.interview import CurriculumInterview
 from app.models.knowledge import KnowledgeSource
@@ -68,6 +68,40 @@ _CURRICULUM_PARAMS = frozenset({
     "weeks", "sessions_per_week", "minutes_per_session", "target_minutes_total",
     "source_ids", "student_id",
 })
+
+
+def _record_llm_failure(db, job_id: uuid.UUID, e: LLMError, what: str) -> None:
+    """Record a provider failure UNDER ITS OWN KIND — the taxonomy the frontend
+    translates and acts on. This is the branch the Claude providers were built
+    to feed (`llm/claude.py::_mapped_errors` turns every Anthropic failure into
+    an `LLMError` with kind auth/rate_limit/timeout/upstream) and that these
+    runners never caught: a rejected key or a 429 fell through to the broad
+    `except Exception` and was filed as error_kind="internal" — "our bug, try
+    again" — sending the tutor to retry-spam the exact call that was
+    rate-limited, instead of to Settings. Same rollback-before-recording rule
+    as every sibling branch: partial flushed writes must not be swept into the
+    failure-record's commit.
+    """
+    db.rollback()
+    job = db.get(GenerationJob, job_id)
+    if job is None:
+        log.warning("%s: job_id=%s gone during failure recovery", what, job_id)
+        return
+    job.status = "failed"
+    if e.kind == "auth":
+        job.error_kind = "auth"
+        job.error = ("Your Anthropic API key was rejected. Open Settings and "
+                     "check your key.")
+    elif e.kind == "rate_limit":
+        job.error_kind = "rate_limit"
+        job.error = "The model is rate-limited right now. Wait a minute, then try again."
+    elif e.kind == "timeout":
+        job.error_kind = "timeout"
+        job.error = f"{what} timed out. Try again."
+    else:
+        job.error_kind = "upstream"
+        job.error = str(e) or f"{what} failed at the model provider. Try again."
+    db.commit()
 
 
 def _curriculum_kwargs(params: dict) -> dict:
@@ -156,6 +190,10 @@ def run_curriculum_job(job_id: uuid.UUID) -> None:
             job.error_kind = "timeout"
             job.error = "Curriculum generation timed out. Try again."
             db.commit()
+        except LLMError as e:
+            log.warning("run_curriculum_job: job_id=%s failed at the provider (%s)",
+                        job_id, e.kind)
+            _record_llm_failure(db, job_id, e, "Curriculum generation")
         except Exception:
             log.exception("run_curriculum_job: job_id=%s failed unexpectedly", job_id)
             # A failure inside generate_curriculum's own DB writes (e.g. mid
@@ -286,6 +324,10 @@ def run_outline_job(job_id: uuid.UUID) -> None:
             job.error_kind = "timeout"
             job.error = "Outline generation timed out. Try again."
             db.commit()
+        except LLMError as e:
+            log.warning("run_outline_job: job_id=%s failed at the provider (%s)",
+                        job_id, e.kind)
+            _record_llm_failure(db, job_id, e, "Outline generation")
         except Exception:
             log.exception("run_outline_job: job_id=%s failed unexpectedly", job_id)
             try:
@@ -389,6 +431,10 @@ def run_lesson_job(job_id: uuid.UUID) -> None:
             job.error_kind = "timeout"
             job.error = "Lesson drafting timed out. Try again."
             db.commit()
+        except LLMError as e:
+            log.warning("run_lesson_job: job_id=%s failed at the provider (%s)",
+                        job_id, e.kind)
+            _record_llm_failure(db, job_id, e, "Lesson drafting")
         except Exception:
             log.exception("run_lesson_job: job_id=%s failed unexpectedly", job_id)
             # Same recovery reasoning as run_curriculum_job's identical block:

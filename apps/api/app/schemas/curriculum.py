@@ -136,10 +136,27 @@ class ModuleCreate(BaseModel):
     after: UUID | None = None
 
 
+class ModuleGenerateRequest(BaseModel):
+    """The AI add-module request. `topic` is the tutor's optional steer ("pedals
+    and effects") — empty means "pick the module this course is missing"."""
+    topic: str | None = Field(default=None, max_length=500)
+
+
 class LessonCreate(BaseModel):
     title: str = Field(min_length=1)
     objective: str = ""
     after: UUID | None = None
+
+
+class LessonFromChat(BaseModel):
+    """The chat→curriculum bridge payload. `content` is the assistant answer the
+    tutor is looking at, passed verbatim — the server stores it, it never goes
+    near a model. `citations` is the chat turn's grounding list (page_no shape);
+    the service maps it to the board's provenance shape."""
+    title: str = Field(min_length=1, max_length=300)
+    content: str = Field(min_length=1)
+    citations: list[dict] | None = None
+    chat_session_id: UUID | None = None
 
 
 class ReorderRequest(BaseModel):
