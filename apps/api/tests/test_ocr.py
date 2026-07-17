@@ -1,5 +1,8 @@
+from unittest.mock import patch
+
 import fitz
 import pytest
+from app.brain.ingest import IngestPayload, ingest_source
 from app.brain.ocr import (
     FIGURE_END,
     FIGURE_MARKER,
@@ -1250,3 +1253,265 @@ def test_a_source_with_no_stored_pdf_falls_back_to_its_page_scan(
 
     assert result.ready == 1
     assert fake.images == [b"jpeg"]                  # `_prep` writes exactly these bytes
+
+
+# =========================================================================
+# Final review, CRITICAL 2 — THE LAYER `paginate` REFUSED, RE-ADOPTED BY
+# `ingest` ~30 LINES LATER
+# =========================================================================
+#
+# `paginate_source` routes on the font and correctly REFUSES a GlyphLessFont
+# layer: `Page.text=None`, `status="pending"`, `ocr_reason="inherited_ocr"`.
+# `ingest_source` then re-opens the SAME PDF bytes, re-extracts THE VERY LAYER
+# paginate just refused, chunks it, embeds it, and links it by `page_id` to those
+# pending pages. `retrieve.search` joins Chunk->Page only to resolve a page
+# number — it does not filter on `Page.status` — so those chunks are fully
+# retrievable and citable. Task 3 changed one half of the pipeline and nobody
+# owned the other half.
+#
+# WHY IT SHIPPED, and this is the part worth remembering: the test that asserts
+# the right invariant (`test_embed_failure_on_one_page_does_not_abort_the_batch`,
+# "if ready: chunks >= 1 / else: chunks == 0") WAS VACUOUS. Every OCR test above
+# builds its Page rows by hand via `_src_with_pending_pages`, so no ingest-time
+# chunk ever existed to survive, and the `else` branch passed against an empty
+# set. The fixture below is the missing piece: it goes through `ingest_source`
+# FIRST, so the chunk store is populated the way a real upload populates it and
+# the invariant can actually fail.
+#
+# THE INVARIANT, stated where it belongs — on the DATA, not on a status:
+#
+#     A PAGE WHOSE `text` IS NULL HAS NO CHUNKS.
+#
+# Not "a non-ready page has no chunks": an `image_region` page keeps correct
+# PUBLISHER text (paginate.py) and must keep the chunks that go with it even when
+# its figure description fails. Powers' 43 tab pages are exactly that page.
+
+# The Kahn p.63 story, in miniature. The layer in the PDF is Tesseract's, and it
+# lost the fraction glyph; what a model reads off the scan has it. The two are
+# distinguishable ON SIGHT, which is what lets these tests say WHICH text a chunk
+# is holding rather than merely how many there are.
+_REFUSED_LAYER = (
+    "Connections are made either with 4-inch stereo cables or with insert cables "
+    "that have a 4-inch stereo connection at one end and two 4-inch mono cables "
+    "at the other end of the signal run."
+)
+_WHAT_CLAUDE_READS = (
+    "Connections are made either with ¼-inch stereo cables or with insert cables "
+    "that have a ¼-inch stereo connection at one end and two ¼-inch mono cables "
+    "at the other end of the signal run."
+)
+
+
+def _scanned_pdf_bytes(layers: list[str]) -> bytes:
+    """A REAL PDF carrying a real text layer — `extract_text` genuinely extracts
+    it, which is the whole mechanism under test."""
+    doc = fitz.open()
+    for body in layers:
+        page = doc.new_page(width=612, height=792)
+        page.insert_textbox(fitz.Rect(72, 72, 540, 720), body, fontsize=11)
+    return doc.tobytes()
+
+
+def _upload(db, monkeypatch, tmp_path, layers, *, kind="ocr", images=False):
+    """Upload a book THE WAY THE TUTOR UPLOADS ONE — through `ingest_source`.
+
+    Only `text_layer_kind` is faked, and only because building a genuine
+    GlyphLessFont PDF needs an OCR toolchain (see test_brain_textlayer.py, which
+    is where that detector is actually tested). Everything else here is the real
+    pipeline: a real PDF, real `paginate_source` routing, real `extract_text`,
+    real `chunk_sections`, real `Chunk` rows linked by `page_id`.
+    """
+    src = KnowledgeSource(type="pdf", title="A scanned book", status="pending")
+    db.add(src)
+    db.commit()
+    monkeypatch.setattr("app.brain.paginate.settings.media_dir", str(tmp_path))
+    monkeypatch.setattr("app.brain.ocr.settings.media_dir", str(tmp_path))
+    monkeypatch.setattr("app.brain.ingest.get_embedder", lambda: _Vision([]))
+    with patch("app.brain.paginate.text_layer_kind", return_value=kind), \
+         patch("app.brain.paginate.has_content_images", return_value=images):
+        ingest_source(db, src.id, IngestPayload(kind="pdf", data=_scanned_pdf_bytes(layers)))
+    return src
+
+
+def _chunks_of(db, page) -> list[str]:
+    return [c.text for c in db.query(Chunk).filter_by(page_id=page.id).all()]
+
+
+def _pages_of(db, src) -> list[Page]:
+    return db.query(Page).filter_by(source_id=src.id).order_by(Page.page_no).all()
+
+
+def test_the_fixture_reproduces_the_bug_an_upload_indexes_the_layer_we_refused(
+    db, tmp_path, monkeypatch
+):
+    """THE CHARACTERISATION TEST, and it must keep passing. If this ever goes
+    green-by-accident the tests below stop testing anything at all — which is
+    precisely how the vacuous invariant above shipped.
+
+    It also pins the PRODUCT ANSWER as it stands: between upload and a completed
+    re-OCR, a scanned book's chunk store serves the untrusted layer. That is not
+    a regression (it is exactly as wrong as before this branch) and it is not
+    what this fix changes — see the report's open question."""
+    src = _upload(db, monkeypatch, tmp_path, [_REFUSED_LAYER])
+    page = _pages_of(db, src)[0]
+
+    assert page.status == "pending", "paginate must refuse the inherited layer"
+    assert page.text is None, "...and drop it"
+    assert page.ocr_reason == "inherited_ocr"
+    # ...and yet:
+    chunks = _chunks_of(db, page)
+    assert chunks, "the fixture is meaningless unless the upload really indexed something"
+    assert any("4-inch" in c for c in chunks), (
+        "ingest re-adopted the very layer paginate refused, linked to a page whose text is NULL"
+    )
+
+
+def test_a_page_that_ends_EMPTY_keeps_no_chunks_of_the_text_we_refused(
+    db, tmp_path, monkeypatch
+):
+    """THE NASTIEST VARIANT, because the book still rolls up GREEN: `empty` pages
+    are not counted as failures (`_rollup_source_status`), so a book whose only
+    casualty is an `empty` page shows the tutor a healthy checkmark — while
+    retrieval serves him Tesseract's "4-inch" as a citation with a real page
+    number on it, and curriculum (which reads `Page.text` -> NULL) skips the same
+    page. Silent, citable, permanently disagreeing consumers."""
+    src = _upload(db, monkeypatch, tmp_path, [_REFUSED_LAYER])
+    fake = _Vision(["There is no visible text on this page."])
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    ocr_source(db, src.id)
+
+    page = _pages_of(db, src)[0]
+    assert page.status == "empty"
+    assert page.text is None
+    assert _chunks_of(db, page) == [], "an unread page must not still be serving the refused layer"
+
+
+def test_a_page_that_ends_FAILED_keeps_no_chunks_of_the_text_we_refused(
+    db, tmp_path, monkeypatch
+):
+    """`_mark_failed` rolls back and writes a status; it never deleted the stale
+    chunks. So a page we could not read went on serving someone else's OCR
+    forever, while `Page.text` said NULL."""
+    src = _upload(db, monkeypatch, tmp_path, [_REFUSED_LAYER])
+    fake = _Vision([RuntimeError("vl timeout"), RuntimeError("vl timeout")])
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    ocr_source(db, src.id)
+
+    page = _pages_of(db, src)[0]
+    assert page.status == "failed"
+    assert page.text is None
+    assert _chunks_of(db, page) == []
+
+
+def test_a_rate_limited_page_keeps_no_chunks_of_the_text_we_refused(
+    db, tmp_path, monkeypatch
+):
+    """The third terminal path: a 429 parks the run and puts the page back to
+    `pending`. It spent an attempt on this page and refused its text; it must not
+    leave the refused text behind in the index either."""
+    from app.llm.errors import LLMError
+
+    src = _upload(db, monkeypatch, tmp_path, [_REFUSED_LAYER])
+    fake = _Vision([LLMError("rate_limit", "429 slow down")])
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    ocr_source(db, src.id)
+
+    page = _pages_of(db, src)[0]
+    assert page.status == "pending"          # parked, will be retried
+    assert page.text is None
+    assert _chunks_of(db, page) == []
+
+
+def test_a_page_that_reaches_READY_serves_only_the_words_we_actually_read(
+    db, tmp_path, monkeypatch
+):
+    """The healing path, pinned rather than assumed: `_embed_page` deletes by
+    `page_id` before re-adding, so a page that reaches `ready` replaces the
+    refused layer instead of stacking on it. Chat must not be able to answer
+    "4-inch" for a page Claude has read."""
+    src = _upload(db, monkeypatch, tmp_path, [_REFUSED_LAYER])
+    fake = _Vision([_WHAT_CLAUDE_READS])
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    ocr_source(db, src.id)
+
+    page = _pages_of(db, src)[0]
+    assert page.status == "ready"
+    chunks = _chunks_of(db, page)
+    assert chunks, "a ready page must be citable"
+    assert not any("4-inch" in c for c in chunks), "the refused layer survived a clean read"
+    assert any("¼-inch" in c for c in chunks)
+
+
+def test_an_IMAGE_REGION_page_whose_figure_fails_KEEPS_its_publisher_chunks(
+    db, tmp_path, monkeypatch
+):
+    """THE LOAD-BEARING GUARD, and the reason the invariant is stated on `text`
+    rather than on `status`.
+
+    An `image_region` page (Powers' 43 tab pages) keeps its PUBLISHER text — real,
+    correct, free. Only the figure description failed. A blanket "non-ready pages
+    have no chunks" rule would strip all 43 of those pages out of the index the
+    first time a tab picture failed to describe, silently deleting content the
+    model never even disputed."""
+    src = _upload(db, monkeypatch, tmp_path, [_REFUSED_LAYER], kind="digital", images=True)
+    page_before = _pages_of(db, src)[0]
+    assert page_before.ocr_reason == "image_region"
+    assert page_before.text is not None, "the publisher's text is kept — that is the point"
+    assert _chunks_of(db, page_before), "and it is indexed, correctly, from the upload"
+
+    fake = _Vision([RuntimeError("vl timeout"), RuntimeError("vl timeout")])
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    ocr_source(db, src.id)
+
+    page = _pages_of(db, src)[0]
+    assert page.status == "failed"           # the PICTURE failed
+    assert page.text is not None             # the WORDS did not
+    assert _chunks_of(db, page), "a failed figure must not delete the publisher's own indexed text"
+
+
+def test_the_invariant_holds_across_a_whole_mixed_book_read_end_to_end(
+    db, tmp_path, monkeypatch
+):
+    """The real shape of the 888-page run: some pages read, some blank, some
+    unreadable — uploaded through `ingest_source`, so every page starts out
+    carrying the refused layer and the invariant has something to fail against.
+
+    Asserted on `text`, in both directions, for every page of the book."""
+    src = _upload(db, monkeypatch, tmp_path, [_REFUSED_LAYER] * 4)
+    fake = _Vision([
+        _WHAT_CLAUDE_READS,                          # p1 -> ready
+        "There is no visible text on this page.",    # p2 -> empty
+        RuntimeError("vl timeout"),                  # p3 -> failed (initial)
+        RuntimeError("vl timeout"),                  # p3 -> failed (retry)
+        _WHAT_CLAUDE_READS,                          # p4 -> ready
+    ])
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    ocr_source(db, src.id)
+
+    pages = _pages_of(db, src)
+    assert [p.status for p in pages] == ["ready", "empty", "failed", "ready"]
+    for page in pages:
+        chunks = _chunks_of(db, page)
+        if page.text is None:
+            assert chunks == [], (
+                f"page {page.page_no} has no text but is still serving {len(chunks)} chunk(s) "
+                "of the layer we refused — curriculum reads NULL, retrieval reads Tesseract"
+            )
+        if page.status == "ready":
+            assert chunks, f"page {page.page_no} is ready but has nothing to cite"
+    # and nowhere in the book does the refused layer survive a completed read
+    survivors = [c.text for c in db.query(Chunk).filter_by(source_id=src.id).all()
+                 if "4-inch" in c.text]
+    assert survivors == [], f"{len(survivors)} chunk(s) of refused Tesseract still indexed"

@@ -608,6 +608,11 @@ def ocr_source(db, source_id) -> OcrResult:
         # able to spend an unbounded number of them by never getting to record
         # any (`ocr_running` is itself a pickup status).
         page.ocr_attempts = (page.ocr_attempts or 0) + 1
+        # In the SAME transaction as the status write, matching this module's
+        # existing "status and chunks commit together" discipline. See the
+        # function's docstring for why this is here rather than on each of the
+        # three terminal paths that would otherwise each need it.
+        _evict_refused_chunks(db, page)
         db.commit()
         # Decided BEFORE the call and from the page's committed state, so the
         # question we ask and the text we must not lose are one value, fixed for
@@ -714,6 +719,40 @@ def ocr_source(db, source_id) -> OcrResult:
     _rollup_source_status(db, source_id)
 
     return OcrResult(total=len(pages), ready=ready, failed=failed)
+
+
+def _evict_refused_chunks(db, page: Page) -> None:
+    """THE INVARIANT: A PAGE WHOSE `text` IS NULL HAS NO CHUNKS.
+
+    `paginate_source` refuses a GlyphLessFont layer — `Page.text=None`, someone
+    else's Tesseract, every fraction glyph gone. `ingest_source` then re-opens the
+    same PDF bytes, re-extracts THE VERY LAYER it just refused, and chunks it
+    against those same pending pages; `retrieve.search` joins Chunk->Page only to
+    resolve a page number and never filters on status, so that text is fully
+    retrievable and citable. One half of the pipeline refuses it and the other
+    adopts it, thirty lines apart.
+
+    CALLED AT PICKUP, and that is the whole design. The obvious fix is to delete
+    on each terminal path — the `empty` branch, `_mark_failed`, the 429 park — but
+    that is three places that must never drift, in a module whose failure paths
+    are exactly where drift hides. Evicting when we take the page instead makes
+    every one of those paths correct with no code of their own: by the time any of
+    them runs, the refused chunks are already gone and committed, and the ONLY
+    thing that ever puts chunks back is `_embed_page` on the success path. The
+    two halves agree by construction rather than by three reminders.
+
+    `page.text is None` IS THE TEST, not `status != "ready"`, and the difference
+    is load-bearing: an `image_region` page keeps correct PUBLISHER text
+    (paginate.py) and the chunks that go with it. Judging by status would strip
+    Powers' 43 tab pages out of the index the moment a figure description failed —
+    deleting content the model never even disputed.
+    """
+    if page.text is not None:
+        return
+    n = db.query(Chunk).filter(Chunk.page_id == page.id).delete()
+    if n:
+        log.info("ocr: page %s — evicted %d chunk(s) of the text layer paginate "
+                 "refused; this page has no text until we read it", page.page_no, n)
 
 
 def _mark_failed(db, page: Page, error, task: _VisionTask) -> None:
