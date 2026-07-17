@@ -2022,6 +2022,11 @@ export interface PromptSummary {
   provider: string | null;
   /** This prompt sits inside the cached prefix (`curriculum/corpus.py`). */
   cache_prefix: boolean;
+  /** The model's LANGUAGE for this prompt is decided by the COURSE — which takes it
+   * from the student (`interview.py:311`) — not by the cockpit locale. Chris caught
+   * the viewer claiming otherwise: the preview said Greek while a course whose
+   * language is 'en' had the model told English. 5 of his 6 courses are English. */
+  language_from_course: boolean;
   /** Whether the UI must warn before a change. Equal to `cache_prefix` today and
    * a different question: that one is where the prompt sits on the wire, this one
    * is what an edit costs. Never re-derive it from `cache_prefix` here — the API
@@ -2071,8 +2076,16 @@ export interface PromptSlice {
 }
 
 export interface PromptDetail extends PromptSummary {
-  /** "app/agent/prompts.py:67" — shown, so the claim is auditable. */
+  /** "app/agent/prompts.py:67". NOT shown to the tutor any more — Chris: *"i dont
+   * think this should be seen by the tutor"*, and he is right: a file path is the
+   * same category as a stack trace or a status code, which `settings/page.tsx:22-37`
+   * says he never sees. Kept on the wire because the registry's completeness test
+   * leans on it and because a developer reading this route is who it is for. */
   source_ref: string;
+  /** The language this preview was rendered at. Only meaningful (non-null) when
+   * `language_from_course` — it is the answer to "which language am I looking at?",
+   * which the cockpit locale cannot be trusted to give for these prompts. */
+  course_language: string | null;
   /** The full rendered prompt: a "\n\n" join of `messages[].content`, and what
    * `spans` index into. `messages` is what goes on the wire; this is the
    * presentational join. */
@@ -2098,9 +2111,16 @@ export function listPrompts(): Promise<PromptSummary[]> {
 /** One prompt, rendered as the model would receive it right now — including any
  * slice he has overridden, because the preview runs the same builders the live
  * path does. Carries `X-App-Locale` like every call here, which matters: the
- * language directive is injected into 8 of these. */
-export function getPrompt(id: string): Promise<PromptDetail> {
-  return request<PromptDetail>(`/prompts/${encodeURIComponent(id)}`);
+ * language directive is injected into 8 of these.
+ *
+ * `courseLanguage` only does anything for a `language_from_course` prompt, and it is
+ * the honest answer to a real bug: those prompts take their language from the COURSE,
+ * so the cockpit locale this call already sends is the wrong control for them. Passing
+ * it renders the preview at the other language, so he can SEE that the value is not
+ * this screen's to give. */
+export function getPrompt(id: string, courseLanguage?: string): Promise<PromptDetail> {
+  const q = courseLanguage ? `?course_language=${encodeURIComponent(courseLanguage)}` : "";
+  return request<PromptDetail>(`/prompts/${encodeURIComponent(id)}${q}`);
 }
 
 /** Validate -> snapshot -> save. Validation runs BEFORE the write and the write

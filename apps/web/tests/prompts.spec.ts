@@ -59,7 +59,24 @@ const summary = (over: Record<string, unknown>) => ({
   provider: null,
   cache_prefix: false,
   cache_cost_warning: false,
+  language_from_course: false,
   has_override: false,
+  ...over,
+});
+
+/** The whole-text slice every authored prompt now carries. Chris: *"bro almost
+ * every prompt is uneditable! the tutor might have core teaching ideas which claude
+ * cannot even imagine."* */
+const textSlice = (promptId: string, text: string, over: Record<string, unknown> = {}) => ({
+  id: promptId,
+  prompt_id: promptId,
+  label_el: "Το κείμενο της οδηγίας",
+  kind: "replace",
+  default: text,
+  effective: text,
+  has_override: false,
+  max_chars: Math.max(2000, text.length * 2),
+  cache_cost_warning: false,
   ...over,
 });
 
@@ -108,7 +125,25 @@ const STUDENT_BRIEF = summary({
   when_it_runs_el: "Κάθε φορά που γράφεται μάθημα για συγκεκριμένο μαθητή.",
 });
 
-const PROMPTS = [CHAT_SYSTEM, TOOLS_DESCRIPTIONS, TOOLS_CLAUDE_CLI, CURRICULUM_SYSTEM, STUDENT_BRIEF];
+const CURRICULUM_OUTLINE = summary({
+  id: "curriculum.outline",
+  flow: "curriculum",
+  title_el: "Ο σκελετός του προγράμματος",
+  what_it_does_el: "Ζητάει μόνο τη δομή: τίτλους ενοτήτων και μαθημάτων.",
+  when_it_runs_el: "Μία φορά, μόλις πατήσεις δημιουργία προγράμματος.",
+  language_from_course: true,
+});
+
+const PROMPTS = [
+  CHAT_SYSTEM, TOOLS_DESCRIPTIONS, TOOLS_CLAUDE_CLI,
+  CURRICULUM_SYSTEM, CURRICULUM_OUTLINE, STUDENT_BRIEF,
+];
+
+/** The language directive, as the two languages actually render it. This is the bug
+ * Chris caught: the PREVIEW said Greek while the model was told English. */
+const OUTLINE_EL = "YOUR TASK: design the outline of a course.\n\nLANGUAGE: write everything you produce in Greek (el)";
+const OUTLINE_EN = "YOUR TASK: design the outline of a course.\n\nLANGUAGE: write everything you produce in English (en)";
+const LANG_LABEL = "Ο κανόνας γλώσσας — τον ορίζει η γλώσσα του μαθητή/προγράμματος, όχι αυτή η οθόνη";
 
 const pitchSlice = (over: Record<string, unknown> = {}) => ({
   id: "student.pitch",
@@ -127,14 +162,16 @@ const DETAILS: Record<string, Record<string, unknown>> = {
   "chat.system": {
     ...CHAT_SYSTEM,
     source_ref: "app/agent/prompts.py:67",
+    course_language: null,
     text: CHAT_SYSTEM_TEXT,
     messages: [{ role: "system", content: CHAT_SYSTEM_TEXT, cached: false }],
     spans: [],
-    slices: [],
+    slices: [textSlice("chat.system", CHAT_SYSTEM_TEXT)],
   },
   "tools.system_claude_cli": {
     ...TOOLS_CLAUDE_CLI,
     source_ref: "app/llm/claude_cli.py:543",
+    course_language: null,
     text: "You have access to the following tools.",
     messages: [{ role: "system", content: "You have access to the following tools.", cached: false }],
     spans: [],
@@ -143,14 +180,35 @@ const DETAILS: Record<string, Record<string, unknown>> = {
   "curriculum.system": {
     ...CURRICULUM_SYSTEM,
     source_ref: "app/curriculum/corpus.py:242",
+    course_language: null,
     text: CURRICULUM_SYSTEM_TEXT,
     messages: [{ role: "system", content: CURRICULUM_SYSTEM_TEXT, cached: true }],
     spans: [],
-    slices: [],
+    slices: [
+      textSlice("curriculum.system", CURRICULUM_SYSTEM_TEXT, { cache_cost_warning: true }),
+    ],
+  },
+  "curriculum.outline": {
+    ...CURRICULUM_OUTLINE,
+    source_ref: "app/curriculum/outline.py:131",
+    course_language: "el",
+    text: OUTLINE_EL,
+    messages: [{ role: "user", content: OUTLINE_EL, cached: false }],
+    spans: [
+      {
+        name: "language_directive",
+        label_el: LANG_LABEL,
+        value: "LANGUAGE: write everything you produce in Greek (el)",
+        start: OUTLINE_EL.indexOf("LANGUAGE:"),
+        end: OUTLINE_EL.length,
+      },
+    ],
+    slices: [textSlice("curriculum.outline", OUTLINE_EL)],
   },
   "shared.student_brief": {
     ...STUDENT_BRIEF,
     source_ref: "app/students/context.py:88",
+    course_language: null,
     text: BRIEF_TEXT,
     messages: [{ role: "user", content: BRIEF_TEXT, cached: false }],
     spans: [
@@ -177,6 +235,8 @@ interface Call {
   method: string;
   pathname: string;
   body: unknown;
+  /** `?course_language=` — how the card asks to see the OTHER language. */
+  query?: string;
 }
 
 interface Opts {
@@ -195,7 +255,7 @@ async function mockApi(page: Page, opts: Opts = {}): Promise<Call[]> {
   await page.route(`${API_ORIGIN}/**`, async (route: Route) => {
     const req = route.request();
     const method = req.method();
-    const { pathname } = new URL(req.url());
+    const { pathname, searchParams } = new URL(req.url());
 
     if (method === "OPTIONS") {
       await route.fulfill({ status: 204, headers: CORS_HEADERS });
@@ -208,7 +268,7 @@ async function mockApi(page: Page, opts: Opts = {}): Promise<Call[]> {
     } catch {
       body = null;
     }
-    calls.push({ method, pathname, body });
+    calls.push({ method, pathname, body, query: searchParams.toString() });
 
     const json = (b: unknown, status = 200) =>
       route.fulfill({
@@ -240,6 +300,25 @@ async function mockApi(page: Page, opts: Opts = {}): Promise<Call[]> {
 
     if (pathname.startsWith("/prompts/")) {
       const id = decodeURIComponent(pathname.slice("/prompts/".length));
+      // The API renders a course-language prompt at the language the COURSE decides;
+      // `?course_language=` is how he asks to look at the other one.
+      if (id === "curriculum.outline" && searchParams.get("course_language") === "en") {
+        return json({
+          ...details[id],
+          course_language: "en",
+          text: OUTLINE_EN,
+          messages: [{ role: "user", content: OUTLINE_EN, cached: false }],
+          spans: [
+            {
+              name: "language_directive",
+              label_el: LANG_LABEL,
+              value: "LANGUAGE: write everything you produce in English (en)",
+              start: OUTLINE_EN.indexOf("LANGUAGE:"),
+              end: OUTLINE_EN.length,
+            },
+          ],
+        });
+      }
       const detail = details[id];
       if (!detail) return json({ detail: { code: "unknown_prompt", message: "no" } }, 404);
       return json(detail);
@@ -299,28 +378,66 @@ test("opening a prompt shows the English VERBATIM, with the Greek beside it", as
   await expect(text).toContainText("Never invent a citation.");
 });
 
-test("the verbatim text is selectable but not editable, and names its source file", async ({ page }) => {
+test("the verbatim text is selectable, not editable, and never shows him a code path", async ({ page }) => {
+  // CHANGE 2. Chris: *"on each prompt i also see where they are inside the code e.g.
+  // 'In the code: app/curriculum/corpus.py:289', i dont think this should be seen by
+  // the tutor."* He is right, and it is the settings page's own stated ethos
+  // (`settings/page.tsx:22-37`): he never sees JSON, a stack trace, a status code or
+  // an untranslated English string. A file path is the same category — it is a fact
+  // about our repository, and he does not have our repository.
+  //
+  // `source_ref` STAYS on the API: the completeness test uses it, and a developer
+  // opening `/prompts/chat.system` is exactly who it is for. This is presentation.
   await mockApi(page);
   await page.goto("/el/settings");
   const card = await open(page, "chat", "chat.system");
 
-  // He may want to paste it somewhere; he may not type into it.
-  await expect(card.getByTestId("prompt-text-chat.system")).toHaveAttribute("data-selectable", "true");
-  await expect(card.locator("textarea")).toHaveCount(0);
-  await expect(card).toContainText("app/agent/prompts.py:67");
+  const text = card.getByTestId("prompt-text-chat.system");
+  await expect(text).toHaveAttribute("data-selectable", "true");
+  await expect(text.locator("textarea")).toHaveCount(0);
+
+  await expect(card).not.toContainText("app/agent/prompts.py");
+  await expect(card).not.toContainText(".py:");
 });
 
-test("a prompt with nothing editable says WHY, in Greek, and reads as engineering", async ({ page }) => {
+
+test("the guard prompt is his to rewrite — the lock is gone, and that is the point", async ({ page }) => {
+  // CHANGE 1, and the headline. Chris: *"bro almost every prompt is uneditable! for
+  // example the tutor might have core teaching ideas which claude cannot even imagine
+  // ... right now he cannot inject those ideas in his creating curriculum prompts."*
+  //
+  // This test asserted the OPPOSITE a commit ago — that `chat.system` shows a padlock
+  // and no textarea. The spec agreed with Chris before he said it: *"'Locked' must
+  // mean 'an editor can't break it by accident', not 'Chris can't change it'."* The
+  // guards are still guards; they are defended by validation, history and a
+  // confirmed Restore, not by the absence of a textarea.
   await mockApi(page);
   await page.goto("/el/settings");
   const card = await open(page, "chat", "chat.system");
 
-  const locked = card.getByTestId("prompt-locked-chat.system");
+  await expect(card.getByTestId("prompt-locked-chat.system")).toHaveCount(0);
+  const input = card.getByTestId("slice-input-chat.system");
+  await expect(input).toBeVisible();
+  await expect(input).toHaveValue(CHAT_SYSTEM_TEXT);
+});
+
+test("the two generated prompts stay read-only, and say why in Greek", async ({ page }) => {
+  // The honest half of Change 1. `tools.descriptions` is `json.dumps(_tool_schemas())`
+  // and `tools.system_claude_cli` is generated by the provider bridge from that same
+  // list — neither is prose anyone wrote, and a textarea over a JSON schema would let
+  // him invent a tool the app does not have. Read-only and honest beats editable and
+  // fake: "a textarea that silently does nothing is worse than no textarea".
+  await mockApi(page, { provider: "claude_cli" });
+  await page.goto("/el/settings");
+  const card = await open(page, "tools", "tools.system_claude_cli");
+
+  await expect(card.getByTestId("slice-input-tools.system_claude_cli")).toHaveCount(0);
+  const locked = card.getByTestId("prompt-locked-tools.system_claude_cli");
   await expect(locked).toBeVisible();
-  // "a textarea is the wrong instrument for editing a guard" — not "you may not".
-  await expect(locked).toContainText("κώδικα");
-  await expect(locked).not.toContainText("prompts.");
+  await expect(locked).toContainText("φτιάχνει η ίδια η εφαρμογή");
+  await expect(locked).not.toContainText("δεν επιτρέπεται");
 });
+
 
 test("an interpolated variable is a labelled chip holding its sample value — not a hole", async ({ page }) => {
   // He must see WHERE the student brief goes, and what it looks like when it
@@ -427,34 +544,84 @@ test("an error code we have never seen never renders a raw key path at him", asy
   await expect(error).not.toContainText("some_future_code");
 });
 
-test("reset puts the code default back", async ({ page }) => {
-  const overridden = { ...STUDENT_BRIEF, has_override: true };
+test("restore asks first, and CANCEL leaves his text exactly where it was", async ({ page }) => {
+  // Chris: *"i need to also maintain the changes if any. i mean if i change something
+  // on a prompt from the ui, this is the one being used, until i hit the restore
+  // default prompt (which also needs a confirmation modal too)"*.
+  //
+  // The modal is not ceremony here. When every prompt is editable, Restore is the one
+  // button that can throw away a paragraph he wrote and cannot retype — so it asks,
+  // and cancelling is the default outcome of every ambiguous exit (`ui/confirm.tsx`).
   const calls = await mockApi(page, {
-    prompts: [CHAT_SYSTEM, TOOLS_DESCRIPTIONS, TOOLS_CLAUDE_CLI, CURRICULUM_SYSTEM, overridden],
     details: {
       ...DETAILS,
-      "shared.student_brief": {
-        ...DETAILS["shared.student_brief"],
-        ...overridden,
-        slices: [pitchSlice({ effective: "Η δική του πρόταση.", has_override: true })],
+      "chat.system": {
+        ...DETAILS["chat.system"],
+        slices: [textSlice("chat.system", CHAT_SYSTEM_TEXT, {
+          effective: "ΤΟ ΔΙΚΟ ΜΟΥ", has_override: true,
+        })],
       },
     },
   });
   await page.goto("/el/settings");
-  const card = await open(page, "shared", "shared.student_brief");
+  const card = await open(page, "chat", "chat.system");
 
-  const box = card.getByTestId("slice-input-student.pitch");
-  await expect(box).toHaveValue("Η δική του πρόταση.");
-  await expect(card.getByTestId("slice-overridden-student.pitch")).toBeVisible();
+  await card.getByTestId("slice-reset-chat.system").click();
+  await expect(page.getByTestId("confirm-dialog")).toBeVisible();
+  await page.getByTestId("confirm-cancel").click();
 
-  await card.getByTestId("slice-reset-student.pitch").click();
-
-  await expect(box).toHaveValue(PITCH_DEFAULT);
-  await expect(card.getByTestId("slice-overridden-student.pitch")).not.toBeVisible();
-  expect(
-    calls.some((c) => c.method === "DELETE" && c.pathname === "/prompts/slices/student.pitch"),
-  ).toBe(true);
+  await expect(page.getByTestId("confirm-dialog")).toHaveCount(0);
+  await expect(card.getByTestId("slice-input-chat.system")).toHaveValue("ΤΟ ΔΙΚΟ ΜΟΥ");
+  expect(calls.filter((c) => c.method === "DELETE")).toHaveLength(0);
 });
+
+test("restore, once confirmed, puts the code default back", async ({ page }) => {
+  const calls = await mockApi(page, {
+    details: {
+      ...DETAILS,
+      "chat.system": {
+        ...DETAILS["chat.system"],
+        slices: [textSlice("chat.system", CHAT_SYSTEM_TEXT, {
+          effective: "ΤΟ ΔΙΚΟ ΜΟΥ", has_override: true,
+        })],
+      },
+    },
+  });
+  await page.goto("/el/settings");
+  const card = await open(page, "chat", "chat.system");
+
+  await card.getByTestId("slice-reset-chat.system").click();
+  await page.getByTestId("confirm-accept").click();
+
+  // The code default is the reset TARGET — which is the whole reason defaults are not
+  // seeded into the table (P2 §1).
+  await expect(card.getByTestId("slice-input-chat.system")).toHaveValue(CHAT_SYSTEM_TEXT);
+  await expect(card.getByTestId("slice-overridden-chat.system")).toHaveCount(0);
+  expect(calls.some((c) => c.method === "DELETE" && c.pathname === "/prompts/slices/chat.system")).toBe(true);
+});
+
+test("the modal names what is about to be lost — never just \"are you sure?\"", async ({ page }) => {
+  await mockApi(page, {
+    details: {
+      ...DETAILS,
+      "chat.system": {
+        ...DETAILS["chat.system"],
+        slices: [textSlice("chat.system", CHAT_SYSTEM_TEXT, {
+          effective: "ΤΟ ΔΙΚΟ ΜΟΥ", has_override: true,
+        })],
+      },
+    },
+  });
+  await page.goto("/el/settings");
+  const card = await open(page, "chat", "chat.system");
+  await card.getByTestId("slice-reset-chat.system").click();
+
+  await expect(page.getByTestId("confirm-title")).toContainText("Επαναφορά");
+  // It must say the consequence AND that it is recoverable — the DELETE snapshots
+  // into history first, and History is right there.
+  await expect(page.getByTestId("confirm-body")).toContainText("Ιστορικό");
+});
+
 
 test("history lists what he replaced, newest first", async ({ page }) => {
   await mockApi(page, {
@@ -529,6 +696,54 @@ test("a slice inside the cached prefix warns BEFORE he saves", async ({ page }) 
 });
 
 // --- i18n ----------------------------------------------------------------
+
+// --- CHANGE 3: the preview must not lie about the language -----------------
+
+test("a course-language prompt says the language comes from the STUDENT, not this screen", async ({ page }) => {
+  // Chris spotted this himself from the screen, and it was real:
+  //
+  //     PREVIEW   (X-App-Locale: el):  "write everything you produce in Greek (el)"
+  //     REAL CALL (a course whose language is 'en'): "...in English (en)"
+  //
+  // The origin is the surprising part — a course takes its language from the STUDENT
+  // (`interview.py:311`), not from the cockpit — so the origin is what the screen has
+  // to say out loud. In his live DB 5 of 6 courses are English.
+  await mockApi(page);
+  await page.goto("/el/settings");
+  const card = await open(page, "curriculum", "curriculum.outline");
+
+  const note = card.getByTestId("prompt-language-origin-curriculum.outline");
+  await expect(note).toBeVisible();
+  await expect(note).toContainText("μαθητή");
+
+  // and the chip over the directive itself says it too
+  await expect(card.getByTestId("prompt-span-language_directive")).toContainText("μαθητή");
+});
+
+test("he can look at the prompt in the other language, and the API is asked for it", async ({ page }) => {
+  // The honest option: he does not have to take our word for the origin. The toggle
+  // is why the fix is not just a sentence — a sentence is a claim, this is the thing.
+  const calls = await mockApi(page);
+  await page.goto("/el/settings");
+  const card = await open(page, "curriculum", "curriculum.outline");
+
+  await expect(card.getByTestId("prompt-text-curriculum.outline")).toContainText("in Greek (el)");
+
+  await card.getByTestId("prompt-language-en-curriculum.outline").click();
+  await expect(card.getByTestId("prompt-text-curriculum.outline")).toContainText("in English (en)");
+
+  expect(calls.some((c) => c.pathname === "/prompts/curriculum.outline" && c.query === "course_language=en")).toBe(true);
+});
+
+test("a prompt the cockpit locale DOES drive gets no such note", async ({ page }) => {
+  // The other half, and the reason this is not a blanket banner: chat, retrieval and
+  // artifacts really are driven by the cockpit locale on the live path. Telling him
+  // otherwise would be the same lie, mirrored.
+  await mockApi(page);
+  await page.goto("/el/settings");
+  const card = await open(page, "chat", "chat.system");
+  await expect(card.getByTestId("prompt-language-origin-chat.system")).toHaveCount(0);
+});
 
 test("every prompts.* string exists in BOTH Greek and English", () => {
   // Greek is the product, and this card is 40-odd new strings. An `en.json` that

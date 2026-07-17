@@ -768,13 +768,10 @@
     "whatItDoes": "What it does",
     "whenItRuns": "When it runs",
     "textLabel": "The text that goes out, exactly as it goes out",
-    "sourceRef": "In the code: {ref}",
     "fragmentNote": "This is never sent on its own: it goes inside other prompts, where it's needed.",
     "spanNote": "The highlighted parts are your own data, in the place it lands inside the text. What you see here is a sample of it.",
     "cacheNote": "This sits in the part the model keeps in memory and reuses — which is why reading your library is billed once instead of once per lesson. If it changes, that memory is rebuilt one time, then it catches again.",
-    "lockedTitle": "Locked",
-    "lockedWhy": "The code writes this text; it doesn't change from here. Its sentences are guarantees — never invent a citation, never write tablature as plain text, always keep the shape the app expects — and a text box is the wrong instrument for editing a guarantee. If something here has to change, it changes with an ordinary code change.",
-    "editableTitle": "This one you can change",
+    "editableTitle": "The text is yours — change it however you like",
     "chars": "{count} of {max} characters",
     "save": "Save",
     "saving": "Saving…",
@@ -810,6 +807,17 @@
       "save_failed": "It didn't save. Try again.",
       "load_failed": "The prompts didn't load. Refresh the page.",
       "network": "Couldn't reach the server. Check your connection."
+    },
+    "generatedTitle": "This one isn't written by hand",
+    "generatedWhy": "Nobody wrote this text sentence by sentence: the app generates it automatically from the assistant's list of tools. There is nothing to change here — your own words would make the assistant try to use tools that don't exist. It changes only when the tools themselves change.",
+    "editableHelp": "Whatever you write here is what goes to the model, from the next time onwards. Put your own teaching ideas in: you know them, the model doesn't. Reset always brings the original back.",
+    "resetConfirmTitle": "Restore the original text?",
+    "resetConfirmBody": "The text you wrote will be deleted and replaced with the one the app started with. It isn't lost for good: you'll find it in History, just below.",
+    "languageOrigin": "This screen doesn't decide the language here: the course's student does (the language on his card). That's why a course can be written in English while you're using the app in Greek.",
+    "languageShow": "Show it in:",
+    "languageName": {
+      "el": "Greek",
+      "en": "English"
     }
   },
   "confirm": {

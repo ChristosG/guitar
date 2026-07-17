@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslations } from "next-intl";
-import { Check, ChevronDown, ChevronRight, Loader2, Lock, TriangleAlert } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, Languages, Loader2, Lock, TriangleAlert } from "lucide-react";
 
 import {
   ApiError,
@@ -21,6 +21,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Textarea } from "@/components/ui/textarea";
+import { useConfirm } from "@/components/ui/confirm";
+import { cn } from "@/lib/utils";
 
 /** READING IS THE FEATURE. EDITING IS THE FOOTNOTE.
  *
@@ -46,9 +48,6 @@ import { Textarea } from "@/components/ui/textarea";
  *    student brief goes and what it looks like when it lands there. The chip's
  *    LABEL is `select-none`, so selecting the prompt and copying it gives him the
  *    verbatim English and none of our annotations.
- *  - **A locked prompt has no textarea and says why** — "a textarea is the wrong
- *    instrument for editing a guard", not "you may not". Every one of them is a
- *    normal code change away, and the Greek says so.
  *  - **`cache_cost_warning` is shown BEFORE the save**, in words, with no dollar
  *    figure: the honest number depends on the live library and the sources a
  *    given curriculum selects, and an invented one is worse than none. It costs
@@ -57,11 +56,32 @@ import { Textarea } from "@/components/ui/textarea";
  *    behind `t.has(...)` so an unknown future code can never render
  *    `prompts.errors.some_new_code` at him.
  *
- * There is exactly ONE editable slice in the whole app (`student.pitch`), so
- * there is exactly one textarea. That is not a stub — the append slots the spec
- * describes each need a live builder changed and their own cache-position answer,
- * which is a task that does not exist yet. Affordances for slices that do not
- * exist would be a UI promising something the API cannot do.
+ * WHAT CHANGED AFTER HE USED IT, AND WHY IT IS NOT A REVERSAL OF THE ABOVE.
+ *
+ * This card shipped with one textarea in it, over one sentence. Chris: *"bro almost
+ * every prompt is uneditable! for example the tutor might have core teaching ideas
+ * which claude cannot even imagine ... right now he cannot inject those ideas in his
+ * creating curriculum prompts."*
+ *
+ * He is right, and the spec said so before he did: *"'Locked' must mean 'an editor
+ * can't break it by accident', not 'Chris can't change it'."* The padlock was
+ * protecting him from an ACCIDENT; it was never an argument that the owner of the app
+ * may not put his own teaching into it. "Reading is the feature, editing is the
+ * footnote" is still true of how this card is SHAPED — the Greek comes first, the
+ * English is verbatim, the textarea is below both. It was never a reason for the
+ * footnote to be empty.
+ *
+ * So, now:
+ *  - **30 of 32 prompts have a textarea holding their whole text.** The two that do
+ *    not are GENERATED (`tools.*` — the tool list, serialised), and they say so. A
+ *    textarea that silently does nothing is worse than no textarea.
+ *  - **Restore asks first** (`ui/confirm.tsx`, the app's one dialog). When every
+ *    prompt is editable, Restore is the only button that can destroy a paragraph he
+ *    wrote and cannot retype.
+ *  - **No source path.** Chris: *"i dont think this should be seen by the tutor"* —
+ *    same category as a stack trace. It stays on the API, for developers.
+ *  - **A course-language prompt says where its language comes from.** The preview used
+ *    to claim Greek while the model was told English; see `LanguageOrigin`.
  */
 export function PromptList({ provider }: { provider: string | null }) {
   const t = useTranslations("prompts");
@@ -174,25 +194,46 @@ function PromptRow({ summary }: { summary: PromptSummary }) {
    * owned by the slices themselves once they are on screen — a badge that
    * survives the Reset it just watched happen is a badge that lies. */
   const [overrides, setOverrides] = useState<Record<string, boolean> | null>(null);
+  /** Which language he is LOOKING at, for a `language_from_course` prompt. `null` =
+   * whatever the course itself decides, which is the honest default: the point of the
+   * fix is that this screen does not get to choose. */
+  const [courseLanguage, setCourseLanguage] = useState<string | null>(null);
   const overridden = overrides
     ? Object.values(overrides).some(Boolean)
     : summary.has_override;
+
+  const load = useCallback(
+    async (lang: string | null) => {
+      setLoading(true);
+      setErrorCode(null);
+      try {
+        const loaded = await getPrompt(summary.id, lang ?? undefined);
+        setDetail(loaded);
+        setOverrides(Object.fromEntries(loaded.slices.map((s) => [s.id, s.has_override])));
+      } catch (e) {
+        setErrorCode(codeOf(e, "load_failed"));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [summary.id],
+  );
 
   async function toggle() {
     const next = !open;
     setOpen(next);
     if (!next || detail || loading) return;
-    setLoading(true);
-    setErrorCode(null);
-    try {
-      const loaded = await getPrompt(summary.id);
-      setDetail(loaded);
-      setOverrides(Object.fromEntries(loaded.slices.map((s) => [s.id, s.has_override])));
-    } catch (e) {
-      setErrorCode(codeOf(e, "load_failed"));
-    } finally {
-      setLoading(false);
-    }
+    await load(courseLanguage);
+  }
+
+  /** He asked to see the other language. Re-fetches rather than guessing: the
+   * directive is built by the API from the live `i18n` module, and a client-side
+   * swap of "Greek"->"English" would be this card inventing prompt text — which is
+   * the entire class of bug this screen exists to end. */
+  async function showLanguage(lang: string) {
+    if (lang === (detail?.course_language ?? courseLanguage)) return;
+    setCourseLanguage(lang);
+    await load(lang);
   }
 
   return (
@@ -272,6 +313,13 @@ function PromptRow({ summary }: { summary: PromptSummary }) {
                   {detail.spans.length > 0 && (
                     <p className="text-xs text-muted-foreground">{t("spanNote")}</p>
                   )}
+                  {summary.language_from_course && (
+                    <LanguageOrigin
+                      promptId={summary.id}
+                      current={detail.course_language}
+                      onPick={showLanguage}
+                    />
+                  )}
                   <pre
                     data-testid={`prompt-text-${summary.id}`}
                     data-selectable="true"
@@ -279,9 +327,13 @@ function PromptRow({ summary }: { summary: PromptSummary }) {
                   >
                     {renderWithSpans(detail.text, detail.spans)}
                   </pre>
-                  <p className="font-mono text-xs text-muted-foreground">
-                    {t("sourceRef", { ref: detail.source_ref })}
-                  </p>
+                  {/* `source_ref` is NOT rendered. Chris: *"on each prompt i also see
+                      where they are inside the code e.g. 'In the code:
+                      app/curriculum/corpus.py:289', i dont think this should be seen
+                      by the tutor."* A file path is the same category as a stack
+                      trace or a status code — `settings/page.tsx:22-37` says he sees
+                      none of those, and it is a fact about our repository, which he
+                      does not have. It stays on the API for the people it is for. */}
                 </div>
 
                 {detail.slices.length === 0 ? (
@@ -291,8 +343,8 @@ function PromptRow({ summary }: { summary: PromptSummary }) {
                   >
                     <Lock className="mt-0.5 size-4 shrink-0" />
                     <div className="flex flex-col gap-1">
-                      <span className="font-medium text-foreground">{t("lockedTitle")}</span>
-                      <span>{t("lockedWhy")}</span>
+                      <span className="font-medium text-foreground">{t("generatedTitle")}</span>
+                      <span>{t("generatedWhy")}</span>
                     </div>
                   </div>
                 ) : (
@@ -315,8 +367,70 @@ function PromptRow({ summary }: { summary: PromptSummary }) {
   );
 }
 
-/** The footnote: one textarea, for the one region in the app that carries no
- * contract. */
+/** WHERE THIS PROMPT'S LANGUAGE ACTUALLY COMES FROM — and the answer is not this
+ * screen.
+ *
+ * Chris spotted this from the card itself, and it was real:
+ *
+ *     PREVIEW   (X-App-Locale: el):  "LANGUAGE: write everything you produce in Greek (el)"
+ *     REAL CALL (a course whose language is 'en'): "...in English (en)"
+ *
+ * A curriculum or lesson prompt takes its language from the COURSE, and a course takes
+ * it from the STUDENT (`interview.py:311` — `normalize_locale(student.preferred_language)`).
+ * The cockpit locale — the only language control he can see — does not enter into it.
+ * In his live database, 5 of his 6 courses are English and 131 of 155 lessons are
+ * English, because his student Giannis prefers English. THE ENGINE IS RIGHT. The
+ * viewer was what lied, and it lied in the most damaging place available: about the
+ * one prompt fact he is most likely to care about.
+ *
+ * So this says the origin out loud, and then does one better than saying it: the
+ * toggle re-renders the prompt at the other language, from the API, so he can look at
+ * the thing rather than trust a sentence about it.
+ */
+function LanguageOrigin({
+  promptId,
+  current,
+  onPick,
+}: {
+  promptId: string;
+  current: string | null;
+  onPick: (lang: string) => void;
+}) {
+  const t = useTranslations("prompts");
+  return (
+    <div
+      data-testid={`prompt-language-origin-${promptId}`}
+      className="flex flex-col gap-2 rounded-lg bg-muted p-2.5 text-xs text-muted-foreground"
+    >
+      <p className="flex items-start gap-2">
+        <Languages className="mt-0.5 size-4 shrink-0" />
+        <span>{t("languageOrigin")}</span>
+      </p>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span>{t("languageShow")}</span>
+        {(["el", "en"] as const).map((lang) => (
+          <button
+            key={lang}
+            type="button"
+            data-testid={`prompt-language-${lang}-${promptId}`}
+            aria-pressed={current === lang}
+            onClick={() => onPick(lang)}
+            className={cn(
+              "cursor-pointer rounded-md px-2 py-0.5 ring-1 transition-colors",
+              current === lang
+                ? "bg-primary/10 text-primary ring-primary/20"
+                : "ring-foreground/10 hover:bg-background",
+            )}
+          >
+            {t(`languageName.${lang}`)}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** One prompt's text, his to rewrite. */
 function SliceEditor({
   slice: initial,
   onOverrideChange,
@@ -325,6 +439,7 @@ function SliceEditor({
   onOverrideChange: (sliceId: string, hasOverride: boolean) => void;
 }) {
   const t = useTranslations("prompts");
+  const confirm = useConfirm();
   const [slice, setSlice] = useState(initial);
   const [draft, setDraft] = useState(initial.effective);
   const [saving, setSaving] = useState(false);
@@ -381,10 +496,30 @@ function SliceEditor({
     }
   }
 
-  /** Back to the text in the code. The DELETE is idempotent by design (P2), so
-   * this is also the plain "undo what I typed" button — no override needed, and
-   * no second code path to keep honest. */
+  /** Back to the text in the code — BEHIND A CONFIRMATION, which Chris asked for by
+   * name: *"until i hit the restore default prompt (which also needs a confirmation
+   * modal too)"*.
+   *
+   * P3 argued against a modal here, and the argument was sound at the time: Reset was
+   * recoverable (the DELETE snapshots into history first), History was right there,
+   * and "a modal over a recoverable action trains him to click through modals". What
+   * changed is the size of the thing being destroyed. When the slice was one sentence
+   * he had typed a minute ago, an accidental Reset cost him a minute. Now it is the
+   * whole of a prompt he may have spent an evening shaping — and the button sits
+   * beside Save, where his hand already is. The dialog says what is lost AND that
+   * History has it, so it informs rather than merely interrupts.
+   *
+   * The DELETE is idempotent by design (P2), so this is also the plain "undo what I
+   * typed" button — no override needed, and no second code path to keep honest.
+   */
   async function onReset() {
+    const ok = await confirm({
+      title: t("resetConfirmTitle"),
+      body: t("resetConfirmBody"),
+      confirmLabel: t("reset"),
+      destructive: true,
+    });
+    if (!ok) return;
     clearVerdict();
     const previous = slice;
     const previousDraft = draft;
@@ -422,6 +557,8 @@ function SliceEditor({
         )}
       </div>
 
+      <p className="text-xs text-muted-foreground">{t("editableHelp")}</p>
+
       {/* The label is the API's — it lives beside the text it names, in the
           registry, not in a message file that could drift from it. */}
       <label className="text-sm text-muted-foreground" htmlFor={`slice-input-${slice.id}`}>
@@ -445,7 +582,10 @@ function SliceEditor({
         id={`slice-input-${slice.id}`}
         data-testid={`slice-input-${slice.id}`}
         value={draft}
-        rows={4}
+        // A whole prompt, not the one sentence this started as. 12 rows is about the
+        // longest of them (`ocr.transcribe`, ~1,850 chars) without the card becoming
+        // a page of its own; it scrolls past that.
+        rows={12}
         onChange={(e) => {
           setDraft(e.target.value);
           clearVerdict();
