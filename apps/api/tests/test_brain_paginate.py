@@ -31,12 +31,35 @@ def _fake_doc(kinds: list[str]):
 
 def test_digital_text_is_taken_for_free(db, tmp_media):
     doc = _fake_doc(["digital"])
+    # Task 3b wires `has_content_images` into this same digital branch (a
+    # digital page with content art still goes to vision — see
+    # test_brain_textlayer.py). FakePage above is a page-count/text-layer
+    # double only, with no get_images/rect, so it must be told there is no
+    # art here — this is the "plain prose page" case that has_content_images
+    # itself asserts False for real pages.
     with patch("app.brain.paginate.fitz.open", return_value=doc), \
-         patch("app.brain.paginate.text_layer_kind", return_value="digital"):
+         patch("app.brain.paginate.text_layer_kind", return_value="digital"), \
+         patch("app.brain.paginate.has_content_images", return_value=False):
         pages = _paginate_pdf(db, tmp_media.source_id, b"%PDF")
     assert pages[0].status == "ready"
     assert pages[0].text_source == "text_layer"
     assert pages[0].ocr_reason is None
+
+
+def test_digital_page_with_content_images_keeps_text_and_goes_to_vision(db, tmp_media):
+    """The Powers-p.11 case: a digital page whose text layer is real publisher
+    prose AND whose tab diagram no text layer describes. Keep the text (it is
+    correct and free) but still queue vision for the picture — contrast the
+    `ocr` branch below, which DISCARDS the inherited text outright."""
+    doc = _fake_doc(["digital"])
+    with patch("app.brain.paginate.fitz.open", return_value=doc), \
+         patch("app.brain.paginate.text_layer_kind", return_value="digital"), \
+         patch("app.brain.paginate.has_content_images", return_value=True):
+        pages = _paginate_pdf(db, tmp_media.source_id, b"%PDF")
+    assert pages[0].status == "pending"
+    assert pages[0].ocr_reason == "image_region"
+    assert pages[0].text == "some text on the page", "the publisher text must be kept, not thrown away"
+    assert pages[0].text_source is None, "not settled yet — vision still has to add the picture's content"
 
 
 def test_inherited_ocr_is_NOT_taken_for_free(db, tmp_media):

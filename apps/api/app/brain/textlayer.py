@@ -106,6 +106,36 @@ _STUB_TOKEN_RATIO = 0.55
 _MUSICAL_TOKEN = re.compile(r"^[A-Gb#xXtT0-9/|:\-\.]+$")
 
 
+# A raster covering at least this much of the page is content, not decoration.
+# Powers' tab pages measure 49-79%; a logo or a rule measures under 1%. The gap
+# is wide, so the threshold is not delicate.
+_CONTENT_IMAGE_AREA = 0.10
+
+
+def has_content_images(page) -> bool:
+    """True when a DIGITAL page carries raster art its text layer cannot describe.
+
+    Only meaningful for `text_layer_kind(page) == "digital"`. On a scan every page
+    has a full-page image under it, so this would answer True for all of them and
+    mean nothing — which is exactly how the first, rejected heuristic ("raster
+    coverage > 25% => needs vision") managed to flag 100% of Hunter and Gallagher.
+
+    Deliberately NOT a function of text length. A page with one paragraph is a
+    normal page, not a broken one; Powers p.11 has 502 chars against a 588-char
+    median and is still 75% tab. What makes it need vision is the tab, not the
+    brevity.
+    """
+    area = page.rect.width * page.rect.height
+    if area <= 0:
+        return False
+    covered = sum(
+        rect.width * rect.height
+        for img in page.get_images(full=True)
+        for rect in page.get_image_rects(img[0])
+    )
+    return (covered / area) >= _CONTENT_IMAGE_AREA
+
+
 def looks_like_ocr_garbage(text: str) -> bool:
     """True when `text` is OCR noise rather than a transcription.
 

@@ -22,7 +22,7 @@ import fitz
 
 from app.brain.extract import extract_text
 from app.brain.media import purge_source_media
-from app.brain.textlayer import text_layer_kind
+from app.brain.textlayer import has_content_images, text_layer_kind
 from app.config import settings
 from app.models.knowledge import Page
 
@@ -91,8 +91,16 @@ def _paginate_pdf(db, source_id, data: bytes) -> list[Page]:
             # the scan ourselves.
             kind = text_layer_kind(doc[i])
             if kind == "digital":
-                text, status, reason, provenance = (
-                    (doc[i].get_text() or "").strip(), "ready", None, "text_layer")
+                layer = (doc[i].get_text() or "").strip()
+                if has_content_images(doc[i]):
+                    # Keep the publisher text — it is correct and free — but the
+                    # picture on this page is content too, and no text layer
+                    # describes a picture. Vision ADDS to the text here; it does
+                    # not replace it (contrast the non-digital branch below,
+                    # which discards the inherited layer outright).
+                    text, status, reason, provenance = layer or None, "pending", "image_region", None
+                else:
+                    text, status, reason, provenance = layer, "ready", None, "text_layer"
             else:
                 text, status, provenance = None, "pending", None
                 reason = "no_text_layer" if kind == "none" else "inherited_ocr"

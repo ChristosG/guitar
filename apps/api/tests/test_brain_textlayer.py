@@ -104,3 +104,39 @@ def test_a_fret_finger_chart_is_not_garbage():
     # length. Must not be screened out as noise.
     text = "1 2 3 4  1 3 4 1  2 4 1 3  T 1 2 3  1 2 3 4  1 3 4 1  2 4 1 3  T 1 2 3"
     assert looks_like_ocr_garbage(text) is False
+
+
+def test_digital_page_with_no_images_needs_no_vision():
+    """A prose page in a digital PDF. Its text layer IS the page. Free."""
+    from app.brain.textlayer import has_content_images
+    page = _page(lambda p: p.insert_text((72, 72), "Many foot controllers have"))
+    assert has_content_images(page) is False
+
+
+def test_digital_page_with_a_big_raster_needs_vision():
+    """Powers p.11: 3 raster images, 75% of the page, 502 chars of caption.
+    The images ARE the exercise.
+
+    NOT detected by text length — Chris: "why to fire based on the len(text)?!
+    some pages might have only 1 paragraph, no?!" He is right: 502 chars against
+    a 588-char median is a perfectly normal page. The signal is that there is a
+    picture on it that the text layer does not describe.
+    """
+    from app.brain.textlayer import has_content_images
+    class FakePage:
+        rect = type("R", (), {"width": 595.0, "height": 842.0})()
+        def get_images(self, full=True): return [(47,), (48,), (49,)]
+        def get_image_rects(self, xref):
+            return [type("R", (), {"width": 581.0, "height": 211.0})()]
+    assert has_content_images(FakePage()) is True
+
+
+def test_a_tiny_decorative_image_does_not_trigger_vision():
+    """A logo or a rule. Not worth a 40s agentic turn."""
+    from app.brain.textlayer import has_content_images
+    class FakePage:
+        rect = type("R", (), {"width": 595.0, "height": 842.0})()
+        def get_images(self, full=True): return [(1,)]
+        def get_image_rects(self, xref):
+            return [type("R", (), {"width": 40.0, "height": 20.0})()]
+    assert has_content_images(FakePage()) is False
