@@ -106,8 +106,21 @@ def clear_provider_cache() -> None:
     reset_translation_breaker()
 
 
+def _require_configured(provider: str | None) -> None:
+    """Shared body of the two guards below: resolve, and turn the one error the
+    tutor can actually fix into the 409 that says so."""
+    try:
+        resolve_llm_config(provider)
+    except LLMNotConfigured as e:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "llm_not_configured", "message": str(e)},
+        ) from e
+
+
 def require_llm_configured() -> None:
-    """A FastAPI dependency for the routes that ENQUEUE a `GenerationJob`.
+    """A FastAPI dependency for the routes that ENQUEUE a `GenerationJob` that
+    will dispatch through `get_provider()` — i.e. chat's provider.
 
     The synchronous paths need nothing: they call `get_provider()` inside the
     request, so an unconfigured key surfaces as a 409 on the spot via the
@@ -119,10 +132,25 @@ def require_llm_configured() -> None:
 
     So: check first, enqueue second. No key means no job row at all.
     """
-    try:
-        resolve_llm_config()
-    except LLMNotConfigured as e:
-        raise HTTPException(
-            status_code=409,
-            detail={"code": "llm_not_configured", "message": str(e)},
-        ) from e
+    _require_configured(None)
+
+
+def require_ocr_configured() -> None:
+    """The same contract, for the routes whose job READS A PAGE SCAN.
+
+    `require_llm_configured` resolves zero-arg — `settings.llm_provider`, chat's
+    provider. The OCR routes' job does not dispatch there: it goes through
+    `get_ocr_provider()`, which resolves `settings.ocr_provider`. So with
+    `OCR_PROVIDER` set-and-unconfigured the guard passed on chat's healthy
+    `claude_cli`, the job enqueued anyway, and `LLMNotConfigured` fired INSIDE the
+    background job — the exact failure the dependency exists to prevent, and the
+    tutor gets 888 failed pages instead of a 409 pointing him at Settings.
+
+    A GUARD MUST RESOLVE THE PROVIDER ITS JOB WILL ACTUALLY USE. Mirrors
+    `_current_text_source` (brain/ocr.py), which resolves `settings.ocr_provider`
+    for the same reason: `OCR_PROVIDER` unset makes the two identical
+    (`provider or settings.llm_provider` falls through), so nothing changes for
+    any install today — and when it is set, this is what stops chat's key
+    vouching for a read chat is not doing.
+    """
+    _require_configured(settings.ocr_provider)

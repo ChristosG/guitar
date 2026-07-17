@@ -134,3 +134,76 @@ def test_retry_on_a_pdf_mid_ocr_joins_the_running_job_instead_of_racing_it(db, c
     body = client.post(f"/knowledge/sources/{src.id}/retry").json()
     assert body["job_id"] == str(running.id)
     assert db.query(GenerationJob).filter_by(kind="ocr").count() == 1
+
+
+# --- Final review, IMPORTANT 6 — the OCR routes guarded CHAT's provider -----
+
+def test_reocr_409s_when_OCRs_own_provider_is_the_unconfigured_one(db, client, monkeypatch):
+    """`require_llm_configured` resolves `settings.llm_provider` zero-arg — CHAT's
+    provider. But the job it is guarding dispatches through `get_ocr_provider()`,
+    which resolves `settings.ocr_provider`. With OCR_PROVIDER set-and-unconfigured
+    the guard passed on chat's healthy `claude_cli`, the job enqueued, and
+    `LLMNotConfigured` fired INSIDE the background job — defeating the
+    dependency's own stated contract ("No key means no job row at all") and
+    handing the tutor 888 failed pages instead of a 409 pointing at Settings.
+
+    Latent only because OCR_PROVIDER is unset today; Task 6 is what armed it."""
+    monkeypatch.setattr("app.routers.library.run_ocr_job", lambda job_id: None)
+    monkeypatch.setattr("app.config.settings.llm_provider", "claude_cli")   # chat: fine
+    monkeypatch.setattr("app.config.settings.ocr_provider", "claude")       # OCR: needs a key
+    monkeypatch.setattr("app.config.settings.llm_api_key", "")              # ...and has none
+    src = _book(db, pages=3)
+
+    r = client.post(f"/knowledge/sources/{src.id}/reocr")
+
+    assert r.status_code == 409, "the guard must resolve the provider that will do the reading"
+    assert r.json()["detail"]["code"] == "llm_not_configured"
+    assert db.query(GenerationJob).filter_by(kind="ocr").count() == 0, "no key means no job row at all"
+
+
+def test_reocr_is_allowed_when_only_OCRs_provider_is_configured(db, client, monkeypatch):
+    """The other direction, and the one that must not regress: OCR_PROVIDER unset
+    is every install today, and then the two resolutions are identical."""
+    monkeypatch.setattr("app.routers.library.run_ocr_job", lambda job_id: None)
+    monkeypatch.setattr("app.config.settings.llm_provider", "claude_cli")
+    monkeypatch.setattr("app.config.settings.ocr_provider", "")
+    src = _book(db, pages=3)
+
+    assert client.post(f"/knowledge/sources/{src.id}/reocr").status_code == 202
+
+
+# --- Final review, IMPORTANT 7 — the attempt reset refunded a RUNNING job ---
+
+def test_a_second_reocr_press_does_not_refund_the_running_jobs_page_budget(
+    db, client, monkeypatch
+):
+    """`ocr_attempts=0` was reset AND COMMITTED before `_enqueue_ocr` took the
+    `SELECT ... FOR UPDATE`. So a press that hit the in-flight guard and correctly
+    returned `already_running: true` still refunded the running job's page budget
+    on its way to doing nothing — silently weakening the MAX_PAGE_ATTEMPTS
+    re-billing cap that reocr's own docstring cites. And this is the button the
+    tutor presses again mid-run precisely BECAUSE it is an 8-hour run."""
+    monkeypatch.setattr("app.routers.library.run_ocr_job", lambda job_id: None)
+    src = _book(db, pages=3)
+    for page in db.query(Page).filter_by(source_id=src.id).all():
+        page.status, page.ocr_attempts = "failed", 2
+    db.commit()
+
+    first = client.post(f"/knowledge/sources/{src.id}/reocr").json()
+    assert first["already_running"] is False
+    # the first press is an explicit "I insist" — it refunds, correctly
+    db.expire_all()
+    assert [p.ocr_attempts for p in db.query(Page).filter_by(source_id=src.id).all()] == [0, 0, 0]
+
+    # ...now spend some of that budget, as the running job would
+    for page in db.query(Page).filter_by(source_id=src.id).all():
+        page.ocr_attempts = 2
+    db.commit()
+
+    second = client.post(f"/knowledge/sources/{src.id}/reocr").json()
+
+    assert second["already_running"] is True, "the in-flight guard still holds"
+    db.expire_all()
+    assert [p.ocr_attempts for p in db.query(Page).filter_by(source_id=src.id).all()] == [2, 2, 2], (
+        "a press that started no job must not refund the running job's budget"
+    )

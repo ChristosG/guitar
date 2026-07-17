@@ -27,7 +27,7 @@ from app.brain.repair import repair_pageless_source
 from app.config import settings
 from app.db import get_db
 from app.jobs.runner import run_ocr_job, run_reingest_job
-from app.llm.factory import require_llm_configured
+from app.llm.factory import require_ocr_configured
 from app.models.generation_job import GenerationJob
 from app.models.knowledge import (
     SOURCE_USABLE_STATUSES,
@@ -58,10 +58,29 @@ def _source_or_404(db: Session, source_id: uuid.UUID) -> KnowledgeSource:
 
 # --- OCR ---------------------------------------------------------------
 
-def _enqueue_ocr(db: Session, background: BackgroundTasks, source_id: uuid.UUID) -> dict:
+def _enqueue_ocr(
+    db: Session,
+    background: BackgroundTasks,
+    source_id: uuid.UUID,
+    *,
+    refund_attempts_for: tuple[str, ...] = (),
+) -> dict:
     """Enqueue a `GenerationJob(kind="ocr")` + schedule `run_ocr_job` — UNLESS
     one is already in flight for this source, in which case the caller gets that
     job's id back and nothing new is started. THE IN-FLIGHT GUARD (Stage 7.2).
+
+    `refund_attempts_for` is the "I INSIST" reset — the page statuses whose
+    `ocr_attempts` this press puts back to 0 (see `reocr_source` and
+    `retry_source`, which insist about different sets of pages). IT LIVES INSIDE
+    THE GUARD ON PURPOSE. Both callers used to reset AND COMMIT before calling
+    here, i.e. before the `SELECT ... FOR UPDATE` — so a press that hit the guard
+    and correctly returned `already_running: true` still refunded a RUNNING job's
+    page budget on its way to doing nothing, silently weakening the
+    `MAX_PAGE_ATTEMPTS` re-billing cap that `reocr_source`'s own docstring cites.
+    That is not a rare race: re-read is an 8-hour button, and pressing it again
+    mid-run is exactly what the tutor does. A refund is part of STARTING a job, so
+    it belongs where the decision to start one is made, in that decision's
+    transaction and under that decision's lock.
 
     Both producers (`POST .../ocr` and the pdf branch of `POST .../retry`) go
     through here. Before this, each of them enqueued unconditionally: two clicks
@@ -91,9 +110,15 @@ def _enqueue_ocr(db: Session, background: BackgroundTasks, source_id: uuid.UUID)
                  existing.id, source_id)
         return {"job_id": str(existing.id), "already_running": True}
 
+    if refund_attempts_for:
+        db.query(Page).filter(
+            Page.source_id == source_id,
+            Page.status.in_(refund_attempts_for),
+        ).update({Page.ocr_attempts: 0}, synchronize_session=False)
+
     job = GenerationJob(kind="ocr", status="pending", params={"source_id": str(source_id)})
     db.add(job)
-    db.commit()
+    db.commit()                       # the refund and the job row it is for, together
     background.add_task(run_ocr_job, job.id)
     return {"job_id": str(job.id), "already_running": False}
 
@@ -102,8 +127,9 @@ def _enqueue_ocr(db: Session, background: BackgroundTasks, source_id: uuid.UUID)
     "/knowledge/sources/{source_id}/ocr",
     status_code=202,
     # OCR is 77 vision calls. Without a key that is 77 "failed" pages and a book
-    # the tutor is told is unreadable — see `require_llm_configured`.
-    dependencies=[Depends(require_llm_configured)],
+    # the tutor is told is unreadable — see `require_ocr_configured`, which
+    # resolves the provider that will do the READING, not chat's.
+    dependencies=[Depends(require_ocr_configured)],
 )
 def start_ocr(
     source_id: uuid.UUID, background: BackgroundTasks, db: Session = Depends(get_db)
@@ -124,7 +150,7 @@ def start_ocr(
 @router.post(
     "/knowledge/sources/{source_id}/reocr",
     status_code=202,
-    dependencies=[Depends(require_llm_configured)],
+    dependencies=[Depends(require_ocr_configured)],
 )
 def reocr_source(
     source_id: uuid.UUID, background: BackgroundTasks, db: Session = Depends(get_db)
@@ -162,11 +188,14 @@ def reocr_source(
             detail="nothing to re-read: only a PDF has page scans a model can read",
         )
 
-    # AN EXPLICIT PRESS MEANS "I INSIST" — the same call `retry_source` makes,
-    # widened to every page still waiting to be read rather than only the ones
-    # that already failed. Without the reset, a book whose pages burned
+    # AN EXPLICIT PRESS MEANS "I INSIST" — the same refund `retry_source` asks
+    # for, widened to every page still waiting to be read rather than only the
+    # ones that already failed. Without it, a book whose pages burned
     # MAX_PAGE_ATTEMPTS inside one rate-limit window is permanently un-re-readable
     # with this very button silently reading zero pages.
+    #
+    # Handed to `_enqueue_ocr` rather than done here, because a press that starts
+    # no job must refund nothing — see that function's docstring.
     #
     # `empty` IS DELIBERATELY NOT IN THE LIST. A real 77-page scan has genuinely
     # blank pages, and the quality gate records a model's "no visible text"
@@ -176,12 +205,10 @@ def reocr_source(
     # re-billing `MAX_PAGE_ATTEMPTS` exists to prevent. A `ready` page is not here
     # either, for a stronger reason: it is already read, and putting its attempts
     # back would only ever cost money to re-derive text we have.
-    db.query(Page).filter(
-        Page.source_id == source_id,
-        Page.status.in_(("pending", "failed", "ocr_running")),
-    ).update({Page.ocr_attempts: 0}, synchronize_session=False)
-    db.commit()
-    return _enqueue_ocr(db, background, source_id)
+    return _enqueue_ocr(
+        db, background, source_id,
+        refund_attempts_for=("pending", "failed", "ocr_running"),
+    )
 
 
 @router.get("/knowledge/sources/{source_id}/progress", response_model=SourceProgress)
@@ -332,7 +359,7 @@ def get_page_image(page_id: uuid.UUID, db: Session = Depends(get_db)) -> FileRes
 @router.post(
     "/knowledge/sources/{source_id}/retry",
     status_code=202,
-    dependencies=[Depends(require_llm_configured)],
+    dependencies=[Depends(require_ocr_configured)],
 )
 def retry_source(
     source_id: uuid.UUID, background: BackgroundTasks, db: Session = Depends(get_db)
@@ -358,15 +385,11 @@ def retry_source(
     if source.type == "pdf":
         # AN EXPLICIT RETRY MEANS "I INSIST". Pages that exhausted their
         # per-run attempt budget (MAX_PAGE_ATTEMPTS) are excluded from every
-        # automatic pickup — without this reset, a book whose pages burned
+        # automatic pickup — without this refund, a book whose pages burned
         # their attempts during a rate-limit window was permanently
         # un-OCR-able, with this very button silently processing 0 pages.
-        db.query(Page).filter(
-            Page.source_id == source_id,
-            Page.status == "failed",
-        ).update({Page.ocr_attempts: 0}, synchronize_session=False)
-        db.commit()
-        return _enqueue_ocr(db, background, source_id)
+        # `_enqueue_ocr` applies it only if this press actually starts a job.
+        return _enqueue_ocr(db, background, source_id, refund_attempts_for=("failed",))
 
     if source.type == "url":
         job = GenerationJob(
