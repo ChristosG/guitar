@@ -44,6 +44,37 @@ _MIN_BOUNDARY_LOOKBACK = 120
 # gets filtered.
 MIN_CHUNK_CHARS = 40
 
+# `Chunk.section_path` is `String(500)` (`models/knowledge.py`) — a column width
+# is a fact about the bytes on disk, the same reasoning `ocr.py`'s
+# `_TEXT_SOURCE_MAX` clamp already applies to `text_source`. `extract.py`'s
+# heading detector caps any ONE line at 120 chars (`_HEADING_MAX_CHARS`) before
+# calling it a heading, but a RUN of consecutive heading-sized lines is
+# concatenated with no bound on the total (`heading = f"{heading} {line_text}"`)
+# — harmless on a born-digital PDF, where a heading run is one or two lines, but
+# a 360dpi scan's INHERITED TESSERACT LAYER carries noisy, inconsistent per-glyph
+# font-size metadata, so dozens of body lines in a row can misread as
+# heading-sized. Measured live: three big scanned books (Kahn, Hunter,
+# Gallagher — 748pp total) each produced one heading run long enough to blow the
+# column, and every one of their chunks came back in a SINGLE bulk INSERT — so
+# Postgres's `StringDataRightTruncation` on that one oversized value rolled back
+# EVERY chunk for the whole source and the source landed on the DESTRUCTIVE
+# "failed" status, indistinguishable in the UI from a book that could not be
+# read at all. Clamped here, once, ahead of both callers (`ingest.py`'s initial
+# chunk of whatever text layer is on the page, and `ocr.py::_embed_page`'s
+# re-chunk of a page Claude just read) rather than at each `Chunk(...)`
+# construction site, which is exactly the kind of two-call-site duplication this
+# codebase avoids (see `_evict_refused_chunks`'s docstring on why "called once,
+# up front" beats "reminded not to drift" at N sites). A citation still opens to
+# the right page either way — this only shortens the breadcrumb text shown above
+# it, never the passage itself.
+_SECTION_PATH_MAX = 500
+
+
+def _clamped_heading(heading: str | None) -> str | None:
+    if heading is None or len(heading) <= _SECTION_PATH_MAX:
+        return heading
+    return heading[:_SECTION_PATH_MAX]
+
 
 @dataclass
 class ChunkDraft:
@@ -100,7 +131,9 @@ def _chunk_one_section(section: Section, target_chars: int, overlap_chars: int) 
             lookback = max(overlap_chars, target_chars // 5, _MIN_BOUNDARY_LOOKBACK)
             end = _split_point(text, start, ideal_end, lookback)
 
-        drafts.append(ChunkDraft(text=text[start:end], section_path=section.heading, page=section.page))
+        drafts.append(
+            ChunkDraft(text=text[start:end], section_path=_clamped_heading(section.heading), page=section.page)
+        )
         if end >= n:
             break
 
