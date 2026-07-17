@@ -83,8 +83,10 @@ FIGURE_END = "[/FIGURE]"
 # across the newlines a multi-line description is full of. A stray opener nested
 # inside a well-formed region is harmless and deliberately not special-cased —
 # it sits in text this rule already calls ours.
+# Group 1 is the region's CONTENTS, for `figure_text` below. `sub()` still
+# replaces the whole match (group 0), so `book_text` is untouched by the capture.
 _FIGURE_REGION = re.compile(
-    re.escape(FIGURE_MARKER) + r".*?" + re.escape(FIGURE_END), re.DOTALL
+    re.escape(FIGURE_MARKER) + r"(.*?)" + re.escape(FIGURE_END), re.DOTALL
 )
 _ANY_FIGURE_MARKER = re.compile(
     f"{re.escape(FIGURE_MARKER)}|{re.escape(FIGURE_END)}"
@@ -112,6 +114,43 @@ def book_text(text: str) -> str:
     # whose markup does not close is refused outright (`_UnclosedFigureRegion`).
     head, marker, _ours = outside.partition(FIGURE_MARKER)
     return (head if marker else outside).strip()
+
+
+def figure_text(text: str) -> str:
+    """OUR words: everything INSIDE a [FIGURE]...[/FIGURE] region — the EXACT
+    COMPLEMENT of `book_text`, and the contract's other half.
+
+    Written for Part B's canon compile, which needs both halves and must not
+    confuse them. Stripping the figures and showing the model only `book_text`
+    would have been the safer-looking choice and it is the wrong one: the OCR pass
+    bought these descriptions with a vision call *because* the picture IS the
+    content in these books (Powers is 40 pages of tab, Hunter p.57 is an amp
+    photo, Kahn's signal chains are diagrams). Dropping them re-opens the gap
+    Tesseract left and that the whole re-OCR run was paid for to close. So the
+    compile reads both, LABELLED — and `concept_claim.grounding` records which
+    half a claim came from, so our description can be cited ("the diagram on p.31
+    shows...") but never quoted as the author's sentence.
+
+    COMPLEMENTARY, INCLUDING THE TOTALITY CLAUSE. `book_text` resolves an
+    unterminated opener by keeping only the head; this keeps exactly the tail it
+    dropped. Anything else would put a run of text in NEITHER half — silently
+    losing a page — or in BOTH, which is the fabrication both functions exist to
+    prevent. `test_ocr.py` pins the partition as a multiset over every marker
+    shape the live library actually contains, so the two cannot drift apart.
+
+    Markers are stripped from the result: they are our delimiters, not content. A
+    stray nested opener is text this rule already calls ours (see `_FIGURE_REGION`)
+    and it must not travel into a prompt looking like something the page said.
+    """
+    regions = [m.group(1) for m in _FIGURE_REGION.finditer(text or "")]
+    # The totality clause, mirrored. `book_text` returns `head`; the rest — which
+    # only legacy `describe` text can reach — is ours, and this is the one path by
+    # which Powers' 43 unterminated pages reach the canon at all.
+    outside = _FIGURE_REGION.sub("\n", text or "")
+    _head, marker, ours = outside.partition(FIGURE_MARKER)
+    if marker:
+        regions.append(ours)
+    return _ANY_FIGURE_MARKER.sub("", "\n".join(regions)).strip()
 
 
 def _figure_markup_is_closed(text: str) -> bool:

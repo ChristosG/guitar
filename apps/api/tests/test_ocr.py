@@ -1,3 +1,4 @@
+import re
 from unittest.mock import patch
 
 import fitz
@@ -10,6 +11,7 @@ from app.brain.ocr import (
     MAX_PAGE_ATTEMPTS,
     OCR_PROMPT,
     book_text,
+    figure_text,
     ocr_source,
 )
 from app.models.knowledge import EMBED_DIM, Chunk, KnowledgeSource, Page
@@ -902,6 +904,93 @@ def test_a_page_that_is_nothing_but_an_unterminated_figure_has_no_words_of_its_o
                   "Measure 2: under \"F\" — columns of 1/2/3 repeated.")
 
     assert book_text(all_figure) == ""
+
+
+# --- figure_text: the contract's OTHER half ---------------------------------
+#
+# `book_text` answers "what did the author write?". The canon compile (Part B)
+# needs the complement too — our description of the picture is real content it
+# must not throw away (Powers is 40 pages of tab; Hunter p.57 is an amp photo),
+# it just may never be quoted as the author's words. These live here, next to
+# `book_text`, because they are the SAME rule read the other way round: a
+# `figure_text` that is not exactly complementary would put text in NEITHER half
+# (silently losing a page) or in BOTH (which is the fabrication).
+
+def test_figure_text_returns_our_description_and_never_the_authors_prose():
+    text = _transcribed_page_with_a_figure()
+
+    ours = figure_text(text)
+
+    assert _FIGURE_BODY in ours
+    assert _PROSE_BEFORE not in ours, "the author's prose collected as our description"
+    assert _PROSE_AFTER not in ours
+
+
+def test_figure_text_collects_every_figure_on_a_page_with_several():
+    text = (f"First paragraph.\n{FIGURE_MARKER} A wiring diagram. {FIGURE_END}\n"
+            f"Second paragraph.\n{FIGURE_MARKER} A photo of a Tele. {FIGURE_END}\n"
+            "Third paragraph.")
+
+    ours = figure_text(text)
+
+    assert "wiring diagram" in ours
+    assert "photo of a Tele" in ours
+    for prose in ("First paragraph.", "Second paragraph.", "Third paragraph."):
+        assert prose not in ours
+
+
+def test_figure_text_honours_the_totality_clause_on_a_legacy_powers_page():
+    """The same unterminated shape `book_text` resolves to "" — 43 of Powers'
+    pages, live in his library right now. All of it is ours, so all of it must
+    come back here: this is the ONLY path by which that book's tab reaches the
+    canon at all."""
+    all_figure = (f"{FIGURE_MARKER} A tablature exercise in 4/4.\n"
+                  "Measure 1: under \"Am\" — columns of 1/2/2 repeated twice.")
+
+    ours = figure_text(all_figure)
+
+    assert "tablature exercise in 4/4" in ours
+    assert "Measure 1" in ours
+
+
+def test_figure_text_and_book_text_partition_the_page_between_them():
+    """THE INVARIANT, stated as a test. Every non-marker character of the page
+    lands in exactly one half — never both (our words quoted as his), never
+    neither (a page silently lost). Checked over all four shapes the library
+    actually contains: well-formed, multiple, inline, and legacy-unterminated."""
+    shapes = [
+        _transcribed_page_with_a_figure(),
+        f"a{FIGURE_MARKER}b{FIGURE_END}c{FIGURE_MARKER}d{FIGURE_END}e",
+        f"hum{FIGURE_MARKER}x{FIGURE_END}bucker",
+        f"{_PUBLISHER_TEXT}\n\n{FIGURE_MARKER} An unterminated tab staff.",
+        "no markers at all, just the author's prose",
+    ]
+    def _chars(s: str) -> list[str]:
+        # A MULTISET, not a concatenation: the two halves interleave on the page
+        # (prose, figure, prose), so their order says nothing. What must hold is
+        # that each character is accounted for exactly once.
+        return sorted(re.sub(r"\s+", "", s))
+
+    for text in shapes:
+        both = _chars(book_text(text) + figure_text(text))
+        page = _chars(text.replace(FIGURE_MARKER, "").replace(FIGURE_END, ""))
+        assert both == page, f"page not partitioned: {text!r}"
+
+
+def test_figure_text_leaves_no_markers_in_what_it_returns():
+    """The markers are OUR delimiters, never content. A stray nested opener sits
+    in text the rule already calls ours (`ocr.py`) — it must not travel into a
+    prompt as if the page contained the literal string."""
+    ours = figure_text(f"p{FIGURE_MARKER}a {FIGURE_MARKER} b{FIGURE_END}q")
+
+    assert FIGURE_MARKER not in ours
+    assert FIGURE_END not in ours
+
+
+def test_figure_text_is_empty_for_a_page_with_no_pictures():
+    assert figure_text("Just the author, writing about mahogany.") == ""
+    assert figure_text("") == ""
+    assert figure_text(None) == ""
 
 
 def test_a_transcribed_page_round_trips_with_the_two_halves_still_separable(

@@ -79,6 +79,14 @@ from app.artifacts.generate import (
 )
 from app.artifacts.generate import _build_messages as _artifact_messages
 from app.brain.ocr import FIGURE_PROMPT, FIGURE_SLICE_ID, OCR_PROMPT, OCR_SLICE_ID
+from app.canon.compile import (
+    COMPILE_SYSTEM,
+    COMPILE_SYSTEM_SLICE_ID,
+    COMPILE_TASK,
+    COMPILE_TASK_SLICE_ID,
+    BookContext,
+    build_compile_messages,
+)
 from app.brain.retrieve import (
     GROUNDED_SLICE_ID,
     GROUNDED_SYSTEM,
@@ -499,6 +507,30 @@ _SAMPLE_LIBRARY = LibraryContext(
     page_index={"S1": {14, 15}},
 )
 
+# ONE book as the canon compile sees it (Part B, Pass 1). Deliberately shows both
+# markers: `[p.14]` for the author's own words and `[p.15 FIGURE]` for OUR
+# description of a picture. That distinction is the single thing the tutor most
+# needs to see in this prompt — it is what stops a caption being quoted back to
+# him as Maxwell Powers' sentence — and a sample with only prose in it would
+# render a viewer that never mentions it.
+_SAMPLE_BOOK_TEXT = (
+    '<book title="Guitar Fretboard Workbook">\n'
+    "[p.14] The CAGED system organizes the fretboard into five interlocking "
+    "shapes. Each one is a movable form of an open chord.\n"
+    "[p.15 FIGURE] A neck diagram spanning frets 1-5. The C shape is outlined in "
+    "grey, with its root on the fifth string marked R.\n"
+    "</book>"
+)
+
+_SAMPLE_BOOK = BookContext(
+    text=_SAMPLE_BOOK_TEXT,
+    token_count=23_000,
+    title="Guitar Fretboard Workbook",
+    page_index={14, 15},
+    author_pages={14},
+    figure_pages={15},
+)
+
 _EMPTY_LIBRARY = LibraryContext(text="", token_count=0, fits=True)
 
 _OVERSIZED_LIBRARY = LibraryContext(
@@ -684,6 +716,16 @@ def _build_curriculum_no_library(locale: str, db, course_language=None) -> _Buil
 
 def _build_curriculum_library_too_large(locale: str, db, course_language=None) -> _Built:
     return _msgs(prefix_messages(_OVERSIZED_LIBRARY, db)[1:]), []
+
+
+def _build_canon_compile(locale: str, db, course_language=None) -> _Built:
+    # NOT locale-driven, and that is not an oversight. This call reads an ENGLISH
+    # book and writes a ledger that C3 compares across authors; only `name_el` is
+    # Greek, and the schema asks for it directly rather than a language directive
+    # steering the whole call.
+    return _msgs(build_compile_messages(_SAMPLE_BOOK, db)), [
+        ("book", "Το βιβλίο που διαβάζεται, ολόκληρο", _SAMPLE_BOOK_TEXT),
+    ]
 
 
 def _build_curriculum_outline(locale: str, db, course_language=None) -> _Built:
@@ -1668,12 +1710,59 @@ _ENTRIES = [
         ),
     ),
 
+    # ---- canon ----
+    PromptEntry(
+        id="canon.compile",
+        flow="canon",
+        kind="prompt",
+        # The line the three messages are assembled on — system, the whole book,
+        # the task — which is a strictly more useful thing to show him than the
+        # `def` above it. See `test_source_refs_point_inside_the_real_definition`.
+        source_ref="app/canon/compile.py:393",
+        title_el="Η καταγραφή ενός βιβλίου σε έννοιες",
+        what_it_does_el=(
+            "Διαβάζει ΕΝΑ βιβλίο ολόκληρο, μία φορά, και γράφει τι λέει: κάθε "
+            "έννοια που διδάσκει, με τη θέση ΤΟΥ ΣΥΓΓΡΑΦΕΑ πάνω της και τις "
+            "πραγματικές σελίδες όπου τη λέει. Δεν του δίνουμε λίστα από έννοιες "
+            "να διαλέξει — τις ονομάζει με τα δικά του λόγια, γιατί μια έτοιμη "
+            "λίστα είναι φίλτρο, και το φίλτρο πετάει ακριβώς την ιδιαίτερη "
+            "ματιά για την οποία αγόρασες το δέκατο βιβλίο. Ζητάει τη θέση του "
+            "συγγραφέα και όχι μια ουδέτερη περίληψη: δέκα ουδέτερες περιλήψεις "
+            "είναι δέκα φορές η ίδια παράγραφος, ενώ η αξία είναι εκεί που οι "
+            "συγγραφείς ΔΙΑΦΩΝΟΥΝ. Ξεχωρίζει επίσης τα λόγια του βιβλίου από τις "
+            "δικές μας περιγραφές των εικόνων, ώστε μια περιγραφή φωτογραφίας να "
+            "μην παρουσιαστεί ποτέ σαν πρόταση του συγγραφέα."
+        ),
+        when_it_runs_el=(
+            "Μία φορά για κάθε βιβλίο, αφού ολοκληρωθεί η ανάγνωσή του. Ποτέ "
+            "ξανά από μόνο του — ένα βιβλίο που διαβάστηκε δεν ξαναδιαβάζεται, "
+            "γιατί θα ήταν σκέτο έξοδο."
+        ),
+        source_of_truth=lambda: build_compile_messages,
+        build=_build_canon_compile,
+        call_sites=("canon/compile.py:698",),
+        slices=(
+            Slice(
+                id=COMPILE_SYSTEM_SLICE_ID,
+                label_el="Ο ρόλος του βοηθού",
+                default=COMPILE_SYSTEM,
+                kind="replace",
+            ),
+            Slice(
+                id=COMPILE_TASK_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=COMPILE_TASK,
+                kind="replace",
+            ),
+        ),
+    ),
+
     # ---- ocr ----
     PromptEntry(
         id="ocr.transcribe",
         flow="ocr",
         kind="prompt",
-        source_ref="app/brain/ocr.py:145",
+        source_ref="app/brain/ocr.py:184",
         title_el="Η ανάγνωση μιας σελίδας βιβλίου",
         what_it_does_el=(
             "Διαβάζει τη φωτογραφία μιας σελίδας και γράφει τα λόγια της, "
@@ -1687,7 +1776,7 @@ _ENTRIES = [
         when_it_runs_el="Μία φορά για κάθε σελίδα, όταν ανεβάζεις ένα βιβλίο.",
         source_of_truth=lambda: OCR_PROMPT,
         build=_vision_prompt(OCR_SLICE_ID, OCR_PROMPT),
-        call_sites=("brain/ocr.py:1041",),
+        call_sites=("brain/ocr.py:1080",),
         slices=(
             Slice(
                 id=OCR_SLICE_ID,
@@ -1701,7 +1790,7 @@ _ENTRIES = [
         id="ocr.figure",
         flow="ocr",
         kind="prompt",
-        source_ref="app/brain/ocr.py:187",
+        source_ref="app/brain/ocr.py:226",
         title_el="Η περιγραφή των εικόνων μιας σελίδας",
         what_it_does_el=(
             "Για σελίδες που έχουν ήδη σωστό κείμενο από τον εκδότη, δεν "
@@ -1716,7 +1805,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: FIGURE_PROMPT,
         build=_vision_prompt(FIGURE_SLICE_ID, FIGURE_PROMPT),
-        call_sites=("brain/ocr.py:1041",),
+        call_sites=("brain/ocr.py:1080",),
         slices=(
             Slice(
                 id=FIGURE_SLICE_ID,
