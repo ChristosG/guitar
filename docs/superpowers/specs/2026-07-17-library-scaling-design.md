@@ -30,15 +30,52 @@ Getting Great Guitar Sounds ......... 194,671 chars ·  77 pages · pdf (a true 
 
 ### The four new books (measured with pdfinfo / pymupdf)
 
-| Book | Pages | Text-layer chars | chars/page | OCR needed |
-|---|---:|---:|---:|---|
-| Guitar Tone (Gallagher) | 388 | 1,079,600 | 2,782 | **no** — full text layer |
-| Tone Manual (Hunter) | 184 | 623,767 | 3,390 | **no** — full text layer |
-| Modern Guitar Rigs (Kahn) | 176 | 301,966 | 1,716 | **no** — full text layer |
-| Guitar Exercises (Powers) | 57 | 31,873 | 559 | **partial — see below** |
+| Book | Pages | Text-layer chars | chars/page | Font | What it really is |
+|---|---:|---:|---:|---|---|
+| Guitar Tone (Gallagher) | 388 | 1,079,600 | 2,782 | `GlyphLessFont` | **scan + inherited Tesseract OCR** |
+| Tone Manual (Hunter) | 184 | 623,767 | 3,390 | `GlyphLessFont` | **scan + inherited Tesseract OCR** |
+| Modern Guitar Rigs (Kahn) | 176 | 301,966 | 1,716 | `GlyphLessFont` | **scan + inherited Tesseract OCR** |
+| Guitar Exercises (Powers) | 57 | 31,873 | 559 | `LiberationSerif` | digital text + raster tab images |
 
-Sample pages confirm the text layers are publisher-quality prose with correct
-typographic quotes, not embedded OCR mush.
+**Correction of an earlier claim in this spec's own history.** The first pass
+recorded "publisher-quality text layers, not OCR mush", from reading sample text
+that looked clean. That was wrong, and the tell was in the first sample quoted:
+Gallagher p.60 begins `[> How the base plate is formed` — a mangled `▶`, dismissed
+at the time as "a bullet glyph artifact". There are 37 more in the first 120 pages.
+
+`GlyphLessFont` is the invisible-text-layer signature OCR tools inject over a
+scan. Three of the four books are 360 DPI scans carrying **someone else's
+Tesseract output**, which the pipeline takes for free and marks `ready` —
+permanently, since nothing ever revisits a `ready` page.
+
+### How good is the inherited OCR? Measured, not assumed.
+
+| Aspect | Verdict | Evidence |
+|---|---|---|
+| Body prose | **Excellent** | Hunter p.57: 1 error in 3,669 chars (`’'m` for `I'm`). Correct typographic quotes, em-dashes, `.001uF`, `150k–300k-ohms`, both sidebar columns in reading order. |
+| **Fraction glyphs** | **100% loss** | **Zero** `¼½¾⅓⅔⅛` survived in 2,012,859 chars across all three books. Kahn p.63 reads `¼-inch stereo cables`; the text layer says `4-inch stereo cables`. |
+| Figures / photos / diagrams | **Nothing** | Structural — OCR cannot describe an image. Hunter p.57's amp photo (knobs labelled VOLUME, MASTER), its running head, and its page number are all absent. |
+| Damaged pages | Noise ingested as content | 9 of 617 pages (~1.5%) render blank in **both** MuPDF and poppler. Tesseract emitted `7 ipgges x a Rar ek en ee & eile a=` (544 chars) for Kahn p.40. |
+
+**The fraction loss is the decision-driver, and it is not cosmetic.** `¼-inch` is
+the standard guitar connector; `4-inch stereo cables` do not exist. It is a
+confident, plausible, wrong fact that flows into the canon, into a curriculum, and
+out of the tutor's mouth. It cannot be regexed away — some `4-inch` references are
+legitimate (a 4-inch speaker dust cap), so find-and-replace would corrupt real
+content. The only fix that distinguishes them is looking at the page.
+
+Verified independently through the intended production path:
+`claude -p --allowedTools Read` on the same page returned *"**¼-inch** — U+00BC…
+At 400% zoom the glyph is unambiguous… It appears three times on the page"*.
+
+### Decision: drop the inherited OCR entirely
+
+Chris: *"yes re-ocr with my claude -p from my subscription for now! fuck tessaract
+at all bro!"*
+
+All three scanned books are re-OCR'd. The inherited text layer is **not** trusted
+for `GlyphLessFont` sources — `paginate.py`'s "free text layer" path applies only
+to real-font PDFs (Powers), where it is genuinely publisher text.
 
 ### The wall
 
@@ -83,7 +120,47 @@ context, not money.
 These land before the canon. Compiling a canon from content the pipeline never
 read would bake the error in permanently.
 
-### A1. The text-layer check is a truthiness test, not a coverage test
+### A0. The text-layer check trusts inherited OCR
+
+`paginate.py:83-89` takes any text layer for free and marks the page `ready`,
+which means no model ever looks at it again. For Powers (real font) that is
+correct and free. For the three `GlyphLessFont` books it silently adopts
+Tesseract's output — including its 100% fraction loss and its garbage on damaged
+pages — as the permanent truth of the library.
+
+**The font IS the signal**, and it is a deterministic fact from the library, not
+a heuristic:
+
+```python
+def text_layer_kind(page) -> str:
+    """'digital' | 'ocr' | 'none' — from the fonts, not from guessing."""
+    fonts = {sp.get("font") or "" for blk in page.get_text("dict")["blocks"]
+             for ln in blk.get("lines", ()) for sp in ln.get("spans", ())}
+    if not fonts:
+        return "none"
+    if all("GlyphLess" in f or not f for f in fonts):
+        return "ocr"        # an invisible OCR layer over a scan — do not trust
+    return "digital"        # real embedded fonts — publisher text, trust it
+```
+
+Two heuristics were tried first and **measured to fail**; they are recorded so
+nobody re-proposes them:
+
+1. *Raster coverage > 25% ⇒ needs vision.* Flags **100%** of Hunter and Gallagher
+   — every page of a scanned book has a full-page image under it, so coverage
+   carries no signal on exactly the books that need one.
+2. *Text chars < 0.5 × the book's median ⇒ needs vision.* Would not have caught
+   Powers p.11 (502 chars vs a 588-char median), the page the rule existed for.
+
+Routing:
+
+| `text_layer_kind` | Example | Action |
+|---|---|---|
+| `none` | Getting Great Guitar Sounds | vision (already the behaviour) |
+| `ocr` | Hunter, Gallagher, Kahn | **vision** — re-OCR, discard the inherited layer |
+| `digital` | Powers | trust the text; vision only for its image regions (A1) |
+
+### A1. Digital-text pages whose images carry content
 
 `paginate.py:83-89`:
 
@@ -143,6 +220,47 @@ New column: `text_layer` | `qwen` | `claude` | `failed`. The Reader shows it per
 page. This is what makes the detector auditable: he can *see* which pages fell
 back and judge whether the heuristic was right. Without it, A1 is a silent
 behaviour change, which is the genre of bug this whole spec is about.
+
+### A2b. Vision through `claude -p` — the bridge must grow one narrow hole
+
+Chris: *"re-ocr with my claude -p from my subscription for now! ... in the future
+we'll have dedicated api."*
+
+`ClaudeCLIProvider.vision()` currently delegates to Qwen, and its docstring says
+*"`claude -p` has no image input"*. True of the native surface — but the same
+docstring names the workaround, and **it is verified to work**: `claude -p
+--allowedTools Read` against a rendered page returned the correct `¼-inch`
+(U+00BC) that Tesseract lost, and volunteered that it had zoomed to 400% to
+disambiguate the glyph.
+
+**The blocker is the bridge's own security posture.** `tools/claude_bridge/bridge.py:137`
+passes `--tools ""`, disabling every built-in tool, deliberately: *"Without it
+this is a coding agent."* Vision needs `Read` plus filesystem access to the page
+image.
+
+So: a **separate `/v1/vision` endpoint** on the bridge — not a relaxation of
+`/v1/complete`:
+
+- `claude -p --tools Read` — `Read` only, nothing else, never a blanket re-enable.
+- A **read-only** bind mount of the media directory alone. The bridge gets no
+  access to the repo, the DB, or anything else.
+- Path validated against the media root before the subprocess starts; a traversal
+  attempt is a 400, not a `claude` invocation.
+- `/v1/complete` keeps `--tools ""`, untouched.
+
+**The real cost is time and the subscription cap, not money.** One page took ~40s
+and burned an agentic turn with multiple zoom crops. 748 pages ≈ **8–12 hours**
+wall clock and a serious, repeated slice of a 5-hour rolling window. Therefore:
+
+- Re-OCR is an **explicit, resumable, per-book action**, never automatic on upload.
+- It runs through the existing `GenerationJob` + boot-sweep machinery, so a
+  killed run resumes instead of restarting.
+- Progress is visible per page, and it is interruptible.
+- Because the CLI reports `total_cost_usd` (what the call *would* have cost on an
+  API key), the UI can show the subscription spend it is displacing.
+- When a real API key lands, `OCR_PROVIDER=claude` (A3) switches the same pipeline
+  to the API with no other change: ~$13 and ~40 minutes batched, instead of 12
+  hours.
 
 ### A3. `OCR_PROVIDER`, decoupled from `LLM_PROVIDER`
 
@@ -283,9 +401,43 @@ keyed by concept, that collapses to near-nothing. What survives is the divergenc
 
 ### Compile at ingest, generate from the canon
 
-**Pass 1 — compile each book, free-form.** A background job when a book is
-ingested, sibling to OCR. The model reads the whole book and emits concept
-entries **in its own words**, each with `[p.N]` citations:
+### Why OCR and compile are not one pass
+
+Chris: *"if possible while u ocr each, u also make the canons as well so we don't
+have to re-read them twice? does this make sense?"*
+
+The instinct is right; the fusion is not, and the reason matters:
+
+**OCR is per-page. The canon is per-book.** OCR reads one page at a time by
+design — `ocr.py`'s per-page commit is what stops a `vision()` timeout on page 60
+from costing pages 1-59. A concept ledger needs the *whole* book: *"pickup height
+is covered on pp.47-48 and contradicted on p.112"* is unknowable while looking at
+page 47. Fused, the canon becomes 388 disconnected page-fragments — which is not a
+canon, it is a worse index.
+
+**And the double read isn't happening anyway.** The compile reads the *text* out
+of Postgres (~271K text tokens), never the images. The expensive part — vision —
+already runs exactly once. There is no second image read to save.
+
+**But the instinct points at something real, and it is adopted:** figure content
+can *only* be captured while the image is in hand. So the OCR pass does both:
+
+```
+OCR pass  (per page, HAS the image)  -> verbatim text  +  a description of any
+                                        figure/diagram/photo/table on the page
+compile   (whole book, text only)    -> concepts, citations, cross-book divergence
+```
+
+The figure description lands in `Page.text` as part of the page's content, so the
+canon inherits it without ever re-reading a pixel. That is the "don't read twice"
+saving, in the one place where it is real — and it closes the gap Tesseract
+cannot: Hunter p.57's amp photo, Kahn's signal-chain diagrams, Powers' 40 pages
+of tab.
+
+### Pass 1 — compile each book, free-form
+
+A background job, after OCR completes. The model reads the whole book and emits
+concept entries **in its own words**, each with `[p.N]` citations:
 
 ```json
 {"concept": "pickup height and its effect on attack",
