@@ -1987,3 +1987,147 @@ export function testSettings(anthropic_key?: string): Promise<SettingsTestResult
     body: JSON.stringify({ anthropic_key: anthropic_key ?? null }),
   });
 }
+
+/**
+ * Typed fetch helpers for the Prompts API (`/prompts/*`) — every prompt this app
+ * sends to a model, readable; the one sentence that carries no contract,
+ * editable. Mirrors `apps/api/app/routers/prompts.py`'s response models
+ * field-for-field.
+ *
+ * READING IS THE FEATURE. Four of these five calls exist to SHOW; one changes
+ * something, and the thing it can change is how the lesson writer is told to
+ * address a student.
+ *
+ * `title_el`/`what_it_does_el`/`when_it_runs_el`/`label_el` are Greek on the
+ * WIRE, and that is not a locale bug — they are the registry's own annotation of
+ * a prompt (`app/prompts/registry.py`), written once beside the thing they
+ * describe, not UI chrome. `messages/{el,en}.json` owns the card's chrome; the
+ * API owns the account of what each prompt does. The `_el` suffix is the API's,
+ * kept verbatim here so the two files can be diffed against each other.
+ */
+
+export interface PromptSummary {
+  id: string;
+  flow: string;
+  /** "prompt" | "fragment" — a fragment is injected INTO another prompt rather
+   * than sent on its own. Kept a plain `string` for the same reason
+   * `BlockNode.kind` is: an unrecognized future kind should still render. */
+  kind: string;
+  title_el: string;
+  what_it_does_el: string;
+  when_it_runs_el: string;
+  /** The provider that sends this, when only one does; `null` = all of them. The
+   * viewer must show what the ACTIVE provider (`AppSettings.provider`) actually
+   * sends — a card for a prompt the app is not currently sending is a lie. */
+  provider: string | null;
+  /** This prompt sits inside the cached prefix (`curriculum/corpus.py`). */
+  cache_prefix: boolean;
+  /** Whether the UI must warn before a change. Equal to `cache_prefix` today and
+   * a different question: that one is where the prompt sits on the wire, this one
+   * is what an edit costs. Never re-derive it from `cache_prefix` here — the API
+   * already knows the rule. */
+  cache_cost_warning: boolean;
+  has_override: boolean;
+}
+
+/** One message as the provider receives it. `cached` marks the prompt-cache
+ * breakpoint. */
+export interface PromptMessage {
+  role: string;
+  content: string;
+  cached: boolean;
+}
+
+/** Where an interpolated variable landed in `PromptDetail.text`, so the UI can
+ * draw it as a labelled chip instead of a hole: `text.slice(start, end) ===
+ * value` is a test on the API side. `value` is a representative sample of his
+ * data — except a slice's span, which is the real resolved text. */
+export interface PromptSpan {
+  name: string;
+  label_el: string;
+  value: string;
+  start: number;
+  end: number;
+}
+
+/** A contiguous, contract-free region the tutor may edit. There is exactly ONE
+ * in the whole app (`student.pitch`), and that is a finding, not a placeholder:
+ * an audit found the pedagogy is interwoven with the contracts everywhere else. */
+export interface PromptSlice {
+  id: string;
+  prompt_id: string;
+  label_el: string;
+  /** "replace" | "append". */
+  kind: string;
+  /** The text in code — the reset target, and why defaults are not seeded into
+   * the table. */
+  default: string;
+  /** What the model actually gets right now: his override if he saved one, else
+   * `default`. */
+  effective: string;
+  has_override: boolean;
+  max_chars: number;
+  cache_cost_warning: boolean;
+}
+
+export interface PromptDetail extends PromptSummary {
+  /** "app/agent/prompts.py:67" — shown, so the claim is auditable. */
+  source_ref: string;
+  /** The full rendered prompt: a "\n\n" join of `messages[].content`, and what
+   * `spans` index into. `messages` is what goes on the wire; this is the
+   * presentational join. */
+  text: string;
+  messages: PromptMessage[];
+  spans: PromptSpan[];
+  slices: PromptSlice[];
+}
+
+export interface PromptSliceHistoryEntry {
+  id: string;
+  text: string;
+  replaced_at: string;
+}
+
+/** Every prompt, in registration order (chat first). No `text`: rendering all 31
+ * means building all 31, and the largest is ~14,000 chars of tool schemas. The
+ * list draws the cards; `getPrompt` fills one in when he opens it. */
+export function listPrompts(): Promise<PromptSummary[]> {
+  return request<PromptSummary[]>("/prompts");
+}
+
+/** One prompt, rendered as the model would receive it right now — including any
+ * slice he has overridden, because the preview runs the same builders the live
+ * path does. Carries `X-App-Locale` like every call here, which matters: the
+ * language directive is injected into 8 of these. */
+export function getPrompt(id: string): Promise<PromptDetail> {
+  return request<PromptDetail>(`/prompts/${encodeURIComponent(id)}`);
+}
+
+/** Validate -> snapshot -> save. Validation runs BEFORE the write and the write
+ * is all-or-nothing, so a rejected edit leaves the stored text untouched. Throws
+ * `ApiError` with `code` one of: `unknown_slice`, `empty`, `too_long`,
+ * `missing_placeholder`, `unknown_placeholder`, `malformed_braces`. */
+export function savePromptSlice(sliceId: string, text: string): Promise<PromptSlice> {
+  return request<PromptSlice>(`/prompts/slices/${encodeURIComponent(sliceId)}`, {
+    method: "PUT",
+    body: JSON.stringify({ text }),
+  });
+}
+
+/** Back to the code default. IDEMPOTENT — resetting something never overridden
+ * is a 200 with `has_override: false`, not a 404. */
+export function resetPromptSlice(sliceId: string): Promise<PromptSlice> {
+  return request<PromptSlice>(`/prompts/slices/${encodeURIComponent(sliceId)}`, {
+    method: "DELETE",
+  });
+}
+
+/** Every text this slice used to have, NEWEST FIRST — the question this answers
+ * is "give me back what I just lost", and the answer is almost always the top
+ * row. Empty for a never-edited slice, and after the FIRST edit of one (what
+ * that replaced was the code default, which is in git). */
+export function getPromptSliceHistory(sliceId: string): Promise<PromptSliceHistoryEntry[]> {
+  return request<PromptSliceHistoryEntry[]>(
+    `/prompts/slices/${encodeURIComponent(sliceId)}/history`,
+  );
+}

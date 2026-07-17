@@ -15,6 +15,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { PromptList } from "@/components/settings/prompt-list";
 import { cn } from "@/lib/utils";
 
 const CONSOLE_URL = "https://console.anthropic.com/settings/keys";
@@ -285,6 +286,19 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
 
+      {/* --- the prompts -------------------------------------------------
+       * The first thing Chris ever asked for, and the reason this page is
+       * worth more than a key box: what the app actually TELLS the model,
+       * verbatim, with a Greek account of it beside the text rather than
+       * rewritten into it.
+       *
+       * `provider` is passed down rather than fetched again: this page already
+       * knows it, and the list needs it to hide a prompt only the OTHER
+       * connection sends. `null` while settings load, which hides the one
+       * provider-specific card for that moment — the conservative direction,
+       * since showing a prompt the app is not sending is the failure this whole
+       * feature exists to prevent. */}
+      <PromptList provider={settings?.provider ?? null} />
     </div>
   );
 }
