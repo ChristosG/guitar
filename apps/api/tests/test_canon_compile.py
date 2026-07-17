@@ -352,6 +352,57 @@ def test_book_compile_records_the_model_and_the_token_count(db, monkeypatch):
     assert record.error is None
 
 
+def test_token_count_counts_the_CACHED_input_too(db, monkeypatch):
+    """CAUGHT BY THE LIVE COMPILE OF POWERS, NOT BY THIS SUITE.
+
+    The `claude` CLI applies its own prompt caching, so the real 40,206-token book
+    came back as `cache_creation_input_tokens: 40206` and `input_tokens: 2` — and
+    reading `input_tokens` alone stamped **`token_count = 2`** on a 57-page book.
+    Nothing fails, nothing looks wrong, and the one column that exists to answer
+    "what did reading this book actually cost?" quietly answers "nothing" — which
+    also makes the plan's "~$1.26/book" estimate uncheckable against reality,
+    forever, on every book compiled from here on.
+
+    The payload below is the REAL one from that run, pasted verbatim.
+    """
+    source = _book(db, {12: _PROSE})
+    fake = _use(monkeypatch, _FakeProvider({"concepts": [_concept()]}))
+    fake.last_usage = {
+        "usage": {"input_tokens": 2, "cache_creation_input_tokens": 40206,
+                  "cache_read_input_tokens": 0, "output_tokens": 4630},
+        "cost_usd": 0.341349, "duration_ms": 46977,
+    }
+
+    record = compile_book(db, source.id)
+
+    assert record.token_count == 40_208, "the cached input was not counted as input"
+
+
+def test_token_count_reads_the_flat_shape_claude_py_reports(db, monkeypatch):
+    """`ClaudeProvider.last_usage` is flat; `ClaudeCLIProvider`'s nests under
+    `usage`. The canon must not care which provider the tutor picked."""
+    source = _book(db, {12: _PROSE})
+    fake = _use(monkeypatch, _FakeProvider({"concepts": [_concept()]}))
+    fake.last_usage = {"input_tokens": 1_000, "cache_creation_input_tokens": 30_000,
+                       "cache_read_input_tokens": 500, "output_tokens": 4_000}
+
+    record = compile_book(db, source.id)
+
+    assert record.token_count == 31_500
+
+
+def test_token_count_falls_back_to_the_estimate_when_usage_says_nothing(db, monkeypatch):
+    """A provider that reports no usage must leave an honest estimate on the row,
+    not a zero that reads as "this book was free"."""
+    source = _book(db, {12: _PROSE})
+    fake = _use(monkeypatch, _FakeProvider({"concepts": [_concept()]}))
+    fake.last_usage = {}
+
+    record = compile_book(db, source.id)
+
+    assert record.token_count > 0
+
+
 def test_two_books_naming_a_concept_identically_share_ONE_concept_row(db, monkeypatch):
     """A free reconciliation, before C3 runs at all — and the reason `concept.key`
     is UNIQUE. Two claims on one concept from two sources is exactly the shape

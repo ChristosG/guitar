@@ -1740,7 +1740,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: build_compile_messages,
         build=_build_canon_compile,
-        call_sites=("canon/compile.py:698",),
+        call_sites=("canon/compile.py:724",),
         slices=(
             Slice(
                 id=COMPILE_SYSTEM_SLICE_ID,

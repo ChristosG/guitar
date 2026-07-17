@@ -612,9 +612,28 @@ def _model_name() -> str:
         return "unknown"
 
 
+# The three buckets Anthropic splits INPUT across. All three are input — they are
+# billed at different RATES (cache writes 1.25x, cache reads 0.1x), not at
+# different times, and a token that arrived via the cache still arrived.
+_INPUT_FIELDS = (
+    "input_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+)
+
+
 def _measured_input_tokens(provider, fallback: int) -> int:
     """What the call ACTUALLY cost to send, from the provider's own usage report,
     falling back to our estimate when it does not offer one.
+
+    SUM ALL THREE INPUT BUCKETS — and this is the bug the live compile of Powers
+    found, which this suite had happily agreed with. The `claude` CLI does its own
+    prompt caching, so a 40,206-token book comes back as
+    `cache_creation_input_tokens: 40206` with `input_tokens: 2`, and reading
+    `input_tokens` alone stamps `token_count = 2` on a 57-page book. Nothing
+    raises; the column that exists to answer "what did reading this book cost?"
+    just quietly answers "nothing", and the plan's ~$1.26/book estimate becomes
+    permanently uncheckable against reality.
 
     Two shapes, because there are two providers: `ClaudeProvider.last_usage` is
     flat (`{input_tokens: N, ...}`), `ClaudeCLIProvider.last_usage` nests the
@@ -622,9 +641,16 @@ def _measured_input_tokens(provider, fallback: int) -> int:
     making the canon care which provider the tutor picked.
     """
     usage = getattr(provider, "last_usage", None) or {}
+    if not isinstance(usage, dict):
+        return fallback
     inner = usage.get("usage") if isinstance(usage.get("usage"), dict) else usage
-    measured = inner.get("input_tokens") if isinstance(inner, dict) else None
-    return int(measured) if isinstance(measured, int) and measured > 0 else fallback
+    if not isinstance(inner, dict):
+        return fallback
+    total = sum(
+        v for f in _INPUT_FIELDS
+        if isinstance(v := inner.get(f), int) and not isinstance(v, bool) and v > 0
+    )
+    return total or fallback
 
 
 def _upsert_compile(db, source_id: UUID, **fields) -> BookCompile:
