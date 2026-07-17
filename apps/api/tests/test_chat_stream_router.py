@@ -169,6 +169,72 @@ def test_stream_success_with_citations_attaches_them_to_the_assistant_row(monkey
 
 
 # ---------------------------------------------------------------------------
+# Task 8: the streaming path reorders identically to `run_agent_turn` —
+# search the library BEFORE declining a named-song request. Both call sites
+# have to behave the same way, or the tutor gets a different answer
+# depending on whether the UI happened to stream that turn.
+# ---------------------------------------------------------------------------
+
+def test_stream_a_song_the_tutor_owns_is_answered_not_declined(monkeypatch):
+    class _Hit:
+        def __init__(self):
+            self.source_id = uuid.uuid4()
+            self.source_title = "Real Book"
+            self.page = 42
+            self.page_id = uuid.uuid4()
+            self.text = "Intro riff: E5 G5 A5"
+            self.score = 0.9
+
+    _use_streaming_provider(monkeypatch, [
+        {"type": "content", "text": "Here's the intro riff from page 42."},
+        {"type": "done", "content": "Here's the intro riff from page 42.", "tool_calls": []},
+    ])
+    monkeypatch.setattr(agent_loop, "search", lambda db_, q, k=5: [_Hit()])
+    session_id = _create_session()
+
+    r = client.post(
+        f"/chat/{session_id}/messages/stream",
+        json={"content": "give me the tab for Sweet Child O' Mine"},
+    )
+
+    assert r.status_code == 200, r.text
+    events = _parse_sse(r.text)
+    assert events[-1][0] == "done", "his own book was refused unread"
+    assert "Real Book" in events[-1][1]
+
+
+def test_stream_a_song_the_tutor_does_not_own_is_still_declined(monkeypatch):
+    # The model must never even be called for a genuine miss — the fake
+    # provider raises if `chat_tools_stream` is invoked.
+    def _must_not_stream(*a, **kw):
+        raise AssertionError("the model must never be called for a named-song request")
+
+    fake = _FakeStreamingProvider([])
+    monkeypatch.setattr(fake, "chat_tools_stream", _must_not_stream)
+    monkeypatch.setattr(agent_loop, "get_provider", lambda: fake)
+    monkeypatch.setattr(agent_loop, "search", lambda db_, q, k=5: [])
+    session_id = _create_session()
+
+    r = client.post(
+        f"/chat/{session_id}/messages/stream",
+        json={"content": "give me the tab for Sweet Child O' Mine"},
+    )
+
+    assert r.status_code == 200, r.text
+    events = _parse_sse(r.text)
+    # The decline IS the final answer (a plain "done", not a "fallback") —
+    # no delta was ever streamed because the model was never called, so the
+    # decline text itself is only visible in what got persisted, not in the
+    # "done" event's own payload (which carries only `citations`).
+    assert events[-1][0] == "done"
+    from app.agent.guards import NAMED_SONG_DECLINE_MESSAGE
+    rows = _db_messages(session_id)
+    assistant_rows = [m for m in rows if m.role == "assistant"]
+    assert len(assistant_rows) == 1
+    assert assistant_rows[0].content == NAMED_SONG_DECLINE_MESSAGE
+
+
+# ---------------------------------------------------------------------------
 # The honest simplification: everything else falls back, persisting nothing
 # ---------------------------------------------------------------------------
 
