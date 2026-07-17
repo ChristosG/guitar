@@ -105,6 +105,21 @@ class Page(Base, PkMixin, TimestampMixin):
     # retrying it unconditionally would re-bill a genuinely blank page on every
     # single retry of the book, forever. Three attempts, then it rests.
     ocr_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # WHERE this page's text came from. NULL for rows written before this
+    # column existed (an additive migration must not invent history).
+    #
+    #   "text_layer" — a real embedded font: publisher text, taken for free.
+    #   "qwen"       — the local VL model transcribed the scan.
+    #   "claude"     — Claude transcribed the scan (subscription or API).
+    #   "failed"     — every attempt failed; `ocr_error` says why.
+    #
+    # Shown per page in the Reader. Without it, `brain/paginate.py`'s routing is
+    # a silent behaviour change the tutor cannot inspect or overrule.
+    text_source: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # WHY this page was sent to vision — the detector's reason, in its own words,
+    # so a wrong call is diagnosable rather than merely wrong.
+    #   "no_text_layer" | "inherited_ocr" | "image_region" | "ocr_garbage"
+    ocr_reason: Mapped[str | None] = mapped_column(String(30), nullable=True)
 
 
 class Chunk(Base, PkMixin, TimestampMixin):

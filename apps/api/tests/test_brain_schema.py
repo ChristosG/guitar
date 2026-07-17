@@ -57,3 +57,38 @@ def test_domain_and_cosine_order():
         assert rows and rows[0].text == "c_a"  # closest by angle to the query axis
     finally:
         db.close()
+
+
+def test_page_records_where_its_text_came_from(db):
+    """`ready` used to mean "no model will ever look at this page again" with no
+    record of who wrote it. Provenance is what makes Task 3's routing auditable
+    instead of a silent behaviour change."""
+    from app.models.knowledge import KnowledgeSource, Page
+
+    source = KnowledgeSource(type="pdf", title="t", status="ready")
+    db.add(source)
+    db.flush()
+    page = Page(
+        source_id=source.id, page_no=1, text="x", status="ready",
+        text_source="text_layer", ocr_reason=None,
+    )
+    db.add(page)
+    db.commit()
+    db.refresh(page)
+    assert page.text_source == "text_layer"
+    assert page.ocr_reason is None
+
+
+def test_page_text_source_defaults_to_null_for_existing_rows(db):
+    """Additive migration: rows written before this column exists stay valid.
+    NULL means "written before we tracked this", not "unknown failure"."""
+    from app.models.knowledge import KnowledgeSource, Page
+
+    source = KnowledgeSource(type="pdf", title="t", status="ready")
+    db.add(source)
+    db.flush()
+    page = Page(source_id=source.id, page_no=1, text="x", status="ready")
+    db.add(page)
+    db.commit()
+    db.refresh(page)
+    assert page.text_source is None
