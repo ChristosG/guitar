@@ -31,12 +31,18 @@ the live path through the back door.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 
 from sqlalchemy import select
 
 from app.models.prompt import PromptOverride, PromptOverrideHistory
 
 log = logging.getLogger(__name__)
+
+# What `resolve` will read from. A `Session` (the request paths), a `Mapping` of
+# already-resolved overrides (the draft workers — see `snapshot`), or None ("no
+# database available, code defaults only").
+Source = "Session | Mapping[str, str] | None"
 
 
 class SliceInvalid(Exception):
@@ -53,21 +59,57 @@ class SliceInvalid(Exception):
         self.detail = {"code": code, **detail}
 
 
-def stored(db, slice_id: str) -> str | None:
-    """His override for `slice_id`, or None if he has never touched it.
+def snapshot(db) -> dict[str, str]:
+    """Every override he has saved, read in ONE query, for a caller that must not
+    touch the database again.
 
-    `db=None` means "no database available — code defaults only", which is the
-    honest answer for `registry.render()` called outside a request (P1's own
-    tests do exactly that). Not an error: a preview with no session is a preview
-    of the code, and the code is what an un-edited install sends.
+    THIS EXISTS BECAUSE OF `jobs/curriculum_draft.py`, AND THAT IS NOT AN
+    OPTIMISATION. `_draft_one` calls `db.close()` at :215 with a comment that spells
+    out why — *"HAND THE CONNECTION BACK before the model call ... This one line is
+    what keeps the progress poll answering"* — and that module's docstring documents
+    the pool exhaustion it is preventing. A `resolve(db, ...)` inside
+    `build_lesson_messages` would check a connection back out and HOLD it for the
+    whole multi-minute model call, once per concurrent worker. The Settings page
+    would have paid for its transparency with the tutor's progress bar.
+
+    So the draft path resolves in Phase A, where a session is legitimately held, and
+    hands the workers a plain dict. That is not a new pattern: `run_lesson_drafts`
+    already calls `build_student_brief(db, student_id)` in Phase A and passes the
+    resolved STRING down in `plan` — this is the same move, for the same reason,
+    generalised from one slice to all of them.
+
+    Reads the whole table because it has one row per prompt he has EDITED — bounded
+    by the number of prompts in the app, and empty on every install where he has
+    changed nothing.
     """
     if db is None:
+        return {}
+    return {row.slice_id: row.text for row in db.scalars(select(PromptOverride)).all()}
+
+
+def stored(source, slice_id: str) -> str | None:
+    """His override for `slice_id`, or None if he has never touched it.
+
+    `source` is a Session, a `snapshot()` mapping, or None. One function over three
+    shapes rather than three functions: the RULE is "has he changed it?", and the
+    rule must have exactly one implementation or the viewer and the live path get
+    the chance to disagree about it — which is the entire failure this feature was
+    built to end.
+
+    `None` means "no database available — code defaults only", the honest answer for
+    `registry.render()` called outside a request (P1's own tests do exactly that).
+    Not an error: a preview with no session is a preview of the code, and the code is
+    what an un-edited install sends.
+    """
+    if source is None:
         return None
-    row = db.get(PromptOverride, slice_id)
+    if isinstance(source, Mapping):
+        return source.get(slice_id)
+    row = source.get(PromptOverride, slice_id)
     return row.text if row is not None else None
 
 
-def resolve(db, slice_id: str, default: str) -> str:
+def resolve(source, slice_id: str, default: str) -> str:
     """THE RULE, and the only implementation of it. Override on top; code
     underneath; never the reverse.
 
@@ -76,7 +118,7 @@ def resolve(db, slice_id: str, default: str) -> str:
     `Slice.default` is the live constant (P1 `is`-tests it), and a resolution
     that rebuilt the string would quietly break that chain.
     """
-    return stored(db, slice_id) or default
+    return stored(source, slice_id) or default
 
 
 def overridden_ids(db) -> set[str]:

@@ -34,6 +34,7 @@ from app.curriculum.outline import (
     gap_body,
 )
 from app.i18n import answer_in, language_directive
+from app.prompts.overrides import resolve
 from app.llm.factory import get_provider
 from app.models.block import Block
 
@@ -141,6 +142,42 @@ def _typical_lesson_count(course: Block, modules: list[Block], db) -> int:
     return 4
 
 
+# THE ADD-MODULE PROMPT, lifted out of the builder byte-identically so the tutor can
+# rewrite it. `{topic_block}` carries the two-way branch the `if topic` expression used
+# to make — the two halves are their own constants below, so he can edit either.
+MODULE_TAIL = (
+    "YOUR TASK: design ONE new module to EXTEND an existing course — a title, "
+    "a one-sentence objective, and its lessons (titles and one-sentence "
+    "objectives only; the lessons are drafted in full later). It must fit the "
+    "course's arc: build on what earlier modules teach, and do NOT repeat any "
+    "module or lesson the course already has.\n"
+    "\nCOURSE: {course_title}"
+    "{course_brief_block}"
+    "\n\nTHE COURSE AS IT STANDS (in teaching order):\n{existing}\n"
+    "{topic_block}\n"
+    "\nSHAPE: give it EXACTLY {lesson_count} lessons of {minutes_per_lesson} "
+    "minutes each; each will later be drafted to ~{target_words} words.\n"
+    "\nTIER THE MODULE HONESTLY. You have read his entire library; you are "
+    "the only one who can say whether it actually covers this topic. A module "
+    "tiered 'library' will be drafted from his pages and cited to them — if "
+    "it is not really in there, that citation is a lie the tutor will click "
+    "on. Say 'general_knowledge' instead. That is not a failure; an "
+    "unlabelled gap is.\n"
+    "\nGAP POLICY: {gap_policy}\n"
+    "\n{language_directive}\n"
+    "\n{answer_in}"
+)
+MODULE_SLICE_ID = "curriculum.extend"
+
+MODULE_COURSE_BRIEF_BLOCK = "\n\nWHAT THE TUTOR WANTS FROM THIS COURSE, IN HIS OWN WORDS:\n{brief}"
+MODULE_TOPIC_BLOCK = "\nTHE NEW MODULE'S TOPIC: {topic}"
+MODULE_NO_TOPIC_BLOCK = (
+    "\nTHE TUTOR DID NOT NAME A TOPIC. Choose the most valuable module "
+    "this course is missing — the thing a student who finished the "
+    "existing modules would most need next."
+)
+
+
 def build_module_messages(
     *,
     course_title: str,
@@ -153,48 +190,32 @@ def build_module_messages(
     target_words: int,
     library: LibraryContext,
     gap_policy: str,
+    source=None,
 ) -> list[dict]:
     """The messages for the add-module call. Pure — same testability contract as
     `outline.build_outline_messages`: the prefix is the shared cached one, and
     every request-specific fact sits strictly after it."""
-    messages = prefix_messages(library)
+    messages = prefix_messages(library, source)
 
-    tail = [
-        "YOUR TASK: design ONE new module to EXTEND an existing course — a title, "
-        "a one-sentence objective, and its lessons (titles and one-sentence "
-        "objectives only; the lessons are drafted in full later). It must fit the "
-        "course's arc: build on what earlier modules teach, and do NOT repeat any "
-        "module or lesson the course already has.",
-        f"\nCOURSE: {course_title}",
-    ]
-    if brief:
-        tail.append(f"\nWHAT THE TUTOR WANTS FROM THIS COURSE, IN HIS OWN WORDS:\n{brief}")
-    tail.append(f"\nTHE COURSE AS IT STANDS (in teaching order):\n{existing}")
-    tail.append(
-        f"\nTHE NEW MODULE'S TOPIC: {topic.strip()}" if topic and topic.strip()
-        else (
-            "\nTHE TUTOR DID NOT NAME A TOPIC. Choose the most valuable module "
-            "this course is missing — the thing a student who finished the "
-            "existing modules would most need next."
-        )
+    content = resolve(source, MODULE_SLICE_ID, MODULE_TAIL).format(
+        course_title=course_title,
+        course_brief_block=(
+            MODULE_COURSE_BRIEF_BLOCK.format(brief=brief) if brief else ""
+        ),
+        existing=existing,
+        topic_block=(
+            MODULE_TOPIC_BLOCK.format(topic=topic.strip())
+            if topic and topic.strip() else MODULE_NO_TOPIC_BLOCK
+        ),
+        lesson_count=lesson_count,
+        minutes_per_lesson=minutes_per_lesson,
+        target_words=f"{target_words:,}",
+        gap_policy=_policy_sentence(gap_policy),
+        language_directive=language_directive(language, source),
+        answer_in=answer_in(language, source),
     )
-    tail.append(
-        f"\nSHAPE: give it EXACTLY {lesson_count} lessons of {minutes_per_lesson} "
-        f"minutes each; each will later be drafted to ~{target_words:,} words."
-    )
-    tail.append(
-        "\nTIER THE MODULE HONESTLY. You have read his entire library; you are "
-        "the only one who can say whether it actually covers this topic. A module "
-        "tiered 'library' will be drafted from his pages and cited to them — if "
-        "it is not really in there, that citation is a lie the tutor will click "
-        "on. Say 'general_knowledge' instead. That is not a failure; an "
-        "unlabelled gap is."
-    )
-    tail.append(f"\nGAP POLICY: {_policy_sentence(gap_policy)}")
-    tail.append(f"\n{language_directive(language)}")
-    tail.append(f"\n{answer_in(language)}")
 
-    messages.append({"role": "user", "content": "\n".join(tail)})
+    messages.append({"role": "user", "content": content})
     return messages
 
 
@@ -219,6 +240,7 @@ def generate_module_json(db, *, course: Block, library: LibraryContext,
         target_words=shape.get("target_words_per_lesson", 2200),
         library=library,
         gap_policy=gap_policy,
+        source=db,
     )
     module = get_provider().guided_json(messages, MODULE_SCHEMA, role="plan")
 

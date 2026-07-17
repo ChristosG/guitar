@@ -32,6 +32,7 @@ import uuid
 
 from app.i18n import DEFAULT_LOCALE, answer_in, language_directive
 from app.llm.errors import GuidedJSONError
+from app.prompts.overrides import resolve
 from app.llm.factory import get_provider
 from app.models.block import Block
 from app.models.knowledge import KnowledgeSource
@@ -89,8 +90,33 @@ def _page_label(page_from: int, page_to: int) -> str:
     return f"page {page_from}" if page_to == page_from else f"pages {page_from}-{page_to}"
 
 
+# THE LESSON-FROM-SELECTION PROMPT, lifted out of the builder byte-identically so the
+# tutor can rewrite it. `{passage}` is the text he marked in the Reader — the whole
+# point of the call, and the one placeholder an edit must not drop.
+SELECTION_SYSTEM = (
+    "You generate ONLY the JSON lesson tree matching the given schema — "
+    "no prose, no markdown, no commentary outside the JSON object. "
+    "Ground the ENTIRE lesson in the PASSAGE below: every session and "
+    "item must teach something the PASSAGE actually says. Do NOT invent "
+    "facts, gear, techniques, citations, or URLs the PASSAGE does not "
+    "support. A lesson may span multiple teaching sessions (this is a "
+    "unit of instruction, not a single hour) — break it into 1-4 "
+    "sessions, each with 1-5 items, that build on each other. Give every "
+    "session a realistic, non-zero est_minutes.\n\n"
+    "{language_directive}"
+)
+SELECTION_SYSTEM_SLICE_ID = "lesson.from_selection"
+
+SELECTION_USER = (
+    "Source: {source_title}, {page_label}\n\n"
+    "PASSAGE:\n{passage}\n\n{answer_in}"
+)
+SELECTION_USER_SLICE_ID = "lesson.from_selection.user"
+
+
 def _build_messages(
     *, text: str, page_from: int, page_to: int, source_title: str, language: str,
+    source=None,
 ) -> list[dict]:
     """Pure function: the {system,user} messages for lesson drafting — kept
     separate from `draft_lesson_from_selection` (which also calls the live
@@ -116,21 +142,14 @@ def _build_messages(
     `answer_in` is repeated after the passage: those are the last tokens
     before generation and they are in the wrong language.
     """
-    system = (
-        "You generate ONLY the JSON lesson tree matching the given schema — "
-        "no prose, no markdown, no commentary outside the JSON object. "
-        "Ground the ENTIRE lesson in the PASSAGE below: every session and "
-        "item must teach something the PASSAGE actually says. Do NOT invent "
-        "facts, gear, techniques, citations, or URLs the PASSAGE does not "
-        "support. A lesson may span multiple teaching sessions (this is a "
-        "unit of instruction, not a single hour) — break it into 1-4 "
-        "sessions, each with 1-5 items, that build on each other. Give every "
-        "session a realistic, non-zero est_minutes.\n\n"
-        f"{language_directive(language)}"
+    system = resolve(source, SELECTION_SYSTEM_SLICE_ID, SELECTION_SYSTEM).format(
+        language_directive=language_directive(language, source),
     )
-    user = (
-        f"Source: {source_title}, {_page_label(page_from, page_to)}\n\n"
-        f"PASSAGE:\n{text}\n\n{answer_in(language)}"
+    user = resolve(source, SELECTION_USER_SLICE_ID, SELECTION_USER).format(
+        source_title=source_title,
+        page_label=_page_label(page_from, page_to),
+        passage=text,
+        answer_in=answer_in(language, source),
     )
     return [
         {"role": "system", "content": system},
@@ -249,7 +268,7 @@ def draft_lesson_from_selection(
 
     messages = _build_messages(
         text=text, page_from=page_from, page_to=page_to,
-        source_title=source.title, language=language,
+        source_title=source.title, language=language, source=db,
     )
     tree = get_provider().guided_json(messages, LESSON_SCHEMA)
 

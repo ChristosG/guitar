@@ -36,6 +36,7 @@ import uuid
 from app.curriculum.corpus import LibraryContext, prefix_messages
 from app.curriculum.shape import Shape, enforce_shape
 from app.i18n import answer_in, language_directive
+from app.prompts.overrides import resolve
 from app.llm.factory import get_provider
 from app.models.block import Block
 
@@ -117,6 +118,46 @@ OUTLINE_SCHEMA: dict = {
 }
 
 
+# THE OUTLINE PROMPT, lifted out of the builder byte-identically so the tutor can
+# rewrite it — this is the one Chris named: *"he cannot inject those ideas in his
+# creating curriculum prompts"*. It is his course design; the placeholders are the
+# only parts this app fills in, and `overrides.validate` refuses an edit that drops
+# one (a counts instruction that no longer names the counts is an instruction that
+# says nothing, and it fails silently).
+#
+# The conditional blocks are `{course_brief_block}` / `{student_brief_block}`, empty
+# strings when absent — the SAME behaviour the `if brief:` / `if student_brief:`
+# appends had, kept identical byte for byte by `tests/test_prompts_byte_identity.py`.
+OUTLINE_TAIL = (
+    "YOUR TASK: design the outline of a course — titles and one-sentence "
+    "objectives only. You are NOT writing lesson content here.\n"
+    "\nTHE COUNTS ARE NOT NEGOTIABLE AND THEY ARE NOT SUGGESTIONS. Produce "
+    "EXACTLY {modules} modules and EXACTLY {lessons_total} lessons "
+    "in total, distributed as: {counts}. Every lesson is "
+    "{minutes_per_lesson} minutes.\n"
+    "\nTIER EVERY MODULE HONESTLY. You have read his entire library; you are "
+    "the only one who can say whether it actually covers a topic. A module "
+    "tiered 'library' will be drafted from his pages and cited to them — if it "
+    "is not really in there, that citation is a lie the tutor will click on. "
+    "Say 'general_knowledge' instead. That is not a failure; an unlabelled "
+    "gap is.\n"
+    "\n{language_directive}\n"
+    "\nCOURSE TITLE: {title}"
+    "{course_brief_block}"
+    "{student_brief_block}"
+    "\n\nSHAPE: {lessons_total} lessons across {modules} modules "
+    "({counts}). Each lesson is {minutes_per_lesson} minutes "
+    "({teaching_minutes} taught + {qa_minutes} of Q&A) and will "
+    "later be drafted to ~{target_words_per_lesson} words.\n"
+    "\nGAP POLICY: {gap_policy}\n"
+    "\n{answer_in}"
+)
+OUTLINE_SLICE_ID = "curriculum.outline"
+
+OUTLINE_COURSE_BRIEF_BLOCK = "\n\nWHAT THE TUTOR WANTS FROM THIS COURSE, IN HIS OWN WORDS:\n{brief}"
+OUTLINE_STUDENT_BRIEF_BLOCK = "\n\n{student_brief}"
+
+
 def build_outline_messages(
     *,
     title: str,
@@ -126,6 +167,7 @@ def build_outline_messages(
     library: LibraryContext,
     student_brief: str | None,
     gap_policy: str,
+    source=None,
 ) -> list[dict]:
     """The messages for the outline call. Pure — no model, no DB — so the ONE
     property that costs real money if it is wrong (the library block is the
@@ -145,39 +187,31 @@ def build_outline_messages(
     # shape counts and the language used to live in a bespoke system message here,
     # which made this call's 90K-token cache write unreadable by every draft that
     # followed it (a different system is a different cache key).
-    messages = prefix_messages(library)
+    messages = prefix_messages(library, source)
 
     # --- everything from here down is VOLATILE and must stay outside the cache ---
-    tail = [
-        "YOUR TASK: design the outline of a course — titles and one-sentence "
-        "objectives only. You are NOT writing lesson content here.",
-        f"\nTHE COUNTS ARE NOT NEGOTIABLE AND THEY ARE NOT SUGGESTIONS. Produce "
-        f"EXACTLY {shape.modules} modules and EXACTLY {shape.lessons_total} lessons "
-        f"in total, distributed as: {counts}. Every lesson is "
-        f"{shape.minutes_per_lesson} minutes.",
-        "\nTIER EVERY MODULE HONESTLY. You have read his entire library; you are "
-        "the only one who can say whether it actually covers a topic. A module "
-        "tiered 'library' will be drafted from his pages and cited to them — if it "
-        "is not really in there, that citation is a lie the tutor will click on. "
-        "Say 'general_knowledge' instead. That is not a failure; an unlabelled "
-        "gap is.",
-        f"\n{language_directive(language)}",
-        f"\nCOURSE TITLE: {title}",
-    ]
-    if brief:
-        tail.append(f"\nWHAT THE TUTOR WANTS FROM THIS COURSE, IN HIS OWN WORDS:\n{brief}")
-    if student_brief:
-        tail.append(f"\n{student_brief}")
-    tail.append(
-        f"\nSHAPE: {shape.lessons_total} lessons across {shape.modules} modules "
-        f"({counts}). Each lesson is {shape.minutes_per_lesson} minutes "
-        f"({shape.teaching_minutes} taught + {shape.qa_minutes} of Q&A) and will "
-        f"later be drafted to ~{shape.target_words_per_lesson:,} words."
+    content = resolve(source, OUTLINE_SLICE_ID, OUTLINE_TAIL).format(
+        modules=shape.modules,
+        lessons_total=shape.lessons_total,
+        counts=counts,
+        minutes_per_lesson=shape.minutes_per_lesson,
+        teaching_minutes=shape.teaching_minutes,
+        qa_minutes=shape.qa_minutes,
+        target_words_per_lesson=f"{shape.target_words_per_lesson:,}",
+        language_directive=language_directive(language, source),
+        title=title,
+        course_brief_block=(
+            OUTLINE_COURSE_BRIEF_BLOCK.format(brief=brief) if brief else ""
+        ),
+        student_brief_block=(
+            OUTLINE_STUDENT_BRIEF_BLOCK.format(student_brief=student_brief)
+            if student_brief else ""
+        ),
+        gap_policy=_policy_sentence(gap_policy),
+        answer_in=answer_in(language, source),
     )
-    tail.append(f"\nGAP POLICY: {_policy_sentence(gap_policy)}")
-    tail.append(f"\n{answer_in(language)}")
 
-    messages.append({"role": "user", "content": "\n".join(tail)})
+    messages.append({"role": "user", "content": content})
     return messages
 
 
@@ -247,6 +281,7 @@ def generate_outline(
     messages = build_outline_messages(
         title=title, brief=brief, language=language, shape=shape,
         library=library, student_brief=student_brief, gap_policy=gap_policy,
+        source=db,
     )
     raw = get_provider().guided_json(messages, OUTLINE_SCHEMA, role="plan")
     # raises GuidedJSONError when there are no modules

@@ -43,6 +43,11 @@ from app.db import get_db
 from app.llm.claude import ClaudeProvider
 from app.llm.errors import GuidedJSONError, LLMError, LLMNotConfigured
 from app.models.setting import MODELS
+# `prompts.overrides` is a LEAF (it imports only its own table), so this does not
+# invert the layering the way importing `prompts.registry` would: the registry
+# imports THIS module to point at `_PROBE_PROMPT`, and a viewer must never become
+# load-bearing for the prompts it claims only to watch.
+from app.prompts.overrides import resolve
 
 log = logging.getLogger(__name__)
 
@@ -135,6 +140,7 @@ _PROBE_SCHEMA = {
 # registry exists to prevent. So the string moved; not one byte of it changed,
 # and it is still the only thing this call sends.
 _PROBE_PROMPT = "Reply with {\"ok\": true} and nothing else."
+_PROBE_SLICE_ID = "settings.probe"
 
 
 @router.post("/test", response_model=TestOut)
@@ -163,7 +169,9 @@ def test_settings(payload: TestIn, db: Session = Depends(get_db)) -> TestOut:
     # Step 2 — one real generation. A green check means this passed.
     try:
         result = provider.guided_json(
-            [{"role": "user", "content": _PROBE_PROMPT}],
+            # `_PROBE_PROMPT` contains a LITERAL `{"ok": true}` — it is showing the
+            # model the shape to reply in. So it is resolved and never `.format()`-ed.
+            [{"role": "user", "content": resolve(db, _PROBE_SLICE_ID, _PROBE_PROMPT)}],
             _PROBE_SCHEMA,
             role="spec",
         )

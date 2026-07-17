@@ -249,7 +249,47 @@ CURRICULUM_SYSTEM = (
 )
 
 
-def prefix_messages(library: LibraryContext) -> list[dict]:
+CURRICULUM_SYSTEM_SLICE_ID = "curriculum.system"
+
+# The three prompts below are lifted out of the builders byte-identically so the tutor
+# can rewrite them. Each is a full replacement for a block the model reads; the
+# `{placeholders}` are the only parts this app fills in, and `overrides.validate`
+# refuses an edit that drops one.
+#
+# ALL THREE SIT INSIDE THE CACHED PREFIX (`cache: True`, below), so an edit re-mints
+# the cache ONCE — the UI says so before he saves, which is the whole reason
+# `cache_prefix` is carried on the registry entry.
+LIBRARY_TOO_LARGE = (
+    "The tutor's library is TOO LARGE to read in full for this course "
+    "({token_count} tokens). You are not being shown it. "
+    "You will instead be given the passages retrieved for each specific "
+    "module, below. Tier a module 'library' ONLY where such a passage "
+    "actually supports it — never from memory of a book you have not "
+    "been shown."
+)
+LIBRARY_TOO_LARGE_SLICE_ID = "curriculum.library_too_large"
+
+NO_LIBRARY = (
+    "The tutor selected NO library sources for this course (or they "
+    "contain no readable text). You have nothing of his to read, so "
+    "tier every module honestly as 'general_knowledge' — never as "
+    "'library'."
+)
+NO_LIBRARY_SLICE_ID = "curriculum.no_library"
+
+# `{library}` is HIS BOOKS — the whole point of the message, and the one thing in it
+# this app did not author. An edit that drops it leaves the model an instruction to
+# read a library it was never given, which is why the placeholder is enforced.
+LIBRARY_MESSAGE = (
+    "Here is the tutor's ENTIRE library — his own books and materials, "
+    "complete, with page markers. Read it. Everything you write for him "
+    "should come from this where it possibly can.\n\n"
+    "{library}"
+)
+LIBRARY_MESSAGE_SLICE_ID = "curriculum.library"
+
+
+def prefix_messages(library: LibraryContext, source=None) -> list[dict]:
     """`[system, cached library]` — THE stable prefix, byte-identical across every
     full-context curriculum call. Build on top of this; never edit the result.
 
@@ -260,8 +300,17 @@ def prefix_messages(library: LibraryContext) -> list[dict]:
     When the library does NOT FIT (`library.fits is False`), the same thing
     happens for the opposite reason: the block is too large to send at all, let
     alone cache. See below.
+
+    `source` is the tutor's overrides (a Session, a `snapshot()` mapping, or None) —
+    see `app/prompts/overrides.py`. NOTE FOR THE CACHE: an override changes this
+    prefix, so it re-mints the cache ONCE and then re-warms. That is a fact about
+    editing, shown to him before he saves; it is not a reason to keep the prompt out
+    of his hands.
     """
-    messages: list[dict] = [{"role": "system", "content": CURRICULUM_SYSTEM}]
+    from app.prompts.overrides import resolve
+
+    system = resolve(source, CURRICULUM_SYSTEM_SLICE_ID, CURRICULUM_SYSTEM)
+    messages: list[dict] = [{"role": "system", "content": system}]
     if not library.is_empty and not library.fits:
         # The docstring promised this for two days and never did it. Above the
         # budget the library block is NOT sent: `draft.py` tops the tail up with
@@ -270,45 +319,34 @@ def prefix_messages(library: LibraryContext) -> list[dict]:
         # it re-wrote a 600K block into the cache at 1.25x on every outline.
         messages.append({
             "role": "user",
-            "content": (
-                "The tutor's library is TOO LARGE to read in full for this course "
-                f"({library.token_count:,} tokens). You are not being shown it. "
-                "You will instead be given the passages retrieved for each specific "
-                "module, below. Tier a module 'library' ONLY where such a passage "
-                "actually supports it — never from memory of a book you have not "
-                "been shown."
-            ),
+            "content": resolve(
+                source, LIBRARY_TOO_LARGE_SLICE_ID, LIBRARY_TOO_LARGE,
+            ).format(token_count=f"{library.token_count:,}"),
         })
         return messages
     if not library.is_empty:
-        messages.append(library_message(library))
+        messages.append(library_message(library, source))
     else:
         messages.append({
             "role": "user",
-            "content": (
-                "The tutor selected NO library sources for this course (or they "
-                "contain no readable text). You have nothing of his to read, so "
-                "tier every module honestly as 'general_knowledge' — never as "
-                "'library'."
-            ),
+            "content": resolve(source, NO_LIBRARY_SLICE_ID, NO_LIBRARY),
         })
     return messages
 
 
-def library_message(library: LibraryContext) -> dict:
+def library_message(library: LibraryContext, source=None) -> dict:
     """The library as ONE cached user message — THE STABLE PREFIX.
 
     `cache: True` becomes `cache_control: {"type": "ephemeral"}` at the wire
     (`llm/anthropic_wire.py`). Everything the caller adds after this message is
     volatile and outside the cache breakpoint, which is exactly where it belongs.
     """
+    from app.prompts.overrides import resolve
+
     return {
         "role": "user",
         "cache": True,
-        "content": (
-            "Here is the tutor's ENTIRE library — his own books and materials, "
-            "complete, with page markers. Read it. Everything you write for him "
-            "should come from this where it possibly can.\n\n"
-            f"{library.text}"
-        ),
+        "content": resolve(
+            source, LIBRARY_MESSAGE_SLICE_ID, LIBRARY_MESSAGE,
+        ).format(library=library.text),
     }

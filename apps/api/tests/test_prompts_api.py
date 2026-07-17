@@ -317,12 +317,30 @@ def test_resetting_something_that_was_never_overridden_is_not_an_error(client):
 # ---------------------------------------------------------------------------
 
 
-def test_a_locked_prompt_exposes_no_editable_slice(client):
-    """SYSTEM_PROMPT is 1,301 chars of guards, each added because something broke.
-    It is readable and not editable."""
+def test_the_guard_prompt_is_readable_AND_his_to_rewrite(client):
+    """THIS TEST USED TO ASSERT THE OPPOSITE, and the reversal is the point.
+
+    It read: *"SYSTEM_PROMPT is 1,301 chars of guards, each added because something
+    broke. It is readable and not editable."* Both halves of that sentence are still
+    true about the TEXT. The conclusion drawn from them was not.
+
+    Chris: *"bro almost every prompt is uneditable! ... the tutor might have core
+    teaching ideas which claude cannot even imagine."* The spec agreed with him
+    before he said it — *"'Locked' must mean 'an editor can't break it by accident',
+    not 'Chris can't change it'"* — and the implementation shipped the opposite. The
+    lock existed because a textarea is the wrong instrument for editing a guard BY
+    ACCIDENT; it was never an argument that the owner of the app may not change his
+    own prompt.
+
+    So the guards are now defended by the things that actually defend them, none of
+    which is a missing textarea: `validate` refuses an edit that breaks a
+    placeholder, every previous text is kept in history, and Restore — behind a
+    confirmation modal — puts the code default back byte for byte.
+    """
     body = client.get("/prompts/chat.system").json()
     assert body["text"], "must be readable"
-    assert body["slices"] == [] or all(s["kind"] == "append" for s in body["slices"])
+    assert body["slices"], "and it must be his to rewrite"
+    assert body["slices"][0]["default"] == body["slices"][0]["effective"]
 
 
 def test_every_registered_prompt_is_listed_and_readable(client):

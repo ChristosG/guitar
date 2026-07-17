@@ -58,6 +58,10 @@ from typing import Callable, Literal
 from uuid import UUID
 
 from app.agent.loop import (
+    GROUNDING_BLOCK,
+    GROUNDING_SLICE_ID,
+    NO_HITS_SLICE_ID as CHAT_NO_HITS_SLICE_ID,
+    SYSTEM_SLICE_ID,
     _NO_HITS_GROUNDING,
     _ensure_system_prompt,
     _grounding_block,
@@ -65,40 +69,100 @@ from app.agent.loop import (
 )
 from app.agent.prompts import SYSTEM_PROMPT
 from app.agent.tools import TOOLS
-from app.artifacts.generate import _KIND_PROMPT_GUIDANCE
+from app.artifacts.generate import (
+    ARTIFACT_REPAIR,
+    ARTIFACT_REPAIR_SLICE_ID,
+    ARTIFACT_SYSTEM,
+    ARTIFACT_SYSTEM_SLICE_ID,
+    TAB_GUIDANCE_SLICE_ID,
+    _KIND_PROMPT_GUIDANCE,
+)
 from app.artifacts.generate import _build_messages as _artifact_messages
-from app.brain.ocr import FIGURE_PROMPT, OCR_PROMPT
-from app.brain.retrieve import _TRANSLATE_SYSTEM, Hit, build_grounded_messages
+from app.brain.ocr import FIGURE_PROMPT, FIGURE_SLICE_ID, OCR_PROMPT, OCR_SLICE_ID
+from app.brain.retrieve import (
+    GROUNDED_SLICE_ID,
+    GROUNDED_SYSTEM,
+    NO_HITS_SYSTEM,
+    TRANSLATE_SLICE_ID,
+    _TRANSLATE_SYSTEM,
+    Hit,
+    build_grounded_messages,
+)
+from app.brain.retrieve import NO_HITS_SLICE_ID as RETRIEVAL_NO_HITS_SLICE_ID
 from app.curriculum.corpus import (
     CURRICULUM_SYSTEM,
+    CURRICULUM_SYSTEM_SLICE_ID,
+    LIBRARY_MESSAGE,
+    LIBRARY_MESSAGE_SLICE_ID,
+    LIBRARY_TOO_LARGE,
+    LIBRARY_TOO_LARGE_SLICE_ID,
+    NO_LIBRARY,
+    NO_LIBRARY_SLICE_ID,
     LibraryContext,
     library_message,
     prefix_messages,
 )
 from app.curriculum.depth import Measurement
 from app.curriculum.draft import (
+    LESSON_DEEPEN_BLOCK,
+    LESSON_DEEPEN_SLICE_ID,
+    LESSON_RETRIEVED_BLOCK,
+    LESSON_RETRIEVED_SLICE_ID,
+    LESSON_SLICE_ID,
+    LESSON_TAIL,
+    REPAIR_MESSAGE,
+    REPAIR_SLICE_ID,
+    TIER_GENERAL_DIRECTIVE,
+    TIER_GENERAL_SLICE_ID,
+    TIER_LIBRARY_DIRECTIVE,
+    TIER_LIBRARY_SLICE_ID,
+    TIER_WEB_DIRECTIVE,
+    TIER_WEB_SLICE_ID,
     LessonContext,
     _repair_message,
     _tier_directive,
     build_lesson_messages,
 )
-from app.curriculum.extend import build_module_messages
+from app.curriculum.extend import MODULE_SLICE_ID, MODULE_TAIL, build_module_messages
 from app.curriculum.outline import (
+    OUTLINE_SLICE_ID,
+    OUTLINE_TAIL,
     POLICY_GENERAL,
     TIER_GENERAL,
     TIER_LIBRARY,
     TIER_WEB,
     build_outline_messages,
 )
-from app.curriculum.refine import build_refine_messages
+from app.curriculum.refine import (
+    REFINE_SYSTEM,
+    REFINE_SYSTEM_SLICE_ID,
+    REFINE_USER,
+    REFINE_USER_SLICE_ID,
+    build_refine_messages,
+)
 from app.curriculum.shape import plan_shape
-from app.i18n import DEFAULT_LOCALE, answer_in, language_directive
+from app.i18n import (
+    ANSWER_IN,
+    ANSWER_IN_SLICE_ID,
+    DEFAULT_LOCALE,
+    LANGUAGE_DIRECTIVE,
+    LANGUAGE_DIRECTIVE_SLICE_ID,
+    answer_in,
+    language_directive,
+)
+from app.lessons.draft import (
+    SELECTION_SYSTEM,
+    SELECTION_SYSTEM_SLICE_ID,
+    SELECTION_USER,
+    SELECTION_USER_SLICE_ID,
+)
 from app.lessons.draft import _build_messages as _selection_messages
 from app.llm.claude_cli import _tool_system_prompt
 from app.models.note import Note
 from app.models.student import Student
 from app.prompts import overrides
-from app.routers.settings import _PROBE_PROMPT
+from app.prompts.overrides import resolve as resolve_text
+from app.routers.settings import _PROBE_PROMPT, _PROBE_SLICE_ID
 from app.students.context import (
     STUDENT_PITCH,
     STUDENT_PITCH_SLICE_ID,
@@ -153,14 +217,24 @@ class Slice:
     default: str
     kind: Literal["replace", "append"]
 
-    # The ceiling `overrides.validate` enforces. Per-slice, per the spec, though
-    # every slice today takes the default — it is a SPEND guard, not a tidiness
-    # rule: this text ships on every call the prompt makes, so a pasted chapter
-    # is a recurring line on the invoice rather than a one-off mistake. 2,000
-    # chars is ~500 tokens and about ten times the longest thing the one shipped
-    # slice has ever said, which is the right amount of room for a tutor and the
-    # wrong amount for a book.
-    max_chars: int = 2000
+    # The ceiling `overrides.validate` enforces. It is a SPEND guard, not a tidiness
+    # rule: this text ships on every call the prompt makes, so a pasted chapter is a
+    # recurring line on the invoice rather than a one-off mistake.
+    #
+    # `None` means "derive it", and deriving is what makes it correct now that every
+    # prompt is editable. A FLAT 2,000 was right when the only slice was one
+    # 148-character sentence; against `ocr.transcribe` (1,847 chars) or `chat.system`
+    # (1,301) it is a ceiling BELOW the text it is a ceiling on — he would open the
+    # textarea, change one word, press Save, and be told his text was too long, about
+    # a prompt this app wrote. The failure would look exactly like a validator working
+    # correctly, which is the worst kind. So: room to roughly double the default, and
+    # never less than 2,000. `test_he_can_always_save_an_edit_of_the_slice_s_own_default`
+    # is what actually holds this — the rule is only as good as the property it buys.
+    max_chars: int | None = None
+
+    def __post_init__(self):
+        if self.max_chars is None:
+            object.__setattr__(self, "max_chars", max(2000, 2 * len(self.default)))
 
 
 @dataclass(frozen=True)
@@ -259,14 +333,23 @@ class PromptEntry:
     what_it_does_el: str
     when_it_runs_el: str
     source_of_truth: Callable[[], object]
-    build: Callable[[str, object | None], _Built]
+    build: Callable[[str, object | None, str | None], _Built]
     call_sites: tuple[str, ...] = ()
     slices: tuple[Slice, ...] = ()
     provider: str | None = None
     cache_prefix: bool = False
 
-    def render(self, locale: str = DEFAULT_LOCALE, db=None) -> RenderedPrompt:
-        built, samples = self.build(locale, db)
+    # True when this prompt's LANGUAGE is decided by the course/student, not by the
+    # cockpit locale. Carried on the entry rather than inferred by the web, because
+    # the rule ("does the live call site pass `course.language` or `locale`?") is a
+    # fact about `curriculum/extend.py` and `curriculum/interview.py` — the API is
+    # where that is knowable, and a UI re-deriving it would be a second copy of it.
+    language_from_course: bool = False
+
+    def render(
+        self, locale: str = DEFAULT_LOCALE, db=None, course_language: str | None = None,
+    ) -> RenderedPrompt:
+        built, samples = self.build(locale, db, course_language)
         messages = tuple(built)
         # Joined the same way `RenderedPrompt.text` joins, because that is what
         # the spans have to index into.
@@ -488,6 +571,62 @@ _SAMPLE_BAD_CITATIONS = [("theory", "S1", 512)]
 
 _LANG = ("language_directive", "Ο κανόνας γλώσσας")
 _ANSWER_IN = ("answer_in", "Η υπενθύμιση γλώσσας στο τέλος")
+
+# ---------------------------------------------------------------------------
+# THE VIEWER USED TO LIE ABOUT THE LANGUAGE, AND IT IS THE WORST LIE IT COULD TELL
+# ---------------------------------------------------------------------------
+#
+# Chris spotted this from the screen. Proven:
+#
+#     PREVIEW   (X-App-Locale: el):  "LANGUAGE: write everything you produce in Greek (el)"
+#     REAL CALL (a course whose language is 'en'): "...in English (en)"
+#
+# This registry rendered the curriculum and lesson prompts with `language=locale` —
+# the SETTINGS PAGE's locale. The live path does not: it passes the COURSE's language
+# (`extend.py:235` `language=course.language`; `interview.py:490`
+# `who.get("language") or DEFAULT_LOCALE`), and a course's language is set from the
+# STUDENT (`interview.py:311` `normalize_locale(student.preferred_language)`).
+#
+# So the lie was not really the word "Greek" — `el` is a legitimate value. It was that
+# the preview was REACTIVE TO A CONTROL THAT DOES NOT CONTROL IT: flip the cockpit to
+# English and these prompts claimed the model would be told "English", when a Greek
+# student's course would still be Greek. The screen presented a number it does not own
+# as one it does.
+#
+# In his live database the gap is not hypothetical: 5 of his 6 courses are
+# `language='en'` (his student Giannis prefers `en`), and 131 of 155 lessons are
+# ENGLISH against 24 Greek. THE ENGINE IS CORRECT. The viewer was what lied.
+#
+# The fix: these prompts render at a SAMPLE COURSE's language, taken from the sample
+# STUDENT — the same place the live path takes it from — so the preview stops moving
+# with the cockpit locale, exactly as the real call does not. `language_from_course`
+# on the entry then lets the API say so, the span says so, and `?course_language=`
+# lets him look at both. Deriving it from `_SAMPLE_STUDENT` rather than writing "el"
+# here is the point: a sample that could disagree with its own student would be a
+# second, quieter version of this same bug.
+_SAMPLE_COURSE_LANGUAGE = _SAMPLE_STUDENT.preferred_language
+
+# The span label for a language directive whose value the COURSE decides. Its origin is
+# the surprising part, and it is exactly what Chris asked about — so the origin is on
+# the chip, not in a footnote.
+_LANG_FROM_COURSE = (
+    "language_directive",
+    "Ο κανόνας γλώσσας — τον ορίζει η γλώσσα του μαθητή/προγράμματος, όχι αυτή η οθόνη",
+)
+_ANSWER_IN_FROM_COURSE = (
+    "answer_in",
+    "Η υπενθύμιση γλώσσας — την ορίζει η γλώσσα του μαθητή/προγράμματος",
+)
+
+
+def _course_language(locale: str, override: str | None = None) -> str:
+    """The language a COURSE would be written in, for a preview.
+
+    `locale` is deliberately IGNORED — that is the whole fix. It is taken as an
+    argument only so the call sites read as builders and nobody re-wires the cockpit
+    locale back in by reflex.
+    """
+    return override or _SAMPLE_COURSE_LANGUAGE
 _LIBRARY = ("library", "Η βιβλιοθήκη σου (ολόκληρη)")
 _STUDENT = ("student_brief", "Το προφίλ του μαθητή")
 
@@ -500,18 +639,18 @@ def _msgs(built: list[dict]) -> list[RenderedMessage]:
     ]
 
 
-def _build_chat_system(locale: str, db) -> _Built:
+def _build_chat_system(locale: str, db, course_language=None) -> _Built:
     # loop.py's own builder, called with an empty transcript so it takes the
     # prepend branch. NOT `f"{SYSTEM_PROMPT}\n\n{language_directive(locale)}"`
     # re-typed here: that shape is `_ensure_system_prompt`'s to own, and a second
     # copy of it would drift the day the loop changes the separator.
-    return _msgs(_ensure_system_prompt([], locale)), [
-        (*_LANG, language_directive(locale)),
+    return _msgs(_ensure_system_prompt([], locale, db)), [
+        (*_LANG, language_directive(locale, db)),
     ]
 
 
-def _build_chat_grounding(locale: str, db) -> _Built:
-    block = _grounding_block(_SAMPLE_HITS, locale)
+def _build_chat_grounding(locale: str, db, course_language=None) -> _Built:
+    block = _grounding_block(_SAMPLE_HITS, locale, db)
     # Appended to the END of the tutor's OWN user turn, never as a second system
     # message — see `_grounding_block`'s docstring for why (the chat template
     # 400s a non-leading system message, and it would break prefix caching).
@@ -522,101 +661,108 @@ def _build_chat_grounding(locale: str, db) -> _Built:
     ]
 
 
-def _build_chat_no_hits(locale: str, db) -> _Built:
-    return [RenderedMessage(role="user", content=_grounding_block([], locale))], [
+def _build_chat_no_hits(locale: str, db, course_language=None) -> _Built:
+    return [RenderedMessage(role="user", content=_grounding_block([], locale, db))], [
         (*_ANSWER_IN, answer_in(locale)),
     ]
 
 
-def _build_curriculum_system(locale: str, db) -> _Built:
+def _build_curriculum_system(locale: str, db, course_language=None) -> _Built:
     # Index 0 of the live prefix is `CURRICULUM_SYSTEM` in every branch.
-    return _msgs(prefix_messages(_SAMPLE_LIBRARY)[:1]), []
+    return _msgs(prefix_messages(_SAMPLE_LIBRARY, db)[:1]), []
 
 
-def _build_curriculum_library(locale: str, db) -> _Built:
-    return _msgs([library_message(_SAMPLE_LIBRARY)]), [
+def _build_curriculum_library(locale: str, db, course_language=None) -> _Built:
+    return _msgs([library_message(_SAMPLE_LIBRARY, db)]), [
         (*_LIBRARY, _SAMPLE_LIBRARY_TEXT),
     ]
 
 
-def _build_curriculum_no_library(locale: str, db) -> _Built:
-    return _msgs(prefix_messages(_EMPTY_LIBRARY)[1:]), []
+def _build_curriculum_no_library(locale: str, db, course_language=None) -> _Built:
+    return _msgs(prefix_messages(_EMPTY_LIBRARY, db)[1:]), []
 
 
-def _build_curriculum_library_too_large(locale: str, db) -> _Built:
-    return _msgs(prefix_messages(_OVERSIZED_LIBRARY)[1:]), []
+def _build_curriculum_library_too_large(locale: str, db, course_language=None) -> _Built:
+    return _msgs(prefix_messages(_OVERSIZED_LIBRARY, db)[1:]), []
 
 
-def _build_curriculum_outline(locale: str, db) -> _Built:
+def _build_curriculum_outline(locale: str, db, course_language=None) -> _Built:
+    lang = _course_language(locale, course_language)
     built = build_outline_messages(
-        title=_SAMPLE_COURSE_TITLE, brief=_SAMPLE_COURSE_BRIEF, language=locale,
+        title=_SAMPLE_COURSE_TITLE, brief=_SAMPLE_COURSE_BRIEF, language=lang,
         shape=_SAMPLE_SHAPE, library=_SAMPLE_LIBRARY,
         student_brief=_sample_student_brief(db), gap_policy=POLICY_GENERAL,
+        source=db,
     )
     return _msgs(built), [
         (*_LIBRARY, _SAMPLE_LIBRARY_TEXT),
         ("course_title", "Ο τίτλος του προγράμματος", _SAMPLE_COURSE_TITLE),
         ("course_brief", "Τι ζήτησες, με τα δικά σου λόγια", _SAMPLE_COURSE_BRIEF),
         (*_STUDENT, _sample_student_brief(db)),
-        (*_LANG, language_directive(locale)),
-        (*_ANSWER_IN, answer_in(locale)),
+        (*_LANG_FROM_COURSE, language_directive(lang, db)),
+        (*_ANSWER_IN_FROM_COURSE, answer_in(lang, db)),
     ]
 
 
-def _build_curriculum_extend(locale: str, db) -> _Built:
+def _build_curriculum_extend(locale: str, db, course_language=None) -> _Built:
+    lang = _course_language(locale, course_language)
     built = build_module_messages(
-        course_title=_SAMPLE_COURSE_TITLE, brief=_SAMPLE_COURSE_BRIEF, language=locale,
+        course_title=_SAMPLE_COURSE_TITLE, brief=_SAMPLE_COURSE_BRIEF, language=lang,
         existing="1. Πρώτες συγχορδίες\n2. Ρυθμικά σχήματα", topic="Το σύστημα CAGED",
         lesson_count=4, minutes_per_lesson=50, target_words=2200,
-        library=_SAMPLE_LIBRARY, gap_policy=POLICY_GENERAL,
+        library=_SAMPLE_LIBRARY, gap_policy=POLICY_GENERAL, source=db,
     )
     return _msgs(built), [
         (*_LIBRARY, _SAMPLE_LIBRARY_TEXT),
         ("existing_modules", "Το πρόγραμμα όπως είναι σήμερα",
          "1. Πρώτες συγχορδίες\n2. Ρυθμικά σχήματα"),
         ("topic", "Το θέμα που ζήτησες", "Το σύστημα CAGED"),
-        (*_LANG, language_directive(locale)),
-        (*_ANSWER_IN, answer_in(locale)),
+        (*_LANG_FROM_COURSE, language_directive(lang, db)),
+        (*_ANSWER_IN_FROM_COURSE, answer_in(lang, db)),
     ]
 
 
-def _build_curriculum_refine(locale: str, db) -> _Built:
+def _build_curriculum_refine(locale: str, db, course_language=None) -> _Built:
+    lang = _course_language(locale, course_language)
     instruction = "Κάν' το πιο απλό, μιλάει σε δωδεκάχρονο."
     built = build_refine_messages(
         instruction=instruction, title="Το σχήμα C και η ρίζα του",
         body="Το σχήμα C είναι ένα από τα πέντε μετακινούμενα σχήματα του CAGED.",
-        kind="item", language=locale,
+        kind="item", language=lang,
         citations=[{"source_title": "Guitar Fretboard Workbook", "page": 14}],
-        context=_SAMPLE_HITS[0].text,
+        context=_SAMPLE_HITS[0].text, source=db,
     )
     return _msgs(built), [
         ("instruction", "Η οδηγία σου", instruction),
         ("block_body", "Το κείμενο που διορθώνεις",
          "Το σχήμα C είναι ένα από τα πέντε μετακινούμενα σχήματα του CAGED."),
-        (*_LANG, language_directive(locale)),
-        (*_ANSWER_IN, answer_in(locale)),
+        (*_LANG_FROM_COURSE, language_directive(lang, db)),
+        (*_ANSWER_IN_FROM_COURSE, answer_in(lang, db)),
     ]
 
 
-def _build_lesson_draft(locale: str, db) -> _Built:
+def _build_lesson_draft(locale: str, db, course_language=None) -> _Built:
+    lang = _course_language(locale, course_language)
     built = build_lesson_messages(
-        ctx=_SAMPLE_LESSON_CTX, library=_SAMPLE_LIBRARY, language=locale,
+        ctx=_SAMPLE_LESSON_CTX, library=_SAMPLE_LIBRARY, language=lang,
         student_brief=_sample_student_brief(db), course_brief=_SAMPLE_COURSE_BRIEF,
+        source=db,
     )
     return _msgs(built), [
         (*_LIBRARY, _SAMPLE_LIBRARY_TEXT),
         ("course_brief", "Τι ζήτησες, με τα δικά σου λόγια", _SAMPLE_COURSE_BRIEF),
         (*_STUDENT, _sample_student_brief(db)),
-        (*_LANG, language_directive(locale)),
-        (*_ANSWER_IN, answer_in(locale)),
+        (*_LANG_FROM_COURSE, language_directive(lang, db)),
+        (*_ANSWER_IN_FROM_COURSE, answer_in(lang, db)),
     ]
 
 
-def _build_lesson_deepen(locale: str, db) -> _Built:
+def _build_lesson_deepen(locale: str, db, course_language=None) -> _Built:
+    lang = _course_language(locale, course_language)
     built = build_lesson_messages(
-        ctx=_SAMPLE_LESSON_CTX, library=_SAMPLE_LIBRARY, language=locale,
+        ctx=_SAMPLE_LESSON_CTX, library=_SAMPLE_LIBRARY, language=lang,
         student_brief=_sample_student_brief(db), course_brief=_SAMPLE_COURSE_BRIEF,
-        deepen=_SAMPLE_MEASUREMENT, previous=_SAMPLE_PREVIOUS_DRAFT,
+        deepen=_SAMPLE_MEASUREMENT, previous=_SAMPLE_PREVIOUS_DRAFT, source=db,
     )
     return _msgs(built), [
         (*_LIBRARY, _SAMPLE_LIBRARY_TEXT),
@@ -625,20 +771,40 @@ def _build_lesson_deepen(locale: str, db) -> _Built:
         # its serialization — still the sample's own data, not authored text.
         ("previous_draft", "Η προηγούμενη γραφή του μαθήματος",
          json.dumps(_SAMPLE_PREVIOUS_DRAFT, ensure_ascii=False)),
-        (*_ANSWER_IN, answer_in(locale)),
+        (*_ANSWER_IN_FROM_COURSE, answer_in(lang, db)),
     ]
 
 
-def _build_lesson_repair(locale: str, db) -> _Built:
-    built = _repair_message(_SAMPLE_BAD_CITATIONS, _SAMPLE_LIBRARY)
+def _build_lesson_retrieved(locale: str, db, course_language=None) -> _Built:
+    # Its OWN entry rather than a second slice on `lesson.draft`, and that is P1's
+    # precedent, not a new idea: `curriculum.no_library`, `curriculum.library_too_large`
+    # and the three tier directives are all registered separately for exactly this
+    # reason — they are alternative BRANCHES of a builder, and a preview can only
+    # render one branch. `lesson.draft` renders the fits-whole branch (his library
+    # fits today), so this block is absent from it. Registered as a slice on that card
+    # it would have been a textarea for text the tutor could not see above it; here it
+    # is a card of its own, visible, with its Greek saying exactly when it fires.
+    return [RenderedMessage(
+        role="user",
+        content=resolve_text(db, LESSON_RETRIEVED_SLICE_ID, LESSON_RETRIEVED_BLOCK).format(
+            retrieved=f"[Guitar Fretboard Workbook, p.14] {_SAMPLE_HITS[0].text}",
+        ),
+    )], [
+        ("retrieved", "Τα αποσπάσματα που βρέθηκαν για ΑΥΤΟ το μάθημα",
+         f"[Guitar Fretboard Workbook, p.14] {_SAMPLE_HITS[0].text}"),
+    ]
+
+
+def _build_lesson_repair(locale: str, db, course_language=None) -> _Built:
+    built = _repair_message(_SAMPLE_BAD_CITATIONS, _SAMPLE_LIBRARY, db)
     return _msgs([built]), []
 
 
-def _build_lesson_from_selection(locale: str, db) -> _Built:
+def _build_lesson_from_selection(locale: str, db, course_language=None) -> _Built:
     passage = _SAMPLE_HITS[0].text
     built = _selection_messages(
         text=passage, page_from=14, page_to=15,
-        source_title="Guitar Fretboard Workbook", language=locale,
+        source_title="Guitar Fretboard Workbook", language=locale, source=db,
     )
     return _msgs(built), [
         ("passage", "Το κείμενο που διάλεξες στον αναγνώστη", passage),
@@ -649,23 +815,23 @@ def _build_lesson_from_selection(locale: str, db) -> _Built:
 
 
 def _tier_fragment(tier: str):
-    def build(locale: str, db) -> _Built:
-        return [RenderedMessage(role="user", content=_tier_directive(tier))], []
+    def build(locale: str, db, course_language=None) -> _Built:
+        return [RenderedMessage(role="user", content=_tier_directive(tier, db))], []
     return build
 
 
-def _build_retrieval_translate(locale: str, db) -> _Built:
+def _build_retrieval_translate(locale: str, db, course_language=None) -> _Built:
     # `_translate_call` assembles these two turns inline. The system turn IS
     # `_TRANSLATE_SYSTEM` (pointed at, not copied); the user turn is the tutor's
     # query, i.e. his data. No prompt text is authored here.
     return [
-        RenderedMessage(role="system", content=_TRANSLATE_SYSTEM),
+        RenderedMessage(role="system", content=resolve_text(db, TRANSLATE_SLICE_ID, _TRANSLATE_SYSTEM)),
         RenderedMessage(role="user", content=_SAMPLE_QUERY),
     ], [("query", "Αυτό που έγραψες στην αναζήτηση", _SAMPLE_QUERY)]
 
 
-def _build_retrieval_grounded(locale: str, db) -> _Built:
-    built = build_grounded_messages(_SAMPLE_QUERY, _SAMPLE_HITS, locale=locale)
+def _build_retrieval_grounded(locale: str, db, course_language=None) -> _Built:
+    built = build_grounded_messages(_SAMPLE_QUERY, _SAMPLE_HITS, locale=locale, source=db)
     return _msgs(built), [
         ("query", "Η ερώτησή σου", _SAMPLE_QUERY),
         ("passage_1", "Ένα απόσπασμα από τα βιβλία σου", _SAMPLE_HITS[0].text),
@@ -675,8 +841,8 @@ def _build_retrieval_grounded(locale: str, db) -> _Built:
     ]
 
 
-def _build_retrieval_no_hits(locale: str, db) -> _Built:
-    built = build_grounded_messages(_SAMPLE_QUERY, [], locale=locale)
+def _build_retrieval_no_hits(locale: str, db, course_language=None) -> _Built:
+    built = build_grounded_messages(_SAMPLE_QUERY, [], locale=locale, source=db)
     return _msgs(built), [
         ("query", "Η ερώτησή σου", _SAMPLE_QUERY),
         (*_LANG, language_directive(locale)),
@@ -687,9 +853,10 @@ def _build_retrieval_no_hits(locale: str, db) -> _Built:
 _SAMPLE_ARTIFACT_PROMPT = "Μια ταμπλατούρα με τη σκάλα Σολ ματζόρε σε δύο μέτρα"
 
 
-def _build_artifacts_generate(locale: str, db) -> _Built:
+def _build_artifacts_generate(locale: str, db, course_language=None) -> _Built:
     built = _artifact_messages(
         kind="tab", prompt=_SAMPLE_ARTIFACT_PROMPT, hits=_SAMPLE_HITS, locale=locale,
+        source=db,
     )
     return _msgs(built), [
         ("prompt", "Αυτό που ζήτησες", _SAMPLE_ARTIFACT_PROMPT),
@@ -702,10 +869,10 @@ def _build_artifacts_generate(locale: str, db) -> _Built:
 _SAMPLE_REPAIR_ERROR = "1 validation error for TabSpec\nalphaTex\n  Field required"
 
 
-def _build_artifacts_repair(locale: str, db) -> _Built:
+def _build_artifacts_repair(locale: str, db, course_language=None) -> _Built:
     built = _artifact_messages(
         kind="tab", prompt=_SAMPLE_ARTIFACT_PROMPT, hits=_SAMPLE_HITS, locale=locale,
-        repair_error=_SAMPLE_REPAIR_ERROR,
+        repair_error=_SAMPLE_REPAIR_ERROR, source=db,
     )
     return _msgs(built), [
         ("prompt", "Αυτό που ζήτησες", _SAMPLE_ARTIFACT_PROMPT),
@@ -714,32 +881,42 @@ def _build_artifacts_repair(locale: str, db) -> _Built:
     ]
 
 
-def _build_artifacts_tab_guidance(locale: str, db) -> _Built:
-    return [RenderedMessage(role="system", content=_KIND_PROMPT_GUIDANCE["tab"])], []
+def _build_artifacts_tab_guidance(locale: str, db, course_language=None) -> _Built:
+    return [RenderedMessage(
+        role="system",
+        content=resolve_text(db, TAB_GUIDANCE_SLICE_ID, _KIND_PROMPT_GUIDANCE["tab"]),
+    )], []
 
 
-def _vision_prompt(prompt: str):
-    def build(locale: str, db) -> _Built:
+def _vision_prompt(slice_id: str, prompt: str):
+    def build(locale: str, db, course_language=None) -> _Built:
         # `vision()` sends the prompt as the user turn beside the page image.
         # No locale: a transcription is in the language the page is printed in,
         # and `language_directive` would be an instruction to mistranslate a book.
-        return [RenderedMessage(role="user", content=prompt)], []
+        #
+        # Resolved at RENDER, not captured at registration: a default closed over
+        # here would show his edit on the card and send the constant to the model.
+        return [RenderedMessage(
+            role="user", content=resolve_text(db, slice_id, prompt),
+        )], []
     return build
 
 
-def _build_settings_probe(locale: str, db) -> _Built:
-    return [RenderedMessage(role="user", content=_PROBE_PROMPT)], []
+def _build_settings_probe(locale: str, db, course_language=None) -> _Built:
+    return [RenderedMessage(
+        role="user", content=resolve_text(db, _PROBE_SLICE_ID, _PROBE_PROMPT),
+    )], []
 
 
-def _build_shared_language_directive(locale: str, db) -> _Built:
-    return [RenderedMessage(role="system", content=language_directive(locale))], []
+def _build_shared_language_directive(locale: str, db, course_language=None) -> _Built:
+    return [RenderedMessage(role="system", content=language_directive(locale, db))], []
 
 
-def _build_shared_answer_in(locale: str, db) -> _Built:
-    return [RenderedMessage(role="user", content=answer_in(locale))], []
+def _build_shared_answer_in(locale: str, db, course_language=None) -> _Built:
+    return [RenderedMessage(role="user", content=answer_in(locale, db))], []
 
 
-def _build_shared_student_brief(locale: str, db) -> _Built:
+def _build_shared_student_brief(locale: str, db, course_language=None) -> _Built:
     brief = _sample_student_brief(db)
     return [RenderedMessage(role="user", content=brief)], [
         ("goals", "Οι στόχοι του μαθητή, όπως τους έγραψες", _SAMPLE_STUDENT.goals),
@@ -757,14 +934,14 @@ def _build_shared_student_brief(locale: str, db) -> _Built:
     ]
 
 
-def _build_tools_descriptions(locale: str, db) -> _Built:
+def _build_tools_descriptions(locale: str, db, course_language=None) -> _Built:
     # `loop._tool_schemas()` — the exact list the loop hands the provider, so a
     # tool added, removed or re-described shows up here on the same commit.
     schemas = json.dumps(_tool_schemas(), indent=2, ensure_ascii=False)
     return [RenderedMessage(role="system", content=schemas)], []
 
 
-def _build_tools_system_claude_cli(locale: str, db) -> _Built:
+def _build_tools_system_claude_cli(locale: str, db, course_language=None) -> _Built:
     # `tool_choice="auto"` is what BOTH live call sites pass (`loop.py:671`,
     # `loop.py:905`); the "required"/"none" branches have no caller today.
     return [RenderedMessage(
@@ -797,13 +974,21 @@ _ENTRIES = [
         when_it_runs_el="Σε κάθε μήνυμα που γράφεις στη συνομιλία.",
         source_of_truth=lambda: SYSTEM_PROMPT,
         build=_build_chat_system,
-        call_sites=("agent/loop.py:671", "agent/loop.py:905"),
+        call_sites=("agent/loop.py:687", "agent/loop.py:921"),
+        slices=(
+            Slice(
+                id=SYSTEM_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=SYSTEM_PROMPT,
+                kind="replace",
+            ),
+        ),
     ),
     PromptEntry(
         id="chat.grounding",
         flow="chat",
         kind="prompt",
-        source_ref="app/agent/loop.py:380",
+        source_ref="app/agent/loop.py:397",
         title_el="Τα αποσπάσματα από τη βιβλιοθήκη σου",
         what_it_does_el=(
             "Πριν απαντήσει, η εφαρμογή ψάχνει μόνη της στα βιβλία σου και "
@@ -817,12 +1002,20 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: _grounding_block,
         build=_build_chat_grounding,
+        slices=(
+            Slice(
+                id=GROUNDING_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=GROUNDING_BLOCK,
+                kind="replace",
+            ),
+        ),
     ),
     PromptEntry(
         id="chat.no_hits",
         flow="chat",
         kind="prompt",
-        source_ref="app/agent/loop.py:373",
+        source_ref="app/agent/loop.py:374",
         title_el="Όταν η βιβλιοθήκη σου δεν έχει τίποτα",
         what_it_does_el=(
             "Όταν η αναζήτηση στα βιβλία σου δεν βρει τίποτα σχετικό, αυτό λέει "
@@ -834,6 +1027,14 @@ _ENTRIES = [
         when_it_runs_el="Όταν ρωτάς κάτι που τα βιβλία σου δεν καλύπτουν.",
         source_of_truth=lambda: _NO_HITS_GROUNDING,
         build=_build_chat_no_hits,
+        slices=(
+            Slice(
+                id=CHAT_NO_HITS_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=_NO_HITS_GROUNDING,
+                kind="replace",
+            ),
+        ),
     ),
 
     # ---- tools ----
@@ -841,7 +1042,7 @@ _ENTRIES = [
         id="tools.descriptions",
         flow="tools",
         kind="fragment",
-        source_ref="app/agent/tools.py:944",
+        source_ref="app/agent/tools.py:1",
         title_el="Τα εργαλεία του βοηθού",
         what_it_does_el=(
             "Ο κατάλογος με τα 21 εργαλεία που έχει ο βοηθός — αναζήτηση στα "
@@ -854,7 +1055,7 @@ _ENTRIES = [
         when_it_runs_el="Σε κάθε μήνυμα που γράφεις στη συνομιλία.",
         source_of_truth=lambda: TOOLS,
         build=_build_tools_descriptions,
-        call_sites=("agent/loop.py:671", "agent/loop.py:905"),
+        call_sites=("agent/loop.py:687", "agent/loop.py:921"),
     ),
     PromptEntry(
         id="tools.system_claude_cli",
@@ -877,7 +1078,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: _tool_system_prompt,
         build=_build_tools_system_claude_cli,
-        call_sites=("agent/loop.py:671", "agent/loop.py:905"),
+        call_sites=("agent/loop.py:687", "agent/loop.py:921"),
         provider="claude_cli",
     ),
 
@@ -903,12 +1104,20 @@ _ENTRIES = [
         source_of_truth=lambda: CURRICULUM_SYSTEM,
         build=_build_curriculum_system,
         cache_prefix=True,
+        slices=(
+            Slice(
+                id=CURRICULUM_SYSTEM_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=CURRICULUM_SYSTEM,
+                kind="replace",
+            ),
+        ),
     ),
     PromptEntry(
         id="curriculum.library",
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/corpus.py:298",
+        source_ref="app/curriculum/corpus.py:337",
         title_el="Ολόκληρη η βιβλιοθήκη σου",
         what_it_does_el=(
             "Δίνει στον βοηθό όλα τα βιβλία που διάλεξες, ολόκληρα, με τον "
@@ -924,12 +1133,20 @@ _ENTRIES = [
         source_of_truth=lambda: library_message,
         build=_build_curriculum_library,
         cache_prefix=True,
+        slices=(
+            Slice(
+                id=LIBRARY_MESSAGE_SLICE_ID,
+                label_el="Τα λόγια γύρω από τη βιβλιοθήκη σου",
+                default=LIBRARY_MESSAGE,
+                kind="replace",
+            ),
+        ),
     ),
     PromptEntry(
         id="curriculum.no_library",
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/corpus.py:289",
+        source_ref="app/curriculum/corpus.py:292",
         title_el="Όταν δεν διάλεξες κανένα βιβλίο",
         what_it_does_el=(
             "Αν δεν διαλέξεις καμία πηγή, μπαίνει αυτό στη θέση της "
@@ -941,12 +1158,20 @@ _ENTRIES = [
         when_it_runs_el="Όταν φτιάχνεις πρόγραμμα χωρίς να διαλέξεις πηγές.",
         source_of_truth=lambda: prefix_messages,
         build=_build_curriculum_no_library,
+        slices=(
+            Slice(
+                id=NO_LIBRARY_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=NO_LIBRARY,
+                kind="replace",
+            ),
+        ),
     ),
     PromptEntry(
         id="curriculum.library_too_large",
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/corpus.py:274",
+        source_ref="app/curriculum/corpus.py:292",
         title_el="Όταν η βιβλιοθήκη σου δεν χωράει",
         what_it_does_el=(
             "Αν τα βιβλία που διάλεξες είναι πάρα πολλά για να διαβαστούν "
@@ -959,12 +1184,21 @@ _ENTRIES = [
         when_it_runs_el="Όταν οι πηγές που διάλεξες ξεπερνούν το όριο ανάγνωσης.",
         source_of_truth=lambda: prefix_messages,
         build=_build_curriculum_library_too_large,
+        slices=(
+            Slice(
+                id=LIBRARY_TOO_LARGE_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=LIBRARY_TOO_LARGE,
+                kind="replace",
+            ),
+        ),
     ),
     PromptEntry(
         id="curriculum.outline",
+        language_from_course=True,
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/outline.py:120",
+        source_ref="app/curriculum/outline.py:161",
         title_el="Ο σκελετός του προγράμματος",
         what_it_does_el=(
             "Ζητάει μόνο τη δομή: τίτλους ενοτήτων και μαθημάτων με μία "
@@ -976,13 +1210,22 @@ _ENTRIES = [
         when_it_runs_el="Μία φορά, μόλις πατήσεις δημιουργία προγράμματος.",
         source_of_truth=lambda: build_outline_messages,
         build=_build_curriculum_outline,
-        call_sites=("curriculum/outline.py:251",),
+        call_sites=("curriculum/outline.py:286",),
+        slices=(
+            Slice(
+                id=OUTLINE_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=OUTLINE_TAIL,
+                kind="replace",
+            ),
+        ),
     ),
     PromptEntry(
         id="curriculum.extend",
+        language_from_course=True,
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/extend.py:144",
+        source_ref="app/curriculum/extend.py:181",
         title_el="Η νέα ενότητα σε υπάρχον πρόγραμμα",
         what_it_does_el=(
             "Δείχνει στον βοηθό το πρόγραμμα όπως είναι σήμερα και ζητάει μία "
@@ -993,13 +1236,22 @@ _ENTRIES = [
         when_it_runs_el="Όταν προσθέτεις ενότητα σε πρόγραμμα που ήδη υπάρχει.",
         source_of_truth=lambda: build_module_messages,
         build=_build_curriculum_extend,
-        call_sites=("curriculum/extend.py:223",),
+        call_sites=("curriculum/extend.py:245",),
+        slices=(
+            Slice(
+                id=MODULE_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=MODULE_TAIL,
+                kind="replace",
+            ),
+        ),
     ),
     PromptEntry(
         id="curriculum.refine",
+        language_from_course=True,
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/refine.py:46",
+        source_ref="app/curriculum/refine.py:80",
         title_el="Η διόρθωση ενός κομματιού",
         what_it_does_el=(
             "Του δίνει το κείμενο που θέλεις να αλλάξει, από πού γράφτηκε, και "
@@ -1010,15 +1262,30 @@ _ENTRIES = [
         when_it_runs_el="Όταν ζητάς αλλαγή σε ένα κομμάτι μαθήματος.",
         source_of_truth=lambda: build_refine_messages,
         build=_build_curriculum_refine,
-        call_sites=("curriculum/refine.py:118",),
+        call_sites=("curriculum/refine.py:150",),
+        slices=(
+            Slice(
+                id=REFINE_SYSTEM_SLICE_ID,
+                label_el="Η οδηγία προς το μοντέλο",
+                default=REFINE_SYSTEM,
+                kind="replace",
+            ),
+            Slice(
+                id=REFINE_USER_SLICE_ID,
+                label_el="Πώς παρουσιάζεται το κείμενο που διορθώνεις",
+                default=REFINE_USER,
+                kind="replace",
+            ),
+        ),
     ),
 
     # ---- lesson ----
     PromptEntry(
         id="lesson.draft",
+        language_from_course=True,
         flow="lesson",
         kind="prompt",
-        source_ref="app/curriculum/draft.py:101",
+        source_ref="app/curriculum/draft.py:176",
         title_el="Η συγγραφή ενός μαθήματος",
         what_it_does_el=(
             "Ζητάει το ίδιο το μάθημα — τις σελίδες που θα διδάξεις, όχι ένα "
@@ -1034,13 +1301,22 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: build_lesson_messages,
         build=_build_lesson_draft,
-        call_sites=("curriculum/draft.py:281",),
+        call_sites=("curriculum/draft.py:375",),
+        slices=(
+            Slice(
+                id=LESSON_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=LESSON_TAIL,
+                kind="replace",
+            ),
+        ),
     ),
     PromptEntry(
         id="lesson.deepen",
+        language_from_course=True,
         flow="lesson",
         kind="prompt",
-        source_ref="app/curriculum/draft.py:163",
+        source_ref="app/curriculum/draft.py:176",
         title_el="Το ξαναγράψιμο ενός κοντού μαθήματος",
         what_it_does_el=(
             "Αν το μάθημα βγήκε πιο κοντό από το όριο, γυρίζει πίσω με την "
@@ -1054,13 +1330,51 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: build_lesson_messages,
         build=_build_lesson_deepen,
-        call_sites=("curriculum/draft.py:302",),
+        call_sites=("curriculum/draft.py:397",),
+        slices=(
+            Slice(
+                id=LESSON_DEEPEN_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=LESSON_DEEPEN_BLOCK,
+                kind="replace",
+            ),
+        ),
+    ),
+    PromptEntry(
+        id="lesson.retrieved",
+        flow="lesson",
+        kind="fragment",
+        source_ref="app/curriculum/draft.py:157",
+        title_el="Όταν η βιβλιοθήκη σου δεν χώρεσε: τα αποσπάσματα του μαθήματος",
+        what_it_does_el=(
+            "Αν τα βιβλία που διάλεξες είναι πάρα πολλά για να διαβαστούν "
+            "ολόκληρα, το κάθε μάθημα δεν τα παίρνει όλα — παίρνει μόνο τα "
+            "αποσπάσματα που βρέθηκαν για αυτό το συγκεκριμένο μάθημα, και "
+            "μπαίνουν εδώ. Του λέει να γράψει από αυτά και να τα αναφέρει. "
+            "Σήμερα η βιβλιοθήκη σου χωράει ολόκληρη, οπότε αυτό δεν στέλνεται "
+            "— θα ξεκινήσει να στέλνεται αν προσθέσεις πολλά βιβλία σε ένα "
+            "πρόγραμμα."
+        ),
+        when_it_runs_el=(
+            "Σε κάθε μάθημα προγράμματος του οποίου οι πηγές ξεπερνούν το όριο "
+            "ανάγνωσης."
+        ),
+        source_of_truth=lambda: LESSON_RETRIEVED_BLOCK,
+        build=_build_lesson_retrieved,
+        slices=(
+            Slice(
+                id=LESSON_RETRIEVED_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=LESSON_RETRIEVED_BLOCK,
+                kind="replace",
+            ),
+        ),
     ),
     PromptEntry(
         id="lesson.repair",
         flow="lesson",
         kind="prompt",
-        source_ref="app/curriculum/draft.py:223",
+        source_ref="app/curriculum/draft.py:306",
         title_el="Όταν παραπέμπει σε σελίδα που δεν υπάρχει",
         what_it_does_el=(
             "Η εφαρμογή ελέγχει κάθε παραπομπή σε σελίδα που γράφει ο βοηθός. "
@@ -1073,13 +1387,21 @@ _ENTRIES = [
         when_it_runs_el="Μόνο όταν πιαστεί λάθος παραπομπή. Το πολύ μία φορά ανά μάθημα.",
         source_of_truth=lambda: _repair_message,
         build=_build_lesson_repair,
-        call_sites=("curriculum/draft.py:287",),
+        call_sites=("curriculum/draft.py:381",),
+        slices=(
+            Slice(
+                id=REPAIR_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=REPAIR_MESSAGE,
+                kind="replace",
+            ),
+        ),
     ),
     PromptEntry(
         id="lesson.tier_library",
         flow="lesson",
         kind="fragment",
-        source_ref="app/curriculum/draft.py:75",
+        source_ref="app/curriculum/draft.py:111",
         title_el="Οδηγία: η ενότητα είναι μέσα στα βιβλία σου",
         what_it_does_el=(
             "Μπαίνει στη συγγραφή του μαθήματος όταν η ενότητα έχει "
@@ -1091,12 +1413,20 @@ _ENTRIES = [
         when_it_runs_el="Σε κάθε μάθημα ενότητας που χαρακτηρίστηκε «από τη βιβλιοθήκη».",
         source_of_truth=lambda: _tier_directive,
         build=_tier_fragment(TIER_LIBRARY),
+        slices=(
+            Slice(
+                id=TIER_LIBRARY_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=TIER_LIBRARY_DIRECTIVE,
+                kind="replace",
+            ),
+        ),
     ),
     PromptEntry(
         id="lesson.gap",
         flow="lesson",
         kind="fragment",
-        source_ref="app/curriculum/draft.py:93",
+        source_ref="app/curriculum/draft.py:111",
         title_el="Οδηγία: η ενότητα ΔΕΝ είναι στα βιβλία σου",
         what_it_does_el=(
             "Μπαίνει όταν η ενότητα δεν καλύπτεται από τη βιβλιοθήκη σου και "
@@ -1108,12 +1438,20 @@ _ENTRIES = [
         when_it_runs_el="Σε κάθε μάθημα ενότητας που χαρακτηρίστηκε «γενικές γνώσεις».",
         source_of_truth=lambda: _tier_directive,
         build=_tier_fragment(TIER_GENERAL),
+        slices=(
+            Slice(
+                id=TIER_GENERAL_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=TIER_GENERAL_DIRECTIVE,
+                kind="replace",
+            ),
+        ),
     ),
     PromptEntry(
         id="lesson.tier_web",
         flow="lesson",
         kind="fragment",
-        source_ref="app/curriculum/draft.py:86",
+        source_ref="app/curriculum/draft.py:111",
         title_el="Οδηγία: η ενότητα θέλει πρόσφατες πληροφορίες",
         what_it_does_el=(
             "Μπαίνει όταν η ενότητα δεν είναι στα βιβλία σου και χρειάζεται "
@@ -1127,12 +1465,20 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: _tier_directive,
         build=_tier_fragment(TIER_WEB),
+        slices=(
+            Slice(
+                id=TIER_WEB_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=TIER_WEB_DIRECTIVE,
+                kind="replace",
+            ),
+        ),
     ),
     PromptEntry(
         id="lesson.from_selection",
         flow="lesson",
         kind="prompt",
-        source_ref="app/lessons/draft.py:92",
+        source_ref="app/lessons/draft.py:117",
         title_el="Μάθημα από κείμενο που διάλεξες",
         what_it_does_el=(
             "Όταν διαβάζεις ένα βιβλίο και μαρκάρεις ένα κομμάτι, αυτό στέλνει "
@@ -1143,7 +1489,21 @@ _ENTRIES = [
         when_it_runs_el="Όταν διαλέγεις κείμενο στον αναγνώστη και ζητάς μάθημα.",
         source_of_truth=lambda: _selection_messages,
         build=_build_lesson_from_selection,
-        call_sites=("lessons/draft.py:254",),
+        call_sites=("lessons/draft.py:273",),
+        slices=(
+            Slice(
+                id=SELECTION_SYSTEM_SLICE_ID,
+                label_el="Η οδηγία προς το μοντέλο",
+                default=SELECTION_SYSTEM,
+                kind="replace",
+            ),
+            Slice(
+                id=SELECTION_USER_SLICE_ID,
+                label_el="Πώς παρουσιάζεται το κείμενο που διάλεξες",
+                default=SELECTION_USER,
+                kind="replace",
+            ),
+        ),
     ),
 
     # ---- retrieval ----
@@ -1151,7 +1511,7 @@ _ENTRIES = [
         id="retrieval.translate",
         flow="retrieval",
         kind="prompt",
-        source_ref="app/brain/retrieve.py:199",
+        source_ref="app/brain/retrieve.py:200",
         title_el="Η μετάφραση της αναζήτησής σου",
         what_it_does_el=(
             "Εσύ γράφεις ελληνικά· τα βιβλία σου είναι αγγλικά. Πριν την "
@@ -1165,13 +1525,21 @@ _ENTRIES = [
         when_it_runs_el="Σε κάθε αναζήτηση στη βιβλιοθήκη σου που δεν είναι ήδη αγγλικά.",
         source_of_truth=lambda: _TRANSLATE_SYSTEM,
         build=_build_retrieval_translate,
-        call_sites=("brain/retrieve.py:244",),
+        call_sites=("brain/retrieve.py:255",),
+        slices=(
+            Slice(
+                id=TRANSLATE_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=_TRANSLATE_SYSTEM,
+                kind="replace",
+            ),
+        ),
     ),
     PromptEntry(
         id="retrieval.grounded",
         flow="retrieval",
         kind="prompt",
-        source_ref="app/brain/retrieve.py:519",
+        source_ref="app/brain/retrieve.py:542",
         title_el="Η απάντηση μέσα από τα βιβλία σου",
         what_it_does_el=(
             "Δίνει την ερώτηση μαζί με τα αποσπάσματα που βρέθηκαν, αριθμημένα, "
@@ -1183,13 +1551,21 @@ _ENTRIES = [
         when_it_runs_el="Όταν ρωτάς κάτι και η βιβλιοθήκη σου έχει σχετικό υλικό.",
         source_of_truth=lambda: build_grounded_messages,
         build=_build_retrieval_grounded,
-        call_sites=("brain/retrieve.py:556",),
+        call_sites=("brain/retrieve.py:593",),
+        slices=(
+            Slice(
+                id=GROUNDED_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=GROUNDED_SYSTEM,
+                kind="replace",
+            ),
+        ),
     ),
     PromptEntry(
         id="retrieval.no_hits",
         flow="retrieval",
         kind="prompt",
-        source_ref="app/brain/retrieve.py:533",
+        source_ref="app/brain/retrieve.py:542",
         title_el="Απάντηση όταν τα βιβλία σου σιωπούν",
         what_it_does_el=(
             "Όταν η αναζήτηση δεν βρει τίποτα, ο βοηθός δεν σου λέει «δεν το "
@@ -1200,7 +1576,15 @@ _ENTRIES = [
         when_it_runs_el="Όταν ρωτάς κάτι που τα βιβλία σου δεν καλύπτουν καθόλου.",
         source_of_truth=lambda: build_grounded_messages,
         build=_build_retrieval_no_hits,
-        call_sites=("brain/retrieve.py:556",),
+        call_sites=("brain/retrieve.py:593",),
+        slices=(
+            Slice(
+                id=RETRIEVAL_NO_HITS_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=NO_HITS_SYSTEM,
+                kind="replace",
+            ),
+        ),
     ),
 
     # ---- artifacts ----
@@ -1208,7 +1592,7 @@ _ENTRIES = [
         id="artifacts.generate",
         flow="artifacts",
         kind="prompt",
-        source_ref="app/artifacts/generate.py:61",
+        source_ref="app/artifacts/generate.py:85",
         title_el="Η δημιουργία ταμπλατούρας, συγχορδίας ή ήχου",
         what_it_does_el=(
             "Ζητάει μόνο τα δεδομένα του αντικειμένου που ζήτησες — μια "
@@ -1223,13 +1607,21 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: _artifact_messages,
         build=_build_artifacts_generate,
-        call_sites=("artifacts/generate.py:228",),
+        call_sites=("artifacts/generate.py:259",),
+        slices=(
+            Slice(
+                id=ARTIFACT_SYSTEM_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=ARTIFACT_SYSTEM,
+                kind="replace",
+            ),
+        ),
     ),
     PromptEntry(
         id="artifacts.repair",
         flow="artifacts",
         kind="prompt",
-        source_ref="app/artifacts/generate.py:61",
+        source_ref="app/artifacts/generate.py:85",
         title_el="Η δεύτερη προσπάθεια, όταν βγει άκυρο",
         what_it_does_el=(
             "Αν αυτό που γύρισε δεν είναι έγκυρο (λείπει πεδίο, λάθος μορφή), "
@@ -1240,13 +1632,21 @@ _ENTRIES = [
         when_it_runs_el="Μόνο όταν η πρώτη προσπάθεια βγει άκυρη.",
         source_of_truth=lambda: _artifact_messages,
         build=_build_artifacts_repair,
-        call_sites=("artifacts/generate.py:239",),
+        call_sites=("artifacts/generate.py:271",),
+        slices=(
+            Slice(
+                id=ARTIFACT_REPAIR_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=ARTIFACT_REPAIR,
+                kind="replace",
+            ),
+        ),
     ),
     PromptEntry(
         id="artifacts.tab_guidance",
         flow="artifacts",
         kind="fragment",
-        source_ref="app/artifacts/generate.py:38",
+        source_ref="app/artifacts/generate.py:1",
         title_el="Πώς γράφεται μια ταμπλατούρα",
         what_it_does_el=(
             "Μαθαίνει στον βοηθό τη γραφή που καταλαβαίνει ο παίκτης της "
@@ -1258,6 +1658,14 @@ _ENTRIES = [
         when_it_runs_el="Μόνο όταν ζητάς ταμπλατούρα.",
         source_of_truth=lambda: _KIND_PROMPT_GUIDANCE["tab"],
         build=_build_artifacts_tab_guidance,
+        slices=(
+            Slice(
+                id=TAB_GUIDANCE_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=_KIND_PROMPT_GUIDANCE["tab"],
+                kind="replace",
+            ),
+        ),
     ),
 
     # ---- ocr ----
@@ -1265,7 +1673,7 @@ _ENTRIES = [
         id="ocr.transcribe",
         flow="ocr",
         kind="prompt",
-        source_ref="app/brain/ocr.py:143",
+        source_ref="app/brain/ocr.py:145",
         title_el="Η ανάγνωση μιας σελίδας βιβλίου",
         what_it_does_el=(
             "Διαβάζει τη φωτογραφία μιας σελίδας και γράφει τα λόγια της, "
@@ -1278,14 +1686,22 @@ _ENTRIES = [
         ),
         when_it_runs_el="Μία φορά για κάθε σελίδα, όταν ανεβάζεις ένα βιβλίο.",
         source_of_truth=lambda: OCR_PROMPT,
-        build=_vision_prompt(OCR_PROMPT),
-        call_sites=("brain/ocr.py:1026",),
+        build=_vision_prompt(OCR_SLICE_ID, OCR_PROMPT),
+        call_sites=("brain/ocr.py:1041",),
+        slices=(
+            Slice(
+                id=OCR_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=OCR_PROMPT,
+                kind="replace",
+            ),
+        ),
     ),
     PromptEntry(
         id="ocr.figure",
         flow="ocr",
         kind="prompt",
-        source_ref="app/brain/ocr.py:182",
+        source_ref="app/brain/ocr.py:187",
         title_el="Η περιγραφή των εικόνων μιας σελίδας",
         what_it_does_el=(
             "Για σελίδες που έχουν ήδη σωστό κείμενο από τον εκδότη, δεν "
@@ -1299,8 +1715,16 @@ _ENTRIES = [
             "τους το έχουμε ήδη."
         ),
         source_of_truth=lambda: FIGURE_PROMPT,
-        build=_vision_prompt(FIGURE_PROMPT),
-        call_sites=("brain/ocr.py:1026",),
+        build=_vision_prompt(FIGURE_SLICE_ID, FIGURE_PROMPT),
+        call_sites=("brain/ocr.py:1041",),
+        slices=(
+            Slice(
+                id=FIGURE_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=FIGURE_PROMPT,
+                kind="replace",
+            ),
+        ),
     ),
 
     # ---- settings ----
@@ -1308,7 +1732,7 @@ _ENTRIES = [
         id="settings.probe",
         flow="settings",
         kind="prompt",
-        source_ref="app/routers/settings.py:137",
+        source_ref="app/routers/settings.py:142",
         title_el="Η δοκιμή του κλειδιού σου",
         what_it_does_el=(
             "Το μικρότερο δυνατό μήνυμα που αποδεικνύει ότι όλα δουλεύουν: "
@@ -1319,7 +1743,15 @@ _ENTRIES = [
         when_it_runs_el="Μόνο όταν πατήσεις «Δοκιμή» στις ρυθμίσεις.",
         source_of_truth=lambda: _PROBE_PROMPT,
         build=_build_settings_probe,
-        call_sites=("routers/settings.py:165",),
+        call_sites=("routers/settings.py:171",),
+        slices=(
+            Slice(
+                id=_PROBE_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=_PROBE_PROMPT,
+                kind="replace",
+            ),
+        ),
     ),
 
     # ---- shared ----
@@ -1327,7 +1759,7 @@ _ENTRIES = [
         id="shared.language_directive",
         flow="shared",
         kind="fragment",
-        source_ref="app/i18n.py:100",
+        source_ref="app/i18n.py:127",
         title_el="Ο κανόνας της γλώσσας",
         what_it_does_el=(
             "Ο πιο σημαντικός κανόνας της εφαρμογής, γραμμένος μία φορά και "
@@ -1346,12 +1778,20 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: language_directive,
         build=_build_shared_language_directive,
+        slices=(
+            Slice(
+                id=LANGUAGE_DIRECTIVE_SLICE_ID,
+                label_el="Το κείμενο του κανόνα",
+                default=LANGUAGE_DIRECTIVE,
+                kind="replace",
+            ),
+        ),
     ),
     PromptEntry(
         id="shared.answer_in",
         flow="shared",
         kind="fragment",
-        source_ref="app/i18n.py:124",
+        source_ref="app/i18n.py:147",
         title_el="Η τελευταία υπενθύμιση γλώσσας",
         what_it_does_el=(
             "Μία γραμμή, κολλημένη στο τέλος-τέλος, μετά τα αγγλικά "
@@ -1363,6 +1803,14 @@ _ENTRIES = [
         when_it_runs_el="Σε κάθε κείμενο που έχει αποσπάσματα από τη βιβλιοθήκη σου.",
         source_of_truth=lambda: answer_in,
         build=_build_shared_answer_in,
+        slices=(
+            Slice(
+                id=ANSWER_IN_SLICE_ID,
+                label_el="Το κείμενο της υπενθύμισης",
+                default=ANSWER_IN,
+                kind="replace",
+            ),
+        ),
     ),
     PromptEntry(
         id="shared.student_brief",
@@ -1417,7 +1865,10 @@ SLICES: dict[str, tuple[PromptEntry, Slice]] = {
 }
 
 
-def render(prompt_id: str, locale: str = DEFAULT_LOCALE, db=None) -> RenderedPrompt:
+def render(
+    prompt_id: str, locale: str = DEFAULT_LOCALE, db=None,
+    course_language: str | None = None,
+) -> RenderedPrompt:
     """The prompt `prompt_id` as the model gets it, with sample interpolations.
 
     `db` is what makes "as the model gets it" true rather than aspirational: with
@@ -1430,7 +1881,7 @@ def render(prompt_id: str, locale: str = DEFAULT_LOCALE, db=None) -> RenderedPro
     machine-readable code the web renders as one Greek sentence, per the existing
     convention. Never a stack trace at the tutor.
     """
-    return REGISTRY[prompt_id].render(locale, db)
+    return REGISTRY[prompt_id].render(locale, db, course_language)
 
 
 def resolve(db, slice_id: str) -> str:
@@ -1449,6 +1900,14 @@ def resolve(db, slice_id: str) -> str:
     """
     _, sl = SLICES[slice_id]
     return overrides.resolve(db, slice_id, sl.default)
+
+
+def course_language_of(override: str | None = None) -> str:
+    """The language a course-language preview is rendered at — what the API reports as
+    `course_language` so the card can name it. Public because the router must not
+    re-derive `_SAMPLE_COURSE_LANGUAGE`: two answers to "which language is this?" is
+    how the screen started disagreeing with the model in the first place."""
+    return _course_language(DEFAULT_LOCALE, override)
 
 
 def by_flow() -> dict[str, list[PromptEntry]]:

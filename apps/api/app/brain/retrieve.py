@@ -127,6 +127,7 @@ from sqlalchemy import select
 
 from app.brain.lexical import get_index, tokenize
 from app.i18n import DEFAULT_LOCALE, answer_in, language_directive
+from app.prompts.overrides import resolve
 from app.llm.embed_factory import get_embedder
 from app.llm.factory import get_provider
 from app.models.knowledge import Chunk, KnowledgeSource, Page
@@ -235,15 +236,25 @@ def reset_translation_breaker() -> None:
 
 
 @lru_cache(maxsize=512)
-def _translate_call(query: str) -> str:
+def _translate_call(query: str, system: str) -> str:
     """The RAISING inner call, cached. `lru_cache` does not memoize raised
     exceptions — which is the entire reason for this split: with the try/except
     inside the cached function, a query that failed ONCE (during an outage, a
     429) had its raw-query fallback cached FOREVER, so that exact query stayed
-    untranslated for the process lifetime even after the provider recovered."""
+    untranslated for the process lifetime even after the provider recovered.
+
+    `system` IS THE RESOLVED PROMPT, PASSED IN RATHER THAN READ HERE, and taking it
+    as an argument is what makes the tutor's override work through a cache: it joins
+    the cache KEY, so the moment he edits this prompt every memoized translation of
+    it is orphaned and the next query re-translates under his new text. Reading the
+    override inside this function instead would have been the subtle version of the
+    bug this whole feature exists to kill — his edit saved, the screen showing it,
+    and the model still being sent last week's prompt for every query he had already
+    searched once. (It also cannot take a Session: `lru_cache` needs a hashable key.)
+    """
     out = get_provider().chat(
         [
-            {"role": "system", "content": _TRANSLATE_SYSTEM},
+            {"role": "system", "content": system},
             {"role": "user", "content": query},
         ],
         temperature=0.0,
@@ -257,7 +268,7 @@ def _translate_call(query: str) -> str:
     return out
 
 
-def _translate_to_english(query: str) -> str:
+def _translate_to_english(query: str, system: str) -> str:
     """Greek query -> English query. Cached (successes only), because the tutor
     asks about the same dozen topics over and over and this is a network call on
     the retrieval hot path.
@@ -271,7 +282,7 @@ def _translate_to_english(query: str) -> str:
     if time.monotonic() < _translation_blocked_until:
         return query
     try:
-        return _translate_call(query)
+        return _translate_call(query, system)
     except Exception:
         _translation_blocked_until = time.monotonic() + _TRANSLATION_COOLDOWN_S
         log.warning(
@@ -308,7 +319,9 @@ def normalize_query(db, query: str) -> str:
             return query
     except Exception:
         log.warning("corpus-language probe failed; assuming a non-Greek corpus", exc_info=True)
-    translated = _translate_to_english(query)
+    translated = _translate_to_english(
+        query, resolve(db, TRANSLATE_SLICE_ID, _TRANSLATE_SYSTEM),
+    )
     if translated != query:
         log.info("query normalised to corpus language: %r -> %r", query, translated)
     return translated
@@ -499,7 +512,36 @@ def search(
     return out
 
 
-def build_grounded_messages(query: str, hits: list[Hit], *, locale: str) -> list[dict]:
+# The two grounded-answer prompts, lifted out of the builder byte-identically so the
+# tutor can rewrite them. The USER halves carry his query and his passages; they are
+# left as plain templates rather than slices because there is no app-authored prose in
+# them to edit — a slice over `"{query}\n\nContext:\n{context}"` would be a textarea
+# containing three placeholders and one word.
+GROUNDED_SYSTEM = (
+    "Answer strictly from the provided context. Cite sources as [n]. If the "
+    "context does not contain the answer, say so.\n\n"
+    "{language_directive}"
+)
+GROUNDED_SLICE_ID = "retrieval.grounded"
+GROUNDED_USER = "{query}\n\nContext:\n{context}\n\n{answer_in}"
+
+NO_HITS_SYSTEM = (
+    "The tutor's own library was searched and contains NOTHING relevant "
+    "to this question. Answer it well from your general knowledge of "
+    "guitar teaching. START your answer by saying, in the answer's own "
+    "language, that his library does not cover this and what follows is "
+    "general knowledge. Do NOT cite any sources — you were shown none.\n\n"
+    "{language_directive}"
+)
+NO_HITS_SLICE_ID = "retrieval.no_hits"
+NO_HITS_USER = "{query}\n\n{answer_in}"
+
+TRANSLATE_SLICE_ID = "retrieval.translate"
+
+
+def build_grounded_messages(
+    query: str, hits: list[Hit], *, locale: str, source=None,
+) -> list[dict]:
     """Pure function: the {system,user} chat messages for a grounded answer.
 
     Kept separate from `answer()` (which also calls the live model) so the prompt
@@ -515,13 +557,13 @@ def build_grounded_messages(query: str, hits: list[Hit], *, locale: str) -> list
     writing, and it is entirely in the wrong language.
     """
     if hits:
-        system = (
-            "Answer strictly from the provided context. Cite sources as [n]. If the "
-            "context does not contain the answer, say so.\n\n"
-            f"{language_directive(locale)}"
+        system = resolve(source, GROUNDED_SLICE_ID, GROUNDED_SYSTEM).format(
+            language_directive=language_directive(locale, source),
         )
         context = "\n\n".join(f"[{i}] {hit.text}" for i, hit in enumerate(hits, start=1))
-        user = f"{query}\n\nContext:\n{context}\n\n{answer_in(locale)}"
+        user = GROUNDED_USER.format(
+            query=query, context=context, answer_in=answer_in(locale, source),
+        )
     else:
         # ZERO HITS IS NOT A REFUSAL SCRIPT. The old prompt still said "answer
         # strictly from the provided context" over an EMPTY context — a billed
@@ -529,15 +571,10 @@ def build_grounded_messages(query: str, hits: list[Hit], *, locale: str) -> list
         # explicit product rule is the opposite: when his library is silent,
         # the model takes over — LABELLED. So: answer from general knowledge,
         # open by saying the library doesn't cover it, cite nothing.
-        system = (
-            "The tutor's own library was searched and contains NOTHING relevant "
-            "to this question. Answer it well from your general knowledge of "
-            "guitar teaching. START your answer by saying, in the answer's own "
-            "language, that his library does not cover this and what follows is "
-            "general knowledge. Do NOT cite any sources — you were shown none.\n\n"
-            f"{language_directive(locale)}"
+        system = resolve(source, NO_HITS_SLICE_ID, NO_HITS_SYSTEM).format(
+            language_directive=language_directive(locale, source),
         )
-        user = f"{query}\n\n{answer_in(locale)}"
+        user = NO_HITS_USER.format(query=query, answer_in=answer_in(locale, source))
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
@@ -552,6 +589,6 @@ class Answer:
 
 def answer(db, query: str, *, locale: str = DEFAULT_LOCALE, k: int = 8) -> Answer:
     hits = search(db, query, k=k)
-    messages = build_grounded_messages(query, hits, locale=locale)
+    messages = build_grounded_messages(query, hits, locale=locale, source=db)
     text = get_provider().chat(messages, enable_thinking=False)
     return Answer(text=text, citations=hits)

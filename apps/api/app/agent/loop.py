@@ -115,6 +115,7 @@ from app.i18n import DEFAULT_LOCALE, answer_in, language_directive
 from app.llm.errors import ToolArgsError
 from app.llm.factory import get_provider
 from app.llm.tools_types import ToolCall
+from app.prompts.overrides import resolve
 from app.text.normalize import fold, has_greek
 
 log = logging.getLogger(__name__)
@@ -375,9 +376,25 @@ _NO_HITS_GROUNDING = (
     "relevant. Say plainly, in your answer, that his material doesn't cover this, "
     "and label the rest of your answer as general knowledge (not from his library)."
 )
+NO_HITS_SLICE_ID = "chat.no_hits"
+
+# The grounding block, lifted out of `_grounding_block` byte-identically so the tutor
+# can rewrite it. `{passages}` is HIS library's text and `{answer_in}` is the tail
+# reminder — both filled at call time, and both required (`overrides.validate` rejects
+# an edit that drops either). Dropping `{passages}` would leave the model an
+# instruction to cite context it was never given.
+GROUNDING_BLOCK = (
+    "GROUNDING — from the tutor's library, the passages most relevant to this "
+    "question:\n\n{passages}\n\n"
+    "Answer from this context and cite the passages you use inline as [n]. If "
+    "none of it actually answers the question, say his material doesn't cover "
+    "this and label the rest of your answer as general knowledge.\n\n"
+    "{answer_in}"
+)
+GROUNDING_SLICE_ID = "chat.grounding"
 
 
-def _grounding_block(hits: list, locale: str) -> str:
+def _grounding_block(hits: list, locale: str, source=None) -> str:
     """The injected context TEXT (C1/C2) — appended onto the end of the
     user's OWN turn (see `run_agent_turn`'s pre-hop), deliberately NOT a
     second `{"role": "system", ...}` message: the real vLLM chat template
@@ -409,18 +426,13 @@ def _grounding_block(hits: list, locale: str) -> str:
     about "we found nothing" makes the answer's language matter less).
     """
     if not hits:
-        return f"{_NO_HITS_GROUNDING}\n\n{answer_in(locale)}"
+        return f"{resolve(source, NO_HITS_SLICE_ID, _NO_HITS_GROUNDING)}\n\n{answer_in(locale, source)}"
     passages = "\n\n".join(
         f"[{i}] (source_id={hit.source_id}, page={hit.page}) {hit.text}"
         for i, hit in enumerate(hits, start=1)
     )
-    return (
-        "GROUNDING — from the tutor's library, the passages most relevant to this "
-        f"question:\n\n{passages}\n\n"
-        "Answer from this context and cite the passages you use inline as [n]. If "
-        "none of it actually answers the question, say his material doesn't cover "
-        "this and label the rest of your answer as general knowledge.\n\n"
-        f"{answer_in(locale)}"
+    return resolve(source, GROUNDING_SLICE_ID, GROUNDING_BLOCK).format(
+        passages=passages, answer_in=answer_in(locale, source),
     )
 
 
@@ -468,7 +480,10 @@ def _tool_schemas() -> list[dict]:
     return [entry.schema for entry in TOOLS.values() if entry.kind in ("read", "mutation")]
 
 
-def _ensure_system_prompt(messages: list[dict], locale: str) -> list[dict]:
+SYSTEM_SLICE_ID = "chat.system"
+
+
+def _ensure_system_prompt(messages: list[dict], locale: str, source=None) -> list[dict]:
     """Prepend `SYSTEM_PROMPT` + the session's LANGUAGE block unless the
     transcript already starts with a system message. Callers (Task 4's chat
     router) own the transcript across turns and pass the full history back in
@@ -486,7 +501,8 @@ def _ensure_system_prompt(messages: list[dict], locale: str) -> list[dict]:
     """
     if messages and messages[0].get("role") == "system":
         return messages
-    system = f"{SYSTEM_PROMPT}\n\n{language_directive(locale)}"
+    prompt = resolve(source, SYSTEM_SLICE_ID, SYSTEM_PROMPT)
+    system = f"{prompt}\n\n{language_directive(locale, source)}"
     return [{"role": "system", "content": system}, *messages]
 
 
@@ -591,7 +607,7 @@ def run_agent_turn(
     the job that eventually runs all carry the same locale. Defaults to `el`
     (the app's default), never `en`.
     """
-    messages = _ensure_system_prompt(list(messages), locale)
+    messages = _ensure_system_prompt(list(messages), locale, db)
     tools = _tool_schemas()
     provider = get_provider()
     repair_attempts = 0
@@ -645,7 +661,7 @@ def run_agent_turn(
     if is_user_turn and (named_song or _is_content_bearing(last_text)):
         hits = search(db, last_text, k=5)
         citations = [_to_citation(hit) for hit in hits]
-        grounded_content = f"{last_text}\n\n{_grounding_block(hits, locale)}"
+        grounded_content = f"{last_text}\n\n{_grounding_block(hits, locale, db)}"
         messages[-1] = {**last, "content": grounded_content}
 
     # --- G5: named-song decline pre-model short-circuit ---------------------
@@ -856,7 +872,7 @@ def stream_plain_turn(
     injection here, because this function NEVER dispatches a tool call: any
     proposed call is a `"fallback"` and `run_agent_turn` re-runs the turn.
     """
-    messages = _ensure_system_prompt(list(messages), locale)
+    messages = _ensure_system_prompt(list(messages), locale, db)
     tools = _tool_schemas()
     provider = get_provider()
     citations: list[dict] = []
@@ -881,7 +897,7 @@ def stream_plain_turn(
     if is_user_turn and (named_song or _is_content_bearing(last_text)):
         hits = search(db, last_text, k=5)
         citations = [_to_citation(hit) for hit in hits]
-        grounded_content = f"{last_text}\n\n{_grounding_block(hits, locale)}"
+        grounded_content = f"{last_text}\n\n{_grounding_block(hits, locale, db)}"
         messages[-1] = {**last, "content": grounded_content}
 
     # Same G5 pre-model short-circuit as `run_agent_turn` — see that

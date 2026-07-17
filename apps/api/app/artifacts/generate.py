@@ -18,6 +18,7 @@ from pydantic import ValidationError
 from app.artifacts.specs import SPECS, validate_spec
 from app.brain.retrieve import search
 from app.i18n import DEFAULT_LOCALE, answer_in, language_directive
+from app.prompts.overrides import resolve
 from app.llm.factory import get_provider
 from app.models.artifact import Artifact
 
@@ -58,9 +59,32 @@ _KIND_PROMPT_GUIDANCE: dict[str, str] = {
 TITLE_MAX_LEN = 300
 
 
+# The artifact prompts, lifted out of the builder byte-identically so the tutor can
+# rewrite them. `{kind}` is "tab"/"chord"/"tone_recipe" — the one thing the app fills
+# in, and the placeholder an edit must keep.
+ARTIFACT_SYSTEM = (
+    "You generate ONLY the JSON spec for a {kind}, matching the given "
+    "schema — no prose, no markdown, no commentary outside the JSON object."
+)
+ARTIFACT_SYSTEM_SLICE_ID = "artifacts.generate"
+
+ARTIFACT_REPAIR = (
+    "\n\nYour previous attempt was INVALID: {repair_error}\n"
+    "Return a corrected spec that fixes this and still matches the schema."
+)
+ARTIFACT_REPAIR_SLICE_ID = "artifacts.repair"
+
+TAB_GUIDANCE_SLICE_ID = "artifacts.tab_guidance"
+
+# kind -> the slice its guidance block is editable under. Keyed on the same `kind`
+# `_KIND_PROMPT_GUIDANCE` is, so the two can be checked against each other rather
+# than drifting: a kind with guidance but no slice is guidance the tutor cannot edit.
+_KIND_GUIDANCE_SLICE_IDS: dict[str, str] = {"tab": TAB_GUIDANCE_SLICE_ID}
+
+
 def _build_messages(
     *, kind: str, prompt: str, hits: list, locale: str = DEFAULT_LOCALE,
-    repair_error: str | None = None,
+    repair_error: str | None = None, source=None,
 ) -> list[dict]:
     """Pure function: the {system,user} messages for one guided_json call —
     kept separate from `generate_artifact` (which also calls the live model)
@@ -100,22 +124,27 @@ def _build_messages(
     it in Greek" and "leave it exactly as it is" have to be said in the same
     breath.
     """
-    system = (
-        f"You generate ONLY the JSON spec for a {kind}, matching the given "
-        "schema — no prose, no markdown, no commentary outside the JSON object."
-    )
+    system = resolve(source, ARTIFACT_SYSTEM_SLICE_ID, ARTIFACT_SYSTEM).format(kind=kind)
     if kind in _KIND_PROMPT_GUIDANCE:
-        system += "\n\n" + _KIND_PROMPT_GUIDANCE[kind]
-    system += "\n\n" + language_directive(locale)
+        # Only `tab` has a guidance block today, and only `tab` has a slice. A
+        # second kind added here without one would silently be unoverridable, so
+        # the map below is keyed rather than special-cased on `kind == "tab"`:
+        # `.get` returning None means "no slice", and `resolve(source, None, ...)`
+        # is not a thing that can be called by accident.
+        guidance = _KIND_PROMPT_GUIDANCE[kind]
+        slice_id = _KIND_GUIDANCE_SLICE_IDS.get(kind)
+        if slice_id is not None:
+            guidance = resolve(source, slice_id, guidance)
+        system += "\n\n" + guidance
+    system += "\n\n" + language_directive(locale, source)
     if hits:
         context = "\n\n".join(f"[{i}] {hit.text}" for i, hit in enumerate(hits, start=1))
-        user = f"{prompt}\n\nCONTEXT:\n{context}\n\n{answer_in(locale)}"
+        user = f"{prompt}\n\nCONTEXT:\n{context}\n\n{answer_in(locale, source)}"
     else:
-        user = f"{prompt}\n\n{answer_in(locale)}"
+        user = f"{prompt}\n\n{answer_in(locale, source)}"
     if repair_error:
-        user += (
-            f"\n\nYour previous attempt was INVALID: {repair_error}\n"
-            "Return a corrected spec that fixes this and still matches the schema."
+        user += resolve(source, ARTIFACT_REPAIR_SLICE_ID, ARTIFACT_REPAIR).format(
+            repair_error=repair_error,
         )
     return [
         {"role": "system", "content": system},
@@ -224,7 +253,9 @@ def generate_artifact(
     schema = SPECS[kind].model_json_schema()
     provider = get_provider()
 
-    messages = _build_messages(kind=kind, prompt=prompt, hits=hits, locale=locale)
+    messages = _build_messages(
+        kind=kind, prompt=prompt, hits=hits, locale=locale, source=db,
+    )
     raw = provider.guided_json(messages, schema)
     try:
         spec = validate_spec(kind, raw)
@@ -235,6 +266,7 @@ def generate_artifact(
         )
         repair_messages = _build_messages(
             kind=kind, prompt=prompt, hits=hits, locale=locale, repair_error=str(e),
+            source=db,
         )
         raw = provider.guided_json(repair_messages, schema)
         spec = validate_spec(kind, raw)  # a second failure propagates uncaught

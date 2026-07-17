@@ -38,7 +38,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.i18n import locale_dep
+from app.i18n import SUPPORTED_LOCALES, locale_dep
 from app.prompts import overrides, registry
 
 router = APIRouter(prefix="/prompts", tags=["prompts"])
@@ -89,10 +89,27 @@ class PromptSummary(BaseModel):
     cache_prefix: bool
     cache_cost_warning: bool
     has_override: bool
+    # True when the model's LANGUAGE for this prompt is decided by the course (which
+    # takes it from the student), not by the cockpit locale. The web shows one Greek
+    # sentence for these and offers the toggle below — see `registry._SAMPLE_COURSE_LANGUAGE`
+    # for the bug this exists to end.
+    language_from_course: bool
 
 
 class PromptDetail(PromptSummary):
+    # STILL RETURNED, deliberately, though the web no longer draws it. Chris: *"on each
+    # prompt i also see where they are inside the code e.g. 'In the code:
+    # app/curriculum/corpus.py:289', i dont think this should be seen by the tutor."*
+    # He is right — a file path is the same category as a stack trace or a status code,
+    # and `settings/page.tsx:22-37` says he sees none of those. But it is load-bearing
+    # HERE: `test_source_refs_point_inside_the_real_definition` is what keeps it honest,
+    # and a developer opening this route is exactly who it is for. Presentation change,
+    # not an API one.
     source_ref: str
+    # The language this preview was rendered at. Only meaningful when
+    # `language_from_course` — it is the answer to "which language am I looking at?",
+    # which the cockpit locale can no longer be trusted to answer for these prompts.
+    course_language: str | None
     text: str
     messages: list[MessageOut]
     spans: list[SpanOut]
@@ -167,6 +184,7 @@ def _summary(entry: registry.PromptEntry, overridden: set[str]) -> dict:
         # and nothing outside it is; collapsing them would make P3 re-derive a
         # rule the API already knows.
         "cache_cost_warning": entry.cache_prefix,
+        "language_from_course": entry.language_from_course,
         "has_override": any(s.id in overridden for s in entry.slices),
     }
 
@@ -188,6 +206,7 @@ def list_prompts(db: Session = Depends(get_db)) -> list[PromptSummary]:
 @router.get("/{prompt_id}", response_model=PromptDetail)
 def get_prompt(
     prompt_id: str,
+    course_language: str | None = None,
     db: Session = Depends(get_db),
     locale: str = Depends(locale_dep),
 ) -> PromptDetail:
@@ -199,11 +218,20 @@ def get_prompt(
     a prompt this app never sends.
     """
     entry = _entry(prompt_id)
-    rendered = entry.render(locale, db)
+    if course_language is not None and course_language not in SUPPORTED_LOCALES:
+        # Not a 422: a language is a presentation preference, not user input to be
+        # validated (`i18n.normalize_locale` NEVER raises, for the same reason). An
+        # unknown value falls back to the sample course's own language.
+        course_language = None
+    rendered = entry.render(locale, db, course_language)
     overridden = overrides.overridden_ids(db)
     return PromptDetail(
         **_summary(entry, overridden),
         source_ref=entry.source_ref,
+        course_language=(
+            registry.course_language_of(course_language)
+            if entry.language_from_course else None
+        ),
         text=rendered.text,
         messages=[MessageOut(**vars(m)) for m in rendered.messages],
         spans=[SpanOut(**vars(s)) for s in rendered.spans],

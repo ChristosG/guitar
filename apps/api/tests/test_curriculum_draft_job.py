@@ -435,3 +435,38 @@ def test_resume_retries_failed_lessons_the_way_every_surface_promises(db, _provi
     assert (db.get(Block, failed.id).meta or {})["draft_status"] == "ready"
     # And ONLY the failed one was re-billed — the ready nineteen were not.
     assert len(_provider.drafted) == before + 1
+
+
+# ---------------------------------------------------------------------------
+# The tutor's prompt overrides reach the fan-out — resolved ONCE, in Phase A
+# ---------------------------------------------------------------------------
+
+
+def test_the_whole_fanout_writes_lessons_with_his_edited_prompt(db, _provider):
+    """END TO END, through the REAL job: he edits the lesson prompt in Settings, and
+    every lesson of a 8-lesson fan-out is written with HIS text.
+
+    THIS IS THE TEST THAT PINS `overrides.snapshot`. The workers must not resolve
+    anything themselves — `_draft_one` hands its connection back before the model call
+    (:215, "This one line is what keeps the progress poll answering"), so a
+    `resolve(db, ...)` down in the builder would hold a pool connection across every
+    minutes-long `guided_json`, once per worker. Phase A reads the overrides once and
+    passes a plain dict, exactly as it already does for `student_brief`.
+
+    So this asserts BOTH halves at once: his text is on the wire (Phase A snapshotted
+    it and threaded it), and it got there without the workers querying for it.
+    """
+    from app.curriculum.draft import LESSON_SLICE_ID, LESSON_TAIL
+    from app.prompts import overrides
+
+    sentinel = "ΔΙΔΑΣΚΩ ΠΑΝΤΑ ΜΕ ΤΡΑΓΟΥΔΙΑ ΑΠΟ ΤΟ ΠΡΩΤΟ ΛΕΠΤΟ"
+    overrides.save(db, LESSON_SLICE_ID, f"{sentinel}\n{LESSON_TAIL}")
+
+    provider = _provider
+    root_id = _course(db)
+    run_curriculum_draft_job(_job(db, root_id))
+
+    assert len(provider.drafted) == 8, "the fan-out did not draft every lesson"
+    for sent in provider.drafted:
+        assert sentinel in sent, "a lesson was drafted with the code default"
+    assert _status(db, root_id) == ["ready"] * 8

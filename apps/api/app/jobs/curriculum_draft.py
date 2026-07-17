@@ -55,6 +55,7 @@ from app.db import SessionLocal
 from app.llm.errors import LLMError, LLMNotConfigured
 from app.models.block import Block
 from app.models.generation_job import GenerationJob
+from app.prompts import overrides
 from app.students.context import build_student_brief
 
 log = logging.getLogger(__name__)
@@ -206,6 +207,7 @@ def _draft_one(lesson_id: uuid.UUID, plan: dict) -> None:
         language = lesson.language
         source_ids = plan["source_ids"]
         student_brief = plan["student_brief"]
+        prompts = plan["prompts"]
         course_brief = plan["course_brief"]
         # HAND THE CONNECTION BACK before the model call. `expire_on_commit=False`
         # (app/db.py) keeps every attribute read above usable afterwards; `close()`
@@ -224,7 +226,8 @@ def _draft_one(lesson_id: uuid.UUID, plan: dict) -> None:
     try:
         lesson_json, m = draft_lesson(
             db, ctx=ctx, library=library, language=language,
-            student_brief=student_brief, course_brief=course_brief, source_ids=source_ids,
+            student_brief=student_brief, course_brief=course_brief,
+            source_ids=source_ids, prompts=prompts,
         )
     except LLMNotConfigured:
         # The key vanished mid-run (cleared in Settings, or ENCRYPTION_SECRET
@@ -320,6 +323,13 @@ def run_curriculum_draft_job(job_id: uuid.UUID) -> None:
 
         library = build_library_context(db, source_ids)
         student_brief = build_student_brief(db, student_id)
+        # THE TUTOR'S PROMPT OVERRIDES, resolved ONCE, here, where a session is
+        # legitimately held — never inside a worker. `_draft_one` hands its
+        # connection back before the model call on purpose (see its :215 comment and
+        # this module's own docstring on the pool); a `resolve(db, ...)` down there
+        # would hold one for the whole call, per worker. Same move this function
+        # already makes for `student_brief` two lines up, and for the same reason.
+        prompt_overrides = overrides.snapshot(db)
 
         lesson_ids = _queued_lesson_ids(db, root_id)
         positions = _positions(db, root_id)
@@ -327,6 +337,7 @@ def run_curriculum_draft_job(job_id: uuid.UUID) -> None:
         plan = {
             "library": library,
             "student_brief": student_brief,
+            "prompts": prompt_overrides,
             "course_brief": meta.get("brief"),
             "source_ids": source_ids,
             "positions": positions,

@@ -47,6 +47,7 @@ from app.curriculum.depth import (
 from app.curriculum.ground import ground_topic
 from app.curriculum.outline import TIER_GENERAL, TIER_LIBRARY, TIER_WEB
 from app.i18n import answer_in, language_directive
+from app.prompts.overrides import resolve
 from app.llm.factory import get_provider
 
 log = logging.getLogger(__name__)
@@ -72,30 +73,104 @@ class LessonContext:
     floor_words: int
 
 
-def _tier_directive(tier: str) -> str:
+# The three tier directives, lifted byte-identically so the tutor can rewrite each.
+#
+# NOTE FOR ANY FUTURE EDIT OF THIS FILE: `TIER_LIBRARY_DIRECTIVE` contains a LITERAL
+# `{source_id, page}` — it is showing the model the citation shape, not interpolating
+# anything. So these three are resolved and NEVER `.format()`-ed. (They are safe to
+# substitute INTO the lesson tail below, because `str.format` scans only the template
+# it is called on, never the values it substitutes.)
+TIER_LIBRARY_DIRECTIVE = (
+    "THIS MODULE IS GROUNDED IN HIS LIBRARY. Teach it from the pages above. "
+    "Quote and paraphrase HIS material, and cite the page you used on every "
+    "section — {source_id, page} against the <source> ids and [p.N] markers "
+    "you were given. Cite ONLY pages you actually read. Do not invent a page "
+    "number; an empty citations array is always better than a wrong one."
+)
+TIER_LIBRARY_SLICE_ID = "lesson.tier_library"
+
+TIER_WEB_DIRECTIVE = (
+    "His library does not cover this module, and it needs current "
+    "information. Write it from your general knowledge, and say plainly "
+    "inside the prose where a fact would need checking against a current "
+    "source. Cite nothing to his library — you did not read it there. "
+    "Leave every citations array empty."
+)
+TIER_WEB_SLICE_ID = "lesson.tier_web"
+
+TIER_GENERAL_DIRECTIVE = (
+    "HIS LIBRARY DOES NOT COVER THIS MODULE — he has agreed to it being written "
+    "from your general knowledge instead, and it will be LABELLED as such for "
+    "him. So write it well, but cite NOTHING to his library: you did not read "
+    "this there. Leave every citations array empty. A fabricated page number is "
+    "the one thing that would make this dishonest."
+)
+TIER_GENERAL_SLICE_ID = "lesson.gap"
+
+
+def _tier_directive(tier: str, source=None) -> str:
     if tier == TIER_LIBRARY:
-        return (
-            "THIS MODULE IS GROUNDED IN HIS LIBRARY. Teach it from the pages above. "
-            "Quote and paraphrase HIS material, and cite the page you used on every "
-            "section — {source_id, page} against the <source> ids and [p.N] markers "
-            "you were given. Cite ONLY pages you actually read. Do not invent a page "
-            "number; an empty citations array is always better than a wrong one."
-        )
+        return resolve(source, TIER_LIBRARY_SLICE_ID, TIER_LIBRARY_DIRECTIVE)
     if tier == TIER_WEB:
-        return (
-            "His library does not cover this module, and it needs current "
-            "information. Write it from your general knowledge, and say plainly "
-            "inside the prose where a fact would need checking against a current "
-            "source. Cite nothing to his library — you did not read it there. "
-            "Leave every citations array empty."
-        )
-    return (
-        "HIS LIBRARY DOES NOT COVER THIS MODULE — he has agreed to it being written "
-        "from your general knowledge instead, and it will be LABELLED as such for "
-        "him. So write it well, but cite NOTHING to his library: you did not read "
-        "this there. Leave every citations array empty. A fabricated page number is "
-        "the one thing that would make this dishonest."
-    )
+        return resolve(source, TIER_WEB_SLICE_ID, TIER_WEB_DIRECTIVE)
+    return resolve(source, TIER_GENERAL_SLICE_ID, TIER_GENERAL_DIRECTIVE)
+
+
+# THE LESSON PROMPT, lifted out of the builder byte-identically so the tutor can
+# rewrite it. This and `curriculum.outline` are the two Chris named — they are where
+# his teaching philosophy belongs, and until now he could not reach either.
+#
+# The conditional tails (`{course_brief_block}` … `{deepen_block}`) are empty strings
+# when absent, which is exactly what the `if course_brief:` appends did.
+# `tests/test_prompts_byte_identity.py` holds that claim to the byte.
+LESSON_TAIL = (
+    "YOUR TASK: write ONE complete lesson — the actual pages the tutor will "
+    "teach from, not a plan for them.\n"
+    "\nCOURSE: {course_title}\n"
+    "MODULE: {module_title} — {module_objective}\n"
+    "LESSON: {lesson_title} — {lesson_objective}\n"
+    "POSITION: {position}. Do not re-teach what earlier lessons covered; "
+    "build on it.\n"
+    "\nLENGTH IS NOT OPTIONAL. This lesson is {teaching_minutes} minutes "
+    "of teaching plus a Q&A block, and it must run to about "
+    "{target_words} words in total across its sections — roughly four to "
+    "five pages. A lesson under {floor_words} words is a rejected "
+    "lesson: it will be sent back to you to be written properly. Write the "
+    "theory out in full, in real paragraphs. Do not write bullet points and "
+    "call them a lesson.\n"
+    "\n{tier_directive}\n"
+    "\n{language_directive}"
+    "{course_brief_block}"
+    "{student_brief_block}"
+    "{retrieved_block}"
+    "{deepen_block}"
+    "\n\n{answer_in}"
+)
+LESSON_SLICE_ID = "lesson.draft"
+
+LESSON_COURSE_BRIEF_BLOCK = "\n\nWHAT THE TUTOR WANTS FROM THIS COURSE:\n{course_brief}"
+LESSON_STUDENT_BRIEF_BLOCK = "\n\n{student_brief}"
+
+# The oversized-library fallback: the whole book did not fit, so this lesson gets the
+# passages retrieval found for it instead. The tutor is told this on the board
+# (`meta.library.full_context = false`).
+LESSON_RETRIEVED_BLOCK = (
+    "\n\nHis library was too large to read in full for this course, so here "
+    "are the passages retrieved for THIS lesson. Ground it in these, and "
+    "cite them:\n\n{retrieved}"
+)
+LESSON_RETRIEVED_SLICE_ID = "lesson.draft.retrieved"
+
+LESSON_DEEPEN_BLOCK = (
+    "\n\nYOUR PREVIOUS DRAFT CAME BACK AT {total_words} WORDS — "
+    "under the {floor}-word floor. Rewrite it in full, keeping "
+    "what is good, and EXPAND these sections, which are the thin ones: "
+    "{thin}. Add real teaching substance — worked explanations, more "
+    "exercises, the things students actually ask — not padding, and not a "
+    "longer introduction.\n\nYOUR PREVIOUS DRAFT:\n"
+    "{previous}"
+)
+LESSON_DEEPEN_SLICE_ID = "lesson.deepen"
 
 
 def build_lesson_messages(
@@ -108,6 +183,7 @@ def build_lesson_messages(
     retrieved: str | None = None,
     deepen: Measurement | None = None,
     previous: dict | None = None,
+    source=None,
 ) -> list[dict]:
     """The messages for one lesson draft. Pure.
 
@@ -121,56 +197,52 @@ def build_lesson_messages(
     `deepen`/`previous` turn this into the deepen prompt: same prefix (still a
     cache hit), plus the previous draft and the sections that came back thin.
     """
-    messages = prefix_messages(library)
+    messages = prefix_messages(library, source)
 
     # ---- volatile, and strictly after the cache breakpoint ----
-    tail = [
-        "YOUR TASK: write ONE complete lesson — the actual pages the tutor will "
-        "teach from, not a plan for them.",
-        f"\nCOURSE: {ctx.course_title}",
-        f"MODULE: {ctx.module_title} — {ctx.module_objective}",
-        f"LESSON: {ctx.lesson_title} — {ctx.lesson_objective}",
-        f"POSITION: {ctx.position}. Do not re-teach what earlier lessons covered; "
-        f"build on it.",
-        f"\nLENGTH IS NOT OPTIONAL. This lesson is {ctx.teaching_minutes} minutes "
-        f"of teaching plus a Q&A block, and it must run to about "
-        f"{ctx.target_words:,} words in total across its sections — roughly four to "
-        f"five pages. A lesson under {ctx.floor_words:,} words is a rejected "
-        "lesson: it will be sent back to you to be written properly. Write the "
-        "theory out in full, in real paragraphs. Do not write bullet points and "
-        "call them a lesson.",
-        f"\n{_tier_directive(ctx.tier)}",
-        f"\n{language_directive(language)}",
-    ]
-    if course_brief:
-        tail.append(f"\nWHAT THE TUTOR WANTS FROM THIS COURSE:\n{course_brief}")
-    if student_brief:
-        tail.append(f"\n{student_brief}")
-    if retrieved:
-        # The oversized-library fallback: the whole book did not fit, so this
-        # lesson gets the passages retrieval found for it instead. The tutor is
-        # told this on the board (`meta.library.full_context = false`).
-        tail.append(
-            "\nHis library was too large to read in full for this course, so here "
-            "are the passages retrieved for THIS lesson. Ground it in these, and "
-            f"cite them:\n\n{retrieved}"
-        )
+    deepen_block = ""
     if deepen is not None and previous is not None:
         import json
 
-        thin = ", ".join(deepen.thin_sections) or "all of them"
-        tail.append(
-            f"\nYOUR PREVIOUS DRAFT CAME BACK AT {deepen.total_words:,} WORDS — "
-            f"under the {deepen.floor:,}-word floor. Rewrite it in full, keeping "
-            f"what is good, and EXPAND these sections, which are the thin ones: "
-            f"{thin}. Add real teaching substance — worked explanations, more "
-            f"exercises, the things students actually ask — not padding, and not a "
-            f"longer introduction.\n\nYOUR PREVIOUS DRAFT:\n"
-            f"{json.dumps(previous, ensure_ascii=False)}"
+        deepen_block = resolve(
+            source, LESSON_DEEPEN_SLICE_ID, LESSON_DEEPEN_BLOCK,
+        ).format(
+            total_words=f"{deepen.total_words:,}",
+            floor=f"{deepen.floor:,}",
+            thin=", ".join(deepen.thin_sections) or "all of them",
+            previous=json.dumps(previous, ensure_ascii=False),
         )
-    tail.append(f"\n{answer_in(language)}")
 
-    messages.append({"role": "user", "content": "\n".join(tail)})
+    content = resolve(source, LESSON_SLICE_ID, LESSON_TAIL).format(
+        course_title=ctx.course_title,
+        module_title=ctx.module_title,
+        module_objective=ctx.module_objective,
+        lesson_title=ctx.lesson_title,
+        lesson_objective=ctx.lesson_objective,
+        position=ctx.position,
+        teaching_minutes=ctx.teaching_minutes,
+        target_words=f"{ctx.target_words:,}",
+        floor_words=f"{ctx.floor_words:,}",
+        tier_directive=_tier_directive(ctx.tier, source),
+        language_directive=language_directive(language, source),
+        course_brief_block=(
+            LESSON_COURSE_BRIEF_BLOCK.format(course_brief=course_brief)
+            if course_brief else ""
+        ),
+        student_brief_block=(
+            LESSON_STUDENT_BRIEF_BLOCK.format(student_brief=student_brief)
+            if student_brief else ""
+        ),
+        retrieved_block=(
+            resolve(
+                source, LESSON_RETRIEVED_SLICE_ID, LESSON_RETRIEVED_BLOCK,
+            ).format(retrieved=retrieved) if retrieved else ""
+        ),
+        deepen_block=deepen_block,
+        answer_in=answer_in(language, source),
+    )
+
+    messages.append({"role": "user", "content": content})
     return messages
 
 
@@ -220,7 +292,20 @@ def strip_invalid_citations(lesson: dict, library: LibraryContext) -> dict:
     return lesson
 
 
-def _repair_message(bad: list[tuple[str, str, int]], library: LibraryContext) -> dict:
+REPAIR_MESSAGE = (
+    "STOP. You cited pages that do not exist in what I gave you: {detail}. "
+    "The library you were shown has: {available}. The tutor CLICKS these "
+    "citations and lands on the page — a wrong page number is worse than no "
+    "citation at all. Produce the whole lesson again, identical in "
+    "substance, citing ONLY [p.N] markers you actually read. Where you are "
+    "not certain of the page, use an empty citations array."
+)
+REPAIR_SLICE_ID = "lesson.repair"
+
+
+def _repair_message(
+    bad: list[tuple[str, str, int]], library: LibraryContext, source=None,
+) -> dict:
     detail = "; ".join(f"{name} cites {ref} p.{page}" for name, ref, page in bad)
     available = ", ".join(
         f"{ref} has pages {min(pages)}-{max(pages)}"
@@ -228,13 +313,8 @@ def _repair_message(bad: list[tuple[str, str, int]], library: LibraryContext) ->
     ) or "no sources at all"
     return {
         "role": "user",
-        "content": (
-            f"STOP. You cited pages that do not exist in what I gave you: {detail}. "
-            f"The library you were shown has: {available}. The tutor CLICKS these "
-            f"citations and lands on the page — a wrong page number is worse than no "
-            f"citation at all. Produce the whole lesson again, identical in "
-            f"substance, citing ONLY [p.N] markers you actually read. Where you are "
-            f"not certain of the page, use an empty citations array."
+        "content": resolve(source, REPAIR_SLICE_ID, REPAIR_MESSAGE).format(
+            detail=detail, available=available,
         ),
     }
 
@@ -252,6 +332,7 @@ def draft_lesson(
     student_brief: str | None = None,
     course_brief: str | None = None,
     source_ids: list[uuid.UUID] | None = None,
+    prompts: dict[str, str] | None = None,
 ) -> tuple[dict, Measurement]:
     """One lesson: draft -> validate citations (one repair) -> measure -> at most
     one deepen pass. Returns `(lesson, measurement)`.
@@ -261,6 +342,18 @@ def draft_lesson(
     database access at all — which is what lets `jobs/curriculum_draft.py` run it
     on a worker thread holding no connection while the board polls progress on the
     request path.
+
+    `prompts` IS AN ALREADY-RESOLVED SNAPSHOT (`overrides.snapshot`), NOT A SESSION,
+    AND THAT IS THE WHOLE POINT. The tutor's prompt overrides have to reach this
+    call, but reading them HERE would mean a `db.get` inside `build_lesson_messages`
+    — which would check a connection back out of the pool and hold it for the entire
+    multi-minute model call, once per concurrent worker, undoing the `db.close()`
+    that `jobs/curriculum_draft.py:_draft_one` performs three lines before calling
+    this ("HAND THE CONNECTION BACK before the model call ... This one line is what
+    keeps the progress poll answering"). So Phase A resolves once and hands the
+    workers a plain dict — exactly what it already does with `student_brief`.
+
+    `None` means the code defaults, which is what an un-edited install sends.
     """
     provider = get_provider()
 
@@ -277,6 +370,7 @@ def draft_lesson(
     messages = build_lesson_messages(
         ctx=ctx, library=library, language=language,
         student_brief=student_brief, course_brief=course_brief, retrieved=retrieved,
+        source=prompts,
     )
     lesson = provider.guided_json(messages, LESSON_DRAFT_SCHEMA, role="draft")
 
@@ -285,7 +379,8 @@ def draft_lesson(
         log.warning("lesson %r cited %d page(s) it was never shown — repairing",
                     ctx.lesson_title, len(bad))
         repaired = provider.guided_json(
-            [*messages, _repair_message(bad, library)], LESSON_DRAFT_SCHEMA, role="draft",
+            [*messages, _repair_message(bad, library, prompts)], LESSON_DRAFT_SCHEMA,
+            role="draft",
         )
         lesson = repaired
         if invalid_citations(lesson, library):
@@ -303,7 +398,7 @@ def draft_lesson(
             build_lesson_messages(
                 ctx=ctx, library=library, language=language,
                 student_brief=student_brief, course_brief=course_brief,
-                retrieved=retrieved, deepen=m, previous=lesson,
+                retrieved=retrieved, deepen=m, previous=lesson, source=prompts,
             ),
             LESSON_DRAFT_SCHEMA, role="draft",
         )

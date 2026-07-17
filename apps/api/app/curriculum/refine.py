@@ -24,6 +24,7 @@ uncited general-knowledge one that still has the citation chip attached.
 from __future__ import annotations
 
 from app.i18n import answer_in, language_directive
+from app.prompts.overrides import resolve
 from app.llm.factory import get_provider
 
 REFINE_SCHEMA: dict = {
@@ -43,6 +44,39 @@ REFINE_SCHEMA: dict = {
 }
 
 
+# THE REFINE PROMPT, lifted out of the builder byte-identically so the tutor can
+# rewrite it. Two slices, because the model reads two messages: the SYSTEM half is the
+# editing philosophy ("this is HIS work, he asked for one edit, not a rewrite"), and
+# the USER half is the block and his instruction. He is likeliest to want the first.
+REFINE_SYSTEM = (
+    "You are editing ONE block of a guitar teacher's lesson, on his "
+    "instruction. Output ONLY the JSON object.\n\n"
+    "REWRITE THE WHOLE BLOCK, in full. Do the thing he asked and change "
+    "nothing else — this is HIS work, and he asked for one edit, not a "
+    "rewrite. If his instruction only touches one paragraph, the rest of the "
+    "block should come back recognisably the same.\n\n"
+    "NEVER invent a page citation. The provenance below is what this block was "
+    "written from; if your edit goes beyond it, say so in the prose rather "
+    "than attaching a page number to it.\n\n"
+    "{language_directive}"
+)
+REFINE_SYSTEM_SLICE_ID = "curriculum.refine"
+
+REFINE_USER = (
+    "BLOCK ({kind}): {title}\n"
+    "\n"
+    "{body}"
+    "{citations_block}"
+    "{context_block}"
+    "\n\nWHAT THE TUTOR WANTS CHANGED:\n{instruction}\n"
+    "\n{answer_in}"
+)
+REFINE_USER_SLICE_ID = "curriculum.refine.user"
+
+REFINE_CITATIONS_BLOCK = "\n\nTHIS BLOCK WAS WRITTEN FROM: {cited}"
+REFINE_CONTEXT_BLOCK = "\n\nFROM HIS LIBRARY:\n{context}"
+
+
 def build_refine_messages(
     *,
     instruction: str,
@@ -52,38 +86,36 @@ def build_refine_messages(
     language: str,
     citations: list[dict] | None = None,
     context: str | None = None,
+    source=None,
 ) -> list[dict]:
     """Pure. The tutor's instruction is the LAST thing the model reads, after the
     block and its provenance — recency wins, and what he typed is the point of the
     call."""
-    system = (
-        "You are editing ONE block of a guitar teacher's lesson, on his "
-        "instruction. Output ONLY the JSON object.\n\n"
-        "REWRITE THE WHOLE BLOCK, in full. Do the thing he asked and change "
-        "nothing else — this is HIS work, and he asked for one edit, not a "
-        "rewrite. If his instruction only touches one paragraph, the rest of the "
-        "block should come back recognisably the same.\n\n"
-        "NEVER invent a page citation. The provenance below is what this block was "
-        "written from; if your edit goes beyond it, say so in the prose rather "
-        "than attaching a page number to it.\n\n"
-        f"{language_directive(language)}"
+    system = resolve(source, REFINE_SYSTEM_SLICE_ID, REFINE_SYSTEM).format(
+        language_directive=language_directive(language, source),
     )
 
-    parts = [f"BLOCK ({kind}): {title}", "", body]
-    if citations:
-        cited = ", ".join(
-            f"{c.get('source_title') or c.get('source_ref')} p.{c.get('page')}"
-            for c in citations
-        )
-        parts.append(f"\nTHIS BLOCK WAS WRITTEN FROM: {cited}")
-    if context:
-        parts.append(f"\nFROM HIS LIBRARY:\n{context}")
-    parts.append(f"\nWHAT THE TUTOR WANTS CHANGED:\n{instruction}")
-    parts.append(f"\n{answer_in(language)}")
+    cited = ", ".join(
+        f"{c.get('source_title') or c.get('source_ref')} p.{c.get('page')}"
+        for c in (citations or [])
+    )
+    user = resolve(source, REFINE_USER_SLICE_ID, REFINE_USER).format(
+        kind=kind,
+        title=title,
+        body=body,
+        citations_block=(
+            REFINE_CITATIONS_BLOCK.format(cited=cited) if citations else ""
+        ),
+        context_block=(
+            REFINE_CONTEXT_BLOCK.format(context=context) if context else ""
+        ),
+        instruction=instruction,
+        answer_in=answer_in(language, source),
+    )
 
     return [
         {"role": "system", "content": system},
-        {"role": "user", "content": "\n".join(parts)},
+        {"role": "user", "content": user},
     ]
 
 
@@ -123,6 +155,7 @@ def refine_block(db, block, instruction: str) -> dict:
             kind=block.kind,
             language=block.language,
             citations=citations,
+            source=db,
             context=context,
         ),
         REFINE_SCHEMA,

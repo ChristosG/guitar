@@ -28,6 +28,8 @@ from app.llm.errors import LLMError
 from app.llm.factory import get_ocr_provider
 from app.models.generation_job import GenerationJob
 from app.models.knowledge import Chunk, KnowledgeSource, Page
+from app.prompts import overrides
+from app.prompts.overrides import resolve
 from app.settings_store import resolve_llm_config
 
 log = logging.getLogger(__name__)
@@ -179,6 +181,9 @@ OCR_PROMPT = (
 # It must never ask for a transcription. Asking would buy a vision call to
 # re-derive text we already hold — this plan's top severity class — and the
 # answer would then be appended to the very text it duplicates.
+FIGURE_SLICE_ID = "ocr.figure"
+OCR_SLICE_ID = "ocr.transcribe"
+
 FIGURE_PROMPT = (
     "You are looking at one page of a printed guitar instruction book. Its text "
     "has already been captured perfectly and is NOT your job — do not transcribe "
@@ -467,7 +472,7 @@ def _marked(description: str) -> str:
     return f"{FIGURE_MARKER}\n{_ANY_FIGURE_MARKER.sub('', text).strip()}\n{FIGURE_END}"
 
 
-def _vision_task_for(page: Page) -> _VisionTask:
+def _vision_task_for(page: Page, prompts=None) -> _VisionTask:
     """THE BRANCH THIS MODULE DID NOT HAVE, and whose absence was live.
 
     `ocr_source` selected pages on `Page.status` alone and never read
@@ -501,7 +506,8 @@ def _vision_task_for(page: Page) -> _VisionTask:
         # instead would only throw away a correct description of one of Powers'
         # 43 tab pages. On the transcribe path the same repair WOULD be a guess —
         # see `_UnclosedFigureRegion`.
-        return _VisionTask(mode="describe", prompt=FIGURE_PROMPT,
+        return _VisionTask(mode="describe",
+                           prompt=resolve(prompts, FIGURE_SLICE_ID, FIGURE_PROMPT),
                            preserved_text=preserved, screens_ocr_garbage=False,
                            screens_figure_markup=False)
     # `screens_ocr_garbage` is False above, and that is a decision, not an
@@ -512,7 +518,8 @@ def _vision_task_for(page: Page) -> _VisionTask:
     # page failed, and the pages it would throw away are precisely Powers' 43 tab
     # pages, which is what `image_region` exists for. Mojibake
     # (`_looks_like_garbage`, a unicode-category screen) still applies to both.
-    return _VisionTask(mode="transcribe", prompt=OCR_PROMPT,
+    return _VisionTask(mode="transcribe",
+                       prompt=resolve(prompts, OCR_SLICE_ID, OCR_PROMPT),
                        preserved_text="", screens_ocr_garbage=True,
                        screens_figure_markup=True)
 
@@ -590,6 +597,14 @@ def ocr_source(db, source_id) -> OcrResult:
     embedder = get_embedder()
     reader = _current_text_source()          # which model is doing this run's reading
     ready = failed = 0
+    # The tutor's prompt overrides, resolved ONCE for the whole run rather than per
+    # page. Two reasons, and the second is the one that matters: a `resolve(db, ...)`
+    # inside the loop would be a query per page — 888 of them on this library — and it
+    # would sit between `db.commit()` and the vision call, holding a pool connection
+    # across every one. The prompt cannot change mid-run anyway; a book read under two
+    # different prompts because he saved an edit at page 400 would be worse than
+    # either prompt alone.
+    prompts = overrides.snapshot(db)
 
     for page in pages:
         if page.image_path is None:
@@ -618,7 +633,7 @@ def ocr_source(db, source_id) -> OcrResult:
         # question we ask and the text we must not lose are one value, fixed for
         # this pickup, rather than something re-derived from a row that the
         # error paths below rollback and re-fetch.
-        task = _vision_task_for(page)
+        task = _vision_task_for(page, prompts)
         try:
             response = _transcribe_with_retry(provider, page, task)
         except LLMError as e:

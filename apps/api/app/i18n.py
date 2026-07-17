@@ -97,33 +97,60 @@ def language_name(locale: str) -> str:
     return _LANGUAGE_NAMES[normalize_locale(locale)]
 
 
-def language_directive(locale: str) -> str:
+# THE LANGUAGE RULE, lifted out of `language_directive` byte-identically so the
+# tutor can rewrite it and `app/prompts/registry.py` can point at it.
+#
+# `{name}` and `{code}` are the LOCALE, filled in at call time — which is why ONE
+# override covers both languages: what he edits is the rule, not the Greek. The
+# placeholders are also why `overrides.validate` refuses an edit that drops one:
+# a directive that no longer names a language is a directive that says nothing,
+# and it would fail silently, in the one place this app cannot afford it
+# (`prompt-cache`/`retrieval` both assume this line holds).
+LANGUAGE_DIRECTIVE = (
+    "LANGUAGE: write everything you produce in {name} ({code}) — every "
+    "title, body, explanation and label. The tutor's library is written in "
+    "ENGLISH; read it as it is and answer in "
+    "{name} anyway. When you QUOTE that material, keep the quoted words in "
+    "ENGLISH, verbatim — never translate a quotation; explain it in "
+    "{name} around the quote instead. NEVER translate or transliterate "
+    "machine tokens, in any language: alphaTex notation, note and chord "
+    "names (C, Am7, G7), tunings (Drop D, E A D G B E), fret/string "
+    "numbers, and gear or model names (Tube Screamer, TS-808, 5150). Those "
+    "are written the same way in every language."
+)
+LANGUAGE_DIRECTIVE_SLICE_ID = "shared.language_directive"
+
+ANSWER_IN = "Answer in {name} ({code})."
+ANSWER_IN_SLICE_ID = "shared.answer_in"
+
+
+def language_directive(locale: str, source=None) -> str:
     """THE language rule, in one place, for every prompt builder in the app
     (`brain/retrieve.py`, `lessons/draft.py`, `curriculum/generate.py` ×3,
     `artifacts/generate.py`, and the agent loop's system prompt).
 
     See this module's docstring for why each clause is here. Written as a
     directive to the model, not as prose about the model.
+
+    `source` is the tutor's overrides (a Session, a `snapshot()` mapping, or None
+    for the code default) — see `app/prompts/overrides.py`. It is threaded rather
+    than looked up globally because this module is a LEAF: eight builders call it,
+    and a global would make the answer depend on which request last touched it.
     """
-    name = language_name(locale)
-    code = normalize_locale(locale)
-    return (
-        f"LANGUAGE: write everything you produce in {name} ({code}) — every "
-        "title, body, explanation and label. The tutor's library is written in "
-        "ENGLISH; read it as it is and answer in "
-        f"{name} anyway. When you QUOTE that material, keep the quoted words in "
-        "ENGLISH, verbatim — never translate a quotation; explain it in "
-        f"{name} around the quote instead. NEVER translate or transliterate "
-        "machine tokens, in any language: alphaTex notation, note and chord "
-        "names (C, Am7, G7), tunings (Drop D, E A D G B E), fret/string "
-        "numbers, and gear or model names (Tube Screamer, TS-808, 5150). Those "
-        "are written the same way in every language."
+    from app.prompts.overrides import resolve
+
+    return resolve(source, LANGUAGE_DIRECTIVE_SLICE_ID, LANGUAGE_DIRECTIVE).format(
+        name=language_name(locale), code=normalize_locale(locale),
     )
 
 
-def answer_in(locale: str) -> str:
+def answer_in(locale: str, source=None) -> str:
     """The short tail reminder (see this module's docstring: recency beats the
     system prompt when a long English passage sits immediately before the
     generation point). Appended at the END of a grounding/CONTEXT block.
     """
-    return f"Answer in {language_name(locale)} ({normalize_locale(locale)})."
+    from app.prompts.overrides import resolve
+
+    return resolve(source, ANSWER_IN_SLICE_ID, ANSWER_IN).format(
+        name=language_name(locale), code=normalize_locale(locale),
+    )
