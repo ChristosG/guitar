@@ -31,6 +31,7 @@ The font name is not a heuristic. It is a fact, and it is free.
 """
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 # What OCR tools name the invisible text layer they lay over a scan. Substring,
@@ -44,10 +45,23 @@ TextLayerKind = Literal["none", "ocr", "digital"]
 def text_layer_kind(page) -> TextLayerKind:
     """`none` | `ocr` | `digital` — from the page's fonts.
 
-    `digital` means real embedded fonts: publisher text, trustworthy, free.
-    `ocr` means every span is glyphless: an invisible layer over a scan, whose
-    quality is whatever some upstream tool produced. We do not inherit it.
-    `none` means no text at all — the pre-existing vision path.
+    `digital` means every span on the page is a real embedded font: publisher
+    text, trustworthy, free. `ocr` means AT LEAST ONE span is glyphless: an
+    invisible layer over a scan, whose quality is whatever some upstream tool
+    produced. We do not inherit it. `none` means no text at all — the
+    pre-existing vision path.
+
+    ANY, not ALL — deliberately. This used to be `all(...)`: a page counted
+    as `ocr` only if every span was glyphless, so a single real-font span
+    (a stamped page number, a running header, a watermark added after
+    scanning) flipped the WHOLE page to `digital` and it was adopted as
+    permanent truth, fraction-glyph loss and all. The costs of the two
+    directions are not symmetric, so the polarity should not be either:
+    wrongly sending a good page to vision costs one extra vision call;
+    wrongly trusting a bad page corrupts the library permanently, because
+    `ready` means nothing ever looks at that page again — and the corruption
+    is the confident-but-wrong kind ("¼-inch" -> "4-inch") that reads as
+    fine. A page is judged by its worst span, not its best one.
     """
     fonts = {
         (span.get("font") or "")
@@ -57,7 +71,7 @@ def text_layer_kind(page) -> TextLayerKind:
     }
     if not fonts or not (page.get_text() or "").strip():
         return "none"
-    if all(GLYPHLESS_MARKER in font or not font for font in fonts):
+    if any(GLYPHLESS_MARKER in font for font in fonts):
         return "ocr"
     return "digital"
 
@@ -71,16 +85,38 @@ def text_layer_kind(page) -> TextLayerKind:
 #
 # 9 of 617 pages (~1.5%) across the three scanned books are like this. The tell
 # is unmistakable and needs no model: real prose is mostly multi-character words.
+#
+# BUT a length-only stub count is too blunt: string-name charts ("E A D G B E
+# E A D G B E  1 3 5 b7") and fret/finger charts ("1 2 3 4  1 3 4 1  2 4 1 3
+# T 1 2 3") are staple content in a guitar instructional book, and they are
+# made almost entirely of tokens <= 2 characters. Counting those as stubs put
+# real, correctly-transcribed pages of real content over the garbage line.
+# `_MUSICAL_TOKEN` exempts tokens built only from note letters, digits, and
+# tab/chord punctuation from the stub count, so short-but-musical text no
+# longer counts against a page.
 _MIN_LEN_TO_JUDGE = 40
 _MIN_TOKENS_TO_JUDGE = 20
 _STUB_TOKEN_RATIO = 0.55
+
+# Note letters (A-G), flat/sharp/x-string markers (b, #, x, X), fret-hand
+# fingering (t, T for thumb), digits, and the punctuation tab/chord charts are
+# written in (/ for slash chords, | for bar lines, : for repeats, - for muted
+# strings or ranges, . for dotted values). A token made ONLY of these is
+# musical notation, not noise, no matter how short.
+_MUSICAL_TOKEN = re.compile(r"^[A-Gb#xXtT0-9/|:\-\.]+$")
 
 
 def looks_like_ocr_garbage(text: str) -> bool:
     """True when `text` is OCR noise rather than a transcription.
 
-    Deliberately conservative: a false positive costs one vision call, a false
-    negative puts noise in the citation store permanently.
+    NOT symmetric-cost the way text_layer_kind's page-selection is: this
+    function screens the OUTPUT of vision transcription (Task 9 marks a page
+    `failed` when this returns True), so a false positive here does not cost
+    one extra vision call — it THROWS AWAY a correct transcription of real
+    content and marks the page failed, which is the same class of permanent
+    harm as trusting a bad page, not the cheap class. A false negative puts
+    noise in the citation store permanently. Treat both directions as
+    expensive; this is not "deliberately conservative" toward one side.
     """
     text = (text or "").strip()
     if len(text) < _MIN_LEN_TO_JUDGE:
@@ -88,5 +124,8 @@ def looks_like_ocr_garbage(text: str) -> bool:
     tokens = text.split()
     if len(tokens) < _MIN_TOKENS_TO_JUDGE:
         return False
-    stubs = sum(1 for token in tokens if len(token) <= 2)
+    stubs = sum(
+        1 for token in tokens
+        if len(token) <= 2 and not _MUSICAL_TOKEN.match(token)
+    )
     return stubs / len(tokens) > _STUB_TOKEN_RATIO

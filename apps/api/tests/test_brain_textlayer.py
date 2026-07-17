@@ -44,6 +44,24 @@ def test_glyphless_font_is_ocr(monkeypatch):
     assert text_layer_kind(page) == "ocr"
 
 
+def test_a_single_real_font_span_does_not_launder_an_ocr_page(monkeypatch):
+    # A scanned page carrying a Tesseract layer PLUS one real-font element (a
+    # stamped page number, a running header, a watermark added after scanning)
+    # must NOT be adopted as "digital". Mixed fonts mean the text is at least
+    # partly machine-transcribed, so the whole page stays untrusted.
+    page = _page(lambda p: p.insert_text((72, 72), "x", fontname="helv"))
+    monkeypatch.setattr(
+        type(page), "get_text",
+        lambda self, kind="text", **kw: {
+            "blocks": [{"lines": [{"spans": [
+                {"font": "Helvetica"},
+                {"font": "GlyphLessFont"},
+            ]}]}]
+        } if kind == "dict" else "some ocr text",
+    )
+    assert text_layer_kind(page) == "ocr"
+
+
 @pytest.mark.parametrize("text", [
     # Kahn p.40, verbatim — what Tesseract produced for a page that renders
     # blank in BOTH MuPDF and poppler. 544 chars the pipeline currently ingests
@@ -65,4 +83,24 @@ def test_ocr_garbage_is_detected(text):
     "Chapter 3",             # short and legitimate
 ])
 def test_good_text_is_not_garbage(text):
+    assert looks_like_ocr_garbage(text) is False
+
+
+def test_a_string_name_chart_is_not_garbage():
+    # E-A-D-G-B-E tuning names plus interval numbers ("1 3 5 b7"), repeated —
+    # staple content in a guitar instructional book, and realistic length for
+    # a transcribed page (the single-line form from the review is too short
+    # to even reach _MIN_LEN_TO_JUDGE/_MIN_TOKENS_TO_JUDGE, so it can't
+    # exercise the bug). Every token is <= 2 chars, so a naive length-only
+    # stub count flags this as garbage and a real transcription of real
+    # content gets marked `failed` and thrown away.
+    text = "E A D G B E   E A D G B E   E A D G B E   1 3 5 b7 1 3 5 b7 1 3 5 b7"
+    assert looks_like_ocr_garbage(text) is False
+
+
+def test_a_fret_finger_chart_is_not_garbage():
+    # A fret/finger diagram: single digits and a lone "T" for thumb, all
+    # short tokens, all musical, repeated to a realistic transcribed-page
+    # length. Must not be screened out as noise.
+    text = "1 2 3 4  1 3 4 1  2 4 1 3  T 1 2 3  1 2 3 4  1 3 4 1  2 4 1 3  T 1 2 3"
     assert looks_like_ocr_garbage(text) is False
