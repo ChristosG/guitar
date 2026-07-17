@@ -62,10 +62,29 @@ test("the DEPLOYED settings page shows the real prompts, verbatim, from the real
   await page.getByTestId("prompt-toggle-chat.system").click();
   const chat = page.getByTestId("prompt-chat.system");
   await expect(chat.getByTestId("prompt-text-chat.system")).toContainText(GUARD);
-  await expect(chat).toContainText("app/agent/prompts.py:67");
-  // 1,301 characters of guards, and no textarea anywhere near them.
-  await expect(chat.getByTestId("prompt-locked-chat.system")).toBeVisible();
-  await expect(chat.locator("textarea")).toHaveCount(0);
+
+  // No code path. Chris: *"i dont think this should be seen by the tutor"* — a file
+  // path is the same category as a stack trace, and he sees none of those. It stays
+  // on the API (`source_ref`), where the completeness test and developers use it.
+  await expect(chat).not.toContainText("app/agent/prompts.py");
+
+  // 1,301 characters of guards — AND HIS TO REWRITE. This asserted the opposite one
+  // commit ago ("no textarea anywhere near them"), and the reversal is the whole
+  // point: the spec always said "'Locked' must mean 'an editor can't break it by
+  // accident', not 'Chris can't change it'". The guards are defended by validation,
+  // history and a confirmed Restore — not by the absence of a textarea.
+  await expect(chat.getByTestId("prompt-locked-chat.system")).toHaveCount(0);
+  await expect(chat.getByTestId("slice-input-chat.system")).toHaveValue(new RegExp(GUARD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+  // --- the language the model is ACTUALLY told (the bug he caught) ---------
+  await page.getByTestId("prompt-flow-curriculum").click();
+  await page.getByTestId("prompt-toggle-curriculum.outline").click();
+  const outline = page.getByTestId("prompt-curriculum.outline");
+  await expect(outline.getByTestId("prompt-language-origin-curriculum.outline")).toContainText("μαθητή");
+  await outline.getByTestId("prompt-language-en-curriculum.outline").click();
+  await expect(outline.getByTestId("prompt-text-curriculum.outline")).toContainText(
+    "write everything you produce in English (en)",
+  );
 
   // --- the one editable sentence in the app -------------------------------
   await page.getByTestId("prompt-flow-shared").click();
