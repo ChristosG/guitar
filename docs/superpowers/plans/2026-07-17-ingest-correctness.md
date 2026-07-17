@@ -8,6 +8,16 @@
 
 **Tech Stack:** FastAPI + SQLAlchemy + Alembic + Postgres 16/pgvector; PyMuPDF (`fitz`) for PDF inspection and rasterisation; the `claude-bridge` sidecar (`tools/claude_bridge/bridge.py`) wrapping `claude -p`; pytest; Next.js + Playwright for the frontend gate.
 
+## Decisions (Chris, 2026-07-17, before handing over for autonomous execution)
+
+- **Sonnet 5 for everything** — OCR and compile. "it's just 5 books." Haiku is not used; the 200K-window problem is moot.
+- **All five books get re-OCR'd by Claude**, including `Getting Great Guitar Sounds`, which Qwen already did at 110dpi. Its text shows no fraction damage (0 glyphs, 0 bare `N-inch` across 77 pages) so this is not a rescue — it is consistency: one model, one DPI, one quality bar under the canon. 77 pages is cheap.
+- **All five books get a canon compile**, `Getting Great Guitar Sounds` included.
+- **Copyright/named-song:** reorder, don't remove (Task 8). Chris: *"i trust you know better."*
+- **`claude -p` now; the API later.** `OCR_PROVIDER` (Task 6) is what makes the swap a one-line change.
+- **The char-length heuristic is dead, and Chris killed it correctly:** *"why to fire based on the len(text)?! some pages might have only 1 paragraph, no?!"* Exactly right — length carries no signal. For a `digital` page the signal is **raster images present**, not text short (Task 3b).
+- **`Create a curriculum` is THE feature.** It must ground in the selected library **and** fill gaps from LLM knowledge, each honestly tiered. Task 11 is the end-to-end gate and is not optional.
+
 ## Global Constraints
 
 - **Prompt quality is not negotiable.** Never simplify a prompt to make it readable. See `docs/superpowers/specs/2026-07-17-prompt-transparency-design.md`.
@@ -559,6 +569,148 @@ A GlyphLessFont text layer is an invisible OCR layer over a scan. Taking it for
 free marked the page `ready`, which means nothing ever looks at it again — so
 Tesseract's 100% fraction-glyph loss became the permanent truth of the library.
 Real fonts are still free; scans get re-read."
+```
+
+---
+
+### Task 3b: Digital pages whose images carry content
+
+Closes the gap the self-review found. Chris's correction drives the design: the
+signal is **images present**, not **text short**.
+
+**Files:**
+- Modify: `apps/api/app/brain/textlayer.py` (add `has_content_images`)
+- Modify: `apps/api/app/brain/paginate.py` (the `digital` branch)
+- Test: `apps/api/tests/test_brain_textlayer.py`
+
+**Interfaces:**
+- Consumes: `text_layer_kind` (Task 1).
+- Produces: `has_content_images(page) -> bool`; pages with `ocr_reason="image_region"` that keep their text layer AND go to vision. Task 9 merges both.
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# apps/api/tests/test_brain_textlayer.py
+def test_digital_page_with_no_images_needs_no_vision():
+    """A prose page in a digital PDF. Its text layer IS the page. Free."""
+    from app.brain.textlayer import has_content_images
+    page = _page(lambda p: p.insert_text((72, 72), "Many foot controllers have"))
+    assert has_content_images(page) is False
+
+
+def test_digital_page_with_a_big_raster_needs_vision():
+    """Powers p.11: 3 raster images, 75% of the page, 502 chars of caption.
+    The images ARE the exercise.
+
+    NOT detected by text length — Chris: "why to fire based on the len(text)?!
+    some pages might have only 1 paragraph, no?!" He is right: 502 chars against
+    a 588-char median is a perfectly normal page. The signal is that there is a
+    picture on it that the text layer does not describe.
+    """
+    from app.brain.textlayer import has_content_images
+    class FakePage:
+        rect = type("R", (), {"width": 595.0, "height": 842.0})()
+        def get_images(self, full=True): return [(47,), (48,), (49,)]
+        def get_image_rects(self, xref):
+            return [type("R", (), {"width": 581.0, "height": 211.0})()]
+    assert has_content_images(FakePage()) is True
+
+
+def test_a_tiny_decorative_image_does_not_trigger_vision():
+    """A logo or a rule. Not worth a 40s agentic turn."""
+    from app.brain.textlayer import has_content_images
+    class FakePage:
+        rect = type("R", (), {"width": 595.0, "height": 842.0})()
+        def get_images(self, full=True): return [(1,)]
+        def get_image_rects(self, xref):
+            return [type("R", (), {"width": 40.0, "height": 20.0})()]
+    assert has_content_images(FakePage()) is False
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `cd apps/api && ./.venv/bin/python -m pytest tests/test_brain_textlayer.py -k images -q`
+Expected: FAIL — `ImportError: cannot import name 'has_content_images'`
+
+- [ ] **Step 3: Implement**
+
+```python
+# apps/api/app/brain/textlayer.py
+
+# A raster covering at least this much of the page is content, not decoration.
+# Powers' tab pages measure 49-79%; a logo or a rule measures under 1%. The gap
+# is wide, so the threshold is not delicate.
+_CONTENT_IMAGE_AREA = 0.10
+
+
+def has_content_images(page) -> bool:
+    """True when a DIGITAL page carries raster art its text layer cannot describe.
+
+    Only meaningful for `text_layer_kind(page) == "digital"`. On a scan every page
+    has a full-page image under it, so this would answer True for all of them and
+    mean nothing — which is exactly how the first, rejected heuristic ("raster
+    coverage > 25% => needs vision") managed to flag 100% of Hunter and Gallagher.
+
+    Deliberately NOT a function of text length. A page with one paragraph is a
+    normal page, not a broken one; Powers p.11 has 502 chars against a 588-char
+    median and is still 75% tab. What makes it need vision is the tab, not the
+    brevity.
+    """
+    area = page.rect.width * page.rect.height
+    if area <= 0:
+        return False
+    covered = sum(
+        rect.width * rect.height
+        for img in page.get_images(full=True)
+        for rect in page.get_image_rects(img[0])
+    )
+    return (covered / area) >= _CONTENT_IMAGE_AREA
+```
+
+In `paginate.py`, the `digital` branch keeps its free text **and** queues vision
+when the page has art:
+
+```python
+            if kind == "digital":
+                layer = (doc[i].get_text() or "").strip()
+                if has_content_images(doc[i]):
+                    # Keep the publisher text — it is correct and free — but the
+                    # picture on this page is content too, and no text layer
+                    # describes a picture. Vision ADDS to the text here; it does
+                    # not replace it (contrast the `ocr` branch, which discards).
+                    text, status, reason, provenance = layer or None, "pending", "image_region", None
+                else:
+                    text, status, reason, provenance = layer, "ready", None, "text_layer"
+```
+
+- [ ] **Step 4: Run to verify it passes**
+
+Run: `cd apps/api && ./.venv/bin/python -m pytest tests/test_brain_textlayer.py -q`
+Expected: PASS
+
+- [ ] **Step 5: Verify against the real book**
+
+```bash
+docker compose exec -T api python3 -c "
+import fitz
+from app.brain.textlayer import has_content_images, text_layer_kind
+d = fitz.open('/tmp/p.pdf')
+n = sum(1 for i in range(d.page_count)
+        if text_layer_kind(d[i]) == 'digital' and has_content_images(d[i]))
+print(f'{n}/{d.page_count} Powers pages route to vision for their images')
+"
+```
+Expected: ~40/57 — matching the measurement that motivated this whole task.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add apps/api/app/brain/textlayer.py apps/api/app/brain/paginate.py apps/api/tests/test_brain_textlayer.py
+git commit -m "feat(brain): digital pages with raster art go to vision too
+
+Powers' 40 tab pages have real publisher text AND an unreadable tab. Keep the
+text, read the picture. Detected by images-present, not by text-length — a page
+with one paragraph is normal, not broken."
 ```
 
 ---
@@ -1333,6 +1485,97 @@ The app is the tutor's to operate. A green backend test is not done."
 ```
 
 ---
+
+### Task 11: End-to-end — "Create a curriculum" (THE feature)
+
+Chris: *"the 'Create a curriculum' is the most important feature, and it has to
+generate the curriculum based both in the books/content on my library (and i have
+them selected when i create a curriculum), and on LLM-Knowledge (especially to
+fill the gaps)."*
+
+Every task above is upstream plumbing. This is the thing that has to work.
+
+**Files:**
+- Create: `apps/web/e2e/create-a-curriculum.spec.ts`
+
+- [ ] **Step 1: Drive the whole flow in the browser**
+
+```typescript
+test("a curriculum grounds in the selected books AND fills gaps honestly", async ({ page }) => {
+  test.setTimeout(30 * 60 * 1000);
+  await page.goto("/el/curricula");
+  await page.getByTestId("new-curriculum").click();
+  // who -> duration -> scope -> SOURCES (he selects his books) -> outline -> confirm
+  await page.getByTestId("interview-sources").getByText("Tone Manual").click();
+  await page.getByTestId("interview-sources").getByText("Guitar tone").click();
+  // The source-selection step must state what it will read, before he spends:
+  await expect(page.getByTestId("corpus-summary")).toContainText(/tokens/);
+  // ...
+  // Both tiers must be present and labelled — grounded modules cite real pages,
+  // gap modules say so rather than pretending:
+  await expect(page.getByTestId("tier-badge").filter({ hasText: /βιβλιοθήκη|library/i }).first()).toBeVisible();
+  await expect(page.getByTestId("provenance-chip").first()).toBeVisible();
+});
+```
+
+- [ ] **Step 2: Verify citations resolve to the right page**
+
+Click a provenance chip; land in the Reader on the cited page; **read it** and
+confirm it says what the lesson claims. A citation that opens the wrong page is
+worse than no citation — `corpus.py:78-84`.
+
+- [ ] **Step 3: Verify the gap tier is honest**
+
+Ask for a module the books genuinely do not cover. It must tier
+`general_knowledge` with an empty citations array — not invent a page.
+
+---
+
+### Task 12: Tabs in the books become playable artifacts
+
+Chris: *"maybe we could also, render those tabs for example as an artifact? by
+calling the appropriate tool while ocr/reading them?"*
+
+**Judgment: yes, but as a separate pass, and gated by the tutor.**
+
+Why it is worth doing: the app already has the whole machine — `generate_artifact`,
+a tab artifact kind, AlphaTab rendering **and playback**. Powers is 57 pages whose
+value *is* 40 tab images. Today they enter the library as pictures nobody can read.
+After Task 3b they become *described* text. This task makes them **playable**.
+
+Why it is not fused into the OCR call: a wrong tab is the same class of harm as a
+wrong citation — the tutor hands a student an exercise that is subtly not the one
+in the book. So transcription (verbatim, low-risk) and musical extraction
+(structured, error-prone) stay separate calls with separate failure modes, and
+every generated artifact:
+
+- **cites the page it came from**, so the tutor can check it against the scan;
+- lands in the existing **approval-card** HITL flow rather than appearing as fact;
+- is skipped silently when the model is not confident, because no artifact is
+  strictly better than a wrong one.
+
+Runs only on pages with `ocr_reason IN ('image_region','no_text_layer')` — never
+on prose.
+
+---
+
+## On "don't pay twice" — the arithmetic, once, so it stays settled
+
+Chris asked twice whether OCR and the canon can be one pass. The honest numbers,
+now that Sonnet 5 is doing both:
+
+| Pass | Calls | Input | Why it cannot merge |
+|---|---|---|---|
+| OCR | **888** (one per page) | ~2,714 vision tok each | per-page by design: `ocr.py`'s per-page commit is what stops a timeout on p.60 costing pages 1-59 |
+| Compile | **5** (one per book) | ~271K text tok each | needs the WHOLE book: "covered on pp.47-48, contradicted on p.112" is unknowable from page 47 |
+
+**The compile is ~0.5% of the OCR work, and it re-reads no images at all** — it
+reads text out of Postgres. There is no double payment to eliminate; the expensive
+thing (vision) already happens exactly once per page.
+
+What *is* adopted from the instinct, because it is real: the OCR pass describes
+figures **while it has the image**, so the canon inherits that content without
+re-reading a pixel. That is the saving, in the one place it exists.
 
 ## Self-Review
 
