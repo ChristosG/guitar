@@ -211,6 +211,54 @@ scope because 157 s of synchronous work in a request handler is wrong regardless
 of who times it out, and the async-job pattern already exists (`jobs/runner.py`,
 `GenerationJob`) from the interview-outline work.
 
+### A7. The named-song guard fires before the library is searched
+
+Not in the original spec; found while investigating Chris's request to "remove the
+copyrighted rule".
+
+```
+loop.py:601   if looks_like_named_song_request(...) -> decline, return
+loop.py:608   # --- C1: forced retrieval pre-hop ---   <- the library is searched HERE
+```
+
+The guard is a **pre-model short-circuit** — deliberately so, and the reasoning in
+`guards.py:310-319` is sound: *"there is no reliable way to make the model itself
+decline (it is the very thing that fabricates when asked)."* But it short-circuits
+**before retrieval too**, which was never the intent.
+
+Consequence: the tutor owns a book containing a song's transcription, on a real
+page, and the app declines to show it to him. His book. His page. A real citation
+available. That is the actual grievance behind "why should I get fucked by
+prompting for such stuff", and it is an ordering bug, not a policy.
+
+**The rule is not a copyright rule.** `NAMED_SONG_DECLINE_MESSAGE` states its own
+reason: *"I don't actually have it memorized, and guessing would just invent a
+confidently wrong (and possibly copyrighted) transcription."* The load-bearing
+clause is the first one. Removing the guard does not unlock a correct tab; it
+unlocks a confidently wrong one, handed to a teacher, handed to a student — the
+same class of harm as an invalid citation, from the same cause.
+
+**Fix — reorder, don't remove:**
+
+```
+user asks for a named song's tab
+  ├─ search the library FIRST
+  ├─ hit  -> answer from it, cite the page. His book. No restriction.
+  └─ miss -> NAMED_SONG_DECLINE_MESSAGE (the model would fabricate)
+```
+
+Also drop "(and possibly copyrighted)" from the message: for a private,
+single-user, non-commercial app over books the tutor owns, it is noise, and
+accuracy is the real and sufficient reason.
+
+Nothing in the app restricts his owned books today, and nothing in this change
+does either — `CURRICULUM_SYSTEM` already instructs the model that *"everything
+you write for him should come from this where it possibly can"*, and the whole
+library ships in the prompt and is quoted and cited freely.
+
+Costs one extra retrieval on song-shaped turns that will mostly miss. Acceptable:
+`retrieve.search` is local BM25 + a local ONNX embedder — no API call, no money.
+
 ---
 
 ## Part B — The Concept Canon
@@ -338,6 +386,22 @@ selected sources → count_tokens
 fits in the window*, which is the wrong question. Attention degrades across a
 600K prompt long before the API rejects it. 300K is a quality-derived ceiling.
 
+**300K is a hypothesis, and the plan must measure it, not assume it.** Chris:
+*"the 300k sounds good, but since u will conduct some experiments to draw
+insights, maybe thats an insight you can also decide."* Agreed — it is currently
+reasoned, not measured. The experiment, run once during Part B:
+
+> Generate the same module at ~150K, ~300K, and ~590K of selected library.
+> Score each on: citation accuracy (do cited pages actually support the claim —
+> the one metric that is objectively checkable), coverage of the module's
+> concepts, and whether late-prompt sources are cited at all or effectively
+> ignored.
+
+The last is the real question. If a 590K prompt cites S1 and S2 but never S7, the
+model isn't reading the tail and the number should drop below 300K. If citation
+accuracy holds flat to 590K, raise it and the canon serves fewer selections.
+Either way the ceiling stops being a guess. One setting, one call site.
+
 This **replaces A5's gate** with one that actually gates. Above the line the canon
 is not a compromise — two tone books is exactly where divergence-surfacing starts
 paying. The threshold exists so a small library doesn't trigger a compile it
@@ -357,23 +421,123 @@ canon lookup, and the tiering already exists (`outline.py:46-49`: `TIER_LIBRARY`
 - **Both** is the normal case: canon-grounded core, general knowledge to bridge,
   each labelled. The tier system was built for exactly this.
 
+### Model selection
+
+Chris: *"please use libs, and haiku when u need to read something."*
+
+Haiku 4.5's context window is **200K, not 1M** — a hard constraint the instruction
+collides with:
+
+| Book | Tokens | Haiku (200K)? |
+|---|---:|---|
+| Hunter | 156K | yes |
+| Kahn | 76K | yes |
+| Powers | 8K | yes |
+| **Gallagher** | **271K** | **no — exceeds the window** |
+
+| Pass | Model | Why |
+|---|---|---|
+| 1 · compile | **Sonnet 5** | The most quality-sensitive step in the design: it decides what the canon knows, permanently, and a weak extraction poisons every curriculum downstream. Gallagher does not fit Haiku at all. The saving is not real — $4 vs $13 across ten books. |
+| 2 · reconcile | **Haiku 4.5** | Clustering ~1,000 short concept names. No long context, mechanical, exactly Haiku's sweet spot. |
+| 3 · merge | deterministic | Plain Python. No model. |
+| 5 · hydration | (curriculum's model) | Unchanged. |
+
+Revisit if a compile-quality eval shows Haiku holding up per-chapter; the
+`book_compile.model` column records what actually ran, so this is measurable
+rather than argued.
+
+**Libraries over hand-rolling** (per Chris): `pymupdf` (already a dependency) for
+raster-coverage detection; `rapidfuzz` for the reconcile pass's candidate
+blocking before the model sees anything (cheap, deterministic, shrinks the LLM's
+job); the existing `PyStemmer`/BM25 for concept search. No bespoke clustering.
+
 ### Data model
+
+All canon state is **persisted in Postgres**, not cached or derived at runtime —
+see "Durability" below.
 
 ```
 concept
-  id, key (canonical slug), label_en, created_at
+  id uuid PK, key varchar (canonical slug, unique), label_en, label_el,
+  created_at, updated_at
 
 concept_claim
-  id, concept_id -> concept, source_id -> knowledge_source,
-  text, pages int[], stance, depth, created_at
+  id uuid PK, concept_id -> concept ON DELETE CASCADE,
+  source_id -> knowledge_source ON DELETE CASCADE,
+  text text, pages int[], stance varchar, depth varchar, created_at
+
+concept_alias                      -- what pass 2 merged, and from where
+  id uuid PK, concept_id -> concept, alias text, source_id -> knowledge_source
 
 book_compile
-  source_id -> knowledge_source (PK), status, model, compiled_at, error
+  source_id -> knowledge_source PK ON DELETE CASCADE,
+  status varchar, model varchar, compiled_at, token_count int, error text
 ```
 
-The canon is *derived state*: rebuildable from `concept_claim` at any time, and
-`concept_claim.pages` validates against the existing `page_index` contract, so a
-hallucinated citation cannot enter the canon in the first place.
+`concept_claim.pages` validates against the existing `page_index` contract on
+write, so a hallucinated citation cannot enter the canon in the first place.
+
+`concept_alias` exists so a bad merge is reversible without recompiling: the
+claims keep their `source_id`, and the alias records which book called it what.
+
+### Durability — canon is user data
+
+Chris: *"every generation, library, curriculum, etc.. every user data, has to be
+persisting! even backup-able! and e.g. when i send him an update of the app, the
+data of the user must be the same!"*
+
+The canon costs real money and real time to build. Losing it on an app update
+would be indistinguishable, from the tutor's side, from the app forgetting his
+books. So it is user data, with the same guarantees as curricula:
+
+1. **Postgres, not a cache.** No Redis, no on-disk pickle, no rebuild-on-boot.
+   Same database, same volume, same lifecycle as `block` and `knowledge_source`.
+2. **In the backup.** `scripts/backup.sh` is a full `pg_dump`, so the four new
+   tables are covered by construction — but the restore test must assert canon
+   rows survive a round-trip, not assume it.
+3. **Additive migrations only.** New tables, no destructive changes to existing
+   ones. `alembic upgrade head` already runs in the api CMD at boot, so an app
+   update migrates in place and the tutor's data is untouched — the property
+   Chris is asking for.
+4. **Re-compilable, never auto-recompiled.** `book_compile` makes a rebuild an
+   explicit act. An update must never silently re-spend his money re-reading
+   books it already read.
+
+### Surfacing the canon — Library UI
+
+Chris: *"that would also be nice to see somewhere in the library, i mean the
+canon generations."*
+
+The compile is invisible work that costs money; the tutor must be able to see
+what it produced and judge it.
+
+- **Per-source, on the source row**: compile status (pending/running/ready/failed),
+  concept count, model, when. Mirrors the existing OCR job status pattern.
+- **A canon view**: browse concepts; each shows coverage (how many books), the
+  consensus, and — the point of the feature — the **divergences**, each citation a
+  chip deep-linking into the Reader at the real page, exactly as lesson citations
+  already do.
+- **Divergence is the headline, not a footnote.** "Hunter and Gallagher disagree
+  here" is the thing ten books buy that one book cannot.
+
+### Concept search — library search and chat
+
+Chris: *"those concepts might be nice to be searchable bro, by the search and from
+the chat screen too!"*
+
+- **Library search**: concepts become a searchable kind alongside pages. BM25 over
+  `concept.label_*` + claim text (reuses the existing `PyStemmer` path — and per
+  [[guitar-tutor-retrieval-is-the-weak-link]], BM25 is load-bearing here, not
+  optional). A hit opens the concept, whose citations open the Reader.
+- **Chat**: a new `search_concepts` read tool in `agent/tools.TOOLS` (today 21
+  schemas; this makes 22). It answers "what do my books say about pickup height?"
+  with the cross-book synthesis and real citations — which today's
+  `search_knowledge` cannot do, because it returns chunks from one book at a time
+  and has no notion that two books disagree.
+
+Note the cost this incurs and accept it deliberately: adding a tool changes the
+tool list, which is part of the cache prefix (`tools` → `system` → `messages`).
+It re-mints the chat prefix once. Once.
 
 ### Testing
 
@@ -390,6 +554,37 @@ hallucinated citation cannot enter the canon in the first place.
 - **Cache invariant**: canon prefix byte-identical across calls; second call
   reports non-zero `cache_read_input_tokens`.
 - **Incremental**: compiling book 11 does not mutate books 1-10's claims.
+- **Durability round-trip**: `scripts/backup.sh` → restore → canon rows, compile
+  status and concept search all still present. Asserted, not assumed.
+- **Migration is additive**: `alembic upgrade head` against a DB holding real
+  curricula leaves every pre-existing row untouched. This is the "the tutor's data
+  survives an app update" property, tested rather than hoped for.
+- **A7 ordering**: a song-shaped request whose transcription IS in the library is
+  answered with a citation; the same request with an empty library declines. Both
+  asserted — the second is what keeps the guard honest.
+
+### Frontend verification is part of done
+
+Chris: *"make sure that you test one of the books via the FE, and not merely from
+the backend, so that we know our frontend will work, and we can do it ourselves
+from UI and not by telling you (claude) to do it."*
+
+The point is the app is his, not a thing operated by me on his behalf. So a
+backend green test is not done. **One book — Powers (57pp, smallest, and the one
+that exercises the A1 coverage detector) — goes in through the real UI:**
+
+1. Upload via `add-source-dialog`, in the browser, as the tutor would.
+2. Watch the OCR job report progress and finish.
+3. Confirm in the Reader that the ~40 tab pages show `text_source=claude`, and
+   that a page's transcription actually describes the tab on it.
+4. Confirm the compile status appears on the source row and reaches `ready`.
+5. Browse the resulting concepts in the canon view; open a citation; land on the
+   right page.
+6. Ask the chat "τι λένε τα βιβλία μου για ..." and get a concept-grounded answer
+   with a working citation.
+
+Driven with the existing Playwright setup (`apps/web/playwright.config.ts`). Any
+step that needs a curl to succeed is a bug in the UI, not a shortcut.
 
 ---
 

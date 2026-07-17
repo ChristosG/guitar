@@ -174,6 +174,40 @@ rules, `language_directive`, tool descriptions, every guard sentence in
 εγγυάται ότι οι παραπομπές είναι αληθινές" — so it reads as engineering, not
 paternalism.
 
+### "Locked" means an editor can't break it by accident — not that Chris can't change it
+
+It is his private app and his call. Every locked region names its reason in the
+UI, and every one is a normal code change away. The lock exists because a textarea
+is the wrong instrument for editing a guard, not because the guard is sacred.
+
+The live worked example, which is why this section exists: Chris asked to remove
+`SYSTEM_PROMPT`'s copyright rule — *"those books are copywrited, but i bought them
+and they're mine, why should i get fucked by prompting for such stuff?"*
+
+Investigating it found three things:
+
+1. **The rule restricts none of his books.** The whole library ships in the prompt
+   and is quoted and cited freely; `CURRICULUM_SYSTEM` explicitly instructs the
+   model to prefer it. The premise of the complaint was unfounded.
+2. **The rule is an anti-hallucination guard, not a copyright rule.** Its own
+   decline message leads with *"I don't actually have it memorized, and guessing
+   would just invent a confidently wrong ... transcription"*; "(and possibly
+   copyrighted)" is a parenthetical. Removing it yields wrong tabs, not permitted
+   ones.
+3. **But the complaint pointed at a real bug** — an ordering one, elsewhere:
+   `loop.py:601` declines *before* `loop.py:608` searches the library, so a
+   transcription he **owns** is refused unread.
+
+Fixed by reordering (search first, decline only on a miss) and dropping the
+copyright parenthetical as noise for a private single-user app. See
+`2026-07-17-library-scaling-design.md` § A7.
+
+That is the pattern to expect from every lock: **the complaint is real, the
+diagnosis is usually somewhere else, and a viewer that shows the prompt honestly
+is what makes the diagnosis possible at all.** Which is the argument for this
+whole spec — the transparency is not decoration, it is how the prompts get
+debugged.
+
 ### Storage
 
 New table. **Not** columns on `app_setting`, which is a fixed-column singleton
