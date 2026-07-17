@@ -1,0 +1,1367 @@
+"""Every prompt this app sends to a model, pointed at rather than copied.
+
+WHY THIS FILE IS SHAPED THE WAY IT IS. The tutor asked to SEE the prompts. The
+obvious implementation — a dict of `{"chat.system": "You are the guitar tutor's
+copilot..."}` — is the one that must never be written, and it is worth being
+precise about why, because it looks like the simple version.
+
+A registry that holds its own copy of a prompt is a viewer that silently starts
+lying. `agent/prompts.py`'s `SYSTEM_PROMPT` gets one more guard sentence (it has
+gained four so far, each one because something broke), the copy in here does not,
+and from that moment the Settings page shows the tutor a prompt the model never
+receives. Nothing fails. No test goes red. He just trusts a screen that is wrong.
+That is the exact shape of the citation failure this whole codebase is
+architected against — `curriculum/corpus.py:79-84` on why a fabricated page
+number is worse than no citation at all, because it is a citation he will click.
+
+So: this module holds ZERO prompt text. `source_of_truth()` returns the live
+object, and `tests/test_prompts_registry.py` asserts `is`, not `==` — equality
+would pass against a copy that has since drifted, which is the only case anyone
+cares about.
+
+WHY `render()` HAS TO BUILD. Only two module-level constants in this app are
+byte-stable by design: `SYSTEM_PROMPT` (1,301 chars) and `CURRICULUM_SYSTEM`
+(358 chars). Everything else is assembled at call time from f-strings and
+fragments, so "the full prompt" is NOT a string that exists anywhere in the
+codebase — it exists only at the moment of the call. A viewer therefore cannot
+read a prompt; it has to build one. Every `_build_*` below calls the SAME builder
+the live path calls (`loop._ensure_system_prompt`, `draft.build_lesson_messages`,
+`retrieve.build_grounded_messages`, …) rather than re-implementing its shape. A
+re-implementation is just a copy with extra steps: it drifts identically, it just
+takes longer to notice.
+
+WHERE THE LIVE BUILDER NEEDS RUNTIME DATA — a student, a library, retrieved
+passages — it gets a representative SAMPLE, and the sample is reported as a
+`Span` so the UI can draw it as a labelled chip. He must see WHERE his student
+brief goes, not a prompt with a hole in it. The samples below are his DATA, never
+his prompts: not one byte of model-facing instruction text is authored in this
+file, which is what `test_the_registry_holds_no_copy_of_any_prompt_it_points_at`
+enforces structurally rather than by eye.
+
+THE GREEK IS THE PRODUCT, AND IT IS NOT A TRANSLATION. `title_el`,
+`what_it_does_el` and `when_it_runs_el` are NEW copy, written for a tutor who is
+a total beginner with computers (`settings/page.tsx:22-37`). They explain what a
+prompt DOES and WHEN it runs. They are emphatically NOT the prompt rendered into
+Greek — that would just be the prompt again, and translating a prompt to make it
+legible is the one thing the spec forbids ("we cant degrade their quality so the
+teacher understands them better"). The English stays verbatim and untouched; the
+Greek sits BESIDE it. He is never asked to read the English; he is given an
+honest account of it, and the English is there because transparency means showing
+the real thing.
+"""
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from datetime import date
+from typing import Callable, Literal
+from uuid import UUID
+
+from app.agent.loop import (
+    _NO_HITS_GROUNDING,
+    _ensure_system_prompt,
+    _grounding_block,
+    _tool_schemas,
+)
+from app.agent.prompts import SYSTEM_PROMPT
+from app.agent.tools import TOOLS
+from app.artifacts.generate import _KIND_PROMPT_GUIDANCE
+from app.artifacts.generate import _build_messages as _artifact_messages
+from app.brain.ocr import FIGURE_PROMPT, OCR_PROMPT
+from app.brain.retrieve import _TRANSLATE_SYSTEM, Hit, build_grounded_messages
+from app.curriculum.corpus import (
+    CURRICULUM_SYSTEM,
+    LibraryContext,
+    library_message,
+    prefix_messages,
+)
+from app.curriculum.depth import Measurement
+from app.curriculum.draft import (
+    LessonContext,
+    _repair_message,
+    _tier_directive,
+    build_lesson_messages,
+)
+from app.curriculum.extend import build_module_messages
+from app.curriculum.outline import (
+    POLICY_GENERAL,
+    TIER_GENERAL,
+    TIER_LIBRARY,
+    TIER_WEB,
+    build_outline_messages,
+)
+from app.curriculum.refine import build_refine_messages
+from app.curriculum.shape import plan_shape
+from app.i18n import DEFAULT_LOCALE, answer_in, language_directive
+from app.lessons.draft import _build_messages as _selection_messages
+from app.llm.claude_cli import _tool_system_prompt
+from app.models.note import Note
+from app.models.student import Student
+from app.routers.settings import _PROBE_PROMPT
+from app.students.context import STUDENT_PITCH, build_student_brief
+
+# ---------------------------------------------------------------------------
+# The types P2 (routes + overrides) and P3 (the Settings card) consume
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Span:
+    """One interpolated variable, and where it landed in the rendered text.
+
+    `value` is a representative SAMPLE, not a live row — the Settings page must
+    not need a student, a library and a retrieval hit to show a prompt. The UI
+    renders `text[start:end]` as a labelled chip, which is the whole point: a
+    prompt shown with `{student_brief}` cut out of it is not the prompt, and a
+    prompt shown with the sample silently inlined claims his real student says
+    something he never said. The chip is the honest third option.
+    """
+
+    name: str
+    label_el: str
+    value: str
+    start: int
+    end: int
+
+
+@dataclass(frozen=True)
+class Slice:
+    """A contiguous, contract-free region of a prompt the tutor may edit.
+
+    `default` is THE LIVE CONSTANT OBJECT, not a copy of its text — same rule as
+    `PromptEntry.source_of_truth`, for the same reason. P2 resolves
+    `override.text if present else Slice.default`.
+
+    There is exactly one today (`student.pitch`), and that is a finding rather
+    than a placeholder: an audit of `curriculum/draft.py` found the pedagogy is
+    INTERWOVEN with the contracts, not separable from them — `draft.py:78-79`
+    puts "Teach it from the pages above" (style) and "cite the page you used on
+    every section" (contract) in one sentence. A slice must be pure pedagogy with
+    no schema, no citation rule, and no placeholder; more can be earned later,
+    but only by a refactor that lifts a fragment out byte-identically, each one
+    shipping with its own equality test. Extraction without that test is prompt
+    editing disguised as refactoring, which is the thing the spec exists to stop.
+    """
+
+    id: str
+    label_el: str
+    default: str
+    kind: Literal["replace", "append"]
+
+
+@dataclass(frozen=True)
+class RenderedMessage:
+    """One message as the provider receives it.
+
+    `cached` mirrors `corpus.library_message`'s `cache: True` — the message that
+    carries the prompt-cache breakpoint. The UI shows it because the entire
+    premise of `corpus.py` is that a cache mistake is invisible until the invoice
+    arrives a month later.
+    """
+
+    role: str
+    content: str
+    cached: bool = False
+
+
+@dataclass(frozen=True)
+class RenderedPrompt:
+    """A prompt as it exists at the moment of the call — the only moment it does.
+
+    `messages` IS THE TRUTH: a prompt is a list of role-tagged messages, and that
+    is what goes on the wire. `text` is a presentational join of their contents,
+    provided because the UI shows one selectable block and because `Span` offsets
+    have to index into something. Do not mistake `text` for what is sent; it is
+    what is READ. Keeping both means the flattening is reversible, so the UI can
+    show role boundaries whenever it wants them back.
+    """
+
+    id: str
+    messages: tuple[RenderedMessage, ...]
+    spans: tuple[Span, ...] = ()
+
+    # Presentational only — see the class docstring. Deliberately not "\n" (role
+    # boundaries would vanish into paragraph breaks) and not a fabricated
+    # "SYSTEM:" header (that would be text the model never sees, rendered as if
+    # it were).
+    JOIN = "\n\n"
+
+    @property
+    def text(self) -> str:
+        return self.JOIN.join(m.content for m in self.messages)
+
+
+# A builder returns the messages plus the samples it interpolated. Samples are
+# `(name, label_el, value)`; `_render` turns them into `Span`s once the text
+# exists, because an offset into a text that has not been joined yet is a guess.
+_Sample = tuple[str, str, str]
+_Built = tuple[list[RenderedMessage], list[_Sample]]
+
+
+@dataclass(frozen=True)
+class PromptEntry:
+    """One prompt the app sends to a model.
+
+    `source_of_truth()` returns the LIVE object — the constant for a constant, the
+    builder function for an assembled prompt. It exists so a test can assert `is`
+    against the real definition and fail the day this registry starts holding a
+    copy.
+
+    `call_sites` is `("path/to/file.py:LINE", ...)`, relative to `app/`, and is
+    used only by the completeness test — the one that fails when someone adds a
+    16th provider call site without registering it, which is what stops the viewer
+    from silently going stale.
+
+    `kind` is "prompt" (sent as its own call) or "fragment" (injected into other
+    prompts — `language_directive` reaches 8 of them). The distinction is not
+    cosmetic: showing a fragment as though it were a standalone prompt would
+    tell the tutor the app makes a model call it does not make.
+
+    `provider` names the provider that sends this, when only one does. `None`
+    means every provider. The viewer must show what the ACTIVE provider actually
+    sends, not what an idealised one would.
+
+    `cache_prefix` marks a prompt inside the cached prefix (`corpus.py:242-249`,
+    `cache: True` at `corpus.py:285`). Editing anything in there re-mints the
+    cache ONCE at 1.25x base input over the whole library block: ~$0.34 at
+    today's ~90K, ~$2.20 once the four books land (~593K). It re-warms
+    afterwards, but it must be SHOWN before a save, not discovered on an invoice.
+    """
+
+    id: str
+    flow: str
+    kind: Literal["prompt", "fragment"]
+    source_ref: str
+    title_el: str
+    what_it_does_el: str
+    when_it_runs_el: str
+    source_of_truth: Callable[[], object]
+    build: Callable[[str], _Built]
+    call_sites: tuple[str, ...] = ()
+    slices: tuple[Slice, ...] = ()
+    provider: str | None = None
+    cache_prefix: bool = False
+
+    def render(self, locale: str = DEFAULT_LOCALE) -> RenderedPrompt:
+        built, samples = self.build(locale)
+        messages = tuple(built)
+        # Joined the same way `RenderedPrompt.text` joins, because that is what
+        # the spans have to index into.
+        text = RenderedPrompt.JOIN.join(m.content for m in messages)
+        return RenderedPrompt(
+            id=self.id, messages=messages, spans=_locate(text, samples),
+        )
+
+
+def _locate(text: str, samples: list[_Sample]) -> tuple[Span, ...]:
+    """Samples -> spans, by finding where the live builder actually put them.
+
+    RAISES when a sample is not in the text, and that is the useful behaviour: it
+    means the builder no longer interpolates what this registry claims it does.
+    Skipping the span instead would render a prompt with no chip on it — the
+    viewer quietly dropping the one thing the tutor was told to look for. Loud is
+    the only honest failure mode here, and it fails in the test run, not at him.
+
+    First occurrence wins. A sample chosen so poorly that it appears twice is a
+    sample worth fixing, not a case worth handling.
+    """
+    spans = []
+    for name, label_el, value in samples:
+        start = text.find(value)
+        if start < 0:
+            raise ValueError(
+                f"sample {name!r} is not in the rendered prompt — the builder no "
+                f"longer interpolates it, or the sample is wrong. Value: {value[:80]!r}"
+            )
+        spans.append(Span(name=name, label_el=label_el, value=value,
+                          start=start, end=start + len(value)))
+    return tuple(sorted(spans, key=lambda s: s.start))
+
+
+# ---------------------------------------------------------------------------
+# Representative samples — HIS DATA, never his prompts
+# ---------------------------------------------------------------------------
+#
+# Greek, because Greek is the product: his students are Greek, his notes are
+# Greek, and his library is English. A sample in English would show him a prompt
+# nobody in this app ever sends and would hide the exact seam that matters — the
+# one where Greek data meets an English book and `language_directive` has to hold
+# the line.
+
+_SAMPLE_STUDENT_ID = UUID("11111111-1111-1111-1111-111111111111")
+# Distinct ids, not the student's reused three ways: `_grounding_block` renders
+# `source_id=` straight into the prompt the tutor reads, and a sample that shows
+# his student's id where a book's id belongs teaches him to read it wrong.
+_SAMPLE_SOURCE_ID = UUID("22222222-2222-2222-2222-222222222222")
+_SAMPLE_CHUNK_ID = UUID("33333333-3333-3333-3333-333333333333")
+
+_SAMPLE_STUDENT = Student(
+    id=_SAMPLE_STUDENT_ID,
+    name="Νίκος Παπαδόπουλος",
+    birthdate=date(2008, 4, 12),
+    level="beginner",
+    instrument="electric",
+    preferred_language="el",
+    goals="Θέλει να παίζει ροκ κομμάτια με τους φίλους του και να μάθει αυτοσχεδιασμό.",
+)
+
+_SAMPLE_NOTES = [
+    Note(
+        title="Μπαρέ",
+        body="Δεν κρατάει ακόμα το F. Πονάει ο καρπός μετά από δύο λεπτά.",
+        tags=["struggle"],
+        student_id=_SAMPLE_STUDENT_ID,
+    ),
+    Note(
+        title="Ρυθμός",
+        body="Πολύ καλό αίσθημα ρυθμού, μπαίνει σωστά χωρίς μετρονόμο.",
+        tags=[],
+        student_id=_SAMPLE_STUDENT_ID,
+    ),
+]
+
+
+class _SampleRows:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def all(self):
+        return self._rows
+
+
+class _SampleDb:
+    """NOT a database — the two accessors `build_student_brief` happens to use.
+
+    This exists so the preview runs the REAL `build_student_brief`, unmodified,
+    against sample rows. The alternative was to re-implement the brief's shape in
+    here, which is a copy, or to open a session from a Settings page render, which
+    is a database query to draw a picture of a prompt. The fake is the honest one:
+    every label, every ordering rule, and `STUDENT_PITCH` itself come out of the
+    live function, so a change to it changes this preview on the same commit.
+    """
+
+    def get(self, model, pk):
+        return _SAMPLE_STUDENT
+
+    def scalars(self, statement):
+        return _SampleRows(_SAMPLE_NOTES)
+
+
+def _sample_student_brief() -> str:
+    return build_student_brief(_SampleDb(), _SAMPLE_STUDENT_ID)
+
+
+# A page of his library, verbatim in shape: an English book, page-marked, as
+# `corpus.library_message` sends it.
+_SAMPLE_LIBRARY_TEXT = (
+    '<source id="S1" title="Guitar Fretboard Workbook">\n'
+    "[p.14] The CAGED system organizes the fretboard into five interlocking "
+    "shapes. Each one is a movable form of an open chord, and every note on the "
+    "neck falls inside one of them.\n"
+    "[p.15] Practice moving the C shape up two frets at a time, naming the root "
+    "as you go. Do not rush this; the naming is the exercise.\n"
+    "</source>"
+)
+
+_SAMPLE_LIBRARY = LibraryContext(
+    text=_SAMPLE_LIBRARY_TEXT,
+    token_count=92_400,
+    fits=True,
+    sources=[{"ref": "S1", "id": str(_SAMPLE_SOURCE_ID), "title": "Guitar Fretboard Workbook",
+              "pages": 2, "chars": len(_SAMPLE_LIBRARY_TEXT)}],
+    page_index={"S1": {14, 15}},
+)
+
+_EMPTY_LIBRARY = LibraryContext(text="", token_count=0, fits=True)
+
+_OVERSIZED_LIBRARY = LibraryContext(
+    text=_SAMPLE_LIBRARY_TEXT, token_count=593_000, fits=False,
+    page_index={"S1": {14, 15}},
+)
+
+_SAMPLE_HITS = [
+    Hit(
+        chunk_id=_SAMPLE_CHUNK_ID,
+        source_id=_SAMPLE_SOURCE_ID,
+        source_title="Guitar Fretboard Workbook",
+        text=("The CAGED system organizes the fretboard into five interlocking "
+              "shapes. Each one is a movable form of an open chord."),
+        section_path="Chapter 2",
+        page=14,
+        score=0.81,
+    ),
+    Hit(
+        chunk_id=_SAMPLE_CHUNK_ID,
+        source_id=_SAMPLE_SOURCE_ID,
+        source_title="Guitar Fretboard Workbook",
+        text=("Practice moving the C shape up two frets at a time, naming the "
+              "root as you go."),
+        section_path="Chapter 2",
+        page=15,
+        score=0.74,
+    ),
+]
+
+_SAMPLE_QUERY = "Πώς διδάσκω το σύστημα CAGED σε αρχάριο;"
+_SAMPLE_COURSE_TITLE = "Ρυθμική κιθάρα από το μηδέν"
+_SAMPLE_COURSE_BRIEF = (
+    "Θέλω κάτι πρακτικό — να παίζει τραγούδια από το πρώτο μάθημα, όχι θεωρία "
+    "για δύο μήνες."
+)
+_SAMPLE_SHAPE = plan_shape(weeks=20, sessions_per_week=1, minutes=50)
+
+_SAMPLE_LESSON_CTX = LessonContext(
+    lesson_title="Το σχήμα C και η ρίζα του",
+    lesson_objective="Ο μαθητής βρίσκει τη ρίζα του σχήματος C οπουδήποτε στο μπράτσο.",
+    module_title="Το σύστημα CAGED",
+    module_objective="Ο μαθητής βλέπει το μπράτσο σαν πέντε σχήματα, όχι σαν σαράντα νότες.",
+    course_title=_SAMPLE_COURSE_TITLE,
+    tier=TIER_LIBRARY,
+    position="lesson 2 of 4, module 3 of 5",
+    minutes=50,
+    teaching_minutes=40,
+    target_words=2200,
+    floor_words=1600,
+)
+
+_SAMPLE_PREVIOUS_DRAFT = {
+    "title": "Το σχήμα C και η ρίζα του",
+    "sections": {"warmup": "Ζέσταμα δύο λεπτών.", "theory": "Το σχήμα C."},
+}
+
+_SAMPLE_MEASUREMENT = Measurement(
+    total_words=980, target=2200, floor=1600,
+    per_section={"warmup": 120, "theory": 860},
+    thin_sections=["theory", "practice"],
+)
+
+_SAMPLE_BAD_CITATIONS = [("theory", "S1", 512)]
+
+
+# ---------------------------------------------------------------------------
+# Builders — each one calls the SAME function the live call path calls
+# ---------------------------------------------------------------------------
+
+_LANG = ("language_directive", "Ο κανόνας γλώσσας")
+_ANSWER_IN = ("answer_in", "Η υπενθύμιση γλώσσας στο τέλος")
+_LIBRARY = ("library", "Η βιβλιοθήκη σου (ολόκληρη)")
+_STUDENT = ("student_brief", "Το προφίλ του μαθητή")
+
+
+def _msgs(built: list[dict]) -> list[RenderedMessage]:
+    """A live builder's `list[dict]` -> `RenderedMessage`s, `cache` flag intact."""
+    return [
+        RenderedMessage(role=m["role"], content=m["content"], cached=bool(m.get("cache")))
+        for m in built
+    ]
+
+
+def _build_chat_system(locale: str) -> _Built:
+    # loop.py's own builder, called with an empty transcript so it takes the
+    # prepend branch. NOT `f"{SYSTEM_PROMPT}\n\n{language_directive(locale)}"`
+    # re-typed here: that shape is `_ensure_system_prompt`'s to own, and a second
+    # copy of it would drift the day the loop changes the separator.
+    return _msgs(_ensure_system_prompt([], locale)), [
+        (*_LANG, language_directive(locale)),
+    ]
+
+
+def _build_chat_grounding(locale: str) -> _Built:
+    block = _grounding_block(_SAMPLE_HITS, locale)
+    # Appended to the END of the tutor's OWN user turn, never as a second system
+    # message — see `_grounding_block`'s docstring for why (the chat template
+    # 400s a non-leading system message, and it would break prefix caching).
+    return [RenderedMessage(role="user", content=block)], [
+        ("passage_1", "Ένα απόσπασμα από τα βιβλία σου", _SAMPLE_HITS[0].text),
+        ("passage_2", "Ένα απόσπασμα από τα βιβλία σου", _SAMPLE_HITS[1].text),
+        (*_ANSWER_IN, answer_in(locale)),
+    ]
+
+
+def _build_chat_no_hits(locale: str) -> _Built:
+    return [RenderedMessage(role="user", content=_grounding_block([], locale))], [
+        (*_ANSWER_IN, answer_in(locale)),
+    ]
+
+
+def _build_curriculum_system(locale: str) -> _Built:
+    # Index 0 of the live prefix is `CURRICULUM_SYSTEM` in every branch.
+    return _msgs(prefix_messages(_SAMPLE_LIBRARY)[:1]), []
+
+
+def _build_curriculum_library(locale: str) -> _Built:
+    return _msgs([library_message(_SAMPLE_LIBRARY)]), [
+        (*_LIBRARY, _SAMPLE_LIBRARY_TEXT),
+    ]
+
+
+def _build_curriculum_no_library(locale: str) -> _Built:
+    return _msgs(prefix_messages(_EMPTY_LIBRARY)[1:]), []
+
+
+def _build_curriculum_library_too_large(locale: str) -> _Built:
+    return _msgs(prefix_messages(_OVERSIZED_LIBRARY)[1:]), []
+
+
+def _build_curriculum_outline(locale: str) -> _Built:
+    built = build_outline_messages(
+        title=_SAMPLE_COURSE_TITLE, brief=_SAMPLE_COURSE_BRIEF, language=locale,
+        shape=_SAMPLE_SHAPE, library=_SAMPLE_LIBRARY,
+        student_brief=_sample_student_brief(), gap_policy=POLICY_GENERAL,
+    )
+    return _msgs(built), [
+        (*_LIBRARY, _SAMPLE_LIBRARY_TEXT),
+        ("course_title", "Ο τίτλος του προγράμματος", _SAMPLE_COURSE_TITLE),
+        ("course_brief", "Τι ζήτησες, με τα δικά σου λόγια", _SAMPLE_COURSE_BRIEF),
+        (*_STUDENT, _sample_student_brief()),
+        (*_LANG, language_directive(locale)),
+        (*_ANSWER_IN, answer_in(locale)),
+    ]
+
+
+def _build_curriculum_extend(locale: str) -> _Built:
+    built = build_module_messages(
+        course_title=_SAMPLE_COURSE_TITLE, brief=_SAMPLE_COURSE_BRIEF, language=locale,
+        existing="1. Πρώτες συγχορδίες\n2. Ρυθμικά σχήματα", topic="Το σύστημα CAGED",
+        lesson_count=4, minutes_per_lesson=50, target_words=2200,
+        library=_SAMPLE_LIBRARY, gap_policy=POLICY_GENERAL,
+    )
+    return _msgs(built), [
+        (*_LIBRARY, _SAMPLE_LIBRARY_TEXT),
+        ("existing_modules", "Το πρόγραμμα όπως είναι σήμερα",
+         "1. Πρώτες συγχορδίες\n2. Ρυθμικά σχήματα"),
+        ("topic", "Το θέμα που ζήτησες", "Το σύστημα CAGED"),
+        (*_LANG, language_directive(locale)),
+        (*_ANSWER_IN, answer_in(locale)),
+    ]
+
+
+def _build_curriculum_refine(locale: str) -> _Built:
+    instruction = "Κάν' το πιο απλό, μιλάει σε δωδεκάχρονο."
+    built = build_refine_messages(
+        instruction=instruction, title="Το σχήμα C και η ρίζα του",
+        body="Το σχήμα C είναι ένα από τα πέντε μετακινούμενα σχήματα του CAGED.",
+        kind="item", language=locale,
+        citations=[{"source_title": "Guitar Fretboard Workbook", "page": 14}],
+        context=_SAMPLE_HITS[0].text,
+    )
+    return _msgs(built), [
+        ("instruction", "Η οδηγία σου", instruction),
+        ("block_body", "Το κείμενο που διορθώνεις",
+         "Το σχήμα C είναι ένα από τα πέντε μετακινούμενα σχήματα του CAGED."),
+        (*_LANG, language_directive(locale)),
+        (*_ANSWER_IN, answer_in(locale)),
+    ]
+
+
+def _build_lesson_draft(locale: str) -> _Built:
+    built = build_lesson_messages(
+        ctx=_SAMPLE_LESSON_CTX, library=_SAMPLE_LIBRARY, language=locale,
+        student_brief=_sample_student_brief(), course_brief=_SAMPLE_COURSE_BRIEF,
+    )
+    return _msgs(built), [
+        (*_LIBRARY, _SAMPLE_LIBRARY_TEXT),
+        ("course_brief", "Τι ζήτησες, με τα δικά σου λόγια", _SAMPLE_COURSE_BRIEF),
+        (*_STUDENT, _sample_student_brief()),
+        (*_LANG, language_directive(locale)),
+        (*_ANSWER_IN, answer_in(locale)),
+    ]
+
+
+def _build_lesson_deepen(locale: str) -> _Built:
+    built = build_lesson_messages(
+        ctx=_SAMPLE_LESSON_CTX, library=_SAMPLE_LIBRARY, language=locale,
+        student_brief=_sample_student_brief(), course_brief=_SAMPLE_COURSE_BRIEF,
+        deepen=_SAMPLE_MEASUREMENT, previous=_SAMPLE_PREVIOUS_DRAFT,
+    )
+    return _msgs(built), [
+        (*_LIBRARY, _SAMPLE_LIBRARY_TEXT),
+        (*_STUDENT, _sample_student_brief()),
+        # The live builder json-dumps the previous draft, so the sample's span is
+        # its serialization — still the sample's own data, not authored text.
+        ("previous_draft", "Η προηγούμενη γραφή του μαθήματος",
+         json.dumps(_SAMPLE_PREVIOUS_DRAFT, ensure_ascii=False)),
+        (*_ANSWER_IN, answer_in(locale)),
+    ]
+
+
+def _build_lesson_repair(locale: str) -> _Built:
+    built = _repair_message(_SAMPLE_BAD_CITATIONS, _SAMPLE_LIBRARY)
+    return _msgs([built]), []
+
+
+def _build_lesson_from_selection(locale: str) -> _Built:
+    passage = _SAMPLE_HITS[0].text
+    built = _selection_messages(
+        text=passage, page_from=14, page_to=15,
+        source_title="Guitar Fretboard Workbook", language=locale,
+    )
+    return _msgs(built), [
+        ("passage", "Το κείμενο που διάλεξες στον αναγνώστη", passage),
+        ("source_title", "Το βιβλίο", "Guitar Fretboard Workbook"),
+        (*_LANG, language_directive(locale)),
+        (*_ANSWER_IN, answer_in(locale)),
+    ]
+
+
+def _tier_fragment(tier: str):
+    def build(locale: str) -> _Built:
+        return [RenderedMessage(role="user", content=_tier_directive(tier))], []
+    return build
+
+
+def _build_retrieval_translate(locale: str) -> _Built:
+    # `_translate_call` assembles these two turns inline. The system turn IS
+    # `_TRANSLATE_SYSTEM` (pointed at, not copied); the user turn is the tutor's
+    # query, i.e. his data. No prompt text is authored here.
+    return [
+        RenderedMessage(role="system", content=_TRANSLATE_SYSTEM),
+        RenderedMessage(role="user", content=_SAMPLE_QUERY),
+    ], [("query", "Αυτό που έγραψες στην αναζήτηση", _SAMPLE_QUERY)]
+
+
+def _build_retrieval_grounded(locale: str) -> _Built:
+    built = build_grounded_messages(_SAMPLE_QUERY, _SAMPLE_HITS, locale=locale)
+    return _msgs(built), [
+        ("query", "Η ερώτησή σου", _SAMPLE_QUERY),
+        ("passage_1", "Ένα απόσπασμα από τα βιβλία σου", _SAMPLE_HITS[0].text),
+        ("passage_2", "Ένα απόσπασμα από τα βιβλία σου", _SAMPLE_HITS[1].text),
+        (*_LANG, language_directive(locale)),
+        (*_ANSWER_IN, answer_in(locale)),
+    ]
+
+
+def _build_retrieval_no_hits(locale: str) -> _Built:
+    built = build_grounded_messages(_SAMPLE_QUERY, [], locale=locale)
+    return _msgs(built), [
+        ("query", "Η ερώτησή σου", _SAMPLE_QUERY),
+        (*_LANG, language_directive(locale)),
+        (*_ANSWER_IN, answer_in(locale)),
+    ]
+
+
+_SAMPLE_ARTIFACT_PROMPT = "Μια ταμπλατούρα με τη σκάλα Σολ ματζόρε σε δύο μέτρα"
+
+
+def _build_artifacts_generate(locale: str) -> _Built:
+    built = _artifact_messages(
+        kind="tab", prompt=_SAMPLE_ARTIFACT_PROMPT, hits=_SAMPLE_HITS, locale=locale,
+    )
+    return _msgs(built), [
+        ("prompt", "Αυτό που ζήτησες", _SAMPLE_ARTIFACT_PROMPT),
+        ("passage_1", "Ένα απόσπασμα από τα βιβλία σου", _SAMPLE_HITS[0].text),
+        (*_LANG, language_directive(locale)),
+        (*_ANSWER_IN, answer_in(locale)),
+    ]
+
+
+_SAMPLE_REPAIR_ERROR = "1 validation error for TabSpec\nalphaTex\n  Field required"
+
+
+def _build_artifacts_repair(locale: str) -> _Built:
+    built = _artifact_messages(
+        kind="tab", prompt=_SAMPLE_ARTIFACT_PROMPT, hits=_SAMPLE_HITS, locale=locale,
+        repair_error=_SAMPLE_REPAIR_ERROR,
+    )
+    return _msgs(built), [
+        ("prompt", "Αυτό που ζήτησες", _SAMPLE_ARTIFACT_PROMPT),
+        ("repair_error", "Τι ήταν λάθος στην πρώτη προσπάθεια", _SAMPLE_REPAIR_ERROR),
+        (*_ANSWER_IN, answer_in(locale)),
+    ]
+
+
+def _build_artifacts_tab_guidance(locale: str) -> _Built:
+    return [RenderedMessage(role="system", content=_KIND_PROMPT_GUIDANCE["tab"])], []
+
+
+def _vision_prompt(prompt: str):
+    def build(locale: str) -> _Built:
+        # `vision()` sends the prompt as the user turn beside the page image.
+        # No locale: a transcription is in the language the page is printed in,
+        # and `language_directive` would be an instruction to mistranslate a book.
+        return [RenderedMessage(role="user", content=prompt)], []
+    return build
+
+
+def _build_settings_probe(locale: str) -> _Built:
+    return [RenderedMessage(role="user", content=_PROBE_PROMPT)], []
+
+
+def _build_shared_language_directive(locale: str) -> _Built:
+    return [RenderedMessage(role="system", content=language_directive(locale))], []
+
+
+def _build_shared_answer_in(locale: str) -> _Built:
+    return [RenderedMessage(role="user", content=answer_in(locale))], []
+
+
+def _build_shared_student_brief(locale: str) -> _Built:
+    brief = _sample_student_brief()
+    return [RenderedMessage(role="user", content=brief)], [
+        ("goals", "Οι στόχοι του μαθητή, όπως τους έγραψες", _SAMPLE_STUDENT.goals),
+        ("struggle_note", "Μια σημείωση που σήμανες ως δυσκολία", _SAMPLE_NOTES[0].body),
+        ("other_note", "Μια απλή σημείωσή σου", _SAMPLE_NOTES[1].body),
+        ("pitch", "Η οδηγία που μπορείς να αλλάξεις", STUDENT_PITCH),
+    ]
+
+
+def _build_tools_descriptions(locale: str) -> _Built:
+    # `loop._tool_schemas()` — the exact list the loop hands the provider, so a
+    # tool added, removed or re-described shows up here on the same commit.
+    schemas = json.dumps(_tool_schemas(), indent=2, ensure_ascii=False)
+    return [RenderedMessage(role="system", content=schemas)], []
+
+
+def _build_tools_system_claude_cli(locale: str) -> _Built:
+    # `tool_choice="auto"` is what BOTH live call sites pass (`loop.py:671`,
+    # `loop.py:905`); the "required"/"none" branches have no caller today.
+    return [RenderedMessage(
+        role="system", content=_tool_system_prompt(_tool_schemas(), "auto"),
+    )], []
+
+
+# ---------------------------------------------------------------------------
+# The registry
+# ---------------------------------------------------------------------------
+
+_ENTRIES = [
+    # ---- chat ----
+    PromptEntry(
+        id="chat.system",
+        flow="chat",
+        kind="prompt",
+        source_ref="app/agent/prompts.py:67",
+        title_el="Ο βοηθός συνομιλίας",
+        what_it_does_el=(
+            "Λέει στον βοηθό ότι δεν ξέρει τίποτα από μόνος του για τους μαθητές "
+            "σου, τα προγράμματα και τα βιβλία σου — πρέπει πάντα να ψάξει πρώτα "
+            "και να μην αναφέρει ποτέ κάτι που δεν βρήκε. Του απαγορεύει να "
+            "γράφει ταμπλατούρες σαν απλό κείμενο (τις φτιάχνει σωστά, ώστε να "
+            "παίζονται πραγματικά) και να επινοεί το ριφ ενός γνωστού τραγουδιού που δεν "
+            "θυμάται· του λέει να στο πει ανοιχτά και να προτείνει κάτι αληθινό "
+            "στη θέση του. Κάθε πρόταση εδώ μέσα μπήκε επειδή κάποτε κάτι πήγε "
+            "στραβά."
+        ),
+        when_it_runs_el="Σε κάθε μήνυμα που γράφεις στη συνομιλία.",
+        source_of_truth=lambda: SYSTEM_PROMPT,
+        build=_build_chat_system,
+        call_sites=("agent/loop.py:671", "agent/loop.py:905"),
+    ),
+    PromptEntry(
+        id="chat.grounding",
+        flow="chat",
+        kind="prompt",
+        source_ref="app/agent/loop.py:380",
+        title_el="Τα αποσπάσματα από τη βιβλιοθήκη σου",
+        what_it_does_el=(
+            "Πριν απαντήσει, η εφαρμογή ψάχνει μόνη της στα βιβλία σου και "
+            "κολλάει τα σχετικά αποσπάσματα κάτω από την ερώτησή σου, "
+            "αριθμημένα. Λέει στον βοηθό να απαντήσει από αυτά και να σημειώνει "
+            "με [1], [2] ποιο χρησιμοποίησε, ώστε να μπορείς να το ελέγξεις. Αν "
+            "τα αποσπάσματα δεν απαντούν στην ερώτηση, του λέει να το πει."
+        ),
+        when_it_runs_el=(
+            "Σε κάθε ερώτηση με ουσία που κάνεις στη συνομιλία — όχι στα «γεια σου»."
+        ),
+        source_of_truth=lambda: _grounding_block,
+        build=_build_chat_grounding,
+    ),
+    PromptEntry(
+        id="chat.no_hits",
+        flow="chat",
+        kind="prompt",
+        source_ref="app/agent/loop.py:373",
+        title_el="Όταν η βιβλιοθήκη σου δεν έχει τίποτα",
+        what_it_does_el=(
+            "Όταν η αναζήτηση στα βιβλία σου δεν βρει τίποτα σχετικό, αυτό λέει "
+            "στον βοηθό να στο πει καθαρά και να ξεκαθαρίσει ότι ό,τι ακολουθεί "
+            "είναι γενικές γνώσεις, όχι δικό σου υλικό. Στέλνεται ακόμα κι όταν "
+            "δεν βρέθηκε τίποτα, επίτηδες: αν δεν έλεγε τίποτα, ο βοηθός δεν θα "
+            "ήξερε αν ψάξαμε και δεν βρήκαμε ή αν δεν ψάξαμε καθόλου."
+        ),
+        when_it_runs_el="Όταν ρωτάς κάτι που τα βιβλία σου δεν καλύπτουν.",
+        source_of_truth=lambda: _NO_HITS_GROUNDING,
+        build=_build_chat_no_hits,
+    ),
+
+    # ---- tools ----
+    PromptEntry(
+        id="tools.descriptions",
+        flow="tools",
+        kind="fragment",
+        source_ref="app/agent/tools.py:944",
+        title_el="Τα εργαλεία του βοηθού",
+        what_it_does_el=(
+            "Ο κατάλογος με τα 21 εργαλεία που έχει ο βοηθός — αναζήτηση στα "
+            "βιβλία σου, άνοιγμα μαθητή, δημιουργία προγράμματος, και τα "
+            "υπόλοιπα. Για καθένα υπάρχει μια περιγραφή που του εξηγεί πότε να "
+            "το χρησιμοποιήσει και πότε να προτιμήσει άλλο. Αυτές οι περιγραφές "
+            "είναι κι αυτές κείμενο που διαβάζει το μοντέλο σε κάθε μήνυμα, "
+            "γι' αυτό φαίνονται εδώ."
+        ),
+        when_it_runs_el="Σε κάθε μήνυμα που γράφεις στη συνομιλία.",
+        source_of_truth=lambda: TOOLS,
+        build=_build_tools_descriptions,
+        call_sites=("agent/loop.py:671", "agent/loop.py:905"),
+    ),
+    PromptEntry(
+        id="tools.system_claude_cli",
+        flow="tools",
+        kind="prompt",
+        source_ref="app/llm/claude_cli.py:543",
+        title_el="Τα εργαλεία, γραμμένα σαν οδηγίες (τρέχουσα σύνδεση)",
+        what_it_does_el=(
+            "Με τη σύνδεση που χρησιμοποιείς αυτή τη στιγμή, τα εργαλεία δεν "
+            "μπορούν να σταλούν σαν κανονική λίστα — γράφονται σε απλό κείμενο "
+            "και στέλνονται σαν οδηγία. Αυτό είναι το πιο μεγάλο κείμενο που "
+            "φεύγει σε κάθε μήνυμα (περίπου 14.000 χαρακτήρες) και δεν το "
+            "γράψαμε εμείς πρόταση-πρόταση: παράγεται αυτόματα από τον κατάλογο "
+            "των εργαλείων. Αν κάποτε βάλεις κανονικό κλειδί, αυτό εξαφανίζεται "
+            "εντελώς."
+        ),
+        when_it_runs_el=(
+            "Σε κάθε μήνυμα στη συνομιλία, όσο η εφαρμογή μιλάει στο μοντέλο "
+            "μέσω της τοπικής γέφυρας (η τρέχουσα ρύθμιση)."
+        ),
+        source_of_truth=lambda: _tool_system_prompt,
+        build=_build_tools_system_claude_cli,
+        call_sites=("agent/loop.py:671", "agent/loop.py:905"),
+        provider="claude_cli",
+    ),
+
+    # ---- curriculum ----
+    PromptEntry(
+        id="curriculum.system",
+        flow="curriculum",
+        kind="prompt",
+        source_ref="app/curriculum/corpus.py:242",
+        title_el="Η εισαγωγή για τη συγγραφή ύλης",
+        what_it_does_el=(
+            "Η πρώτη οδηγία σε κάθε δημιουργία ύλης: ότι γράφει για έναν "
+            "πραγματικό δάσκαλο κιθάρας, ότι θα διαβάσει ολόκληρη τη βιβλιοθήκη "
+            "σου και μετά θα πάρει μία συγκεκριμένη δουλειά, και ότι πρέπει να "
+            "απαντήσει μόνο με τα δεδομένα που του ζητούνται, χωρίς κουβέντα "
+            "γύρω-γύρω. Είναι σκόπιμα σύντομη και ίδια πάντα — έτσι η ανάγνωση "
+            "της βιβλιοθήκης χρεώνεται μία φορά και μετά ξαναχρησιμοποιείται."
+        ),
+        when_it_runs_el=(
+            "Κάθε φορά που φτιάχνεις πρόγραμμα σπουδών, προσθέτεις ενότητα ή "
+            "γράφεται ένα μάθημα."
+        ),
+        source_of_truth=lambda: CURRICULUM_SYSTEM,
+        build=_build_curriculum_system,
+        cache_prefix=True,
+    ),
+    PromptEntry(
+        id="curriculum.library",
+        flow="curriculum",
+        kind="prompt",
+        source_ref="app/curriculum/corpus.py:298",
+        title_el="Ολόκληρη η βιβλιοθήκη σου",
+        what_it_does_el=(
+            "Δίνει στον βοηθό όλα τα βιβλία που διάλεξες, ολόκληρα, με τον "
+            "αριθμό κάθε σελίδας δίπλα στο κείμενό της — και του λέει να γράφει "
+            "από αυτά όπου γίνεται. Δεν είναι αποσπάσματα· είναι το πλήρες "
+            "κείμενο. Οι αριθμοί σελίδων είναι που κάνουν τις παραπομπές "
+            "αληθινές και κλικαρίσιμες."
+        ),
+        when_it_runs_el=(
+            "Κάθε φορά που φτιάχνεις πρόγραμμα σπουδών, προσθέτεις ενότητα ή "
+            "γράφεται ένα μάθημα."
+        ),
+        source_of_truth=lambda: library_message,
+        build=_build_curriculum_library,
+        cache_prefix=True,
+    ),
+    PromptEntry(
+        id="curriculum.no_library",
+        flow="curriculum",
+        kind="prompt",
+        source_ref="app/curriculum/corpus.py:289",
+        title_el="Όταν δεν διάλεξες κανένα βιβλίο",
+        what_it_does_el=(
+            "Αν δεν διαλέξεις καμία πηγή, μπαίνει αυτό στη θέση της "
+            "βιβλιοθήκης: του λέει ότι δεν έχει δει τίποτα δικό σου, άρα να "
+            "χαρακτηρίσει κάθε ενότητα ειλικρινά ως «γενικές γνώσεις» και ποτέ "
+            "ως «από τη βιβλιοθήκη». Χωρίς αυτό, θα έγραφε σαν να είχε διαβάσει "
+            "βιβλία που δεν του δώσαμε."
+        ),
+        when_it_runs_el="Όταν φτιάχνεις πρόγραμμα χωρίς να διαλέξεις πηγές.",
+        source_of_truth=lambda: prefix_messages,
+        build=_build_curriculum_no_library,
+    ),
+    PromptEntry(
+        id="curriculum.library_too_large",
+        flow="curriculum",
+        kind="prompt",
+        source_ref="app/curriculum/corpus.py:274",
+        title_el="Όταν η βιβλιοθήκη σου δεν χωράει",
+        what_it_does_el=(
+            "Αν τα βιβλία που διάλεξες είναι πάρα πολλά για να διαβαστούν "
+            "ολόκληρα, δεν στέλνονται καθόλου — και μπαίνει αυτό στη θέση τους. "
+            "Του λέει ότι δεν του δείχνουμε τη βιβλιοθήκη και ότι θα πάρει "
+            "αποσπάσματα για κάθε ενότητα ξεχωριστά, άρα να μη χαρακτηρίσει "
+            "τίποτα «από τη βιβλιοθήκη» παρά μόνο εκεί που ένα απόσπασμα το "
+            "στηρίζει όντως."
+        ),
+        when_it_runs_el="Όταν οι πηγές που διάλεξες ξεπερνούν το όριο ανάγνωσης.",
+        source_of_truth=lambda: prefix_messages,
+        build=_build_curriculum_library_too_large,
+    ),
+    PromptEntry(
+        id="curriculum.outline",
+        flow="curriculum",
+        kind="prompt",
+        source_ref="app/curriculum/outline.py:120",
+        title_el="Ο σκελετός του προγράμματος",
+        what_it_does_el=(
+            "Ζητάει μόνο τη δομή: τίτλους ενοτήτων και μαθημάτων με μία "
+            "πρόταση στόχο ο καθένας — όχι περιεχόμενο. Επιβάλλει τους ακριβείς "
+            "αριθμούς που έβγαλε η συνέντευξη και απαιτεί να χαρακτηριστεί κάθε "
+            "ενότητα ειλικρινά: «από τη βιβλιοθήκη» μόνο αν είναι πράγματι μέσα — "
+            "αλλιώς η παραπομπή είναι ένα ψέμα, και θα το πατήσεις."
+        ),
+        when_it_runs_el="Μία φορά, μόλις πατήσεις δημιουργία προγράμματος.",
+        source_of_truth=lambda: build_outline_messages,
+        build=_build_curriculum_outline,
+        call_sites=("curriculum/outline.py:251",),
+    ),
+    PromptEntry(
+        id="curriculum.extend",
+        flow="curriculum",
+        kind="prompt",
+        source_ref="app/curriculum/extend.py:144",
+        title_el="Η νέα ενότητα σε υπάρχον πρόγραμμα",
+        what_it_does_el=(
+            "Δείχνει στον βοηθό το πρόγραμμα όπως είναι σήμερα και ζητάει μία "
+            "καινούργια ενότητα που να δένει με τα υπόλοιπα και να μην "
+            "επαναλαμβάνει τίποτα. Αν δεν του πεις θέμα, διαλέγει αυτό που "
+            "λείπει περισσότερο."
+        ),
+        when_it_runs_el="Όταν προσθέτεις ενότητα σε πρόγραμμα που ήδη υπάρχει.",
+        source_of_truth=lambda: build_module_messages,
+        build=_build_curriculum_extend,
+        call_sites=("curriculum/extend.py:223",),
+    ),
+    PromptEntry(
+        id="curriculum.refine",
+        flow="curriculum",
+        kind="prompt",
+        source_ref="app/curriculum/refine.py:46",
+        title_el="Η διόρθωση ενός κομματιού",
+        what_it_does_el=(
+            "Του δίνει το κείμενο που θέλεις να αλλάξει, από πού γράφτηκε, και "
+            "στο τέλος — τελευταία, για να βαραίνει πιο πολύ — την οδηγία σου. "
+            "Του λέει να κάνει ΜΟΝΟ αυτό που ζήτησες και τίποτε άλλο: είναι δική "
+            "σου δουλειά, ζήτησες μια διόρθωση, όχι ξαναγράψιμο."
+        ),
+        when_it_runs_el="Όταν ζητάς αλλαγή σε ένα κομμάτι μαθήματος.",
+        source_of_truth=lambda: build_refine_messages,
+        build=_build_curriculum_refine,
+        call_sites=("curriculum/refine.py:118",),
+    ),
+
+    # ---- lesson ----
+    PromptEntry(
+        id="lesson.draft",
+        flow="lesson",
+        kind="prompt",
+        source_ref="app/curriculum/draft.py:101",
+        title_el="Η συγγραφή ενός μαθήματος",
+        what_it_does_el=(
+            "Ζητάει το ίδιο το μάθημα — τις σελίδες που θα διδάξεις, όχι ένα "
+            "σχέδιο για αυτές. Του λέει σε ποιο σημείο του προγράμματος "
+            "βρίσκεται (για να μην ξαναδιδάξει τα προηγούμενα), πόσες λέξεις "
+            "πρέπει να πιάσει, και ότι κάτω από ένα όριο το μάθημα γυρίζει πίσω "
+            "για ξαναγράψιμο. Μαζί πάει το προφίλ του μαθητή, αν έχεις διαλέξει "
+            "κάποιον."
+        ),
+        when_it_runs_el=(
+            "Μία φορά για κάθε μάθημα του προγράμματος, αφού εγκρίνεις τον "
+            "σκελετό."
+        ),
+        source_of_truth=lambda: build_lesson_messages,
+        build=_build_lesson_draft,
+        call_sites=("curriculum/draft.py:281",),
+    ),
+    PromptEntry(
+        id="lesson.deepen",
+        flow="lesson",
+        kind="prompt",
+        source_ref="app/curriculum/draft.py:163",
+        title_el="Το ξαναγράψιμο ενός κοντού μαθήματος",
+        what_it_does_el=(
+            "Αν το μάθημα βγήκε πιο κοντό από το όριο, γυρίζει πίσω με την "
+            "προηγούμενη γραφή του και τη λίστα των σημείων που ήταν φτωχά. Του "
+            "λέει να κρατήσει ό,τι ήταν καλό και να επεκτείνει αυτά — με "
+            "πραγματική ύλη, ασκήσεις και εξηγήσεις, όχι με μακρύτερη εισαγωγή."
+        ),
+        when_it_runs_el=(
+            "Μόνο όταν ένα μάθημα βγει κάτω από το όριο λέξεων. Το πολύ μία φορά "
+            "ανά μάθημα."
+        ),
+        source_of_truth=lambda: build_lesson_messages,
+        build=_build_lesson_deepen,
+        call_sites=("curriculum/draft.py:302",),
+    ),
+    PromptEntry(
+        id="lesson.repair",
+        flow="lesson",
+        kind="prompt",
+        source_ref="app/curriculum/draft.py:223",
+        title_el="Όταν παραπέμπει σε σελίδα που δεν υπάρχει",
+        what_it_does_el=(
+            "Η εφαρμογή ελέγχει κάθε παραπομπή σε σελίδα που γράφει ο βοηθός. "
+            "Αν αναφέρει σελίδα που δεν του δώσαμε ποτέ, σταματάει και του "
+            "στέλνει αυτό: ποιες σελίδες ανέφερε λάθος, ποιες υπάρχουν "
+            "πραγματικά, και να ξαναγράψει το μάθημα ίδιο αλλά με σωστές "
+            "παραπομπές. Υπάρχει επειδή εσύ πατάς τις παραπομπές και πας στη "
+            "σελίδα — μια λάθος σελίδα είναι χειρότερη από καμία."
+        ),
+        when_it_runs_el="Μόνο όταν πιαστεί λάθος παραπομπή. Το πολύ μία φορά ανά μάθημα.",
+        source_of_truth=lambda: _repair_message,
+        build=_build_lesson_repair,
+        call_sites=("curriculum/draft.py:287",),
+    ),
+    PromptEntry(
+        id="lesson.tier_library",
+        flow="lesson",
+        kind="fragment",
+        source_ref="app/curriculum/draft.py:75",
+        title_el="Οδηγία: η ενότητα είναι μέσα στα βιβλία σου",
+        what_it_does_el=(
+            "Μπαίνει στη συγγραφή του μαθήματος όταν η ενότητα έχει "
+            "χαρακτηριστεί ως καλυμμένη από τη βιβλιοθήκη σου. Του λέει να τη "
+            "διδάξει από τις σελίδες σου, να τις αναφέρει σε κάθε κομμάτι, και "
+            "να αναφέρει ΜΟΝΟ σελίδες που όντως διάβασε — καλύτερα καμία "
+            "παραπομπή παρά λάθος."
+        ),
+        when_it_runs_el="Σε κάθε μάθημα ενότητας που χαρακτηρίστηκε «από τη βιβλιοθήκη».",
+        source_of_truth=lambda: _tier_directive,
+        build=_tier_fragment(TIER_LIBRARY),
+    ),
+    PromptEntry(
+        id="lesson.gap",
+        flow="lesson",
+        kind="fragment",
+        source_ref="app/curriculum/draft.py:93",
+        title_el="Οδηγία: η ενότητα ΔΕΝ είναι στα βιβλία σου",
+        what_it_does_el=(
+            "Μπαίνει όταν η ενότητα δεν καλύπτεται από τη βιβλιοθήκη σου και "
+            "έχεις συμφωνήσει να γραφτεί από γενικές γνώσεις. Του λέει να τη "
+            "γράψει καλά αλλά να ΜΗΝ αναφέρει καμία σελίδα σου — δεν το διάβασε "
+            "εκεί. Στο πρόγραμμά σου το μάθημα εμφανίζεται σημειωμένο ως τέτοιο. "
+            "Μια επινοημένη σελίδα είναι το μόνο πράγμα που θα το έκανε ανέντιμο."
+        ),
+        when_it_runs_el="Σε κάθε μάθημα ενότητας που χαρακτηρίστηκε «γενικές γνώσεις».",
+        source_of_truth=lambda: _tier_directive,
+        build=_tier_fragment(TIER_GENERAL),
+    ),
+    PromptEntry(
+        id="lesson.tier_web",
+        flow="lesson",
+        kind="fragment",
+        source_ref="app/curriculum/draft.py:86",
+        title_el="Οδηγία: η ενότητα θέλει πρόσφατες πληροφορίες",
+        what_it_does_el=(
+            "Μπαίνει όταν η ενότητα δεν είναι στα βιβλία σου και χρειάζεται "
+            "επίκαιρη πληροφορία (π.χ. σημερινά μηχανήματα). Του λέει να τη "
+            "γράψει από γενικές γνώσεις, να σημειώνει μέσα στο κείμενο πού "
+            "χρειάζεται έλεγχος με κάτι πρόσφατο, και να μην αναφέρει τίποτα "
+            "στη βιβλιοθήκη σου."
+        ),
+        when_it_runs_el=(
+            "Σε μαθήματα ενότητας «web», μόνο αν το επιτρέψεις στη συνέντευξη."
+        ),
+        source_of_truth=lambda: _tier_directive,
+        build=_tier_fragment(TIER_WEB),
+    ),
+    PromptEntry(
+        id="lesson.from_selection",
+        flow="lesson",
+        kind="prompt",
+        source_ref="app/lessons/draft.py:92",
+        title_el="Μάθημα από κείμενο που διάλεξες",
+        what_it_does_el=(
+            "Όταν διαβάζεις ένα βιβλίο και μαρκάρεις ένα κομμάτι, αυτό στέλνει "
+            "το κείμενο ακριβώς όπως το διάλεξες και ζητάει ένα μάθημα "
+            "χτισμένο πάνω του — κάθε κομμάτι πρέπει να διδάσκει κάτι που το "
+            "απόσπασμα λέει όντως, χωρίς τίποτα επινοημένο γύρω του."
+        ),
+        when_it_runs_el="Όταν διαλέγεις κείμενο στον αναγνώστη και ζητάς μάθημα.",
+        source_of_truth=lambda: _selection_messages,
+        build=_build_lesson_from_selection,
+        call_sites=("lessons/draft.py:254",),
+    ),
+
+    # ---- retrieval ----
+    PromptEntry(
+        id="retrieval.translate",
+        flow="retrieval",
+        kind="prompt",
+        source_ref="app/brain/retrieve.py:199",
+        title_el="Η μετάφραση της αναζήτησής σου",
+        what_it_does_el=(
+            "Εσύ γράφεις ελληνικά· τα βιβλία σου είναι αγγλικά. Πριν την "
+            "αναζήτηση, αυτό μεταφράζει μόνο τη φράση που έγραψες στα αγγλικά, "
+            "ώστε να βρεθούν οι σωστές σελίδες. Του λέει ρητά να ΜΗΝ πειράξει "
+            "ονόματα συγχορδιών (C, Am7), κουρδίσματα (Drop D), τάστα ή "
+            "μοντέλα μηχανημάτων (Tube Screamer) — αυτά γράφονται ίδια σε κάθε "
+            "γλώσσα. Η απάντηση δεν φαίνεται πουθενά· χρησιμοποιείται μόνο για "
+            "το ψάξιμο."
+        ),
+        when_it_runs_el="Σε κάθε αναζήτηση στη βιβλιοθήκη σου που δεν είναι ήδη αγγλικά.",
+        source_of_truth=lambda: _TRANSLATE_SYSTEM,
+        build=_build_retrieval_translate,
+        call_sites=("brain/retrieve.py:244",),
+    ),
+    PromptEntry(
+        id="retrieval.grounded",
+        flow="retrieval",
+        kind="prompt",
+        source_ref="app/brain/retrieve.py:519",
+        title_el="Η απάντηση μέσα από τα βιβλία σου",
+        what_it_does_el=(
+            "Δίνει την ερώτηση μαζί με τα αποσπάσματα που βρέθηκαν, αριθμημένα, "
+            "και ζητάει απάντηση αυστηρά από αυτά, με [1], [2] δίπλα σε ό,τι "
+            "χρησιμοποίησε. Στο τέλος-τέλος επαναλαμβάνει σε ποια γλώσσα να "
+            "γράψει — επίτηδες εκεί: μετά από σελίδες αγγλικών, η τελευταία "
+            "οδηγία είναι αυτή που κρατάει."
+        ),
+        when_it_runs_el="Όταν ρωτάς κάτι και η βιβλιοθήκη σου έχει σχετικό υλικό.",
+        source_of_truth=lambda: build_grounded_messages,
+        build=_build_retrieval_grounded,
+        call_sites=("brain/retrieve.py:556",),
+    ),
+    PromptEntry(
+        id="retrieval.no_hits",
+        flow="retrieval",
+        kind="prompt",
+        source_ref="app/brain/retrieve.py:533",
+        title_el="Απάντηση όταν τα βιβλία σου σιωπούν",
+        what_it_does_el=(
+            "Όταν η αναζήτηση δεν βρει τίποτα, ο βοηθός δεν σου λέει «δεν το "
+            "βρήκα» — του ζητάμε να απαντήσει καλά από γενικές γνώσεις, αλλά να "
+            "ξεκινήσει λέγοντας ότι η βιβλιοθήκη σου δεν το καλύπτει και να μην "
+            "αναφέρει καμία πηγή, αφού δεν του δείξαμε καμία."
+        ),
+        when_it_runs_el="Όταν ρωτάς κάτι που τα βιβλία σου δεν καλύπτουν καθόλου.",
+        source_of_truth=lambda: build_grounded_messages,
+        build=_build_retrieval_no_hits,
+        call_sites=("brain/retrieve.py:556",),
+    ),
+
+    # ---- artifacts ----
+    PromptEntry(
+        id="artifacts.generate",
+        flow="artifacts",
+        kind="prompt",
+        source_ref="app/artifacts/generate.py:61",
+        title_el="Η δημιουργία ταμπλατούρας, συγχορδίας ή ήχου",
+        what_it_does_el=(
+            "Ζητάει μόνο τα δεδομένα του αντικειμένου που ζήτησες — μια "
+            "ταμπλατούρα, μια συγχορδία, μια συνταγή ήχου — σε αυστηρή μορφή "
+            "που η εφαρμογή μπορεί να ζωγραφίσει και να παίξει. Αν υπάρχει "
+            "σχετικό υλικό στα βιβλία σου, μπαίνει από κάτω για να χτίσει πάνω "
+            "του."
+        ),
+        when_it_runs_el=(
+            "Κάθε φορά που ζητάς ταμπλατούρα, συγχορδία, κάρτα εξοπλισμού ή "
+            "συνταγή ήχου — από τη συνομιλία ή από ένα μάθημα."
+        ),
+        source_of_truth=lambda: _artifact_messages,
+        build=_build_artifacts_generate,
+        call_sites=("artifacts/generate.py:228",),
+    ),
+    PromptEntry(
+        id="artifacts.repair",
+        flow="artifacts",
+        kind="prompt",
+        source_ref="app/artifacts/generate.py:61",
+        title_el="Η δεύτερη προσπάθεια, όταν βγει άκυρο",
+        what_it_does_el=(
+            "Αν αυτό που γύρισε δεν είναι έγκυρο (λείπει πεδίο, λάθος μορφή), "
+            "ξαναστέλνεται το ίδιο αίτημα με το συγκεκριμένο σφάλμα κολλημένο "
+            "στο τέλος, ώστε να διορθώσει ακριβώς αυτό αντί να ξαναδοκιμάσει "
+            "στα τυφλά. Γίνεται μία φορά μόνο."
+        ),
+        when_it_runs_el="Μόνο όταν η πρώτη προσπάθεια βγει άκυρη.",
+        source_of_truth=lambda: _artifact_messages,
+        build=_build_artifacts_repair,
+        call_sites=("artifacts/generate.py:239",),
+    ),
+    PromptEntry(
+        id="artifacts.tab_guidance",
+        flow="artifacts",
+        kind="fragment",
+        source_ref="app/artifacts/generate.py:38",
+        title_el="Πώς γράφεται μια ταμπλατούρα",
+        what_it_does_el=(
+            "Μαθαίνει στον βοηθό τη γραφή που καταλαβαίνει ο παίκτης της "
+            "εφαρμογής: κάθε νότα ως «τάστο.χορδή.διάρκεια», με παράδειγμα μιας "
+            "σκάλας Σολ σε δύο μέτρα. Χωρίς αυτό γράφει την ετικέτα «G Major "
+            "Scale Tab» στη θέση της μουσικής και δεν παίζει τίποτα. Είναι το "
+            "μόνο σημείο όπου διδάσκουμε στο μοντέλο μια γλώσσα, όχι έναν κανόνα."
+        ),
+        when_it_runs_el="Μόνο όταν ζητάς ταμπλατούρα.",
+        source_of_truth=lambda: _KIND_PROMPT_GUIDANCE["tab"],
+        build=_build_artifacts_tab_guidance,
+    ),
+
+    # ---- ocr ----
+    PromptEntry(
+        id="ocr.transcribe",
+        flow="ocr",
+        kind="prompt",
+        source_ref="app/brain/ocr.py:143",
+        title_el="Η ανάγνωση μιας σελίδας βιβλίου",
+        what_it_does_el=(
+            "Διαβάζει τη φωτογραφία μιας σελίδας και γράφει τα λόγια της, "
+            "ακριβώς όπως είναι τυπωμένα — χωρίς περίληψη, χωρίς μετάφραση, "
+            "χωρίς διόρθωση του συγγραφέα. Τα σύμβολα μετράνε: το ¼ δεν γίνεται "
+            "4. Κάθε φωτογραφία ή διάγραμμα περιγράφεται ξεχωριστά, μέσα σε "
+            "σημάδια, ώστε αργότερα να ξεχωρίζουν τα δικά του λόγια από την "
+            "περιγραφή — γιατί ό,τι είναι έξω από τα σημάδια σου παρουσιάζεται "
+            "σαν πρόταση του συγγραφέα, με τον αριθμό σελίδας πάνω του."
+        ),
+        when_it_runs_el="Μία φορά για κάθε σελίδα, όταν ανεβάζεις ένα βιβλίο.",
+        source_of_truth=lambda: OCR_PROMPT,
+        build=_vision_prompt(OCR_PROMPT),
+        call_sites=("brain/ocr.py:1026",),
+    ),
+    PromptEntry(
+        id="ocr.figure",
+        flow="ocr",
+        kind="prompt",
+        source_ref="app/brain/ocr.py:182",
+        title_el="Η περιγραφή των εικόνων μιας σελίδας",
+        what_it_does_el=(
+            "Για σελίδες που έχουν ήδη σωστό κείμενο από τον εκδότη, δεν "
+            "ξαναδιαβάζουμε τα λόγια — θα ήταν σκέτο έξοδο. Ζητάμε μόνο τις "
+            "εικόνες: τι δείχνει κάθε φωτογραφία, διάγραμμα ή ταμπλατούρα, με "
+            "όσα νούμερα και ονόματα είναι τυπωμένα μέσα τους. Αυτά είναι που "
+            "δεν βγαίνουν από τις λέξεις γύρω τους."
+        ),
+        when_it_runs_el=(
+            "Μόνο για σελίδες ψηφιακού βιβλίου που έχουν εικόνες αλλά το κείμενό "
+            "τους το έχουμε ήδη."
+        ),
+        source_of_truth=lambda: FIGURE_PROMPT,
+        build=_vision_prompt(FIGURE_PROMPT),
+        call_sites=("brain/ocr.py:1026",),
+    ),
+
+    # ---- settings ----
+    PromptEntry(
+        id="settings.probe",
+        flow="settings",
+        kind="prompt",
+        source_ref="app/routers/settings.py:137",
+        title_el="Η δοκιμή του κλειδιού σου",
+        what_it_does_el=(
+            "Το μικρότερο δυνατό μήνυμα που αποδεικνύει ότι όλα δουλεύουν: "
+            "ζητάει από το μοντέλο να απαντήσει μόνο «ok». Αν γυρίσει σωστά, το "
+            "κλειδί σου, το μοντέλο και ο δρόμος ως εκεί είναι εντάξει. Κοστίζει "
+            "ελάχιστα, γι' αυτό είναι τόσο μικρό."
+        ),
+        when_it_runs_el="Μόνο όταν πατήσεις «Δοκιμή» στις ρυθμίσεις.",
+        source_of_truth=lambda: _PROBE_PROMPT,
+        build=_build_settings_probe,
+        call_sites=("routers/settings.py:165",),
+    ),
+
+    # ---- shared ----
+    PromptEntry(
+        id="shared.language_directive",
+        flow="shared",
+        kind="fragment",
+        source_ref="app/i18n.py:100",
+        title_el="Ο κανόνας της γλώσσας",
+        what_it_does_el=(
+            "Ο πιο σημαντικός κανόνας της εφαρμογής, γραμμένος μία φορά και "
+            "μπαίνει σε 8 σημεία. Λέει τρία πράγματα: γράψε στα ελληνικά· τα "
+            "βιβλία είναι αγγλικά, διάβασέ τα έτσι και απάντα ελληνικά· και όταν "
+            "παραθέτεις κάτι από αυτά, ΚΡΑΤΑ τα λόγια αγγλικά, αυτούσια. Μια "
+            "μεταφρασμένη παράθεση δεν είναι παράθεση — είναι δική του "
+            "παράφραση με εισαγωγικά, και τότε δεν μπορείς να την ελέγξεις στη "
+            "σελίδα. Απαγορεύει επίσης να «ελληνοποιήσει» ονόματα συγχορδιών ή "
+            "μηχανημάτων: το «Ααμ7» δεν παίζεται και ο «Σωλήνας Ουρλιαχτού» δεν "
+            "είναι Tube Screamer."
+        ),
+        when_it_runs_el=(
+            "Σε κάθε δημιουργία κειμένου: συνομιλία, μαθήματα, προγράμματα, "
+            "ταμπλατούρες, απαντήσεις από τη βιβλιοθήκη."
+        ),
+        source_of_truth=lambda: language_directive,
+        build=_build_shared_language_directive,
+    ),
+    PromptEntry(
+        id="shared.answer_in",
+        flow="shared",
+        kind="fragment",
+        source_ref="app/i18n.py:124",
+        title_el="Η τελευταία υπενθύμιση γλώσσας",
+        what_it_does_el=(
+            "Μία γραμμή, κολλημένη στο τέλος-τέλος, μετά τα αγγλικά "
+            "αποσπάσματα. Υπάρχει επειδή μετά από χιλιάδες λέξεις αγγλικών, η "
+            "οδηγία «γράψε ελληνικά» που δόθηκε στην αρχή είναι ό,τι πιο "
+            "παλιό έχει διαβάσει — και τότε τελειώνει τα αγγλικά και απαντάει "
+            "αγγλικά. Αυτή η μία γραμμή στο τέλος είναι που κρατάει."
+        ),
+        when_it_runs_el="Σε κάθε κείμενο που έχει αποσπάσματα από τη βιβλιοθήκη σου.",
+        source_of_truth=lambda: answer_in,
+        build=_build_shared_answer_in,
+    ),
+    PromptEntry(
+        id="shared.student_brief",
+        flow="shared",
+        kind="fragment",
+        source_ref="app/students/context.py:79",
+        title_el="Το προφίλ του μαθητή",
+        what_it_does_el=(
+            "Όσα ξέρεις για τον μαθητή, γραμμένα σε κανονικές προτάσεις που "
+            "μπορεί να χρησιμοποιήσει το μοντέλο: ηλικία, επίπεδο, τι θέλει, "
+            "και οι σημειώσεις σου — πρώτα αυτές που σήμανες ως δυσκολίες, "
+            "γιατί μάθημα που αγνοεί μια γνωστή δυσκολία είναι χειρότερο από "
+            "γενικό. Μπαίνει ολόκληρο, χωρίς φιλτράρισμα: σαράντα σημειώσεις "
+            "είναι λίγες, και το ψάξιμο θα ρίσκαρε να χάσει ακριβώς αυτήν που "
+            "μετρούσε. Αν δεν διαλέξεις μαθητή, δεν μπαίνει τίποτα απολύτως."
+        ),
+        when_it_runs_el=(
+            "Στον σκελετό και σε κάθε μάθημα, όταν έχεις διαλέξει μαθητή για το "
+            "πρόγραμμα."
+        ),
+        source_of_truth=lambda: build_student_brief,
+        build=_build_shared_student_brief,
+        slices=(
+            Slice(
+                id="student.pitch",
+                label_el="Πώς να απευθύνεται στον μαθητή",
+                default=STUDENT_PITCH,
+                kind="replace",
+            ),
+        ),
+    ),
+]
+
+REGISTRY: dict[str, PromptEntry] = {e.id: e for e in _ENTRIES}
+
+
+def render(prompt_id: str, locale: str = DEFAULT_LOCALE) -> RenderedPrompt:
+    """The prompt `prompt_id` as the model gets it, with sample interpolations.
+
+    Raises `KeyError` for an unknown id — the route layer (P2) turns that into a
+    machine-readable code the web renders as one Greek sentence, per the existing
+    convention. Never a stack trace at the tutor.
+    """
+    return REGISTRY[prompt_id].render(locale)
+
+
+def by_flow() -> dict[str, list[PromptEntry]]:
+    """Entries grouped by flow, in registration order — the order the Settings
+    page lists them in. Chat first because it is the thing he uses every day.
+    """
+    grouped: dict[str, list[PromptEntry]] = {}
+    for entry in _ENTRIES:
+        grouped.setdefault(entry.flow, []).append(entry)
+    return grouped

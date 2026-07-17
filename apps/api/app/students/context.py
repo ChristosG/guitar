@@ -49,6 +49,23 @@ STRUGGLE_TAG = "struggle"
 # the least surprising rule when it happens. Newest first.
 MAX_NOTES = 40
 
+# THE ONE CONTRACT-FREE SENTENCE IN THE STUDENT BRIEF, lifted out of
+# `build_student_brief` byte-identically so `app/prompts/registry.py` can POINT
+# AT it rather than hold a second copy — a viewer showing its own copy is how it
+# starts lying while the model gets the original.
+#
+# It is the tutor-editable slice (`student.pitch`) the prompt-transparency spec
+# names, and it is the only line in this module that qualifies: pure pedagogy,
+# no JSON schema, no citation rule, and — the property that actually makes it
+# safe to hand to a textarea — NO PLACEHOLDER. Nothing here is an f-string, so
+# no edit can drop a `{field}` the surrounding code requires and turn a lesson
+# draft into a KeyError in his face. Every other line above is either the
+# tutor's own data or a label welded to it.
+STUDENT_PITCH = (
+    "Write for THIS student: pitch the explanations at his level, and where "
+    "his notes say he is stuck, address it directly instead of teaching past it."
+)
+
 
 def _age(birthdate: date | None) -> int | None:
     if birthdate is None:
@@ -106,8 +123,5 @@ def build_student_brief(db, student_id: UUID | None) -> str | None:
         lines.append("The tutor's other notes on him:")
         lines.extend(f"  - {n.title}: {n.body.strip()}" for n in others)
 
-    lines.append(
-        "Write for THIS student: pitch the explanations at his level, and where "
-        "his notes say he is stuck, address it directly instead of teaching past it."
-    )
+    lines.append(STUDENT_PITCH)
     return "\n".join(lines)

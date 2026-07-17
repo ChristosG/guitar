@@ -128,6 +128,14 @@ _PROBE_SCHEMA = {
     "additionalProperties": False,
 }
 
+# LIFTED OUT OF THE CALL BELOW, BYTE-IDENTICAL, for `app/prompts/registry.py`.
+# The registry's one rule is that it POINTS AT a prompt rather than copying it,
+# and an inline literal is the one shape that cannot be pointed at: the viewer
+# would have to carry its own second copy, which is exactly the drift the
+# registry exists to prevent. So the string moved; not one byte of it changed,
+# and it is still the only thing this call sends.
+_PROBE_PROMPT = "Reply with {\"ok\": true} and nothing else."
+
 
 @router.post("/test", response_model=TestOut)
 def test_settings(payload: TestIn, db: Session = Depends(get_db)) -> TestOut:
@@ -155,7 +163,7 @@ def test_settings(payload: TestIn, db: Session = Depends(get_db)) -> TestOut:
     # Step 2 — one real generation. A green check means this passed.
     try:
         result = provider.guided_json(
-            [{"role": "user", "content": "Reply with {\"ok\": true} and nothing else."}],
+            [{"role": "user", "content": _PROBE_PROMPT}],
             _PROBE_SCHEMA,
             role="spec",
         )
