@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "playwright test",
+    "test:e2e": "playwright test --config=playwright.live.config.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",
