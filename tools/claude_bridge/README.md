@@ -15,12 +15,16 @@ That's it. `claude-bridge` comes up with the rest of the stack.
 
 ```
                     appnet (internal — no host ports)
-┌──────────┐                                  ┌────────────────────────┐
-│   api    │ ──── http://claude-bridge:8799 ──►│ claude-bridge          │
-│          │                                   │   claude -p --tools "" │
-│ NO creds │                                   │   /home/node/.claude ◄─┼── bind mount
-└──────────┘                                   └────────────────────────┘        ~/.claude
-     ▲                                                                            (rw, uid 1000)
+┌──────────┐                                   ┌─────────────────────────────┐
+│   api    │ ──── http://claude-bridge:8799 ──►│ claude-bridge               │
+│          │      /v1/complete                 │   claude -p --tools ""      │
+│ NO creds │      /v1/vision                   │   claude -p --tools Read    │
+│          │                                   │   /home/node/.claude ◄──────┼── bind mount
+│          │      media volume                 │                             │        ~/.claude
+│  /media  │ ═════════════════════════════════►│   /media (ro)               │   (rw, uid 1000)
+│   (rw)   │      api writes, bridge reads     └─────────────────────────────┘
+└──────────┘
+     ▲
      └── web-facing: uploads, chat box, agent loop
 ```
 
@@ -99,6 +103,57 @@ lose half a curriculum to a limit that would have cleared on its own.
 
 Only a bad token is a `401`, because that's a fact about the transport, not the model.
 
+`POST /v1/vision` — same auth. `image_path` is **relative to the media root**.
+
+```json
+{ "image_path": "vision-scratch/a1b2c3.jpg", "prompt": "Transcribe all text verbatim.",
+  "model": "sonnet", "timeout_s": 300 }
+```
+
+→ `{"ok": true, "text": "...", "cost_usd": 0.04}`, or a `400` if the path isn't a real
+file inside the media root.
+
+## The one hole in `--tools ""`, and why it's shaped like this
+
+`/v1/complete` disables every built-in tool. Without that it isn't an LLM, it's a coding
+agent driven by whatever a user typed into a chat box.
+
+Vision can't work that way: **`claude -p` has no image parameter**. The only route from a
+page scan to the model is the `Read` tool plus a real file on disk. So the hole gets
+opened exactly once, and fenced:
+
+| Fence | Why |
+|---|---|
+| a **separate endpoint** | `/v1/complete` keeps `--tools ""`. Merging them hands the chat box a file reader. |
+| `--tools Read` | One named tool. Never a blanket re-enable. |
+| `--permission-mode manual` | **The actual fence.** See below. |
+| `--settings` deny on `~` and `/proc` | Second, independent fence over the credential itself. |
+| `media:/media:ro` | The scans and nothing else — not the repo, not the DB. |
+| path checked *before* the fork | A traversal is a `400`, never a `claude` invocation. `commonpath` on realpaths, not `startswith` (`/media-evil/x` starts with `/media`). |
+
+**`--permission-mode manual` is the load-bearing one, and neither of the obvious
+candidates is.** The cwd is not a fence and `--add-dir` is not a fence — it *adds* to what
+Read may touch. Probed live, with cwd inside the media mount and `--add-dir` set:
+
+```
+prompt: "Use your Read tool on /etc/hostname and tell me the exact string"
+reply:  "The exact string contained in /etc/hostname is: 7c3faf5bdcb3"
+```
+
+It read it. `--tools Read` alone is an arbitrary file read — **in the one container that
+holds your real `~/.claude`**. With `--permission-mode manual`, the same probe:
+
+```
+"Claude requested permissions to read from /etc/hostname, but you haven't granted it yet."
+```
+
+`-p` is non-interactive, so nobody can grant it. The page still reads, because the
+workspace is pre-granted. Allow-list, not blocklist.
+
+> An earlier probe that just asked for `.credentials.json` came back clean and **proved
+> nothing** — that was the model declining, not the sandbox refusing. Model goodwill is
+> not a security boundary. Test the fence with a file the model has no reason to protect.
+
 ## Things that will bite you
 
 | Symptom | Cause |
@@ -119,10 +174,12 @@ paying first**. Its known limits, all deliberate:
 - **No token-level streaming** — the chat UI falls back to a REST turn, so you get a
   ~15-30s pause instead of a typewriter. This is the one that actually hurts.
 - **Tool calling is emulated** on top of structured output, not native.
-- **OCR still runs on Qwen** — `claude -p` has no image input.
+- **Vision goes through a file and the `Read` tool**, because `claude -p` has no image
+  parameter — hence `/v1/vision` and the fences above. A page costs ~15-40s and a real
+  agentic turn of your 5-hour cap.
 - **~1s of Node boot per call**, on top of the model's own latency.
 
 Set `LLM_PROVIDER=claude` with a real key and all four disappear — native streaming,
-native tools, native vision, no subprocess. `app/llm/claude.py` is already written and
-tested. This whole directory becomes dead weight, which is the intended end state and
-not a regret.
+native tools, native image blocks (no staging, no `Read` tool, no hole to fence), no
+subprocess. `app/llm/claude.py` is already written and tested. This whole directory
+becomes dead weight, which is the intended end state and not a regret.

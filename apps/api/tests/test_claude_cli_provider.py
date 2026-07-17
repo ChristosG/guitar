@@ -26,11 +26,14 @@ The four things worth a test:
      particular: `jobs/runner.py` requeues a rate-limited lesson and buries a
      failed one, and on a subscription the 5-hour cap is routine, not exceptional.
 """
+import base64
 import json
+import os
 
 import httpx
 import pytest
 
+from app.config import settings
 from app.llm.claude_cli import _TOOL_TURN_SCHEMA, ClaudeCLIProvider
 from app.llm.errors import GuidedJSONError, LLMError, ToolArgsError
 
@@ -248,3 +251,157 @@ def test_render_flattens_a_react_transcript_including_tool_results(bridge):
     assert "USER: Τι λέει το βιβλίο;" in prompt
     assert "search_knowledge" in prompt                      # the call survives
     assert "σελ. 67" in prompt                               # the RESULT survives
+
+
+# --- 5. vision: the page goes as a FILE, not as base64 ----------------------
+#
+# This method used to delegate to Qwen, and the reason it no longer does is the
+# whole point of the plan around it: the tutor's books carry someone else's
+# Tesseract OCR, which turned every fraction glyph into a digit — "¼-inch" became
+# "4-inch", and a 4-inch cable does not exist. The pages are being re-read.
+#
+# `claude -p` has NO image parameter. The only route from a scan to the model is
+# the `Read` tool plus a real file, so the provider STAGES the page into the media
+# volume both containers mount and posts the PATH. See `tools/claude_bridge/`.
+
+PAGE = b"\xff\xd8\xff\xe0 pretend this is a rendered page"
+
+
+@pytest.fixture
+def vision_bridge(monkeypatch, tmp_path):
+    """`media_dir` -> a tmpdir, and capture what the provider POSTs — including
+    whether the staged page was ON DISK at the moment of the call, which is the
+    entire contract with the bridge."""
+    monkeypatch.setattr(settings, "media_dir", str(tmp_path))
+    sent: dict = {"paths": []}
+    reply: dict = {"ok": True, "text": ""}
+
+    def _post(url, **kw):
+        body = kw.get("json") or {}
+        sent["url"] = url
+        sent["body"] = body
+        sent["headers"] = kw.get("headers")
+        staged = tmp_path / (body.get("image_path") or "_")
+        sent["staged_existed"] = staged.is_file()
+        sent["staged_bytes"] = staged.read_bytes() if staged.is_file() else None
+        sent["paths"].append(body.get("image_path"))
+        return httpx.Response(200, json=reply)
+
+    monkeypatch.setattr(httpx, "post", _post)
+    return sent, reply, tmp_path
+
+
+def test_vision_posts_a_path_to_the_vision_endpoint_not_a_base64_page(vision_bridge):
+    sent, reply, _media = vision_bridge
+    reply.update({"ok": True, "text": "the ¼-inch jack"})
+
+    out = _provider().vision(PAGE, "Transcribe all text on this page verbatim.")
+
+    assert out == "the ¼-inch jack"
+    # A SEPARATE endpoint. `/v1/complete` still runs `--tools ""` and must never
+    # learn to read a file; that separation is the bridge's security boundary.
+    assert sent["url"].endswith("/v1/vision")
+    assert sent["body"]["prompt"] == "Transcribe all text on this page verbatim."
+    assert "image_path" in sent["body"]
+    # The page travels as a FILE. The Read tool needs a real one anyway, and
+    # base64'ing an 11-megapixel scan through a JSON body would be ~15MB of
+    # gratuitous copying between two containers that already share the volume.
+    assert base64.b64encode(PAGE).decode() not in json.dumps(sent["body"])
+
+
+def test_the_staged_page_is_on_disk_where_the_bridge_will_look(vision_bridge):
+    """THE mount contract, and the one most likely to be wrong: the api WRITES
+    the page and the bridge READS it, so they must be the same filesystem. If the
+    bytes are not there at POST time, the bridge answers "no such image" while
+    both containers sit there healthy."""
+    sent, reply, _media = vision_bridge
+    reply.update({"ok": True, "text": "ok"})
+
+    _provider().vision(PAGE, "transcribe")
+
+    assert sent["staged_existed"] is True
+    assert sent["staged_bytes"] == PAGE
+    # RELATIVE to the media root. The bridge refuses an absolute path outright —
+    # silently rebasing one would be the same bug as trusting it.
+    assert not os.path.isabs(sent["body"]["image_path"])
+
+
+def test_the_staged_page_is_deleted_after_the_call(vision_bridge):
+    sent, reply, media = vision_bridge
+    reply.update({"ok": True, "text": "ok"})
+
+    _provider().vision(PAGE, "transcribe")
+
+    assert not (media / sent["body"]["image_path"]).exists()
+
+
+def test_the_staged_page_is_deleted_even_when_the_bridge_fails(vision_bridge):
+    """Scratch is scratch on the failure path too. 888 pages leaking one scan
+    each is a second copy of the tutor's whole library on his disk — and the run
+    that leaks them is exactly the one that hit the 5-hour cap and gets retried."""
+    sent, reply, media = vision_bridge
+    reply.clear()
+    reply.update({"ok": False, "kind": "rate_limit", "message": "usage limit reached"})
+
+    with pytest.raises(LLMError):
+        _provider().vision(PAGE, "transcribe")
+
+    assert not (media / sent["paths"][0]).exists()
+
+
+def test_two_pages_in_flight_cannot_collide(vision_bridge):
+    """The bridge runs 3 `claude` processes at once and the OCR run is a fan-out.
+    A fixed scratch name lets page 2 overwrite page 1's bytes in the window
+    between the write and the Read — and the symptom is a transcript of the WRONG
+    PAGE: silent data corruption that reads like a bad model."""
+    sent, reply, _media = vision_bridge
+    reply.update({"ok": True, "text": "ok"})
+
+    p = _provider()
+    p.vision(PAGE, "page one")
+    p.vision(PAGE, "page two")
+
+    assert len(set(sent["paths"])) == 2
+
+
+@pytest.mark.parametrize("kind", ["rate_limit", "auth", "timeout", "upstream"])
+def test_a_vision_error_kind_survives_into_LLMError(vision_bridge, kind):
+    """Same contract as chat, and it matters more here: re-reading 888 pages WILL
+    hit the subscription cap, and `jobs/runner.py` requeues a `rate_limit` page
+    while burying an `upstream` one."""
+    sent, reply, _media = vision_bridge
+    reply.clear()
+    reply.update({"ok": False, "kind": kind, "message": "boom"})
+
+    with pytest.raises(LLMError) as e:
+        _provider().vision(PAGE, "transcribe")
+
+    assert e.value.kind == kind
+
+
+def test_vision_no_longer_delegates_to_qwen(vision_bridge, monkeypatch):
+    """The hybrid is over. Qwen is a local 9B that was measured LOSING the very
+    glyphs this pass exists to recover; delegating OCR to it would make the whole
+    re-read a no-op."""
+    import app.llm.qwen as qwen_mod
+
+    def _boom(*a, **kw):
+        raise AssertionError("vision() must not construct QwenVLLM any more")
+
+    monkeypatch.setattr(qwen_mod, "QwenVLLM", _boom)
+    sent, reply, _media = vision_bridge
+    reply.update({"ok": True, "text": "ok"})
+
+    assert _provider().vision(PAGE, "transcribe") == "ok"
+
+
+def test_vision_allows_far_more_time_than_a_chat_turn(vision_bridge):
+    """One page is ~40s: Node boots, the model reads the scan, and it may take an
+    agentic turn or two zooming in. A chat-shaped timeout kills a working call and
+    reads as "vision is broken"."""
+    sent, reply, _media = vision_bridge
+    reply.update({"ok": True, "text": "ok"})
+
+    _provider().vision(PAGE, "transcribe")
+
+    assert sent["body"]["timeout_s"] >= 120

@@ -46,8 +46,18 @@ WHAT IS NOT WORSE
     reached through a different door. Same schema sanitizer (`llm/schema.py`),
     same guarantees. This is the one place the CLI is not a compromise at all.
 
-OCR STAYS ON QWEN — SEE `vision()`. That is a deliberate hybrid, not an
-omission.
+OCR IS CLAUDE NOW — SEE `vision()`. It used to delegate to Qwen, and that hybrid
+died on a fact: the tutor's books are scans carrying someone else's Tesseract
+OCR, and it lost every fraction glyph — Kahn p63 says "4-inch stereo cables",
+which is not a typo but a wrong fact, since ¼-inch is what the paragraph is
+about. Qwen is a local 9B that loses the same class of detail. All 888 pages are
+being re-read, so this provider had to grow real eyes.
+
+That is also the ONE place the bridge's `--tools ""` posture is relaxed, because
+`claude -p` has no image parameter and the `Read` tool plus a real file is the
+only way in. It is a separate endpoint (`/v1/vision`) with one tool, a read-only
+mount of the page scans alone, and a path validated before the subprocess starts.
+See `vision()` and `tools/claude_bridge/bridge.py::run_vision`.
 
 THE PROCESS DOES NOT RUN HERE. This class is an HTTP client. The subprocess runs
 in the sibling `claude-bridge` container (`tools/claude_bridge/`, wired up in
@@ -68,6 +78,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -106,8 +117,33 @@ _EFFORT: dict[str, str] = {
     "plan":    "high",
     "draft":   "high",
     "spec":    "medium",
-    "ocr":     "low",     # unused — OCR never reaches this provider. See vision().
+    # NOT USED BY `vision()`, which is the only OCR path here. `/v1/vision` sends
+    # no `--effort`: the bridge composes its own argv for the one invocation that
+    # has a tool enabled, and adding a knob to that argv means widening the
+    # narrowest surface in the system to tune something that has never been the
+    # bottleneck (a page is ~40s, nearly all of it reading pixels). Kept so the
+    # role table still matches `claude.py`'s.
+    "ocr":     "low",
 }
+
+# Where `vision()` stages a page for the bridge to read, RELATIVE to
+# `settings.media_dir` — the volume both containers mount (this one rw, the bridge
+# ro). Deliberately not a UUID: `brain/media.py::sweep_orphaned_media` purges
+# UUID-named directories with no matching source and leaves everything else alone.
+_VISION_SCRATCH = "vision-scratch"
+
+_VISION_EXT = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
+
+# One page is ~40s: Node boots (~1s), then the model reads an 11-megapixel scan and
+# may spend an agentic turn or two zooming into it. This is deliberately ~7x that
+# — a page that dies at 60s looks like a bug and is really a stopwatch — while
+# still being well under the 600s a curriculum draft gets, because 888 pages behind
+# a hung one is a different kind of bad day.
+_VISION_TIMEOUT_S = 300.0
 
 # The reply shape `chat_tools` forces. `arguments` is a STRING, not an object,
 # and that is the load-bearing detail of this whole emulation.
@@ -161,10 +197,6 @@ class ClaudeCLIProvider(LLMProvider):
         self._alias = _MODEL_ALIAS[self._model]
         self._url = (bridge_url or settings.claude_bridge_url).rstrip("/")
         self._token = settings.claude_bridge_token
-        # The Qwen provider this one delegates OCR to. Built lazily, on first page —
-        # constructing it eagerly would open an OpenAI client against the vLLM box
-        # for every chat-only process that will never OCR anything. See `vision()`.
-        self._qwen: LLMProvider | None = None
         # Same purpose as `ClaudeProvider.last_usage`, with a twist: `cost_usd` is
         # what this call WOULD have cost on an API key. On the subscription it is
         # not billed. It is the number that answers "is a key worth buying yet".
@@ -181,17 +213,29 @@ class ClaudeCLIProvider(LLMProvider):
         json_schema: dict | None = None,
         timeout_s: float = 600.0,
     ) -> dict:
-        body = {
-            "prompt": prompt,
-            "system": system,
-            "model": self._alias,
-            "effort": _EFFORT.get(role, _EFFORT["default"]),
-            "json_schema": json_schema,
-            "timeout_s": timeout_s,
-        }
+        return self._post(
+            "/v1/complete",
+            {
+                "prompt": prompt,
+                "system": system,
+                "model": self._alias,
+                "effort": _EFFORT.get(role, _EFFORT["default"]),
+                "json_schema": json_schema,
+                "timeout_s": timeout_s,
+            },
+            timeout_s=timeout_s,
+        )
+
+    def _post(self, path: str, body: dict, *, timeout_s: float) -> dict:
+        """One HTTP call to the bridge, with the whole failure taxonomy applied.
+
+        Shared by `/v1/complete` and `/v1/vision` so the two cannot drift: every
+        distinction below was paid for once (see the comments), and a second
+        hand-rolled `httpx.post` in `vision()` would inherit none of them.
+        """
         try:
             resp = httpx.post(
-                f"{self._url}/v1/complete",
+                f"{self._url}{path}",
                 json=body,
                 headers={"Authorization": f"Bearer {self._token}"},
                 # The bridge's own subprocess timeout is `timeout_s`; give the HTTP
@@ -401,28 +445,73 @@ class ClaudeCLIProvider(LLMProvider):
     # blesses. See module docstring, point 2.
 
     def vision(self, image_bytes: bytes, prompt: str, *, media_type: str = "image/jpeg") -> str:
-        """OCR STAYS ON QWEN. This method delegates, and that is the design.
+        """A page scan -> Claude, through a file on a shared volume.
 
-        `claude -p` has no image input: you would write the page to a temp file,
-        re-enable the `Read` tool we deliberately disabled, and spend an agentic
-        turn per page. For 77 pages of an ENGLISH book that Qwen was already
-        measured transcribing faithfully at 110dpi (see `QwenVLLM.vision`), that
-        buys nothing and spends a real slice of a 5-hour subscription cap.
+        THIS USED TO DELEGATE TO QWEN, and the reason it no longer does is the
+        reason this method is on the critical path. The tutor's books are scans
+        carrying someone else's Tesseract OCR, and it lost every fraction glyph:
+        page 63 of Kahn reads "4-inch stereo cables", which is not a typo but a
+        WRONG FACT — 4-inch cables do not exist, ¼-inch ones are the entire
+        subject of the paragraph. Qwen is a local 9B measured losing the same
+        class of detail. All 888 pages are being re-read by Claude, so `vision()`
+        has to actually be Claude.
 
-        So the provider is a HYBRID, on purpose: Claude does the language work
-        (chat, curricula, lessons — where Greek is the whole point), Qwen keeps
-        doing the pixels. Nothing above the seam knows.
+        THE PAGE TRAVELS AS A FILE, NOT AS BASE64. `claude -p` has NO image
+        parameter — the only route from a scan to the model is the `Read` tool
+        plus a real file on disk. Both containers already mount the media volume
+        (this one writes it, the bridge reads it read-only), so the page is staged
+        there and the PATH is posted. Base64 would mean ~15MB of JSON per page to
+        move bytes that are already on the other side of the wall.
 
-        THIS IS THE FLIP POINT. When the tutor buys an API key, `LLM_PROVIDER=claude`
-        makes `ClaudeProvider.vision()` live — native image blocks, no temp files —
-        and this method, along with the Qwen dependency, becomes unreachable. The
-        hybrid is a PoC-era compromise with a known expiry date, not an architecture.
+        THE STAGED PAGE IS SCRATCH. A unique name because the bridge runs three
+        `claude` processes at once and a fixed one would let page 2 overwrite page
+        1 in the window before its Read — a transcript of the wrong page, which is
+        silent corruption that reads like a bad model. Deleted in a `finally`,
+        because 888 leaked scans is a second copy of the library on his disk.
+
+        WHAT IS NOT HANDLED HERE. If `claude -p` wraps the transcription in chatty
+        markdown (it may narrate that it zoomed in), that is a PROMPT problem and
+        it belongs to the caller that owns the prompt. Scrubbing it here would hide
+        it from the only place that can fix it properly, and would risk eating a
+        line of a real page along with it.
+
+        THE FLIP POINT is unchanged: with a real API key `ClaudeProvider.vision()`
+        takes over with native image blocks, no staging and no `Read` tool, and
+        this method plus the whole bridge become dead weight — the intended end
+        state, not a regret.
         """
-        from app.llm.qwen import QwenVLLM
+        media_root = Path(settings.media_dir)
+        scratch = media_root / _VISION_SCRATCH
+        # Not a UUID name, and that is load-bearing: `brain/media.py`'s boot-time
+        # `sweep_orphaned_media` deletes UUID-named directories under the media
+        # root that have no `KnowledgeSource`, and skips everything else. A scratch
+        # dir named like a source id would be swept out from under a live OCR run.
+        scratch.mkdir(parents=True, exist_ok=True)
+        staged = scratch / f"{uuid.uuid4().hex}{_VISION_EXT.get(media_type, '.jpg')}"
 
-        if self._qwen is None:
-            self._qwen = QwenVLLM()
-        return self._qwen.vision(image_bytes, prompt, media_type=media_type)
+        try:
+            staged.write_bytes(image_bytes)
+            data = self._post(
+                "/v1/vision",
+                {
+                    # RELATIVE to the media root. The bridge resolves it against
+                    # its own root and refuses anything that escapes — it will not
+                    # accept an absolute path, because rebasing one would be the
+                    # same bug as trusting it.
+                    "image_path": f"{_VISION_SCRATCH}/{staged.name}",
+                    "prompt": prompt,
+                    "model": self._alias,
+                    "timeout_s": _VISION_TIMEOUT_S,
+                },
+                timeout_s=_VISION_TIMEOUT_S,
+            )
+        finally:
+            # The page is scratch even when the call raised — and ESPECIALLY then:
+            # the run that fails is the one that hit the 5-hour cap, and it is the
+            # one that gets retried 888 times.
+            staged.unlink(missing_ok=True)
+
+        return data.get("text") or ""
 
     def health(self) -> dict:
         """Is the bridge up and is there a live credential behind it — for FREE.

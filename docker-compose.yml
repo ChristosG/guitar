@@ -59,6 +59,11 @@ services:
       CLAUDE_BRIDGE_HOST: "0.0.0.0"     # inside the container; see the missing `ports:` below
       CLAUDE_BRIDGE_PORT: "8799"
       CLAUDE_BRIDGE_MAX_CONCURRENCY: "3"
+      # The ONLY directory /v1/vision will read from, and it must match the `media`
+      # volume's mount point below AND the api's `settings.media_dir`. It is set
+      # here rather than left to the default so that the fence is visible in the
+      # deployment, not just in the code it fences.
+      CLAUDE_BRIDGE_MEDIA_ROOT: "/media"
     # NO `ports:` — DELIBERATELY. Reachable only from `api` over the internal appnet.
     # (The earlier host-run version of this bridge had to bind 0.0.0.0 on a real host
     # port, because a container cannot reach the host's loopback — which left a
@@ -77,6 +82,22 @@ services:
     # `claude` terminals already do, which is normal and supported.
     volumes:
       - ${HOME}/.claude:/home/node/.claude
+      # THE PAGE SCANS, READ-ONLY. The one hole in `--tools ""`: /v1/vision runs
+      # `claude -p --tools Read`, because `claude -p` has no image parameter and a
+      # real file on disk is the only route from a page scan to the model. This
+      # mount is what that tool is allowed to see — the scans and nothing else. Not
+      # the repo, not the DB, not the rest of the host.
+      #
+      # THE SAME NAMED VOLUME `api` MOUNTS, NOT `./media`. The api WRITES the staged
+      # page here (`settings.media_dir` = /media) and the bridge READS it, so they
+      # must be the same filesystem. A `./media:/media:ro` bind would be a DIFFERENT,
+      # empty host directory (there is no ./media in this repo) — docker would create
+      # it, the mount would look fine, and every vision call would 400 "no such image"
+      # while both containers sat there healthy.
+      #
+      # `:ro` is the bridge's half of the contract: only the api may write a page,
+      # and a compromised `claude` cannot plant a file for its next self to read.
+      - media:/media:ro
     # uid 1000 = the human on the host. Without it the CLI's first token refresh writes
     # a root-owned .credentials.json into your home directory and your own `claude`
     # can no longer update it.
