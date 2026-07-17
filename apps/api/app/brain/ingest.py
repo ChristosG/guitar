@@ -35,6 +35,7 @@ from dataclasses import dataclass
 
 from app.brain.chunk import chunk_sections
 from app.brain.extract import Section, extract_text
+from app.brain.ocr import source_status_from_page_counts
 from app.brain.paginate import paginate_source
 from app.llm.embed_factory import get_embedder
 from app.models.knowledge import Chunk, KnowledgeSource
@@ -187,8 +188,30 @@ def ingest_source(db, source_id, payload: IngestPayload) -> None:
         # SPEC D6 — a source with nothing in it is NOT ready. Three live rows
         # sat "ready" with 0 chars and rendered green; that lie hid a broken
         # knowledge base for two days and is why the agent had nothing to
-        # ground against.
-        source.status = "ready" if char_count > 0 else "empty"
+        # ground against. `source_status_from_page_counts` is `ocr.py`'s
+        # rollup rule, shared rather than re-derived here: D6 is exactly its
+        # rule 2/4, and its rule 1 is the reason this call cannot be the
+        # two-line `"ready" if char_count > 0 else "empty"` it used to be.
+        #
+        # `has_unread` — a `pending`/`ocr_running` Page from `paginate_source`,
+        # above — is what makes this call necessary at ALL: upload
+        # deliberately does not auto-start OCR (an 8-12 hour run must be a
+        # button, never a side effect of a file landing — see
+        # `routers/library.py::reocr_source`), so for a scanned PDF this is
+        # the ONLY status this source will ever get until the tutor presses
+        # it. Before this, a scanned book's char_count came from `extract_text`
+        # re-reading the very GlyphLessFont layer `paginate_source` just
+        # refused a few lines up in this same function's call to it — nonzero,
+        # so D6's naive rule alone called it "ready" with zero pages actually
+        # read by anything trustworthy, and nothing ever told the tutor a
+        # button existed to press. `failed=0` always here: at this point in
+        # the pipeline no page has been attempted yet, so none can be
+        # `failed` — `paginate_source` only ever hands back `pending` or
+        # `ready` pages.
+        has_unread = any(p.status in ("pending", "ocr_running") for p in pages)
+        source.status = source_status_from_page_counts(
+            has_unread=has_unread, char_count=char_count, failed=0,
+        )
         db.commit()
     except Exception as e:
         log.exception("ingest_source failed for source_id=%s", source_id)

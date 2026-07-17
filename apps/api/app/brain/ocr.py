@@ -785,26 +785,60 @@ def _mark_failed(db, page: Page, error, task: _VisionTask) -> None:
     db.commit()
 
 
+def source_status_from_page_counts(*, has_unread: bool, char_count: int, failed: int) -> str:
+    """THE ONE DECISION behind `KnowledgeSource.status`, shared by `ingest.py`
+    (right after upload, before any OCR has ever run) and `_rollup_source_status`
+    below (after an OCR run, however far it got) — see both callers' docstrings
+    for why a source's status must tell the same truth at both moments, and
+    `_evict_refused_chunks`'s docstring for why this app puts a shared rule in
+    ONE place rather than trusting N call sites to agree by reminder.
+
+    Priority order, and it IS a priority — each rule below only applies once
+    every rule above it says no:
+
+      1. `has_unread` (this source has a `Page` still `pending`/`ocr_running`)
+         -> "partial", no matter what `char_count`/`failed` say. THE LIVE BUG
+         this rule exists to close, in two shapes: mid-run, Powers read
+         `status="ready"` with 9 pages still `pending` (a rate limit or a
+         killed process can leave any run short of the finish line, and the
+         old rule never asked); and — the more serious half — upload
+         deliberately does NOT auto-start OCR, so a freshly uploaded scanned
+         book sat "ready" with ZERO pages ever read by anything trustworthy,
+         its inherited-Tesseract chunks fully retrievable, and nothing
+         anywhere telling the tutor a button existed to press. That window
+         was indefinite, not transient. "partial" is right even at
+         `char_count == 0`: the source is not done, and "empty" (a dead end
+         with no implied next step) is a worse signal than "partial" (amber,
+         points at Re-read) for a book nobody has read yet.
+      2. `char_count == 0` (and nothing left unread) -> "empty": genuinely
+         nothing usable was found anywhere in this source (SPEC D6).
+      3. `failed > 0` (and nothing left unread) -> "partial": usable text
+         exists, but some pages could not be read at all — the SAME value as
+         rule 1, a DIFFERENT reason (Stage 7.2's 74-good/3-unreadable book).
+      4. otherwise -> "ready": every page is resolved, and none of them failed.
+
+    `empty` PAGES ARE NOT FAILURES (rule 3 does not see them). A real 77-page
+    scan has genuinely blank pages (section breaks, the verso of a plate), and
+    the quality gate deliberately records a model's "no visible text"
+    narration as `empty` too. Counting those as failures would paint a
+    perfectly healthy book amber — the specific false alarm Stage 7.4 was
+    warned about.
+    """
+    if has_unread:
+        return "partial"
+    if char_count == 0:
+        return "empty"
+    if failed:
+        return "partial"
+    return "ready"
+
+
 def _rollup_source_status(db, source_id) -> None:
     """Re-derive the parent `KnowledgeSource`'s `status`/`char_count` from its
-    pages, after the per-page loop above has finished.
-
-    THE RULE, AND WHY IT CHANGED (Stage 7.2). It used to be `ingest_source`'s D6
-    rule verbatim — `ready iff char_count > 0` — which is right for a source that
-    is one indivisible blob of text and WRONG for a book. 74 pages read + 3 pages
-    unreadable is `char_count > 0`, so the tutor's book showed a green checkmark
-    and no retry path, forever; the job row already knew ("3 page(s) unreadable")
-    and the UI fetched that string and threw it away. Now:
-
-        no readable text at all            -> "empty"   (red, retry)
-        readable text, some pages FAILED   -> "partial" (amber, retry failed pages)
-        readable text, no failed pages     -> "ready"   (green)
-
-    `empty` PAGES ARE NOT FAILURES. A real 77-page scan has genuinely blank pages
-    (section breaks, the verso of a plate), and the quality gate above deliberately
-    records a model's "no visible text" narration as `empty` too. Counting those
-    as failures would paint a perfectly healthy book amber — the specific false
-    alarm Stage 7.4 was warned about. Only `failed` (we could not READ it) counts.
+    pages, after the per-page loop above has finished (however far it got —
+    including a run the 429 rule parked early, which is exactly the shape that
+    exposed the bug this function now guards against; see
+    `source_status_from_page_counts`'s docstring, rule 1).
 
     Guarded the same swallow-and-log way as every other commit in this module
     (module docstring, D5): a rollup failure is logged and rolled back, but must
@@ -820,13 +854,11 @@ def _rollup_source_status(db, source_id) -> None:
             len(p.text) for p in source_pages if p.status == "ready" and p.text
         )
         failed = sum(1 for p in source_pages if p.status == "failed")
+        has_unread = any(p.status in ("pending", "ocr_running") for p in source_pages)
         source.char_count = char_count
-        if char_count == 0:
-            source.status = "empty"
-        elif failed:
-            source.status = "partial"
-        else:
-            source.status = "ready"
+        source.status = source_status_from_page_counts(
+            has_unread=has_unread, char_count=char_count, failed=failed
+        )
         db.commit()
     except Exception:
         log.warning("ocr: source status rollup failed for source_id=%s", source_id, exc_info=True)

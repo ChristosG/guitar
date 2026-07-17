@@ -358,6 +358,47 @@ def test_ocr_source_partial_success_rolls_up_to_PARTIAL_never_green(
     assert reloaded.char_count == len(pages[0].text)
 
 
+def test_ocr_source_stopping_early_with_pages_still_pending_rolls_up_to_partial_not_ready(
+    db, tmp_path, monkeypatch
+):
+    """LIVE BUG, verified against the tutor's real library: mid-run, Powers read
+    `status="ready"` in the DB with 9 pages still `pending`. `_rollup_source_status`
+    only ever asked "how many pages FAILED?" — it never asked "how many pages are
+    still UNREAD?" — so a run a rate limit stops partway through (the exact shape
+    an 8-12 hour read takes across several sittings; see `reocr_source`'s
+    docstring on the 429 rule) rolled up GREEN with most of the book never looked
+    at, and a curriculum built from it would believe the book complete.
+
+    Three pages: page 1 reads clean, page 2 rate-limits (the 429 rule parks the
+    run and refunds the attempt), page 3 is never even reached — the `break`
+    exits the loop before it gets there. Two of three pages are `pending` when
+    the rollup runs. `partial` is the only truthful value: real text exists (not
+    `empty`), but the book is not done (not `ready`) — and per
+    `SOURCE_USABLE_STATUSES` it is still fully citable for the one page that WAS
+    read."""
+    from app.llm.errors import LLMError
+
+    src = _src_with_pending_pages(db, 3)
+    monkeypatch.setattr("app.brain.ocr.settings.media_dir", str(tmp_path))
+    for i in (1, 2, 3):
+        p = tmp_path / str(src.id); p.mkdir(exist_ok=True)
+        (p / f"{i:04d}.jpg").write_bytes(b"jpeg")
+    fake = _Vision([
+        "Page one, about humbuckers and how their two coils cancel mains hum.",
+        LLMError("rate_limit", "429 slow down"),
+    ])
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    ocr_source(db, src.id)
+
+    pages = db.query(Page).filter_by(source_id=src.id).order_by(Page.page_no).all()
+    assert [p.status for p in pages] == ["ready", "pending", "pending"]
+    reloaded = db.get(KnowledgeSource, src.id)
+    assert reloaded.status == "partial"  # NOT "ready" — 2 of 3 pages still unread
+    assert reloaded.char_count == len(pages[0].text)
+
+
 def test_ocr_source_rollup_failure_does_not_undo_committed_page_work(db, tmp_path, monkeypatch):
     """A rollup failure (e.g. the re-fetch/commit of the source row blowing
     up) must not cost already-committed page work — pages that reached
@@ -1364,6 +1405,35 @@ def test_the_fixture_reproduces_the_bug_an_upload_indexes_the_layer_we_refused(
     assert any("4-inch" in c for c in chunks), (
         "ingest re-adopted the very layer paginate refused, linked to a page whose text is NULL"
     )
+
+
+def test_a_freshly_uploaded_scanned_book_is_partial_not_ready(db, tmp_path, monkeypatch):
+    """THE SERIOUS HALF of the live bug (verified against the tutor's real
+    library), and the reason status must be correct at upload, not only after
+    an OCR run: uploading a PDF deliberately does NOT auto-start OCR (see
+    `reocr_source`'s docstring — an 8-12 hour run against a shared subscription
+    cap must be a button the tutor presses, never a side effect of a file
+    landing). So the FIRST status this source ever gets is the one
+    `ingest_source` writes right here, and until this fix it was "ready":
+    `extract_text` re-extracts the very GlyphLessFont layer `paginate_source`
+    just refused (the fixture above) and its non-zero char_count alone decided
+    D6's ready/empty split — with zero pages actually read by anything
+    trustworthy. A tutor who searched his brand-new book got "4-inch stereo
+    cables" back under a healthy green checkmark, with nothing anywhere
+    suggesting a button existed to press. That window was indefinite, not
+    transient — nothing else in this app was ever going to re-visit a "ready"
+    source on its own.
+
+    `partial` is now forced whenever a source still has a page `pending`/
+    `ocr_running` (SOURCE_USABLE_STATUSES's docstring in models/knowledge.py):
+    usable, such as it is, but visibly and honestly incomplete — which is what
+    should have been prompting the tutor to press Re-read all along."""
+    src = _upload(db, monkeypatch, tmp_path, [_REFUSED_LAYER])
+
+    reloaded = db.get(KnowledgeSource, src.id)
+    assert reloaded.status == "partial"  # NOT "ready" — the one page is still `pending`
+    page = _pages_of(db, src)[0]
+    assert page.status == "pending"
 
 
 def test_a_page_that_ends_EMPTY_keeps_no_chunks_of_the_text_we_refused(
