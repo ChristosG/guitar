@@ -1693,15 +1693,17 @@ export function getSourceProgress(id: string): Promise<SourceProgressOut> {
   return request<SourceProgressOut>(`/knowledge/sources/${id}/progress`);
 }
 
-/** Enqueues OCR for a "pdf" source's pending/failed pages. Safe to call
- * unconditionally right after a PDF upload (`AddSourceDialog` does exactly
- * that) — a page that's already `ready` (e.g. one with a native text layer,
- * skipped by pagination) is left untouched; `ocr_source` only re-picks-up
- * pending/failed/ocr_running pages (see `app.brain.ocr.ocr_source`'s own
- * docstring). */
-export function startOcr(id: string): Promise<OcrJobRef> {
-  return request<OcrJobRef>(`/knowledge/sources/${id}/ocr`, { method: "POST" });
-}
+/* `startOcr` (POST /knowledge/sources/{id}/ocr) USED TO LIVE HERE, and
+ * `AddSourceDialog` called it the instant a PDF upload landed. That was free and
+ * right while OCR was a local Qwen box. It is now Claude on the tutor's
+ * subscription at ~40s a page, so dropping his four books in would have silently
+ * started 888 pages = 8-12 hours of model time against a 5-hour cap, with no
+ * dialog and no estimate. Reading a book is now a decision he makes, on a button
+ * that says what it costs — `reocrSource` below.
+ *
+ * The server route still exists (it is what `retrySource` reaches for a PDF, and
+ * it has its own tests); it simply has no unprompted caller in the UI any more,
+ * which is the entire point. Do not re-add one. */
 
 /** `POST /knowledge/sources/{id}/reocr` — re-read a book's unread pages with
  * the vision model. THE BUTTON, and it resumes.

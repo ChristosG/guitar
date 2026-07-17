@@ -17,7 +17,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { ApiError, createSource, startOcr, uploadSource } from "@/lib/api";
+import { ApiError, createSource, uploadSource } from "@/lib/api";
 
 type Mode = "text" | "url" | "pdf";
 
@@ -61,25 +61,29 @@ export function AddSourceDialog({ onCreated }: AddSourceDialogProps) {
     try {
       if (mode === "pdf") {
         if (!file) return; // the `required` file input already guards normal submission
-        const created = await uploadSource({ title, file });
-        // Kick OCR right after the upload succeeds (a scanned PDF's sync
-        // ingest above extracted only whatever native text layer existed —
-        // usually little or none — so this is what actually reads the
-        // book). Best-effort: the source already exists either way, so a
-        // failure here doesn't block adding it — the tutor can Retry it
-        // from the row later.
+        await uploadSource({ title, file });
+        // OCR IS DELIBERATELY *NOT* STARTED HERE ANY MORE, and removing this
+        // line is the "explicit" half of "explicit, resumable" (Task 9).
         //
-        // Nothing is handed back to the parent any more: the job is a SERVER
-        // fact from here on (`SourceOut.ocr_active` + `GET .../progress`), so
-        // the `onCreated()` refresh below is all it takes for the new row to
-        // start narrating "reading page N of M" — in this tab, in a second tab,
-        // and after a reload. It used to hand the parent a job id to watch in
-        // React state, which is exactly why an F5 lost the thread.
-        try {
-          await startOcr(created.id);
-        } catch {
-          // swallowed — see docstring above
-        }
+        // This used to `await startOcr(created.id)` the moment an upload
+        // landed, and for a year that was free and right: OCR was a local Qwen
+        // box, so reading a book cost electricity and a few minutes. It is now
+        // Claude, through `claude -p`, on the tutor's SUBSCRIPTION — ~40s a page
+        // against a 5-hour cap shared with the curriculum draft that is the
+        // actual product. Dropping his four books in would have silently started
+        // 888 pages = 8-12 hours of model time, with no dialog, no estimate and
+        // no way to know it had happened. Wasted or duplicated LLM spend is this
+        // plan's top severity class.
+        //
+        // So the page scans get rendered and the pages get routed (that is what
+        // the upload above does, and it is free and fast), and READING the book
+        // is a button on the row — one that says what it costs and resumes where
+        // it stopped: `SourceRow.requestReocr` -> `POST .../reocr`.
+        //
+        // A digital PDF is already fully readable at this point: `paginate.py`
+        // keeps a real embedded font's text layer for free and marks those pages
+        // `ready`. It is only scans that wait for the button, which is exactly
+        // the set that costs money.
       } else {
         await createSource({
           kind: mode,
