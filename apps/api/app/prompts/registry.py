@@ -1763,7 +1763,7 @@ _ENTRIES = [
         # The line the three messages are assembled on — system, the whole book,
         # the task — which is a strictly more useful thing to show him than the
         # `def` above it. See `test_source_refs_point_inside_the_real_definition`.
-        source_ref="app/canon/compile.py:393",
+        source_ref="app/canon/compile.py:490",
         title_el="Η καταγραφή ενός βιβλίου σε έννοιες",
         what_it_does_el=(
             "Διαβάζει ΕΝΑ βιβλίο ολόκληρο, μία φορά, και γράφει τι λέει: κάθε "
@@ -1785,7 +1785,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: build_compile_messages,
         build=_build_canon_compile,
-        call_sites=("canon/compile.py:730",),
+        call_sites=("canon/compile.py:827",),
         slices=(
             Slice(
                 id=COMPILE_SYSTEM_SLICE_ID,

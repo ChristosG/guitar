@@ -24,7 +24,7 @@ import pytest
 
 import app.canon.compile as compile_mod
 from app.brain.ocr import FIGURE_END, FIGURE_MARKER
-from app.canon.compile import build_book_context, compile_book
+from app.canon.compile import COMPILE_TASK, build_book_context, compile_book
 from app.llm.errors import LLMError
 from app.models.canon import BookCompile, Concept, ConceptAlias, ConceptClaim
 from app.models.knowledge import KnowledgeSource, Page
@@ -269,6 +269,33 @@ def test_the_model_is_shown_the_authors_words_and_our_descriptions_LABELLED_APAR
     assert "the wrist does the work" in prompt.lower(), "the author's words were not shown"
     assert "tablature exercise in 4/4" in prompt, "our figure description was stripped"
     assert "[p.31 FIGURE]" in prompt, "our description was shown as the author's words"
+
+
+def test_the_prompt_forbids_citing_a_folio_printed_inside_the_page_body(db):
+    """MEASURED BUG. Every page block reads `[p.N] <body>`, where N is the
+    PHYSICAL page_no we injected and the body is OCR'd scan text that ALSO shows
+    the PRINTED folio (a scan of physical page 86 shows "62" on it, because the
+    book has 24 pages of front matter). Left to itself the model cites the printed
+    folio, not our injected marker: on Gallagher, 17 of 20 random claims came back
+    off by exactly the front-matter offset. Every citation then lands 24 pages from
+    the content, and the validator misses it because the offset number is still a
+    real page_no.
+
+    The only defence is the prompt: it must tell the model, emphatically and with a
+    concrete example, that the ONLY citation is the number inside the injected
+    [p.N] marker at the START of a block, and that a number printed within the page
+    text is never a citation."""
+    lower = COMPILE_TASK.lower()
+    assert "folio" in lower, "the prompt never names the folio it must not cite"
+    assert "[p.86] ... 62" in COMPILE_TASK, (
+        "the concrete `[p.86] ... 62` example — the one that teaches the rule — is "
+        "missing"
+    )
+    # The rule must actually forbid the in-body number, not merely mention it.
+    assert "never" in lower and "start" in lower, (
+        "the prompt does not say the in-body number is NEVER a citation and that "
+        "the page comes from the marker at the START of the block"
+    )
 
 
 def test_the_raw_figure_markers_never_reach_the_model(db, monkeypatch):

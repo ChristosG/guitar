@@ -152,6 +152,55 @@ def _page_block(page_no: int, body: str, *, figure: bool) -> str:
     return f"[p.{page_no} FIGURE] {body}" if figure else f"[p.{page_no}] {body}"
 
 
+# A running-header/footer PAGE NUMBER — the folio the author's own page displays —
+# that OCR captured as a bare number on its own line at the top or bottom of the
+# scan.
+_FOLIO_LINE = re.compile(r"^\s*\d{1,4}\s*$")
+
+
+def strip_printed_folio(text: str) -> str:
+    """Remove the PRINTED FOLIO from a page's OCR'd body before the model reads it.
+
+    MEASURED BUG, and the reason this exists. The model is shown each page as
+    `[p.N] <body>`, where N is the PHYSICAL `page_no` we inject and is the ONLY
+    number the whole codebase validates a citation against. But a scan of physical
+    page 86 of Gallagher shows "62" printed on it — the book has 24 pages of front
+    matter — and OCR captured that "62" as a lone trailing line inside the body.
+    The model then cited 62, not 86: of 20 random Gallagher claims, 17 landed on
+    `cited + 24`, i.e. the WRONG physical page. That is precisely the "a citation
+    he will trust" failure this module is built to prevent, and the prompt rule
+    alone ("cite only the [p.N] marker, never a number printed in the text") did
+    not stop it — the number was right there on the page and the model believed
+    the page over the instruction.
+
+    So we delete the folio from what the model sees. With no bare "62" in the
+    block, the only page number left to cite is the authoritative `[p.86]` marker.
+
+    Conservative BY CONSTRUCTION: strips a bare-integer line ONLY when it is the
+    first or last non-blank line of the page — the two positions a running
+    head/foot occupies. A number inside prose ("a 250k pot", "the 24th fret") has
+    neighbours on its line and `_FOLIO_LINE` never matches it, so real content is
+    never removed. At most one line is stripped from each end.
+    """
+    lines = text.split("\n")
+
+    def _first_nonblank(order) -> int | None:
+        for i in order:
+            if lines[i].strip():
+                return i
+        return None
+
+    tail = _first_nonblank(range(len(lines) - 1, -1, -1))
+    if tail is not None and _FOLIO_LINE.match(lines[tail]):
+        del lines[tail]
+
+    head = _first_nonblank(range(len(lines)))
+    if head is not None and _FOLIO_LINE.match(lines[head]):
+        del lines[head]
+
+    return "\n".join(lines).strip()
+
+
 def build_book_context(db, source_id: UUID) -> BookContext:
     """ONE book's complete text, with our figure descriptions labelled apart:
 
@@ -184,7 +233,11 @@ def build_book_context(db, source_id: UUID) -> BookContext:
 
     for page in pages:
         raw = page.text or ""
-        author = book_text(raw)
+        # Strip the printed folio from the AUTHOR half only — the figure half is
+        # our own description and carries no folio. See `strip_printed_folio`: the
+        # folio is why the model cited the wrong page, and the prompt rule alone
+        # did not stop it.
+        author = strip_printed_folio(book_text(raw))
         figure = figure_text(raw)
         # The floor is applied per HALF, and that is what keeps the page sets
         # honest: a tab page whose only prose is a stray running head must not
@@ -251,6 +304,30 @@ COMPILE_SYSTEM = (
 # avoid. What cannot be reconstructed later is what THIS author thinks, so that is
 # what is asked for, in the author's own emphasis, including the parts other books
 # would disagree with.
+#
+# The anti-folio paragraph in point 3 is not belt-and-braces — it fixes a MEASURED
+# bug. Every page block is `[p.N] <body>`, where N is the PHYSICAL page_no we
+# inject and `<body>` is OCR'd scan text that ALSO carries the number printed on
+# the page (the folio). Those two numbers DISAGREE by the book's front matter: a
+# scan of physical page 86 shows "62" printed on it because 24 pages of front
+# matter precede the folio's page 1. Left to itself the model copies the number it
+# can SEE on the page — the folio — instead of our injected marker. Measured on
+# Gallagher: of 20 random claims, 17 cited `physical - 24` (the folio) and only 3
+# cited the true page. Every such citation then opens 24 pages from the content,
+# and `_valid_pages` cannot catch it because the folio is still a real page_no that
+# passes the existence check. The only place this is fixable is here, in words: the
+# model must be told, with a concrete example, that the page number is READ FROM
+# THE MARKER, never from the page body.
+#
+# NAMING THE EXACT SHAPE OF THE FOLIO EARNS ITS KEYSTROKES. A first pass with only
+# a generic "don't cite in-body numbers" rule was recompiled and MEASURED against
+# the live books: on Kahn (front matter = 14) it halved the error but left a hard
+# cluster — ~29 of 61 confident claims still cited `physical - 14`. Inspection of
+# those claims showed WHY: in these scans the folio is a BARE NUMBER alone at the
+# very END of the page's text (`...once you go rack, you never go back!  25`), and
+# that trailing digit reads to the model exactly like a page number. So the rule
+# below does not just forbid in-body numbers in the abstract; it points at that
+# specific trailing-number shape, which is the one the model actually fell for.
 COMPILE_TASK = (
     "Above is the ENTIRE book. Go through it and write down every concept it "
     "teaches.\n"
@@ -277,6 +354,26 @@ COMPILE_TASK = (
     "on the page — a number you did not read above is worse than no citation at "
     "all, because it is one he will trust. If you are not certain of the page, "
     "leave the claim out.\n"
+    "\n"
+    "   THE PAGE NUMBER IS THE ONE INSIDE THE [p.N] MARKER AT THE START OF THE "
+    "BLOCK — AND NOTHING ELSE. Each block begins with the marker WE injected: "
+    "`[p.N]` or `[p.N FIGURE]`. That N is the only valid citation. A number "
+    "printed WITHIN the page's text is NEVER a citation: not the folio at the foot "
+    "of the page (\"62\", \"Page 62\"), not a chapter or section number, not a "
+    "figure, plate or exercise number, not a year. These books open with front "
+    "matter, so the marker we injected and the folio printed on the page routinely "
+    "DISAGREE by ten, fourteen, twenty or more. When they differ, the marker is "
+    "right and the printed number is wrong.\n"
+    "   WATCH THE END OF EACH BLOCK ESPECIALLY. The folio is almost always a BARE "
+    "NUMBER sitting alone at the very END of a page's text — a block will read like "
+    "`[p.86] Wet/dry rigs pull your effects out of the direct path ... re-amping "
+    "your dry parts.  62`, and that trailing `62` is the folio, NOT the page. The "
+    "page is 86. Do not let a number that trails off the end of the text become the "
+    "citation.\n"
+    "   CONCRETE: if a block reads `[p.86] ... 62`, the page is 86 and the citation "
+    "is 86 — NEVER 62, even though 62 is the number you can see on the page. Read "
+    "the page number only from the [p.N] / [p.N FIGURE] marker at the START of the "
+    "block; ignore every number the page body shows, wherever it sits.\n"
     "\n"
     "4. TWO KINDS OF TEXT ARE ABOVE, AND THEY ARE NOT THE SAME.\n"
     "   [p.N]        — the PAGE'S OWN WORDS. The author wrote these.\n"
