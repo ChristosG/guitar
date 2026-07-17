@@ -1148,7 +1148,7 @@ _ENTRIES = [
         id="tools.system_claude_cli",
         flow="tools",
         kind="prompt",
-        source_ref="app/llm/claude_cli.py:543",
+        source_ref="app/llm/claude_cli.py:567",
         title_el="Τα εργαλεία, γραμμένα σαν οδηγίες (τρέχουσα σύνδεση)",
         what_it_does_el=(
             "Με τη σύνδεση που χρησιμοποιείς αυτή τη στιγμή, τα εργαλεία δεν "
@@ -1785,7 +1785,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: build_compile_messages,
         build=_build_canon_compile,
-        call_sites=("canon/compile.py:724",),
+        call_sites=("canon/compile.py:730",),
         slices=(
             Slice(
                 id=COMPILE_SYSTEM_SLICE_ID,

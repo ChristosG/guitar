@@ -148,6 +148,37 @@ def test_guided_json_raises_when_structured_output_is_missing(bridge):
         _provider().guided_json([{"role": "user", "content": "x"}], {"type": "object"})
 
 
+def test_the_compile_role_gets_a_whole_book_timeout_not_a_chat_one(bridge):
+    """Reading a WHOLE book in one `guided_json` call is the LONGEST call in the app.
+    Gallagher is 366K tokens — ~1.75x Hunter's 209K, which already took ~290s via
+    `claude -p`. The default 600s a curriculum draft gets is too short for it and
+    times the compile out (`ReadTimeout`). The `compile` role must ask the bridge for
+    far more headroom; a genuine hang still dies at that ceiling, it does not hang
+    forever."""
+    sent, reply = bridge
+    reply.update({"ok": True, "structured": {"concepts": []}})
+
+    _provider().guided_json([{"role": "user", "content": "the whole book"}],
+                            {"type": "object"}, role="compile")
+
+    assert sent["body"]["timeout_s"] >= 1200, (
+        "a whole-book compile must get well over the 600s a chat/draft gets — "
+        f"got {sent['body']['timeout_s']}"
+    )
+
+
+def test_a_non_compile_guided_json_still_fails_fast_at_600s(bridge):
+    """The long timeout is SCOPED to the compile path. A stuck spec/chat-shaped
+    structured call must still die at the default 600s, not inherit the book-length
+    ceiling — a hung chat turn should fail fast."""
+    sent, reply = bridge
+    reply.update({"ok": True, "structured": {"ok": True}})
+
+    _provider().guided_json([{"role": "user", "content": "x"}], {"type": "object"})
+
+    assert sent["body"]["timeout_s"] == 600
+
+
 # --- 3. the AssistantTurn it reconstructs -----------------------------------
 
 def test_chat_tools_reconstructs_the_assistant_turn_contract(bridge):

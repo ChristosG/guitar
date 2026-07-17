@@ -721,7 +721,14 @@ def compile_book(db, source_id: UUID, *, force: bool = False) -> BookCompile:
 
     provider = get_provider()
     try:
-        data = provider.guided_json(build_compile_messages(ctx), CONCEPT_SCHEMA)
+        # `role="compile"` is load-bearing, not decorative: this reads the WHOLE book
+        # in one call — the longest call type in the app — and both providers map the
+        # role to a book-length budget (a far larger timeout on the `claude -p` bridge,
+        # a streamed large-output request on the real API). Without it the largest
+        # book (Gallagher, 366K tokens) overruns the default 600s and dies with a
+        # ReadTimeout, and on the real API a 4k-capped `spec` output would truncate.
+        data = provider.guided_json(build_compile_messages(ctx), CONCEPT_SCHEMA,
+                                    role="compile")
     except Exception as e:
         record.status = "failed"
         record.error = str(e)

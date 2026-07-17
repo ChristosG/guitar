@@ -143,6 +143,29 @@ def test_every_role_resolves_including_default():
     assert len(p._client.messages.calls) == len(_ROLES) + 1
 
 
+def test_the_compile_role_streams_a_large_budget_for_a_whole_book_read():
+    """Compiling a book's concept canon is the app's BIGGEST single structured call —
+    a 388-page book read in one shot. On the real API that role must:
+
+      (a) allow a large output budget. The `spec` role the compile used to borrow
+          caps at 4,096 tokens, which truncates a whole book's canon and surfaces as
+          a `max_tokens` GuidedJSONError AFTER the money is spent; and
+      (b) STREAM — a non-streaming request whose `max_tokens` implies more than ~10
+          minutes of generation is rejected by the API outright, exactly as `draft`.
+    """
+    from app.llm.claude import _ROLES
+
+    assert _ROLES["compile"]["stream"] is True, (
+        "compile emits a large structured output; a non-streaming request that big "
+        "is rejected by the API"
+    )
+    p = _provider(model=SONNET)
+    kw = p._kwargs("compile")
+    assert kw["max_tokens"] >= 16_000, (
+        "4k truncates a whole book's canon — the compile role needs a real budget"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 3. The schema is sanitized before it is sent.
 # ---------------------------------------------------------------------------

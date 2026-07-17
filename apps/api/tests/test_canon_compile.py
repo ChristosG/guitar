@@ -38,11 +38,13 @@ class _FakeProvider:
         self.raises = raises
         self.calls = 0
         self.messages = []      # every transcript it was asked with
+        self.last_kw: dict = {}  # the kwargs of the last guided_json call
         self.last_usage = {"usage": {"input_tokens": 23_000}, "cost_usd": 0.42}
 
     def guided_json(self, messages, schema, **kw):
         self.calls += 1
         self.messages.append(messages)
+        self.last_kw = kw
         if self.raises:
             raise self.raises
         return self.payload
@@ -280,6 +282,23 @@ def test_the_raw_figure_markers_never_reach_the_model(db, monkeypatch):
 
     assert FIGURE_MARKER not in fake.prompt
     assert FIGURE_END not in fake.prompt
+
+
+def test_the_compile_reads_the_book_under_the_compile_role_not_the_default(
+    db, monkeypatch
+):
+    """The whole-book read is the LONGEST call in the app and must not run under the
+    default 600s `guided_json` timeout — Gallagher (366K tokens) overran it and the
+    compile failed with a `ReadTimeout`. `compile_book` tags the call `role="compile"`,
+    which both providers map to a book-length budget: a far larger timeout on the
+    `claude -p` bridge, and a streamed, large-output request on the real API. Without
+    the role the largest and most important book cannot be compiled at all."""
+    source = _book(db, {12: _PROSE})
+    fake = _use(monkeypatch, _FakeProvider({"concepts": [_concept()]}))
+
+    compile_book(db, source.id)
+
+    assert fake.last_kw.get("role") == "compile"
 
 
 # ---------------------------------------------------------------------------

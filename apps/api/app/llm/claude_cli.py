@@ -124,7 +124,28 @@ _EFFORT: dict[str, str] = {
     # bottleneck (a page is ~40s, nearly all of it reading pixels). Kept so the
     # role table still matches `claude.py`'s.
     "ocr":     "low",
+    # Reading a WHOLE book into the concept canon. Effort is `medium` — the same the
+    # compile has always run at (it used role="spec") — so the ONLY thing this role
+    # changes is the timeout below, not the model's behaviour. See `_GUIDED_TIMEOUT_S`.
+    "compile": "medium",
 }
+
+# Role -> the timeout `guided_json` grants, where it differs from the default. This
+# is a DIFFERENT axis from `_EFFORT`: "how hard to think" is not "how long the read
+# may take". `compile` reads a WHOLE book in one `guided_json` call — the LONGEST
+# call type in the app. Gallagher is 366K tokens (~1.75x Hunter's 209K, which
+# already took ~290s via `claude -p`), and that variable, agentic read overran the
+# 600s a curriculum draft gets and died with a `ReadTimeout`. 1800s is ~2x the
+# worst per-token rate we measured applied to 366K (Getting Great compiled at
+# ~2.4s/1K tokens → ~875s for Gallagher, already past 600s) — headroom for the
+# variance, not a blank cheque: a genuine hang still dies at this ceiling and the
+# bridge classifies it `timeout`, which `canon_compile.py` records as an honest
+# failure. Scoped to `compile` on purpose — a stuck chat/spec turn still fails fast
+# at the default below.
+_GUIDED_TIMEOUT_S: dict[str, float] = {
+    "compile": 1800.0,
+}
+_DEFAULT_GUIDED_TIMEOUT_S = 600.0
 
 # Where `vision()` stages a page for the bridge to read, RELATIVE to
 # `settings.media_dir` — the volume both containers mount (this one rw, the bridge
@@ -370,9 +391,12 @@ class ClaudeCLIProvider(LLMProvider):
             role=role,
             json_schema=to_anthropic_schema(schema),
             # A Greek lesson draft was live-measured at 49-179s on the Qwen path and
-            # is not faster here. The default 600s is deliberately generous; a draft
-            # that dies at 60s looks like a bug and is a stopwatch.
-            timeout_s=600.0,
+            # is not faster here, so 600s is the deliberately-generous default; a
+            # draft that dies at 60s looks like a bug and is a stopwatch. The one
+            # exception is `compile`, which reads a whole book in one call and gets a
+            # far larger ceiling — see `_GUIDED_TIMEOUT_S` for why 600s times out on
+            # the tutor's largest book.
+            timeout_s=_GUIDED_TIMEOUT_S.get(role, _DEFAULT_GUIDED_TIMEOUT_S),
         )
 
         structured = data.get("structured")

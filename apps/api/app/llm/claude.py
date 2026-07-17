@@ -96,6 +96,16 @@ _ROLES: dict[str, dict[str, Any]] = {
     "draft":   {"thinking": True,  "effort": "high",   "max_tokens": 32_000, "stream": True},
     "spec":    {"thinking": False, "effort": "medium", "max_tokens": 4_096,  "stream": False},
     "ocr":     {"thinking": False, "effort": "low",    "max_tokens": 8_000,  "stream": False},
+    # Reading a WHOLE book into the concept canon — the app's biggest single
+    # structured call. `max_tokens` is `draft`-sized (32k), NOT `spec`'s 4,096: a
+    # 388-page book's canon does not fit in 4k, and the overflow arrives as a
+    # `max_tokens` GuidedJSONError AFTER the tokens are spent. `stream: True` for the
+    # same reason `draft` streams — a non-streaming request whose `max_tokens`
+    # implies >~10 min of generation is rejected outright. `thinking: False` is
+    # deliberate here even though this is a no-replay single-shot call: on Anthropic
+    # thinking tokens share the `max_tokens` budget, and letting them eat into a
+    # whole-book JSON output is exactly the truncation this role exists to avoid.
+    "compile": {"thinking": False, "effort": "medium", "max_tokens": 32_000, "stream": True},
 }
 
 # Sonnet 5's real image ceiling is 2576px on the long edge (NOT the widely-cited
