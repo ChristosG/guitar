@@ -108,10 +108,24 @@ class Page(Base, PkMixin, TimestampMixin):
     # WHERE this page's text came from. NULL for rows written before this
     # column existed (an additive migration must not invent history).
     #
-    #   "text_layer" — a real embedded font: publisher text, taken for free.
-    #   "qwen"       — the local VL model transcribed the scan.
-    #   "claude"     — Claude transcribed the scan (subscription or API).
-    #   "failed"     — every attempt failed; `ocr_error` says why.
+    #   "text_layer"        — a real embedded font: publisher text, taken free.
+    #   "qwen"              — the local VL model transcribed the scan.
+    #   "claude"            — Claude transcribed the scan (subscription or API).
+    #   "text_layer+claude" — BOTH, and the page says which is which: publisher
+    #                         text, plus a model's description of the picture on
+    #                         it inside a [FIGURE]…[/FIGURE] region (an
+    #                         `image_region` page — see `brain/ocr.py`'s contract).
+    #                         "claude" alone would claim a transcription that
+    #                         never happened; "text_layer" alone would hide that a
+    #                         model put content on the page at all.
+    #   "unknown"           — a page was read but the provider name could not be
+    #                         resolved (`_current_text_source` refuses to fail a
+    #                         12-hour run over provenance). Honest, not a guess.
+    #   "failed"            — every attempt failed; `ocr_error` says why.
+    #
+    # Any other value is a provider this app has not heard of, recorded verbatim
+    # and clamped to String(20) — `ocr._TEXT_SOURCE_BY_PROVIDER` maps what it
+    # knows and passes the rest through rather than guessing. Nothing parses this.
     #
     # Shown per page in the Reader. Without it, `brain/paginate.py`'s routing is
     # a silent behaviour change the tutor cannot inspect or overrule.
