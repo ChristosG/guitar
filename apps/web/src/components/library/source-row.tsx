@@ -76,6 +76,12 @@ interface SourceRowProps {
   moving: boolean;
   collectionOptions: { id: string | null; name: string }[];
   onRetry: (id: string) => void;
+  /** Re-read the whole book with the vision model (`POST .../reocr`) —
+   * DISTINCT from `onRetry`, which re-runs whatever the source's own ingest
+   * was. Separate because their costs are nothing alike: retry re-fetches a
+   * URL, this queues hours of model time against the tutor's subscription cap
+   * (see `reocrSource`), so it asks first and says what it will cost. */
+  onReocr: (id: string) => void;
   onDelete: (id: string) => void;
   onMove: (id: string, collectionId: string | null) => void;
   onChanged: () => void;
@@ -95,6 +101,7 @@ export function SourceRow({
   moving,
   collectionOptions,
   onRetry,
+  onReocr,
   onDelete,
   onMove,
   onChanged,
@@ -137,17 +144,23 @@ export function SourceRow({
     if (ok) onDelete(source.id);
   }
 
-  /** Re-reading a healthy 77-page book is 77 vision calls against a paid model.
-   * The server makes it SAFE (only unread pages are picked up, and a second job
-   * can't start while one is running) — but it cannot make it free, so this asks
-   * first. It is not destructive, so the dialog is not styled as such. */
+  /** Re-reading a book is one vision call per unread page, at ~40 seconds each,
+   * against the tutor's subscription cap. On his real library that is 888 pages
+   * and 8-12 HOURS — the copy used to say "several minutes", which was true of
+   * the 77-page book it was written for and is now off by two orders of
+   * magnitude.
+   *
+   * The server makes it SAFE (only unread pages are picked up, a second job
+   * can't start while one is running, and it resumes where it stopped) — but it
+   * cannot make it free, so this asks first and says what it will actually cost.
+   * It is not destructive, so the dialog is not styled as such. */
   async function requestReocr() {
     const ok = await confirm({
       title: t("confirmReocr.title", { title: source.title }),
       body: t("confirmReocr.body", { pages: total || 0 }),
       confirmLabel: t("confirmReocr.confirm"),
     });
-    if (ok) onRetry(source.id);
+    if (ok) onReocr(source.id);
   }
 
   return (
@@ -281,12 +294,13 @@ export function SourceRow({
         <Pencil />
       </Button>
 
-      {/* Re-read: the OCR job has always been re-runnable server-side and no UI
-          ever offered it on a HEALTHY book — so a book that OCR'd badly (a bad
-          scan, a model hiccup) could only be fixed by deleting and re-uploading
-          it. Hidden while a job is running: the server would just hand back the
-          same job, but a button that looks like it does nothing is worse than no
-          button. */}
+      {/* Re-read with Claude (`POST .../reocr`). The OCR job has always been
+          re-runnable server-side and no UI ever offered it on a HEALTHY book — so
+          a book that OCR'd badly (a bad scan, a model hiccup, or a text layer
+          inherited from someone else's Tesseract) could only be fixed by deleting
+          and re-uploading it. Hidden while a job is running: the server would just
+          hand back the same job, but a button that looks like it does nothing is
+          worse than no button. */}
       {source.type === "pdf" && !reading && (
         <Button
           type="button"

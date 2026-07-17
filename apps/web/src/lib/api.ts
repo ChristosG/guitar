@@ -1703,6 +1703,27 @@ export function startOcr(id: string): Promise<OcrJobRef> {
   return request<OcrJobRef>(`/knowledge/sources/${id}/ocr`, { method: "POST" });
 }
 
+/** `POST /knowledge/sources/{id}/reocr` — re-read a book's unread pages with
+ * the vision model. THE BUTTON, and it resumes.
+ *
+ * Deliberately NOT called on upload, and it must never become so: at ~40s a page
+ * through `claude -p`, the tutor's four books are 888 pages — 8-12 hours of model
+ * time and a repeated slice of a 5-hour subscription cap shared with everything
+ * else the app does for him. So it is his decision, and the confirm dialog quotes
+ * what it costs (`SourceRow.requestReocr`).
+ *
+ * Every press costs only the pages still unread (`ocr_source` picks up nothing
+ * that is already `ready`), which is what makes an 8-hour run survivable across
+ * the several sittings it will really take: press, hit the cap, come back
+ * tomorrow, press again.
+ *
+ * 409 for a non-PDF (nothing to re-read) — `SourceRow` only renders the action
+ * for "pdf" sources, so a 409 here means that gate has a bug, not an expected
+ * response to design around. Same posture as `retrySource`. */
+export function reocrSource(id: string): Promise<OcrJobRef> {
+  return request<OcrJobRef>(`/knowledge/sources/${id}/reocr`, { method: "POST" });
+}
+
 /** One row of `GET /knowledge/sources/{id}/pages` — mirrors
  * `schemas/library.py`'s `PageSummary`. `status` is the full
  * `PAGE_STATUSES` set (`pending`/`ocr_running`/`ready`/`failed`/`empty`) as

@@ -39,6 +39,9 @@ interface CollectionTreeProps {
   deletingCollectionId: string | null;
   movingId: string | null;
   onRetry: (id: string) => void;
+  /** Re-read a book with the vision model — see `SourceRow`'s own prop doc for
+   * why this is not `onRetry`. */
+  onReocr: (id: string) => void;
   onDelete: (id: string) => void;
   onDeleteCollection: (id: string) => void;
   onMove: (id: string, collectionId: string | null) => void;
@@ -62,6 +65,7 @@ export function CollectionTree({
   deletingCollectionId,
   movingId,
   onRetry,
+  onReocr,
   onDelete,
   onDeleteCollection,
   onMove,
@@ -158,6 +162,7 @@ export function CollectionTree({
                   moving={movingId === source.id}
                   collectionOptions={collectionOptions}
                   onRetry={onRetry}
+                  onReocr={onReocr}
                   onDelete={onDelete}
                   onMove={onMove}
                   onChanged={onChanged}

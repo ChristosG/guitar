@@ -5,7 +5,10 @@ Any text at all meant no model would ever see the page again — so Hunter,
 Gallagher and Kahn entered the library as Tesseract output, fraction glyphs
 and all.
 """
+import os
 from unittest.mock import patch
+
+import fitz
 
 from app.brain.paginate import _paginate_pdf
 
@@ -81,3 +84,41 @@ def test_no_text_layer_still_goes_to_vision(db, tmp_media):
         pages = _paginate_pdf(db, tmp_media.source_id, b"%PDF")
     assert pages[0].status == "pending"
     assert pages[0].ocr_reason == "no_text_layer"
+
+
+# --- Task 9: the original PDF is kept, because 110dpi is a Qwen ceiling -----
+
+def test_the_source_pdf_is_kept_so_vision_pages_can_be_re_rendered(db, tmp_media):
+    """An upload is the ONLY moment the original is ever in this process's
+    hands. Rendering it to 110dpi JPEGs and dropping it made 110 permanent for
+    every page of every book — and 110 is a QWEN CEILING, not a quality choice
+    (`config.ocr_render_dpi`). You cannot recover 150dpi detail by upscaling a
+    110dpi JPEG, so `brain/ocr.py` needs the original still to be here."""
+    from app.brain.paginate import source_pdf_path
+
+    real = fitz.open()
+    real.new_page(width=612, height=792)
+    data = real.tobytes()
+
+    _paginate_pdf(db, tmp_media.source_id, data)
+
+    with open(source_pdf_path(tmp_media.source_id), "rb") as fh:
+        assert fh.read() == data          # byte-identical, not a re-encode
+
+
+def test_deleting_a_source_takes_its_stored_pdf_with_it(db, tmp_media, monkeypatch):
+    """The PDF lives inside the source's own media directory precisely so that
+    the purge which already removes the scans removes it too — no new leak, and
+    it cannot outlive the row it belongs to."""
+    from app.brain.media import purge_source_media
+    from app.brain.paginate import source_pdf_path
+
+    monkeypatch.setattr("app.brain.media.settings.media_dir", str(tmp_media.media_dir))
+    real = fitz.open()
+    real.new_page(width=612, height=792)
+    _paginate_pdf(db, tmp_media.source_id, real.tobytes())
+    assert os.path.exists(source_pdf_path(tmp_media.source_id))
+
+    purge_source_media(tmp_media.source_id)
+
+    assert not os.path.exists(source_pdf_path(tmp_media.source_id))

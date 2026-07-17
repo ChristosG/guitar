@@ -14,6 +14,22 @@ length 2080 exceeds pre-allocated encoder cache size 2048"), so every page
 would fail. At 110dpi the local VL model transcribes a real book page
 faithfully at ~1,127 prompt tokens. Do not raise this without also raising the
 server's mm-encoder budget.
+
+THE SOURCE PDF IS KEPT (Task 9). Until now the uploaded bytes were rendered to
+JPEGs and dropped on the floor, which made 110dpi permanent for every page of
+every book: an upload is the only time the original is ever in this process's
+hands, and you cannot recover 150dpi detail by upscaling a 110dpi JPEG. Since
+110 is a QWEN ceiling and Claude is a high-resolution model, that silently
+capped OCR fidelity on the exact glyphs this plan exists for (`¼` vs `⅛` differ
+by a few pixels at page scale). So the PDF now stays next to the scans it
+produced, and `brain/ocr.py` re-rasterises the pages it sends to vision at
+`settings.ocr_render_dpi`.
+
+It costs the tutor's five books ~90MB against the ~125MB of JPEGs they already
+render to, it is deleted by the SAME `purge_source_media` that removes those
+scans (so it leaks nothing new and cannot outlive its row), and it is NOT
+web-reachable: `media_dir` has no static mount — the only route out of it is
+`GET /media/pages/{page_id}.jpg`, which serves one named `Page.image_path`.
 """
 import logging
 import os
@@ -29,6 +45,25 @@ from app.models.knowledge import Page
 log = logging.getLogger(__name__)
 
 RENDER_DPI = 110      # HARD CEILING on this server — see module docstring
+
+# The uploaded PDF, kept beside the scans it rendered. A fixed name inside the
+# source's own `{media_dir}/{source_id}/` directory: `purge_source_media` removes
+# that whole directory, so this file's entire lifecycle is already written and
+# tested — it cannot outlive its `KnowledgeSource`, and a re-paginate replaces it
+# rather than stacking. It cannot collide with a page scan either; those are all
+# `{page_no:04d}.jpg`.
+SOURCE_PDF_NAME = "source.pdf"
+
+
+def source_pdf_path(source_id) -> str:
+    """Where this source's original PDF lives, whether or not it is there.
+
+    Existence is the CALLER's question, deliberately: every book ingested before
+    Task 9 has scans and no PDF, and `brain/ocr.py` treats that as "read this
+    book at the stored 110dpi" rather than as an error. A book the tutor can no
+    longer re-read at all would be a worse answer than one re-read at 110.
+    """
+    return os.path.join(settings.media_dir, str(source_id), SOURCE_PDF_NAME)
 
 
 def paginate_source(db, source_id, *, kind, data=None, url=None, text=None) -> list[Page]:
@@ -72,6 +107,16 @@ def _paginate_pdf(db, source_id, data: bytes) -> list[Page]:
     try:
         out_dir = os.path.join(settings.media_dir, str(source_id))
         os.makedirs(out_dir, exist_ok=True)
+
+        # Written BEFORE the pages, and its failure is fatal to this ingest —
+        # unlike the best-effort posture the rest of the media tree takes. The
+        # difference is what each loss costs: a leaked JPEG wastes a megabyte,
+        # but a book whose PDF did not land is a book that can only ever be
+        # re-read at 110dpi, and nothing downstream would say so. Better to fail
+        # the upload the tutor is watching than to hand him a book that is
+        # quietly second-rate forever.
+        with open(os.path.join(out_dir, SOURCE_PDF_NAME), "wb") as fh:
+            fh.write(data)
 
         pages: list[Page] = []
         for i in range(doc.page_count):

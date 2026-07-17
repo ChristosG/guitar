@@ -486,7 +486,7 @@
     "retryFailedPages": "Retry failed pages",
     "rename": "Rename",
     "renameCollection": "Rename folder",
-    "reocr": "Read this book again",
+    "reocr": "Read this book again with Claude",
     "renameDialog": {
       "sourceHeading": "Rename this source",
       "sourceDescription": "Only the name changes — nothing that was read out of it is touched.",
@@ -499,9 +499,9 @@
       "error": "Could not rename this."
     },
     "confirmReocr": {
-      "title": "Read “{title}” again?",
-      "body": "Every page that isn't already read will be sent to the model again ({pages, plural, =0 {no pages yet} one {# page} other {up to # pages}}). Pages that were read fine are left alone, and nothing you already have is lost. This costs money and can take several minutes.",
-      "confirm": "Read it again"
+      "title": "Have Claude read “{title}” again?",
+      "body": "Claude will look at each page that hasn't been read yet ({pages, plural, =0 {no pages yet} one {# page} other {up to # pages}}) — about half a minute each, so a whole book takes hours. You can close this page and come back later: pressing it again picks up where it stopped. Pages that are already read are left alone, and nothing you already have is lost.",
+      "confirm": "Start reading"
     },
     "search": {
       "placeholder": "Find something in your library — e.g. “Tube Screamer”",
@@ -511,7 +511,8 @@
       "page": "p. {page}",
       "noResults": "Nothing in your library matches “{query}”.",
       "error": "Could not search your library."
-    }
+    },
+    "reocrError": "Could not re-read this book."
   },
   "lessons": {
     "heading": "Lessons",

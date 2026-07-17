@@ -449,3 +449,115 @@ def test_run_reingest_job_refetches_the_stored_url(db, monkeypatch):
     db.expire_all()  # run_reingest_job commits on its OWN SessionLocal()
     reloaded_job = db.get(GenerationJob, job.id)
     assert reloaded_job.status == "succeeded"
+
+
+# =========================================================================
+# Task 9 — the explicit, resumable re-OCR button
+# =========================================================================
+#
+# NEVER automatic on upload. At ~40s/page through `claude -p`, 888 pages is
+# 8-12 hours and a repeated slice of a 5-hour subscription cap. Wasted or
+# duplicated LLM spend is this plan's top severity class. It is a button, and
+# it resumes.
+
+def test_reocr_enqueues_an_ocr_job(db, monkeypatch):
+    monkeypatch.setattr("app.routers.library.run_ocr_job", lambda job_id: None)
+    src = KnowledgeSource(type="pdf", title="Book", status="ready")
+    db.add(src); db.commit()
+
+    r = client.post(f"/knowledge/sources/{src.id}/reocr")
+
+    assert r.status_code == 202
+    job = db.get(GenerationJob, uuid.UUID(r.json()["job_id"]))
+    assert job.kind == "ocr"
+    assert job.params["source_id"] == str(src.id)
+
+
+def test_reocr_resets_the_attempt_budget_of_pages_still_waiting_to_be_read(db, monkeypatch):
+    """AN EXPLICIT PRESS MEANS "I INSIST". Pages that burned MAX_PAGE_ATTEMPTS
+    are excluded from every automatic pickup — a book whose pages exhausted
+    their budget inside one rate-limit window would otherwise be permanently
+    un-re-readable, with this very button silently reading 0 pages."""
+    monkeypatch.setattr("app.routers.library.run_ocr_job", lambda job_id: None)
+    src = KnowledgeSource(type="pdf", title="Book", status="partial")
+    db.add(src); db.commit()
+    failed = Page(source_id=src.id, page_no=1, status="failed", ocr_attempts=3,
+                  ocr_reason="inherited_ocr", image_path=f"{src.id}/0001.jpg")
+    pending = Page(source_id=src.id, page_no=2, status="pending", ocr_attempts=3,
+                   ocr_reason="image_region", image_path=f"{src.id}/0002.jpg")
+    db.add_all([failed, pending]); db.commit()
+
+    assert client.post(f"/knowledge/sources/{src.id}/reocr").status_code == 202
+
+    db.expire_all()
+    assert db.get(Page, failed.id).ocr_attempts == 0
+    assert db.get(Page, pending.id).ocr_attempts == 0
+
+
+def test_reocr_does_not_re_bill_a_page_that_is_already_read(db, monkeypatch):
+    """THE RESUME. 888 pages is several sittings against a 5-hour cap, so the
+    tutor presses this button again and again — and every press must cost only
+    the pages still unread. A `ready` page is not in `PICKUP_STATUSES`, and
+    resetting its attempts would put it back in reach of a future pickup."""
+    monkeypatch.setattr("app.routers.library.run_ocr_job", lambda job_id: None)
+    src = KnowledgeSource(type="pdf", title="Book", status="partial")
+    db.add(src); db.commit()
+    done = Page(source_id=src.id, page_no=1, status="ready", text="Already read.",
+                text_source="claude", ocr_attempts=1, image_path=f"{src.id}/0001.jpg")
+    db.add(done); db.commit()
+
+    client.post(f"/knowledge/sources/{src.id}/reocr")
+
+    db.expire_all()
+    reloaded = db.get(Page, done.id)
+    assert reloaded.ocr_attempts == 1          # untouched
+    assert reloaded.status == "ready"
+    assert reloaded.text == "Already read."
+
+
+def test_reocr_leaves_a_genuinely_blank_page_alone(db, monkeypatch):
+    """The other half of "I insist": a real 77-page scan has genuinely blank
+    pages, and `empty` is a TRUE FACT about the book (the quality gate records
+    a model's "no visible text" narration as `empty` deliberately). Resetting
+    those on every press would re-bill the book's blank pages forever — the
+    exact re-billing `MAX_PAGE_ATTEMPTS` exists to stop. Same call
+    `retry_source` already makes."""
+    monkeypatch.setattr("app.routers.library.run_ocr_job", lambda job_id: None)
+    src = KnowledgeSource(type="pdf", title="Book", status="ready")
+    db.add(src); db.commit()
+    blank = Page(source_id=src.id, page_no=1, status="empty", ocr_attempts=3,
+                 image_path=f"{src.id}/0001.jpg")
+    db.add(blank); db.commit()
+
+    client.post(f"/knowledge/sources/{src.id}/reocr")
+
+    db.expire_all()
+    assert db.get(Page, blank.id).ocr_attempts == 3
+
+
+def test_reocr_will_not_start_a_second_job_while_one_is_running(db, monkeypatch):
+    """THE IN-FLIGHT GUARD, which this route must sit behind exactly like
+    `POST .../ocr` does. Two jobs reading the same book race each other through
+    the same page's delete-then-insert of chunks — and this button's whole
+    reason to exist is that the tutor WILL press it again during an 8-hour run."""
+    monkeypatch.setattr("app.routers.library.run_ocr_job", lambda job_id: None)
+    src = KnowledgeSource(type="pdf", title="Book", status="partial")
+    db.add(src); db.commit()
+
+    first = client.post(f"/knowledge/sources/{src.id}/reocr").json()
+    second = client.post(f"/knowledge/sources/{src.id}/reocr").json()
+
+    assert second["job_id"] == first["job_id"]
+    assert second["already_running"] is True
+    assert db.query(GenerationJob).filter_by(kind="ocr").count() == 1
+
+
+def test_reocr_on_a_non_pdf_source_is_409_not_a_silent_noop(db):
+    src = KnowledgeSource(type="text", title="Pasted notes", status="ready")
+    db.add(src); db.commit()
+
+    assert client.post(f"/knowledge/sources/{src.id}/reocr").status_code == 409
+
+
+def test_reocr_on_unknown_source_is_404(db):
+    assert client.post(f"/knowledge/sources/{uuid.uuid4()}/reocr").status_code == 404

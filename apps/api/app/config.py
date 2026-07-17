@@ -77,6 +77,20 @@ class Settings(BaseSettings):
 
     media_dir: str = "/media"     # page scans live here; mounted volume
 
+    # Pages ROUTED TO VISION are re-rendered from the source PDF at this DPI.
+    # `paginate.RENDER_DPI = 110` is a QWEN CEILING, not a quality choice: at
+    # 150dpi the local vLLM rejects the image outright ("image item with length
+    # 2080 exceeds pre-allocated encoder cache size 2048") and every page fails.
+    # Claude is high-resolution tier — 110dpi is 1,496 visual tokens, 150dpi is
+    # 2,714 — so pointing it at the stored 110dpi JPEG would silently cap its
+    # fidelity on exactly the glyphs this plan exists for: `¼` and `⅛` differ by
+    # a few pixels at page scale, and "¼-inch" read as "4-inch" is the wrong
+    # FACT that started all of this.
+    #
+    # Only vision pages pay it (on Powers, ~40 of 888). The stored scan stays at
+    # 110 — it is the Reader's thumbnail and does not need more.
+    ocr_render_dpi: int = 150
+
     # ---- Auth (Plan 13 Task 3.1) ------------------------------------------
     #
     # OFF BY DEFAULT, and that is not laziness. `tests/conftest.py` imports

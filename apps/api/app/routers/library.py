@@ -121,6 +121,69 @@ def start_ocr(
     return _enqueue_ocr(db, background, source_id)
 
 
+@router.post(
+    "/knowledge/sources/{source_id}/reocr",
+    status_code=202,
+    dependencies=[Depends(require_llm_configured)],
+)
+def reocr_source(
+    source_id: uuid.UUID, background: BackgroundTasks, db: Session = Depends(get_db)
+) -> dict:
+    """Re-read this book with the vision model. THE BUTTON, and it resumes.
+
+    WHY THIS IS NOT AUTOMATIC ON UPLOAD, and must never become so. At ~40s per
+    page through `claude -p`, the tutor's 888 pages is 8-12 hours of model time
+    and a repeated slice of a 5-hour subscription cap — a cap shared with every
+    other thing this app does for him, including the curriculum draft that is the
+    actual product. Wasted or duplicated LLM spend is this plan's top severity
+    class. So the cost is spent when he asks for it, and only then.
+
+    AND IT RESUMES, which is what makes an 8-hour run survivable across the
+    several sittings it will actually take. `ocr_source` picks up only pages that
+    are not `ready` (`PICKUP_STATUSES`), so every press after the first costs
+    exactly the pages still unread — press it, lose the connection, hit the cap,
+    come back tomorrow, press it again. The 429 rule inside `ocr_source` parks
+    the run and refunds the attempt rather than burning 800 pages' budgets
+    against a rate-limit window.
+
+    Behind the same `SELECT ... FOR UPDATE` in-flight guard as `POST .../ocr`
+    (`_enqueue_ocr`) — not optional here of all places: this is the button the
+    tutor presses again mid-run precisely BECAUSE it is a long run, and two jobs
+    reading the same book race each other through the same page's
+    delete-then-insert of chunks.
+
+    409 for a non-PDF: url/text/note sources have no scan to re-read, and a
+    silent no-op that returned a job id would look like something happened.
+    """
+    source = _source_or_404(db, source_id)
+    if source.type != "pdf":
+        raise HTTPException(
+            status_code=409,
+            detail="nothing to re-read: only a PDF has page scans a model can read",
+        )
+
+    # AN EXPLICIT PRESS MEANS "I INSIST" — the same call `retry_source` makes,
+    # widened to every page still waiting to be read rather than only the ones
+    # that already failed. Without the reset, a book whose pages burned
+    # MAX_PAGE_ATTEMPTS inside one rate-limit window is permanently un-re-readable
+    # with this very button silently reading zero pages.
+    #
+    # `empty` IS DELIBERATELY NOT IN THE LIST. A real 77-page scan has genuinely
+    # blank pages, and the quality gate records a model's "no visible text"
+    # narration as `empty` on purpose — it is a true fact about the book, not a
+    # failure to read it. Resetting those on every press would re-bill the book's
+    # blank pages to a paid model on every press, forever, which is the exact
+    # re-billing `MAX_PAGE_ATTEMPTS` exists to prevent. A `ready` page is not here
+    # either, for a stronger reason: it is already read, and putting its attempts
+    # back would only ever cost money to re-derive text we have.
+    db.query(Page).filter(
+        Page.source_id == source_id,
+        Page.status.in_(("pending", "failed", "ocr_running")),
+    ).update({Page.ocr_attempts: 0}, synchronize_session=False)
+    db.commit()
+    return _enqueue_ocr(db, background, source_id)
+
+
 @router.get("/knowledge/sources/{source_id}/progress", response_model=SourceProgress)
 def source_progress(source_id: uuid.UUID, db: Session = Depends(get_db)) -> SourceProgress:
     """SERVER-COMPUTED OCR progress — the whole point of Stage 7.2.

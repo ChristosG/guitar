@@ -15,24 +15,105 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
+import fitz
 from sqlalchemy import func, or_
 
 from app.brain.chunk import chunk_sections
 from app.brain.extract import Section
+from app.brain.paginate import RENDER_DPI, source_pdf_path
+from app.brain.textlayer import looks_like_ocr_garbage
 from app.config import settings
 from app.llm.embed_factory import get_embedder
 from app.llm.errors import LLMError
 from app.llm.factory import get_provider
 from app.models.generation_job import GenerationJob
 from app.models.knowledge import Chunk, KnowledgeSource, Page
+from app.settings_store import resolve_llm_config
 
 log = logging.getLogger(__name__)
 
+# --- what we ask the model, and why ---------------------------------------
+#
+# THE MARKER. A description of a picture is NOT a sentence from the book, and
+# once both are in `page.text` nothing downstream can tell them apart by
+# reading them — the canon compile (Part B) and `retrieve.py` both quote this
+# text back to the tutor as the book's own words. Quoting our description of a
+# photo as if the author wrote it is a fabricated citation with a real page
+# number on it, which is worse than having no description at all.
+#
+# So: one stable sentinel, and the whole contract is positional. Everything
+# before the first marker is the page's words; everything from it on is ours.
+# ASCII and greppable on purpose — `_publisher_text` splits on it, a human
+# reading the Reader sees what it means, and it survives a model that decides
+# to reformat the markdown around it.
+FIGURE_MARKER = "[FIGURE]"
+
+# THE TRANSCRIBE PROMPT — for a page with no trustworthy text (`inherited_ocr`,
+# `no_text_layer`).
+#
+# The old wording ("Transcribe ALL text ... do not invent any text that is not
+# visibly present") inherited TESSERACT'S STRUCTURAL BLIND SPOT: an OCR layer
+# cannot describe a PICTURE, so it doesn't, and neither did we. But these are
+# books about guitar TONE. The photo of a dialed-in amp face IS the lesson;
+# Hunter p.57 (knobs labelled VOLUME, MASTER) produced literally nothing from
+# Tesseract, and under the old prompt a vision model would have agreed with it —
+# correctly, because there is no *text* on that page to speak of. A page that
+# reads as blank is a page the curriculum cannot teach from.
+#
+# Point 3 is the answer to `claude -p`, which returns chatty markdown around a
+# transcription: it narrates that it zoomed in, it adds its own headers. The
+# bridge deliberately scrubs none of it (Task 4) — and it should not, because a
+# regex aimed at a model's prose eventually eats a line of a real page with it.
+# Instructing the shape is the only fix that cannot corrupt the content.
 OCR_PROMPT = (
-    "Transcribe ALL text on this page verbatim, preserving reading order. "
-    "Include headings, captions and table text. Do not summarize, do not "
-    "translate, and do not invent any text that is not visibly present. "
-    "If the page has no readable text, reply with nothing at all."
+    "You are reading one page of a printed guitar instruction book, for a "
+    "library the book's own words will be quoted from. Reply with the page's "
+    "content and nothing else.\n"
+    "\n"
+    "1. TEXT. Transcribe all text on the page verbatim, in reading order — "
+    "headings, body, captions, sidebars, table text, page numbers. Do not "
+    "summarize, do not translate, do not correct the author, and do not invent "
+    "any text that is not visibly present. Small glyphs are content, not noise: "
+    "fractions (¼ ½ ¾ ⅓ ⅔ ⅛), sharps and flats (♯ ♭), primes (′ ″) and "
+    "superscripts must be transcribed as they are printed, never flattened to "
+    "the nearest plain digit or letter.\n"
+    "2. PICTURES. A photograph, diagram, illustration, chord box, tab staff or "
+    f"table is content too, and no transcription describes one. Add a {FIGURE_MARKER} "
+    "line for each, where it appears in reading order, describing plainly what "
+    "it shows and reproducing any text, numbers or labels printed inside it. "
+    "Describe only what is visible — if you cannot make it out, say that "
+    "instead of guessing.\n"
+    "3. SHAPE. No preamble, no sign-off, no commentary about how you read the "
+    "page, no markdown fences, no headings of your own. Begin with the page's "
+    f"first word, or with {FIGURE_MARKER} if the page is all picture. If the page "
+    "is genuinely blank, reply with nothing at all."
+)
+
+# THE DESCRIBE PROMPT — for an `image_region` page: a DIGITAL page whose text
+# layer is the publisher's own real font (correct, and already ours for free),
+# carrying raster art that text layer cannot describe. Powers has 43 of them.
+#
+# It must never ask for a transcription. Asking would buy a vision call to
+# re-derive text we already hold — this plan's top severity class — and the
+# answer would then be appended to the very text it duplicates.
+FIGURE_PROMPT = (
+    "You are looking at one page of a printed guitar instruction book. Its text "
+    "has already been captured perfectly and is NOT your job — do not transcribe "
+    "the page.\n"
+    "\n"
+    "Describe the pictures on it: each photograph, diagram, illustration, chord "
+    "box, tab staff or table. Say plainly what each one shows, and reproduce any "
+    "text, numbers or labels printed inside it (a knob's setting, a fret number, "
+    "a string name) — those are the parts a reader cannot get from the words "
+    "around them. For a tab or chord diagram, give the notation itself: strings, "
+    "frets, fingerings, and the order they are played in.\n"
+    "\n"
+    "Describe only what is visible. Do not invent detail you cannot make out, "
+    "and do not explain, teach, or comment on the music.\n"
+    "\n"
+    f"Begin each picture with {FIGURE_MARKER} on its own line. No preamble, no "
+    "sign-off, no commentary about how you read the page, no markdown fences. "
+    "If the page has no picture on it at all, reply with nothing at all."
 )
 
 _MAX_ATTEMPTS = 2       # initial + one retry
@@ -118,10 +199,27 @@ class _SuspectedTruncation(RuntimeError):
 
 
 class _GarbageTranscription(RuntimeError):
-    """The response was long enough to judge and was mostly not language (see
-    `_looks_like_garbage`). Routed through the same one-retry-then-`failed` path
-    as any other vision() error: a mis-decoded scan is a FAILED page (amber, with
-    a retry), not an `empty` one (which would silently roll up green)."""
+    """The response was long enough to judge and is not a transcription of a
+    page. TWO detectors raise this, because there are two ways to get here and
+    they are the same verdict:
+
+      `_looks_like_garbage`      — mostly not LANGUAGE (mojibake, a mis-decoded
+                                   image): symbol/private-use codepoints by
+                                   unicode category.
+      `looks_like_ocr_garbage`   — mostly not PROSE (`brain/textlayer.py`): a
+                                   wall of 1-2 character stubs, which is what a
+                                   page damaged in the PDF itself produces. Kahn
+                                   p.40 renders blank in BOTH MuPDF and poppler
+                                   and Tesseract wrote 544 chars of "7 ipgges x
+                                   a Rar ek en ee" for it — 9 of 617 pages across
+                                   the three scanned books are like this, and
+                                   today's pipeline ingests every one of them as
+                                   page content.
+
+    Routed through the same one-retry-then-`failed` path as any other vision()
+    error: a page we could not read is a FAILED page (amber, with a retry), not
+    an `empty` one (which would silently roll up green), and above all not a
+    `ready` one — which is what it is today."""
 
 
 def _looks_like_no_text(text: str) -> bool:
@@ -158,6 +256,166 @@ class OcrResult:
     failed: int
 
 
+# --- WHICH question this page is being sent to vision to answer -------------
+
+def _publisher_text(page: Page) -> str:
+    """The page's OWN words as currently stored — never our description of its
+    pictures.
+
+    Splits at the first `FIGURE_MARKER` because a page can be picked up more
+    than once (an embed hiccup, a resumed run, an explicit re-read), and what it
+    must merge onto EVERY time is the publisher's text — not the previous run's
+    output, which would stack a description onto a description onto a
+    description. Idempotent by construction: the only writer of that marker is
+    `_VisionTask.merge`.
+    """
+    return (page.text or "").split(FIGURE_MARKER, 1)[0].strip()
+
+
+@dataclass(frozen=True)
+class _VisionTask:
+    """What to ask about one page, and what its answer means.
+
+    A page's answer is not interchangeable with another page's: for a scan it IS
+    the page, for a Powers tab page it is an ADDITION to a page we already have.
+    Making that a value decided once, up front, is what keeps the difference out
+    of the retry loop — where it would be an `if` inside error handling, read by
+    nobody, in the exact place this module can least afford one.
+    """
+    mode: str                   # "transcribe" | "describe" — for the log line
+    prompt: str
+    preserved_text: str         # publisher text this page must not lose ("" if none)
+    screens_ocr_garbage: bool
+
+    def merge(self, response: str) -> str:
+        """This page's final text. MERGE, never overwrite.
+
+        `describe` mode APPENDS, and an empty response is not a blank page — it
+        is a page with no picture worth describing, whose publisher text is
+        untouched and perfectly good. The unconditional `page.text = text or
+        None` this replaces would have blanked it and rolled it up `empty`: a
+        page of the tutor's book deleted by a model shrug.
+        """
+        if self.mode == "transcribe":
+            return response
+        if not response:
+            return self.preserved_text
+        return f"{self.preserved_text}\n\n{_marked(response)}"
+
+    def text_source(self, reader: str, *, described: bool) -> str:
+        """Whose words `merge` just produced.
+
+        A merged page is genuinely BOTH: the publisher wrote the text, the model
+        wrote the picture description under the marker. "claude" alone would
+        claim a transcription that never happened — the same lie the merge gap
+        told, told by the column instead of the text. "text_layer" alone would
+        hide that a model put content on the page at all, which is precisely the
+        question this column exists to answer. So it says both, and the
+        `[FIGURE]` marker says which is which, positionally, in the text itself.
+
+        Clamped to the column's width: a 12-hour run must not die on its last
+        page because someone added a provider with a long name.
+        """
+        if self.mode == "transcribe":
+            return reader[:_TEXT_SOURCE_MAX]
+        if not described:
+            return TEXT_LAYER_SOURCE        # nothing was described; the text is untouched
+        return f"{TEXT_LAYER_SOURCE}+{reader}"[:_TEXT_SOURCE_MAX]
+
+
+def _marked(description: str) -> str:
+    """Guarantee the description carries its marker even if the model dropped it.
+
+    NOT scrubbing the model's prose — the prompt asks for the marker and this
+    only makes our own output contract true regardless of whether it complied.
+    An unmarked description is indistinguishable from the book's words, which is
+    the one thing this must never be.
+    """
+    return description if description.lstrip().startswith(FIGURE_MARKER) else \
+        f"{FIGURE_MARKER} {description}"
+
+
+def _vision_task_for(page: Page) -> _VisionTask:
+    """THE BRANCH THIS MODULE DID NOT HAVE, and whose absence was live.
+
+    `ocr_source` selected pages on `Page.status` alone and never read
+    `ocr_reason`, then did `page.text = text or None` unconditionally. Task 3b
+    creates 43 `image_region` pages (Powers' tab pages) that KEEP their correct
+    publisher text and are queued for vision ONLY so the tab picture gets
+    described. On first pickup, every one of them would have (a) bought a vision
+    call to re-transcribe text we already had for free — this plan's top severity
+    class — and (b) silently DISCARDED that publisher text in favour of the
+    transcription, leaving `text_source` NULL forever. Confident, permanent,
+    silently wrong: the exact failure the whole plan exists to fix.
+
+    BOTH conditions are checked, and the conjunction is deliberate:
+
+      `ocr_reason == "image_region"` is the routing decision, but it is not a
+      permanent record — a garbage transcription overwrites it with
+      "ocr_garbage" (a documented value of the column), so it cannot be the sole
+      witness forever.
+
+      `preserved` — text we did not write — is the independent one. A page with
+      no text has nothing to lose and is transcribed whole, which is also the
+      right answer for every page ingested before `ocr_reason` existed: it is
+      NULL there, and NULL must never silently mean "describe" (an inherited
+      Tesseract layer taken as gospel is where this started).
+    """
+    preserved = _publisher_text(page)
+    if page.ocr_reason == "image_region" and preserved:
+        return _VisionTask(mode="describe", prompt=FIGURE_PROMPT,
+                           preserved_text=preserved, screens_ocr_garbage=False)
+    # `screens_ocr_garbage` is False above, and that is a decision, not an
+    # oversight: `looks_like_ocr_garbage` judges a TRANSCRIPTION against the
+    # shape of real prose, and a description of a tab diagram is neither — it is
+    # inherently full of short tokens ("5 7 5", "E A D G B E"). Its own docstring
+    # warns that a false positive there THROWS AWAY correct content and marks the
+    # page failed, and the pages it would throw away are precisely Powers' 43 tab
+    # pages, which is what `image_region` exists for. Mojibake
+    # (`_looks_like_garbage`, a unicode-category screen) still applies to both.
+    return _VisionTask(mode="transcribe", prompt=OCR_PROMPT,
+                       preserved_text="", screens_ocr_garbage=True)
+
+
+# --- WHOSE words these are --------------------------------------------------
+
+# `models/knowledge.py`: `Page.text_source` is `String(20)`. A column width is a
+# fact about the bytes on disk (see `EMBED_DIM`'s comment for the last time this
+# app learned that), so the value is clamped to it here rather than trusted to
+# stay short by convention.
+_TEXT_SOURCE_MAX = 20
+
+# `paginate.py` stamps this on a clean digital page: the publisher's own embedded
+# font, taken for free. It is also HALF the answer for an `image_region` page —
+# whose text is the publisher's and whose figure description is the model's.
+TEXT_LAYER_SOURCE = "text_layer"
+
+# `Page.text_source`, by configured provider. Derived from the CONFIG rather than
+# sniffed off the provider object, because the column answers "whose words are
+# these" and the only thing that knows is the config that chose the model.
+#
+# `claude_cli` and `claude` both map to "claude": they are the same model bought
+# from two different wallets (a subscription via the CLI bridge vs. API tokens —
+# see `config.py`). The tutor is asking which MODEL read his book; "claude_cli"
+# would be answering a question about billing.
+_TEXT_SOURCE_BY_PROVIDER = {"claude": "claude", "claude_cli": "claude", "qwen": "qwen"}
+
+
+def _current_text_source() -> str:
+    """Which model is doing this run's reading. Resolved once per run.
+
+    Falls back to the raw provider name rather than a guess: a provider this map
+    has never heard of is a fact worth recording honestly, and every value here
+    is written to a `String(20)` column that nothing parses.
+    """
+    try:
+        provider = resolve_llm_config().provider
+    except Exception:            # noqa: BLE001 — provenance must never fail a run
+        log.warning("ocr: could not resolve the provider name for text_source", exc_info=True)
+        return "unknown"
+    return _TEXT_SOURCE_BY_PROVIDER.get(provider, provider)
+
+
 def ocr_source(db, source_id) -> OcrResult:
     # Pages this run will touch: a non-terminal/retryable status (PICKUP_STATUSES)
     # that has not already burned its attempt budget (MAX_PAGE_ATTEMPTS). The
@@ -183,6 +441,7 @@ def ocr_source(db, source_id) -> OcrResult:
     # object while one vLLM box served both; they are not any more.
     provider = get_provider()
     embedder = get_embedder()
+    reader = _current_text_source()          # which model is doing this run's reading
     ready = failed = 0
 
     for page in pages:
@@ -203,8 +462,13 @@ def ocr_source(db, source_id) -> OcrResult:
         # any (`ocr_running` is itself a pickup status).
         page.ocr_attempts = (page.ocr_attempts or 0) + 1
         db.commit()
+        # Decided BEFORE the call and from the page's committed state, so the
+        # question we ask and the text we must not lose are one value, fixed for
+        # this pickup, rather than something re-derived from a row that the
+        # error paths below rollback and re-fetch.
+        task = _vision_task_for(page)
         try:
-            text = _transcribe_with_retry(provider, page)
+            response = _transcribe_with_retry(provider, page, task)
         except LLMError as e:
             if e.kind == "rate_limit":
                 # THE 429 RULE, same as the draft fan-out's: a rate limit is
@@ -225,20 +489,12 @@ def ocr_source(db, source_id) -> OcrResult:
                             "the remaining pages stay pending", page.page_no)
                 break
             log.warning("ocr: page %s failed permanently", page.page_no, exc_info=True)
-            db.rollback()
-            page = db.get(Page, page.id)
-            page.status = "failed"
-            page.ocr_error = str(e)
-            db.commit()
+            _mark_failed(db, page, e, task)
             failed += 1
             continue
         except Exception as e:
             log.warning("ocr: page %s failed permanently", page.page_no, exc_info=True)
-            db.rollback()
-            page = db.get(Page, page.id)
-            page.status = "failed"
-            page.ocr_error = str(e)
-            db.commit()
+            _mark_failed(db, page, e, task)
             failed += 1
             continue
 
@@ -247,16 +503,31 @@ def ocr_source(db, source_id) -> OcrResult:
         # this page". Getting that distinction wrong in either direction is a lie
         # the tutor pays for: an `empty` page rolls the source up GREEN, a
         # `failed` one turns it AMBER with a retry.
-        if _looks_like_no_text(text):
+        #
+        # Screens the model's RESPONSE, before the merge — not the merged text.
+        # In `describe` mode a "no visible text" narration means "no picture worth
+        # describing", which is a fact about our question and NOT a verdict on the
+        # publisher text sitting on the page; `merge` turns the "" back into that
+        # text and the page stays `ready`.
+        if _looks_like_no_text(response):
             log.info("ocr: page %s narrated 'no visible text' — recording empty",
                      page.page_no)
-            text = ""
+            response = ""
+        text = task.merge(response)
 
         page.text = text or None
         page.ocr_error = None
+        # Never NULL after a pickup. NULL means "written before anyone tracked
+        # this" — a page we just read is not that, and it is the only way the
+        # tutor can tell a page Claude read from a page still carrying someone
+        # else's Tesseract.
+        page.text_source = task.text_source(reader, described=bool(response))
 
         if not text:
             page.status = "empty"
+            # An `empty` page has no text, so it has no author. Naming a model
+            # here would claim a transcription that does not exist.
+            page.text_source = None
             db.commit()
             continue
 
@@ -275,11 +546,7 @@ def ocr_source(db, source_id) -> OcrResult:
             n_chunks = _embed_page(db, embedder, page)
         except Exception as e:
             log.warning("ocr: page %s embed failed", page.page_no, exc_info=True)
-            db.rollback()
-            page = db.get(Page, page.id)
-            page.status = "failed"
-            page.ocr_error = f"embedding failed: {e}"
-            db.commit()
+            _mark_failed(db, page, f"embedding failed: {e}", task)
             failed += 1
             continue
 
@@ -300,6 +567,36 @@ def ocr_source(db, source_id) -> OcrResult:
     _rollup_source_status(db, source_id)
 
     return OcrResult(total=len(pages), ready=ready, failed=failed)
+
+
+def _mark_failed(db, page: Page, error, task: _VisionTask) -> None:
+    """Record one page as unreadable: `failed`, why, and by whom — in the
+    rollback-and-re-fetch shape every failure path in `ocr_source` already used,
+    now in one place because there are four of them and they must not drift.
+
+    THE RE-FETCH IS NOT CEREMONY. The rollback discards this page's uncommitted
+    writes (including, on the embed path, the text and the chunks), which detaches
+    the identity-mapped object; `db.get` re-reads the committed row so the status
+    lands on something real.
+    """
+    db.rollback()
+    page = db.get(Page, page.id)
+    page.status = "failed"
+    page.ocr_error = str(error)
+    # "failed" is a documented `text_source` value and it is not the same fact as
+    # NULL. NULL means "written before anyone tracked this"; this page is one we
+    # tried, and lost, and the column must be able to say so.
+    page.text_source = "failed"
+    # The garbage verdict REPLACES the routing reason — "ocr_garbage" is one of
+    # the column's four documented values, and for a scan it IS now the reason the
+    # page needs re-reading. EXCEPT for an `image_region` page, whose reason is a
+    # live routing decision this module still needs on the next pickup: overwrite
+    # it and the page silently falls back to transcribe mode and REPLACES the
+    # publisher text it was only ever queued to keep. Nothing is lost by leaving
+    # it — the failure is in `ocr_error`, which is where a failure belongs.
+    if isinstance(error, _GarbageTranscription) and page.ocr_reason != "image_region":
+        page.ocr_reason = "ocr_garbage"
+    db.commit()
 
 
 def _rollup_source_status(db, source_id) -> None:
@@ -442,11 +739,45 @@ def active_ocr_job(db, source_id):
     return active_ocr_jobs(db, [source_id]).get(str(source_id))
 
 
-def _transcribe_with_retry(provider, page: Page) -> str:
+def _render_for_vision(page: Page, dpi: int) -> bytes | None:
+    """This page, re-rasterised from the SOURCE PDF at `dpi` — or None if there
+    is no PDF to rasterise.
+
+    The stored scan is 110dpi and upscaling it recovers nothing that was not
+    captured; the only thing that can produce a real 150dpi page is the original,
+    which is why `paginate.py` now keeps it. See `settings.ocr_render_dpi` for why
+    110 is a Qwen ceiling rather than a quality choice.
+
+    None (not an exception) for a source with no stored PDF: every book ingested
+    before Task 9 has scans and no original, and reading those at the stored
+    110dpi is exactly what was always going to happen to them. Raising would make
+    the tutor's existing library permanently un-re-readable in the name of
+    quality, which is a bad trade and a silent one — the caller logs the fallback.
+    """
+    path = source_pdf_path(page.source_id)
+    if not os.path.exists(path):
+        return None
+    doc = fitz.open(path)
+    try:
+        index = page.page_no - 1        # Page.page_no is 1-based, as printed
+        if not 0 <= index < doc.page_count:
+            # The row and the PDF disagree about how long the book is. Fall back
+            # rather than raise: the stored scan for this page is right there, and
+            # it is a better answer than failing the page.
+            log.warning("ocr: page %s is outside the stored PDF (%d pages) for "
+                        "source=%s — falling back to the stored scan",
+                        page.page_no, doc.page_count, page.source_id)
+            return None
+        return doc[index].get_pixmap(dpi=dpi).tobytes("jpeg")
+    finally:
+        doc.close()
+
+
+def _stored_scan(page: Page) -> bytes:
     path = os.path.join(settings.media_dir, page.image_path)
     try:
         with open(path, "rb") as fh:
-            image_bytes = fh.read()
+            return fh.read()
     except FileNotFoundError:
         # A clear, human-meaningful ocr_error, not a raw errno string — this
         # is what a tutor (or a future debugging session) actually needs to
@@ -455,10 +786,26 @@ def _transcribe_with_retry(provider, page: Page) -> str:
     except OSError as e:
         raise RuntimeError(f"OCR image file could not be read ({path}): {e}") from None
 
+
+def _page_pixels(page: Page) -> bytes:
+    """The image vision actually reads: the PDF re-rendered at
+    `settings.ocr_render_dpi`, or the stored 110dpi scan if there is no PDF."""
+    rendered = _render_for_vision(page, settings.ocr_render_dpi)
+    if rendered is not None:
+        return rendered
+    log.info("ocr: no stored PDF for source=%s — reading page %s from its "
+             "%ddpi scan instead of a %ddpi re-render",
+             page.source_id, page.page_no, RENDER_DPI, settings.ocr_render_dpi)
+    return _stored_scan(page)
+
+
+def _transcribe_with_retry(provider, page: Page, task: _VisionTask) -> str:
+    image_bytes = _page_pixels(page)
+
     last: Exception | None = None
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
-            text = (provider.vision(image_bytes, OCR_PROMPT) or "").strip()
+            text = (provider.vision(image_bytes, task.prompt) or "").strip()
             if len(text) >= _SUSPECTED_TRUNCATION_CHARS:
                 raise _SuspectedTruncation(
                     f"vision() returned {len(text)} chars (>= "
@@ -475,6 +822,19 @@ def _transcribe_with_retry(provider, page: Page) -> str:
                     f"vision() returned {len(text)} chars that are mostly not "
                     "language (>30% symbol/control codepoints) — the scan did "
                     "not decode"
+                )
+            # The stub-token screen, beside it and for the same reason. Only a
+            # TRANSCRIPTION is judged (see `_vision_task_for`): 9 of 617 pages
+            # across the three scanned books render blank in both MuPDF and
+            # poppler — damaged in the PDF itself — and a model asked to
+            # transcribe one does not fail, it produces the same wall of
+            # 1-2 character stubs Tesseract did. That is a `failed` page, not
+            # 544 characters of content.
+            if task.screens_ocr_garbage and looks_like_ocr_garbage(text):
+                raise _GarbageTranscription(
+                    f"vision() returned {len(text)} chars that are mostly "
+                    "1-2 character stubs rather than words — the page did not "
+                    "read (it may be damaged in the PDF itself)"
                 )
             return text
         except LLMError as e:

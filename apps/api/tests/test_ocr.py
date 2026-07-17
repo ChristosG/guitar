@@ -1,5 +1,12 @@
+import fitz
 import pytest
-from app.brain.ocr import MAX_PAGE_ATTEMPTS, OCR_PROMPT, ocr_source
+from app.brain.ocr import (
+    FIGURE_MARKER,
+    FIGURE_PROMPT,
+    MAX_PAGE_ATTEMPTS,
+    OCR_PROMPT,
+    ocr_source,
+)
 from app.models.knowledge import EMBED_DIM, Chunk, KnowledgeSource, Page
 
 
@@ -8,9 +15,13 @@ class _Vision:
     def __init__(self, results):
         self.results = list(results)
         self.calls = 0
+        self.prompts = []          # every prompt this provider was asked with
+        self.images = []           # every image payload it was handed
 
     def vision(self, image_bytes, prompt, *, media_type="image/jpeg"):
         self.calls += 1
+        self.prompts.append(prompt)
+        self.images.append(image_bytes)
         r = self.results.pop(0)
         if isinstance(r, Exception):
             raise r
@@ -104,12 +115,6 @@ def test_a_page_the_model_reads_as_blank_is_empty_not_ready(db, tmp_path, monkey
 
     assert (result.ready, result.failed) == (0, 0)
     assert db.query(Page).filter_by(source_id=src.id).one().status == "empty"
-
-
-def test_ocr_prompt_forbids_invention():
-    # a transcriber that "helpfully" fills gaps corrupts the ground truth the
-    # whole app is supposed to trust
-    assert "verbatim" in OCR_PROMPT.lower()
 
 
 def test_a_response_near_the_max_tokens_ceiling_is_treated_as_suspected_truncation(
@@ -575,3 +580,414 @@ def test_a_book_with_a_failed_page_is_partial_and_stays_citable(db, tmp_path, mo
     assert source.status == "partial"
     assert source.char_count > 0
     assert db.query(Chunk).filter_by(source_id=src.id).count() >= 2
+
+
+# =========================================================================
+# Task 9 — THE MERGE GAP
+# =========================================================================
+#
+# Task 3b creates 43 `image_region` pages (Powers' tab pages). They KEEP their
+# correct publisher text AND are queued for vision so the tab PICTURE gets
+# described. Before this task, `ocr.py` did `page.text = text or None`
+# unconditionally and `ocr_source` selected on `Page.status` alone — it never
+# read `ocr_reason`. So on first pickup those 43 pages would have (a) paid a
+# vision call to re-transcribe text we already had for free, and (b) SILENTLY
+# DISCARDED the publisher text in favour of that transcription. That is the
+# exact "confident, permanent, silently-wrong" failure this whole plan exists
+# to fix, reproduced by the fix's own machinery.
+
+# A real Powers tab page: publisher text (correct, free, from a real embedded
+# font) with a tab picture beside it that no text layer can describe.
+_PUBLISHER_TEXT = (
+    "Exercise 14 — Alternate Picking Across the Strings\n\n"
+    "Keep the pick angle constant and let the wrist do the work. Start at 60bpm "
+    "and only raise the tempo once every note rings cleanly."
+)
+
+
+def _image_region_page(db, monkeypatch, tmp_path, text=_PUBLISHER_TEXT):
+    """One page in the shape `paginate.py` leaves an `image_region` page: it
+    already carries the publisher's own text, and it is queued for vision
+    anyway — for the PICTURE, not the words."""
+    src = _prep(db, monkeypatch, tmp_path)
+    page = db.query(Page).filter_by(source_id=src.id).one()
+    page.text = text
+    page.ocr_reason = "image_region"
+    db.commit()
+    return src, page
+
+
+def _inherited_ocr_page(db, monkeypatch, tmp_path):
+    """The shape `paginate.py` leaves a scanned page: the GlyphLessFont layer
+    has ALREADY been discarded (text=None), because it is someone else's
+    Tesseract and it lost every fraction glyph in the book."""
+    src = _prep(db, monkeypatch, tmp_path)
+    page = db.query(Page).filter_by(source_id=src.id).one()
+    page.ocr_reason = "inherited_ocr"
+    db.commit()
+    return src, page
+
+
+def test_an_image_region_page_keeps_its_publisher_text_and_gains_a_description(
+    db, tmp_path, monkeypatch
+):
+    """THE MERGE, and the single most important assertion in this file. The
+    publisher's words are correct and were free; the description is ADDED to
+    them. `page.text = text or None` would have thrown the words away."""
+    src, page = _image_region_page(db, monkeypatch, tmp_path)
+    description = ("A six-line tab staff. The first bar alternates between the "
+                   "5th and 7th frets of the A string, marked with down and up "
+                   "pick strokes above each note.")
+    fake = _Vision([description])
+    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    ocr_source(db, src.id)
+
+    reloaded = db.get(Page, page.id)
+    assert _PUBLISHER_TEXT in reloaded.text          # NOT discarded — merged
+    assert description in reloaded.text              # and the picture is described
+    assert reloaded.text.index(_PUBLISHER_TEXT) < reloaded.text.index(description)
+    assert reloaded.status == "ready"
+    assert reloaded.text_source is not None          # never NULL after a pickup
+
+
+def test_a_figure_description_is_marked_so_it_cannot_be_read_as_a_quotation(
+    db, tmp_path, monkeypatch
+):
+    """The canon compile reads this text later and has no way to ask which half
+    is which. A description of a photo is NOT a sentence from the book, and
+    quoting it as one would be a fabricated citation."""
+    src, page = _image_region_page(db, monkeypatch, tmp_path)
+    fake = _Vision(["A photo of an amp face; the knobs are labelled VOLUME and MASTER."])
+    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    ocr_source(db, src.id)
+
+    text = db.get(Page, page.id).text
+    assert FIGURE_MARKER in text
+    # everything BEFORE the marker is the book's own words; everything after is ours
+    assert text.split(FIGURE_MARKER, 1)[0].strip() == _PUBLISHER_TEXT
+
+
+def test_an_image_region_page_is_asked_to_describe_the_picture_not_re_transcribe_it(
+    db, tmp_path, monkeypatch
+):
+    """The other half of the duplicated-spend bug: asking a model to transcribe
+    a page whose text we already hold is a vision call bought for nothing."""
+    src, _page = _image_region_page(db, monkeypatch, tmp_path)
+    fake = _Vision(["A tab staff."])
+    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    ocr_source(db, src.id)
+
+    assert fake.prompts == [FIGURE_PROMPT]
+    assert fake.prompts[0] != OCR_PROMPT
+
+
+def test_re_reading_an_image_region_page_does_not_stack_a_second_description(
+    db, tmp_path, monkeypatch
+):
+    """A page picked up twice (a retry, an embed hiccup, a resumed run) must
+    merge onto the PUBLISHER text again — not onto the previous run's output,
+    which would stack description onto description onto description."""
+    src, page = _image_region_page(db, monkeypatch, tmp_path)
+    fake = _Vision(["First description of the tab.", "Second description of the tab."])
+    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    ocr_source(db, src.id)
+    # put it back in the pickup set, exactly as a failure/resume would
+    page = db.get(Page, page.id)
+    page.status = "pending"
+    db.commit()
+    ocr_source(db, src.id)
+
+    text = db.get(Page, page.id).text
+    assert text.count(FIGURE_MARKER) == 1
+    assert "First description" not in text        # replaced, not stacked
+    assert "Second description" in text
+    assert _PUBLISHER_TEXT in text
+
+
+def test_an_image_region_page_whose_picture_yields_nothing_keeps_its_text(
+    db, tmp_path, monkeypatch
+):
+    """`page.text = text or None` on an empty response would blank a page whose
+    publisher text is perfectly good, and roll it up as `empty` — a page of the
+    tutor's book deleted by a model shrug."""
+    src, page = _image_region_page(db, monkeypatch, tmp_path)
+    fake = _Vision([""])
+    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    ocr_source(db, src.id)
+
+    reloaded = db.get(Page, page.id)
+    assert reloaded.text == _PUBLISHER_TEXT      # kept, verbatim
+    assert reloaded.status == "ready"            # NOT empty
+
+
+def test_an_inherited_ocr_page_is_transcribed_whole_and_replaces_nothing(
+    db, tmp_path, monkeypatch
+):
+    """The other branch: a scanned page has NO trustworthy text (paginate already
+    dropped the GlyphLessFont layer), so vision transcribes the whole page and
+    that transcription IS the page — no marker, nothing to merge onto."""
+    src, page = _inherited_ocr_page(db, monkeypatch, tmp_path)
+    transcription = "Use a ¼-inch instrument cable, never a speaker cable, between the guitar and the amp."
+    fake = _Vision([transcription])
+    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    ocr_source(db, src.id)
+
+    reloaded = db.get(Page, page.id)
+    assert reloaded.text == transcription
+    assert fake.prompts == [OCR_PROMPT]
+    assert reloaded.status == "ready"
+
+
+# --- Task 9: the prompt must also describe pictures -----------------------
+
+def test_ocr_prompt_asks_for_the_text_verbatim_AND_a_description_of_any_figure():
+    """An OCR layer cannot describe a PICTURE, and these are books about guitar
+    TONE: the photo of a dialed-in amp face, the signal-chain diagram and
+    Powers' 40 pages of tab ARE the content. Hunter p.57's amp photo (knobs
+    labelled VOLUME, MASTER) produced literally nothing from Tesseract."""
+    assert "verbatim" in OCR_PROMPT.lower()
+    assert FIGURE_MARKER in OCR_PROMPT
+    for word in ("photo", "diagram", "describ"):
+        assert word in OCR_PROMPT.lower(), f"OCR_PROMPT never mentions {word!r}"
+
+
+def test_both_prompts_forbid_invention():
+    # a transcriber that "helpfully" fills gaps corrupts the ground truth the
+    # whole app is supposed to trust
+    for prompt in (OCR_PROMPT, FIGURE_PROMPT):
+        assert "invent" in prompt.lower()
+
+
+def test_both_prompts_ask_for_a_bare_reply_because_claude_p_narrates():
+    """`claude -p` returns chatty markdown around a transcription — it narrates
+    that it zoomed in, it adds headers. The bridge deliberately adds no
+    scrubbing (Task 4), so shaping the reply is this prompt's job. Regex-eating
+    a model's prose would eventually eat a line of a real page with it."""
+    for prompt in (OCR_PROMPT, FIGURE_PROMPT):
+        assert "preamble" in prompt.lower()
+
+
+def test_figure_prompt_never_asks_for_a_transcription_of_the_page():
+    """If it did, the merge would append the page's own words back onto the
+    page's own words — the duplicated spend AND a doubled page."""
+    assert "describ" in FIGURE_PROMPT.lower()
+    assert "verbatim" not in FIGURE_PROMPT.lower()
+
+
+# --- Task 9: provenance — text_source is never NULL after a pickup --------
+
+def test_ocr_records_that_claude_wrote_the_text(db, tmp_path, monkeypatch):
+    """Without this the tutor cannot tell a page Claude read from a page that
+    still carries someone else's Tesseract — which is the entire question this
+    plan exists to answer."""
+    src = _prep(db, monkeypatch, tmp_path)
+    monkeypatch.setattr("app.config.settings.llm_provider", "claude_cli")
+    fake = _Vision(["Use a ¼-inch instrument cable between the guitar and the amp head."])
+    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    ocr_source(db, src.id)
+
+    page = db.query(Page).filter_by(source_id=src.id).one()
+    assert page.text_source == "claude"       # `claude_cli` is Claude — a wallet, not a model
+
+
+def test_ocr_records_that_qwen_wrote_the_text(db, tmp_path, monkeypatch):
+    src = _prep(db, monkeypatch, tmp_path)
+    monkeypatch.setattr("app.config.settings.llm_provider", "qwen")
+    fake = _Vision(["A page of text transcribed by the local model, long enough to chunk."])
+    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    ocr_source(db, src.id)
+
+    assert db.query(Page).filter_by(source_id=src.id).one().text_source == "qwen"
+
+
+def test_a_merged_page_credits_the_publisher_AND_the_model_not_just_one(
+    db, tmp_path, monkeypatch
+):
+    """A merged page is genuinely both. "claude" alone would claim a
+    transcription that never happened — the merge gap's own lie, told by the
+    column instead of the text; "text_layer" alone would hide that a model put
+    content on the page at all, which is the question this column exists to
+    answer."""
+    src, page = _image_region_page(db, monkeypatch, tmp_path)
+    monkeypatch.setattr("app.config.settings.llm_provider", "claude_cli")
+    fake = _Vision(["A tab staff showing the first four bars."])
+    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    ocr_source(db, src.id)
+
+    reloaded = db.get(Page, page.id)
+    assert reloaded.text_source == "text_layer+claude"
+    assert len(reloaded.text_source) <= 20        # models/knowledge.py: String(20)
+
+
+def test_an_image_region_page_with_no_picture_described_still_credits_the_publisher(
+    db, tmp_path, monkeypatch
+):
+    """Nothing was added, so nothing may be claimed: the text on this page is
+    the publisher's, exactly as it was before the model looked at it."""
+    src, page = _image_region_page(db, monkeypatch, tmp_path)
+    monkeypatch.setattr("app.config.settings.llm_provider", "claude_cli")
+    fake = _Vision([""])
+    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    ocr_source(db, src.id)
+
+    assert db.get(Page, page.id).text_source == "text_layer"
+
+
+def test_a_page_that_could_not_be_read_says_so_rather_than_leaving_text_source_null(
+    db, tmp_path, monkeypatch
+):
+    """NULL means "written before anyone tracked this". A page this run just
+    failed to read is not that — it is a page we tried and lost, and the column
+    must say so rather than being indistinguishable from history."""
+    src = _prep(db, monkeypatch, tmp_path)
+    fake = _Vision([RuntimeError("vl timeout"), RuntimeError("vl timeout")])
+    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    ocr_source(db, src.id)
+
+    page = db.query(Page).filter_by(source_id=src.id).one()
+    assert page.status == "failed"
+    assert page.text_source == "failed"
+
+
+# --- Task 9: the garbage screen -------------------------------------------
+
+# Kahn p.40, verbatim: the page renders blank in BOTH MuPDF and poppler (it is
+# damaged in the PDF itself, so no model can recover it) and Tesseract wrote
+# these 544 characters for it — which today's pipeline ingests as page content.
+_KAHN_P40_NOISE = (
+    "7 ipgges x \na \nRar \nek \nen ee \n& \neile \na= \n@ \nFilip \n«@ \n' \n= \nae \n¢ \n® a "
+    "\n_ \n- \n¥ \n= \n, \n» \nve \né \n~ \nas \nre \not \ni \nby \nay \nse \nen \nid \nor \nan"
+)
+
+
+def test_garbage_transcription_is_marked_failed_not_committed_as_content(
+    db, tmp_path, monkeypatch
+):
+    """9 of 617 pages across the three scanned books are like this. What must NOT
+    happen is 544 chars of "7 ipgges x a Rar ek en ee" entering the citation
+    store as if it were a page of the tutor's book."""
+    src = _prep(db, monkeypatch, tmp_path)
+    fake = _Vision([_KAHN_P40_NOISE, _KAHN_P40_NOISE])
+    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    result = ocr_source(db, src.id)
+
+    page = db.query(Page).filter_by(source_id=src.id).one()
+    assert page.status == "failed"
+    assert page.text_source == "failed"
+    assert page.ocr_reason == "ocr_garbage"
+    assert result.ready == 0
+    assert fake.calls == 2                                   # initial + one retry
+    assert db.query(Chunk).filter_by(page_id=page.id).count() == 0
+
+
+def test_the_garbage_screen_does_not_judge_a_figure_description(
+    db, tmp_path, monkeypatch
+):
+    """`looks_like_ocr_garbage` screens a TRANSCRIPTION against the shape of real
+    prose. A description of a TAB DIAGRAM is neither: it is inherently full of
+    short tokens ("5 7 5", "E A D G B E"). Its own docstring warns that a false
+    positive here THROWS AWAY correct content and marks the page failed — and
+    the pages it would throw away are exactly Powers' 43 tab pages, the ones
+    `image_region` exists for. So the screen belongs to transcribe mode only."""
+    src, page = _image_region_page(db, monkeypatch, tmp_path)
+    fake = _Vision([_KAHN_P40_NOISE])
+    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    ocr_source(db, src.id)
+
+    reloaded = db.get(Page, page.id)
+    assert reloaded.ocr_reason == "image_region"    # routing survives — not clobbered
+    assert _PUBLISHER_TEXT in reloaded.text         # and the publisher text is still there
+
+
+# --- Task 9: 150dpi ------------------------------------------------------
+
+def test_vision_pages_are_rendered_at_the_ocr_dpi_not_the_stored_110(
+    db, tmp_path, monkeypatch
+):
+    """RENDER_DPI=110 is a QWEN CEILING ("image item with length 2080 exceeds
+    pre-allocated encoder cache size 2048"), not a quality choice. Claude is
+    high-res tier: 110dpi = 1,496 visual tokens, 150dpi = 2,714. Feeding it the
+    stored 110dpi JPEG caps its fidelity on exactly the glyphs that matter —
+    `¼` and `⅛` differ by a few pixels at page scale."""
+    src = _prep(db, monkeypatch, tmp_path)
+    monkeypatch.setattr("app.config.settings.ocr_render_dpi", 150)
+    seen = {}
+
+    def _fake_render(page, dpi):
+        seen["dpi"] = dpi
+        return b"\xff\xd8rendered-at-150"
+
+    monkeypatch.setattr("app.brain.ocr._render_for_vision", _fake_render)
+    fake = _Vision(["A page of the book transcribed from the 150dpi render."])
+    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    ocr_source(db, src.id)
+
+    assert seen["dpi"] == 150
+    assert fake.images == [b"\xff\xd8rendered-at-150"]   # the render, not the stored JPEG
+
+
+def test_render_for_vision_rasterises_the_source_pdf_at_the_requested_dpi(
+    db, tmp_path, monkeypatch
+):
+    """Not a mock: the stored JPEG is 110dpi and UPSCALING it recovers nothing.
+    The only thing that can produce a real 150dpi page is the original PDF, so
+    the original PDF has to still be here."""
+    from app.brain.ocr import _render_for_vision
+
+    src = _prep(db, monkeypatch, tmp_path)
+    page = db.query(Page).filter_by(source_id=src.id).one()
+    doc = fitz.open()
+    doc.new_page(width=612, height=792)                 # US Letter @ 72pt/inch
+    (tmp_path / str(src.id) / "source.pdf").write_bytes(doc.tobytes())
+
+    data = _render_for_vision(page, 150)
+
+    pix = fitz.Pixmap(data)
+    assert (pix.width, pix.height) == (1275, 1650)      # 8.5in x 150dpi, 11in x 150dpi
+    assert fitz.Pixmap(_render_for_vision(page, 110)).width == 935   # and the knob is real
+
+
+def test_a_source_with_no_stored_pdf_falls_back_to_its_page_scan(
+    db, tmp_path, monkeypatch
+):
+    """Every book ingested before this task has page scans and no PDF. Falling
+    back to the 110dpi JPEG reads that book at 110dpi, which is what it was
+    always going to be; RAISING here would make those books permanently
+    un-re-readable instead."""
+    src = _prep(db, monkeypatch, tmp_path)          # writes 0001.jpg, no source.pdf
+    fake = _Vision(["Transcribed from the stored scan, because there is no PDF to re-render."])
+    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    result = ocr_source(db, src.id)
+
+    assert result.ready == 1
+    assert fake.images == [b"jpeg"]                  # `_prep` writes exactly these bytes

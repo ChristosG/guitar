@@ -14,6 +14,7 @@ import {
   listCollections,
   listSources,
   moveSource,
+  reocrSource,
   retrySource,
   type CollectionOut,
   type SourceOut,
@@ -138,6 +139,28 @@ export default function LibraryPage() {
       await refresh();
     } catch (err) {
       setError(err instanceof ApiError ? err.detail : t("retryError"));
+    } finally {
+      setRetryingId(null);
+    }
+  }
+
+  /** Re-read a book with the vision model. Shares `retryingId` with `handleRetry`
+   * on purpose: both disable the same row's buttons while a request is in flight,
+   * and a row can only be doing one of them at a time — the server's in-flight
+   * guard makes the pair mutually exclusive anyway (`_enqueue_ocr`).
+   *
+   * Refreshes and then does nothing else: the durable progress loop above picks
+   * the job up from `ocr_active` on its next tick, exactly as it does for a job
+   * some other tab started. This handler has no idea how long the run is, and
+   * that is the point — an 8-hour read is the server's business, not this tab's. */
+  async function handleReocr(id: string) {
+    setRetryingId(id);
+    setError(null);
+    try {
+      await reocrSource(id);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.detail : t("reocrError"));
     } finally {
       setRetryingId(null);
     }
@@ -270,6 +293,7 @@ export default function LibraryPage() {
           deletingCollectionId={deletingCollectionId}
           movingId={movingId}
           onRetry={handleRetry}
+          onReocr={handleReocr}
           onDelete={handleDelete}
           onDeleteCollection={handleDeleteCollection}
           onMove={handleMove}
