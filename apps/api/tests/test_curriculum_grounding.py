@@ -157,6 +157,58 @@ def _lessons(db, module_id) -> list[Block]:
 
 
 # ---------------------------------------------------------------------------
+# `fits` actually gates `prefix_messages` (Task 7)
+# ---------------------------------------------------------------------------
+
+def test_oversized_library_is_NOT_shipped_whole():
+    """corpus.py's docstring promises: "Above `full_context_budget` `fits` goes
+    False and the caller degrades to per-module retrieval — WITH AN HONEST
+    BANNER, never silently."
+
+    It does not. `fits` is computed at corpus.py:208 and consulted by nobody:
+    outline.py:148 and extend.py:160 call prefix_messages() unconditionally, and
+    draft.py:268 ADDS retrieved passages on top of the still-complete library —
+    strictly worse than either path alone. Meanwhile outline.py:361 sets
+    `full_context: false` and tree-board.tsx:189 renders a banner reporting a
+    degrade that never happened.
+
+    Unreachable at 82K. The four new books put the corpus at 592,841 tokens
+    against a 600,000 budget — 11 book pages of headroom.
+    """
+    from app.curriculum.corpus import LibraryContext, prefix_messages
+
+    oversized = LibraryContext(
+        text="<source id='S1' title='t'>[p.1] " + ("x" * 100) + "</source>",
+        token_count=700_000, fits=False,
+        page_index={"S1": {1}}, ref_to_source_id={},
+        sources=[{"ref": "S1", "id": "x", "title": "t", "pages": 1, "chars": 100}],
+    )
+    messages = prefix_messages(oversized)
+    body = "\n".join(m["content"] for m in messages)
+
+    assert "[p.1]" not in body, "the library shipped whole despite fits=False"
+    assert not any(m.get("cache") for m in messages), \
+        "a 700K block must not be written to the cache at 1.25x"
+    assert "too large" in body.lower() or "retrieval" in body.lower(), \
+        "the model must be told why it is not seeing the library"
+
+
+def test_fitting_library_is_unchanged():
+    """The 82K path today, and the <=300K path after the canon lands. This is the
+    regression guard: the fix must not alter the working case."""
+    from app.curriculum.corpus import LibraryContext, prefix_messages
+
+    fits = LibraryContext(
+        text="<source id='S1' title='t'>[p.1] hello</source>",
+        token_count=90_000, fits=True,
+        page_index={"S1": {1}}, ref_to_source_id={}, sources=[],
+    )
+    messages = prefix_messages(fits)
+    assert any(m.get("cache") for m in messages), "the stable prefix must still cache"
+    assert "[p.1] hello" in "\n".join(m["content"] for m in messages)
+
+
+# ---------------------------------------------------------------------------
 # The outline reads the WHOLE library — this is the change
 # ---------------------------------------------------------------------------
 

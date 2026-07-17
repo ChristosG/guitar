@@ -256,8 +256,30 @@ def prefix_messages(library: LibraryContext) -> list[dict]:
     When the library is empty there is nothing to cache and the caller gets an
     honest substitute block instead, so downstream prompts can still say "tier
     honestly — you read nothing of his".
+
+    When the library does NOT FIT (`library.fits is False`), the same thing
+    happens for the opposite reason: the block is too large to send at all, let
+    alone cache. See below.
     """
     messages: list[dict] = [{"role": "system", "content": CURRICULUM_SYSTEM}]
+    if not library.is_empty and not library.fits:
+        # The docstring promised this for two days and never did it. Above the
+        # budget the library block is NOT sent: `draft.py` tops the tail up with
+        # retrieval, and that top-up is the substitute, not an addition. Shipping
+        # both is what the code did before — strictly worse than either alone, and
+        # it re-wrote a 600K block into the cache at 1.25x on every outline.
+        messages.append({
+            "role": "user",
+            "content": (
+                "The tutor's library is TOO LARGE to read in full for this course "
+                f"({library.token_count:,} tokens). You are not being shown it. "
+                "You will instead be given the passages retrieved for each specific "
+                "module, below. Tier a module 'library' ONLY where such a passage "
+                "actually supports it — never from memory of a book you have not "
+                "been shown."
+            ),
+        })
+        return messages
     if not library.is_empty:
         messages.append(library_message(library))
     else:
