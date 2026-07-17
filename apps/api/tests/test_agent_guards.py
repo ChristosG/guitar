@@ -454,3 +454,56 @@ def test_live_model_asked_chris_exact_question_teen_spirit_riff(db):
             assert not looks_like_tablature(m.get("content") or ""), (
                 f"a hand-typed tab reached the transcript uncaught: {m!r}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Task 8: search the library before declining a named song
+# ---------------------------------------------------------------------------
+#
+# The guard is a pre-model short-circuit at (old) loop.py:601. The forced-
+# retrieval pre-hop is at (old) loop.py:608. So it declined BEFORE the
+# library was searched — and a transcription the tutor OWNS, on a real page,
+# with a real citation available, was refused unread. That is the actual
+# complaint behind "those books are copywrited, but i bought them and
+# they're mine". It is an ordering bug, not a policy: reorder, don't remove.
+
+def test_a_song_the_tutor_OWNS_is_answered_not_declined(db, monkeypatch):
+    """His own book HAS this transcription (a mocked `search()` hit) — the
+    decline must not fire, and the answer must carry a citation to the real
+    page. `get_provider()` IS mocked here (unlike the sibling live-model
+    checks above): once the reorder is in place this path falls through to
+    an actual model call, and this suite must stay offline/deterministic —
+    the live vLLM host is unreachable outside the compose network (see
+    `conftest.py::_no_live_retrieval`). A scripted `_FakeProvider` mirrors
+    this file's own established pattern.
+    """
+    hit = type("H", (), {
+        "source_id": "s1", "source_title": "Real Book", "page": 42, "page_id": None,
+        "text": "Intro riff: E5 G5 A5", "score": 0.9,
+    })()
+    monkeypatch.setattr("app.agent.loop.search", lambda *a, **kw: [hit])
+    monkeypatch.setattr("app.agent.loop.NAMED_SONG_DECLINE_MESSAGE", "DECLINED")
+    fake_provider = _FakeProvider(
+        [AssistantTurn(content="Here's the intro riff from page 42: E5 G5 A5", tool_calls=[])]
+    )
+    monkeypatch.setattr(agent_loop, "get_provider", lambda: fake_provider)
+
+    result = run_agent_turn(db, [{"role": "user", "content": "give me the tab for Sweet Child O' Mine"}], locale="el")
+    assert result.content != "DECLINED", "his own book was refused unread"
+    assert result.citations, "an answer from his library must cite the page"
+
+
+def test_a_song_the_tutor_does_NOT_own_is_still_declined(db, monkeypatch):
+    """The guard's reason survives the reorder. The model cannot recall a specific
+    recording's tab; removing the guard yields a confidently wrong one handed to a
+    teacher, handed to a student — the same harm as an invalid citation."""
+    monkeypatch.setattr("app.agent.loop.search", lambda *a, **kw: [])
+    result = run_agent_turn(db, [{"role": "user", "content": "give me the tab for Sweet Child O' Mine"}], locale="el")
+    assert result.content == NAMED_SONG_DECLINE_MESSAGE
+
+
+def test_the_decline_no_longer_cites_copyright():
+    """For a private, single-user, non-commercial app over books the tutor owns,
+    copyright is noise. Accuracy is the real and sufficient reason."""
+    assert "copyright" not in NAMED_SONG_DECLINE_MESSAGE.lower()
+    assert "memorized" in NAMED_SONG_DECLINE_MESSAGE

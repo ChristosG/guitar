@@ -60,20 +60,26 @@ instead of executing them:
     (protocol integrity — see the dispatch loop's own comment).
 
 Plan 12 Task 5 (G5) adds a PRE-model short-circuit, same shape as C1's
-forced-retrieval pre-hop but even earlier: on a fresh user turn, if
+forced-retrieval pre-hop: on a fresh user turn, if
 `app.agent.guards.looks_like_named_song_request` trips (Chris's OTHER live
 bug — asked for the "Smells Like Teen Spirit" riff, got a real
 `generate_artifact` tab back with one note repeated seven times, because the
-model cannot actually recall a specific copyrighted recording and invents
-instead), the turn is answered immediately with `NAMED_SONG_DECLINE_MESSAGE`
-and the model is NEVER called. This has to happen before the model sees the
-request at all — there is no reliable way to make the model itself decline,
-since it is the very thing that fabricates when asked. See `guards.py`'s own
+model cannot actually recall a specific song's recording and invents
+instead), the turn is answered with `NAMED_SONG_DECLINE_MESSAGE` and the
+model is NEVER called. This has to happen before the model sees the request
+at all — there is no reliable way to make the model itself decline, since it
+is the very thing that fabricates when asked. See `guards.py`'s own
 docstring for the full "why not a hardcoded song list" detection rationale
-and its false-positive analysis. Runs BEFORE the C1 grounding pre-hop below
-(no point searching the library for a request that's about to be declined
-outright) and returns straight away, same "short-circuit before the loop
-proper starts" shape.
+and its false-positive analysis.
+
+Task 8 (same plan) reordered this against C1: G5 now runs AFTER the C1
+grounding pre-hop below, not before, and only declines when that search came
+back with NO hits. The tutor complained — correctly — that a transcription
+from a book he OWNS, on a real page, was being refused unread because the
+decline used to fire before his library was ever searched. The guard itself
+is right to exist (it is anti-hallucination, not copyright enforcement — its
+own message leads with "I don't actually have it memorized"), so it was
+reordered, not removed: search first, decline only on a genuine miss.
 
 Plan 11 Task 2 (C3) adds a POST-TURN guard on top of all of the above: when a
 turn ends with a plain answer (no tool_calls), and that answer's `content`
@@ -593,22 +599,11 @@ def run_agent_turn(
     last_content: str | None = None
     citations: list[dict] = []
 
-    # --- G5: named-song decline pre-model short-circuit ---------------------
-    # Must run BEFORE the model is ever called (see this module's own
-    # docstring above) — a named-song tab/riff/solo request gets an honest,
-    # deterministic decline instead of a chance to fabricate.
-    last = messages[-1]
-    if last.get("role") == "user" and looks_like_named_song_request(last.get("content") or ""):
-        messages.append({"role": "assistant", "content": NAMED_SONG_DECLINE_MESSAGE})
-        return AgentResult(
-            status="answer", content=NAMED_SONG_DECLINE_MESSAGE,
-            messages=messages, citations=citations,
-        )
-
     # --- C1: forced retrieval pre-hop ---------------------------------------
-    # Fires ONLY when the newest message in the transcript is a fresh user
-    # turn (i.e. `messages[-1]["role"] == "user"`) — a resumed turn after an
-    # HITL resolve always ends with a `{"role": "tool", ...}` answer to the
+    # Runs FIRST now (Task 8 — see G5 below for why the reorder). Fires ONLY
+    # when the newest message in the transcript is a fresh user turn (i.e.
+    # `messages[-1]["role"] == "user"`) — a resumed turn after an HITL
+    # resolve always ends with a `{"role": "tool", ...}` answer to the
     # approved/rejected mutation, never a user message, so this never
     # re-triggers mid-approval. `search()` is called directly — not offered
     # to the model as a tool it might decline — and its hits are appended
@@ -627,13 +622,49 @@ def run_agent_turn(
     # (`_new_tail`) to compute what to persist. An in-place mutation would
     # retroactively rewrite `prior_wire`'s own last entry too, corrupting
     # that diff; reassigning the slot only ever changes what THIS function's
-    # local list points to. `last` is still `messages[-1]` from the G5 check
-    # above (unchanged — this function returned already if it had matched).
-    if last.get("role") == "user" and _is_content_bearing(last.get("content") or ""):
-        hits = search(db, last["content"], k=5)
+    # local list points to. `last` stays bound to the ORIGINAL (pre-grounding)
+    # dict throughout — including for the G5 check right below, which must
+    # judge the tutor's own words, not his words plus a retrieved-text tail.
+    #
+    # `named_song` is computed HERE, not inline in the G5 `if` below, because
+    # it also has to widen THIS gate: `_is_content_bearing` treats any turn
+    # mentioning "tab"/"tabs" as an artifact-generation instruction and
+    # deliberately skips grounding for it (see that function's own
+    # docstring) — right for "give me a G major scale tab", wrong for "give
+    # me the tab for Sweet Child O' Mine", which is `looks_like_named_song_
+    # request`'s single most common phrasing (its own trigger-word set
+    # includes "tab"/"tabs"). Without the `or named_song` below, C1 would
+    # never search for exactly the requests G5 exists to check, `hits` would
+    # stay empty by never being asked, and Task 8's whole fix would be a
+    # no-op for the majority of real named-song phrasings.
+    last = messages[-1]
+    hits: list = []
+    is_user_turn = last.get("role") == "user"
+    last_text = last.get("content") or ""
+    named_song = is_user_turn and looks_like_named_song_request(last_text)
+    if is_user_turn and (named_song or _is_content_bearing(last_text)):
+        hits = search(db, last_text, k=5)
         citations = [_to_citation(hit) for hit in hits]
-        grounded_content = f"{last['content']}\n\n{_grounding_block(hits, locale)}"
+        grounded_content = f"{last_text}\n\n{_grounding_block(hits, locale)}"
         messages[-1] = {**last, "content": grounded_content}
+
+    # --- G5: named-song decline pre-model short-circuit ---------------------
+    # Still runs BEFORE the model is ever called (see this module's own
+    # docstring above) — there is no reliable way to make the model itself
+    # decline, since it is the very thing that fabricates when asked. But
+    # (Task 8) it no longer runs before C1's search above, and it now fires
+    # ONLY when that search came back empty (`not hits`): the tutor's library
+    # is checked FIRST, so a transcription he OWNS, on a real page, is
+    # answered with a citation instead of refused unread — the ordering bug
+    # behind "those books are copywrited, but i bought them and they're
+    # mine". A genuine miss (his library does NOT have it) still declines,
+    # because that is exactly the case where the model would fabricate.
+    if named_song and not hits:
+        messages.append({"role": "assistant", "content": NAMED_SONG_DECLINE_MESSAGE})
+        return AgentResult(
+            status="answer", content=NAMED_SONG_DECLINE_MESSAGE,
+            messages=messages, citations=citations,
+        )
 
     for _ in range(max_steps):
         try:
@@ -830,32 +861,43 @@ def stream_plain_turn(
     provider = get_provider()
     citations: list[dict] = []
 
+    # Same pre-hop as `run_agent_turn`, and run FIRST for the same Task 8
+    # reason (see that function's own extensive comment for the full
+    # rationale) — his library is searched before the named-song guard below
+    # ever gets a say. `named_song` widens this gate the same way it does in
+    # `run_agent_turn` (see that function's comment for why: `tab`/`tabs` is
+    # both an `_is_content_bearing` exclusion AND G5's own most common
+    # trigger word, so without this a named-song "tab" request would never
+    # get searched at all). Duplicated here (not extracted into a shared
+    # helper) because it's genuinely small and this module already follows
+    # the "small deliberate duplication over a cross-call shared helper with
+    # more parameters than callers" precedent (e.g. `_stringify` in
+    # `app/routers/chat.py`).
+    last = messages[-1]
+    hits: list = []
+    is_user_turn = last.get("role") == "user"
+    last_text = last.get("content") or ""
+    named_song = is_user_turn and looks_like_named_song_request(last_text)
+    if is_user_turn and (named_song or _is_content_bearing(last_text)):
+        hits = search(db, last_text, k=5)
+        citations = [_to_citation(hit) for hit in hits]
+        grounded_content = f"{last_text}\n\n{_grounding_block(hits, locale)}"
+        messages[-1] = {**last, "content": grounded_content}
+
     # Same G5 pre-model short-circuit as `run_agent_turn` — see that
     # function's own comment and this module's top-level docstring for the
-    # full rationale. Emitted as a plain "done" (not a "fallback"): there is
-    # nothing for the REST path to redo here, the decline itself IS the
-    # final answer, same as `run_agent_turn`'s equivalent branch returns it
-    # directly rather than falling back.
-    last = messages[-1]
-    if last.get("role") == "user" and looks_like_named_song_request(last.get("content") or ""):
+    # full rationale, and Task 8 for why it now runs AFTER the pre-hop above,
+    # gated on `not hits`. Emitted as a plain "done" (not a "fallback"):
+    # there is nothing for the REST path to redo here, the decline itself IS
+    # the final answer, same as `run_agent_turn`'s equivalent branch returns
+    # it directly rather than falling back.
+    if named_song and not hits:
         messages.append({"role": "assistant", "content": NAMED_SONG_DECLINE_MESSAGE})
         yield {
             "event": "done", "content": NAMED_SONG_DECLINE_MESSAGE,
             "citations": citations, "messages": messages,
         }
         return
-
-    # Same pre-hop as `run_agent_turn` — see that function's own extensive
-    # comment for the full rationale; duplicated here (not extracted into a
-    # shared helper) because it's genuinely small and this module already
-    # follows the "small deliberate duplication over a cross-call shared
-    # helper with more parameters than callers" precedent (e.g. `_stringify`
-    # in `app/routers/chat.py`).
-    if last.get("role") == "user" and _is_content_bearing(last.get("content") or ""):
-        hits = search(db, last["content"], k=5)
-        citations = [_to_citation(hit) for hit in hits]
-        grounded_content = f"{last['content']}\n\n{_grounding_block(hits, locale)}"
-        messages[-1] = {**last, "content": grounded_content}
 
     final_content: str | None = None
     tool_calls: list = []

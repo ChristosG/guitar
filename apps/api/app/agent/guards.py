@@ -340,9 +340,9 @@ def looks_like_named_song_request(text: str) -> bool:
 NAMED_SONG_DECLINE_MESSAGE = (
     "I can't reproduce a specific recording's tab note-for-note — I don't "
     "actually have it memorized, and guessing would just invent a "
-    "confidently wrong (and possibly copyrighted) transcription instead of "
-    "an honest answer. What I CAN generate for you: the chord progression "
-    "in that style, a scale or technique exercise it draws on, or the "
-    "riff's rhythmic shape as a generic pattern — just ask for one of those "
-    "and I'll generate it as a real artifact."
+    "confidently wrong transcription instead of an honest answer. What I CAN "
+    "generate for you: the chord progression in that style, a scale or "
+    "technique exercise it draws on, or the riff's rhythmic shape as a generic "
+    "pattern — just ask for one of those and I'll generate it as a real "
+    "artifact."
 )
