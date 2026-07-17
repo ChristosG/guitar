@@ -26,8 +26,9 @@ from app.brain.ocr import active_ocr_job, page_counts
 from app.brain.repair import repair_pageless_source
 from app.config import settings
 from app.db import get_db
+from app.jobs.canon_compile import enqueue_canon_compile, run_canon_compile_job
 from app.jobs.runner import run_ocr_job, run_reingest_job
-from app.llm.factory import require_ocr_configured
+from app.llm.factory import require_llm_configured, require_ocr_configured
 from app.models.generation_job import GenerationJob
 from app.models.knowledge import (
     SOURCE_USABLE_STATUSES,
@@ -242,6 +243,41 @@ def source_progress(source_id: uuid.UUID, db: Session = Depends(get_db)) -> Sour
         active=job is not None,
         job_id=job.id if job else None,
     )
+
+
+# --- Canon compile (Part B, Task C6) ----------------------------------------
+
+@router.post(
+    "/knowledge/sources/{source_id}/compile",
+    status_code=202,
+    # Compiling reads the whole book through the CHAT provider (not OCR's) — so it
+    # gates on that key. Without it the tutor would get a `canon_compile` job that
+    # fails "auth" a second later; a clean 4xx here is honest instead.
+    dependencies=[Depends(require_llm_configured)],
+)
+def compile_source(
+    source_id: uuid.UUID, background: BackgroundTasks, db: Session = Depends(get_db)
+) -> dict:
+    """Read this book into the concept canon. Poll `GET /jobs/{job_id}` for the
+    outcome, exactly like OCR.
+
+    THE MONEY GUARD, twice. Pressing this on an already-compiled book starts NO
+    job and returns `already_compiled: true` — an app update must not re-spend the
+    tutor's subscription re-reading a book it already read. Pressing it twice on an
+    un-compiled book returns the SAME job the second time (`already_running: true`,
+    the `SELECT ... FOR UPDATE` guard in `enqueue_canon_compile`) rather than a
+    second reading racing the first through the ledger.
+
+    Not automatic here: OCR completion auto-compiles (`runner.run_ocr_job`), so
+    this endpoint is the explicit "compile it now / retry a failed compile" button.
+    """
+    _source_or_404(db, source_id)
+    job_id, status = enqueue_canon_compile(db, source_id)
+    if status == "already_compiled":
+        return {"already_compiled": True}
+    if status == "enqueued":
+        background.add_task(run_canon_compile_job, job_id)
+    return {"job_id": str(job_id), "already_running": status == "already_running"}
 
 
 # --- Reader --------------------------------------------------------------

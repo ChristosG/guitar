@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import uuid
 
+from app.curriculum.corpus import CurriculumContextError
 from app.curriculum.extend import ExtendError, generate_module
 from app.db import SessionLocal
 from app.jobs.curriculum_draft import run_curriculum_draft_job
@@ -51,6 +52,12 @@ def run_module_generate_job(job_id: uuid.UUID) -> None:
         db.commit()
     except ExtendError as e:
         _fail(db, job_id, "internal", str(e))
+        return
+    except CurriculumContextError as e:
+        # Too large to read whole AND a selected book is not compiled into the
+        # canon yet — an actionable refusal (compile the book, or pick fewer),
+        # not "our bug". Nothing was added to the course.
+        _fail(db, job_id, "upstream", str(e))
         return
     except LLMNotConfigured:
         _fail(db, job_id, "auth",

@@ -43,9 +43,11 @@ import openai
 
 from app.brain.ingest import IngestPayload, ingest_source
 from app.brain.ocr import ocr_source
+from app.curriculum.corpus import CurriculumContextError
 from app.curriculum.generate import generate_curriculum
 from app.curriculum.interview import generate_interview_outline
 from app.db import SessionLocal
+from app.jobs.canon_compile import autocompile_after_ocr, run_canon_compile_job
 from app.jobs.curriculum_draft import run_curriculum_draft_job
 from app.i18n import DEFAULT_LOCALE
 from app.lessons.draft import draft_lesson_from_selection
@@ -133,6 +135,23 @@ def run_curriculum_job(job_id: uuid.UUID) -> None:
 
         try:
             root_id = generate_curriculum(db, **_curriculum_kwargs(job.params))
+        except CurriculumContextError as e:
+            # The selection is too large to read whole AND a selected book is not
+            # compiled into the canon yet — an honest refusal that names what to
+            # fix, NOT the broad "internal / our bug". Recording it under its own
+            # message is the difference between the tutor compiling a book and the
+            # tutor retry-spamming a call that will refuse identically every time.
+            # rollback first (same reasoning as the sibling branches): nothing was
+            # persisted, but the Session's transaction must be clean before the
+            # failure-record commit.
+            db.rollback()
+            job = db.get(GenerationJob, job_id)
+            if job is None:
+                return
+            job.status = "failed"
+            job.error_kind = "upstream"
+            job.error = str(e)
+            db.commit()
         except LLMNotConfigured:
             # The key was there when this job was enqueued (`require_llm_configured`
             # gates every producer) and is gone now — the tutor cleared it, or the
@@ -290,6 +309,18 @@ def run_outline_job(job_id: uuid.UUID) -> None:
             # and job.status="succeeded" in one transaction (see the docstring of
             # `generate_interview_outline`): a crash between them writes neither.
             interview.outline = generate_interview_outline(db, interview)
+        except CurriculumContextError as e:
+            # Too large to read whole AND a selected book is not compiled yet —
+            # an actionable refusal, not "our bug". Same handling as
+            # run_curriculum_job's own branch.
+            db.rollback()
+            job = db.get(GenerationJob, job_id)
+            if job is None:
+                return
+            job.status = "failed"
+            job.error_kind = "upstream"
+            job.error = str(e)
+            db.commit()
         except LLMNotConfigured:
             # Key vanished mid-flight — the one error_kind that says "you can fix this
             # in Settings", not "our bug". Same handling as run_curriculum_job.
@@ -491,8 +522,9 @@ def run_ocr_job(job_id: uuid.UUID) -> None:
 
         job.status = "running"
         db.commit()
+        source_id = uuid.UUID(job.params["source_id"])
         try:
-            result = ocr_source(db, uuid.UUID(job.params["source_id"]))
+            result = ocr_source(db, source_id)
         except LLMNotConfigured:
             # The key was there when this job was enqueued (`require_llm_configured`
             # gates every producer) and is gone now — the tutor cleared it, or the
@@ -526,6 +558,17 @@ def run_ocr_job(job_id: uuid.UUID) -> None:
             job.status = "succeeded"
             job.error = None if result.failed == 0 else f"{result.failed} page(s) unreadable"
             db.commit()
+            # C6: OCR finished — if the book is now fully read and not yet
+            # compiled, read it into the canon. Gated on "fully read" inside
+            # `autocompile_after_ocr` (a parked run must not compile a half book)
+            # and money-guarded (an already-compiled book enqueues nothing). Chained
+            # inline the same way `run_curriculum_job` chains the draft fan-out —
+            # hand the connection back first, then run the compile on its own.
+            compile_job_id = autocompile_after_ocr(db, source_id)
+            db.close()
+            if compile_job_id is not None:
+                run_canon_compile_job(compile_job_id)
+            return
     finally:
         db.close()
 

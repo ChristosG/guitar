@@ -133,7 +133,29 @@ class Settings(BaseSettings):
     # (see app/curriculum/corpus.py). 600K leaves ~400K of Sonnet 5's 1M window
     # for a 32K lesson output plus the volatile tail. His real library measures
     # ~90K, so this is headroom for a library 6x the one he has.
+    #
+    # THIS IS THE HARD CEILING, and it stays so — it is what drives `fits` on
+    # both the library block AND the canon block. It answers "does the block I
+    # chose physically fit in the window?", never "which block do I choose?".
     full_context_budget: int = 600_000
+    # THE ROUTE POINT — a SEPARATE decision from the ceiling above, and the two
+    # must not be conflated. `canon_threshold` chooses the REPRESENTATION: at or
+    # below it, the library goes in verbatim (today's path, unchanged); above it,
+    # the compiled canon goes in instead — the point of which is that even when
+    # ten books would fit whole, full-context averages Hunter and Gallagher into
+    # consensus mush, and the canon is what makes their DISAGREEMENT visible
+    # (see app/canon/render.py). `full_context_budget` then decides whether the
+    # representation that was chosen physically fits.
+    #
+    # It sits BELOW the ceiling on purpose (300K < 600K). The band between them
+    # is where a verbatim library still fits but the canon is preferred anyway —
+    # and it is the fallback zone: above the threshold, a selected book that has
+    # not been compiled cannot enter the canon, so authoring reads the library
+    # WHOLE instead whenever it still fits under the ceiling, and refuses (never
+    # silently degrades) only when it does not. Raising this above
+    # `full_context_budget` would create a dead band that neither reads whole nor
+    # routes to the canon; they are deliberately kept ordered.
+    canon_threshold: int = 300_000
     # Lesson drafts that run at once. TWO, deliberately: each is a 32K-output
     # call, and a fresh Anthropic account's per-minute OUTPUT token limit is the
     # binding constraint long before wall-clock is. A 429 puts a lesson back to

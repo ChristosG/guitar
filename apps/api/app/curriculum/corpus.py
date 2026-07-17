@@ -212,6 +212,113 @@ def build_library_context(db, source_ids: list[UUID] | None) -> LibraryContext:
     )
 
 
+# ---------------------------------------------------------------------------
+# ROUTING — full-context below the threshold, the canon above it (C5)
+# ---------------------------------------------------------------------------
+
+class CurriculumContextError(Exception):
+    """The selection cannot be turned into an honest prompt, and we refuse rather
+    than ship a silently-partial one.
+
+    `code` is machine-readable (one Greek sentence hangs off it upstream); the
+    message names what the tutor must do — compile the listed books, or pick
+    fewer. The whole point of this class is that it is a VISIBLE refusal: the job
+    fails and says why, instead of an unattended 20-lesson run quietly drafting
+    from a canon that was missing one of his books."""
+
+    code = "curriculum_context"
+
+    def __init__(self, message: str, *, uncompiled: list[dict] | None = None):
+        super().__init__(message)
+        self.uncompiled = uncompiled or []
+
+
+def _uncompiled_contributors(db, library: "LibraryContext") -> list[dict]:
+    """The books whose TEXT is in `library` but whose compile is not `ready`.
+
+    This is exactly the set the canon would silently omit: `library.sources` is
+    the sources that actually contributed readable text, and a canon built from
+    the ledger drops any of them that never got a `ready` compile. A source with
+    no readable text (a note, or a book mid-OCR with no pages yet) is not here —
+    it is in neither representation, so it cannot be silently lost by choosing
+    one over the other.
+    """
+    if not library.sources:
+        return []
+    from app.models.canon import BookCompile
+
+    ids = [UUID(s["id"]) for s in library.sources]
+    ready = {
+        str(sid)
+        for sid in db.scalars(
+            select(BookCompile.source_id).where(
+                BookCompile.source_id.in_(ids),
+                BookCompile.status == "ready",
+            )
+        ).all()
+    }
+    return [s for s in library.sources if s["id"] not in ready]
+
+
+def build_curriculum_context(db, source_ids: list[UUID] | None):
+    """THE ROUTER. Returns the context the curriculum prompt should read — a
+    `LibraryContext` (verbatim, today's path) at or below `canon_threshold`, or a
+    `CanonContext` (the compiled canon) above it. Both mirror each other field for
+    field, so `prefix_messages` and every downstream citation check take either
+    without a special case.
+
+        <= canon_threshold  -> full-context verbatim   (unchanged)
+        >  canon_threshold  -> the canon               (its divergences are the point)
+
+    The size that decides the route is the RAW library's — the thing the tutor
+    would otherwise read whole — not the canon's (which is always small). So this
+    builds the library first (it needs its token count regardless) and only
+    reaches for the canon above the line.
+
+    A selected book that is not yet compiled cannot enter the canon, and a canon
+    that silently omits one of his books during an unattended run is the exact bug
+    this subsystem exists to prevent. So above the threshold:
+
+      * every contributing book compiled -> the canon;
+      * a book uncompiled but the library still FITS whole -> full context, which
+        reads everything (not a degrade — it is the higher-fidelity path);
+      * a book uncompiled and it does NOT fit -> refuse, naming the book. Never a
+        partial canon, never a silent miss.
+
+    Below the threshold none of this applies: the library is read whole exactly as
+    before, compiled or not.
+    """
+    library = build_library_context(db, source_ids)
+    if library.token_count <= settings.canon_threshold:
+        return library
+
+    uncompiled = _uncompiled_contributors(db, library)
+    if not uncompiled:
+        from app.canon.render import build_canon_context
+
+        return build_canon_context(db, source_ids)
+
+    if library.fits:
+        # Full context still fits, and it reads every book whole — including the
+        # uncompiled one. Strictly better here than a canon missing a book.
+        log.info(
+            "curriculum: %d selected book(s) not compiled yet (%s) — reading the "
+            "library WHOLE instead of the canon, which still fits (%d tokens)",
+            len(uncompiled), ", ".join(s.get("title") or s["id"] for s in uncompiled),
+            library.token_count,
+        )
+        return library
+
+    titles = ", ".join(s.get("title") or s["id"] for s in uncompiled)
+    raise CurriculumContextError(
+        f"The selected library is too large to read whole ({library.token_count:,} "
+        f"tokens) and these books have not been compiled into the canon yet, so it "
+        f"cannot be built without silently leaving them out: {titles}. Compile them "
+        f"(or select fewer books) and try again.",
+        uncompiled=uncompiled,
+    )
+
+
 def _count_tokens(text: str) -> int:
     """Exact when the provider can tell us, estimated when it cannot.
 

@@ -46,7 +46,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import aliased
 
 from app.config import settings
-from app.curriculum.corpus import build_library_context
+from app.curriculum.corpus import CurriculumContextError, build_curriculum_context
 from app.curriculum.depth import floor_words, target_words
 from app.curriculum.draft import LessonContext, draft_lesson, draft_progress, persist_lesson
 from app.curriculum.outline import TIER_GENERAL
@@ -321,7 +321,11 @@ def run_curriculum_draft_job(job_id: uuid.UUID) -> None:
         source_ids = None if raw_sources is None else [uuid.UUID(s) for s in raw_sources]
         student_id = uuid.UUID(meta["student_id"]) if meta.get("student_id") else None
 
-        library = build_library_context(db, source_ids)
+        # SAME ROUTING as the outline call — same source_ids, same compile
+        # states, so the same representation (library or canon) and therefore the
+        # same byte-identical prefix the outline warmed. Routing here and at
+        # outline time must never disagree, or the fan-out is a cache miss.
+        library = build_curriculum_context(db, source_ids)
         student_brief = build_student_brief(db, student_id)
         # THE TUTOR'S PROMPT OVERRIDES, resolved ONCE, here, where a session is
         # legitimately held — never inside a worker. `_draft_one` hands its
@@ -350,6 +354,15 @@ def run_curriculum_draft_job(job_id: uuid.UUID) -> None:
 
         job.progress = {"phase": "drafting"}
         db.commit()
+    except CurriculumContextError as e:
+        # The selection got too large to read whole while a selected book is still
+        # uncompiled — an honest, actionable refusal, NOT "our bug". Reachable
+        # here (not just at outline time) on a Resume where a book's compile state
+        # changed since the outline. Fail visibly rather than draft 20 lessons
+        # from a canon that would silently omit one of his books.
+        log.warning("run_curriculum_draft_job: refusing job %s — %s", job_id, e)
+        _fail_job(db, job_id, "upstream", str(e))
+        return
     except Exception:
         log.exception("run_curriculum_draft_job: setup failed for job %s", job_id)
         _fail_job(db, job_id, "internal", "The draft could not be started. Try again.")

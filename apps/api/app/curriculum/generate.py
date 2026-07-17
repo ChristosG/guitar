@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import uuid
 
-from app.curriculum.corpus import build_library_context
+from app.curriculum.corpus import build_curriculum_context
 from app.curriculum.outline import POLICY_GENERAL, POLICY_LIBRARY_ONLY, generate_outline, materialize_outline
 from app.curriculum.shape import Shape, plan_shape
 from app.i18n import DEFAULT_LOCALE
@@ -133,7 +133,10 @@ def generate_curriculum(
         target_minutes_total=target_minutes_total,
     )
 
-    library = build_library_context(db, source_ids)
+    # ROUTES the whole selection: full-context verbatim at/below the canon
+    # threshold, the compiled canon above it. Below threshold this is a pure
+    # passthrough to `build_library_context`, so his ~90K library is untouched.
+    library = build_curriculum_context(db, source_ids)
     student_brief = build_student_brief(db, student_id)
 
     outline = generate_outline(

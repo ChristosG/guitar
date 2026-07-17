@@ -315,14 +315,16 @@ def generate_module(db, root_id: uuid.UUID, *, topic: str | None = None) -> Bloc
     if course.kind != "course":
         raise ExtendError(f"block {root_id} is a {course.kind!r}, not a course")
 
-    from app.curriculum.corpus import build_library_context
+    from app.curriculum.corpus import build_curriculum_context
 
     meta = course.meta or {}
     # Same None-vs-[] rule as the draft fan-out: [] is the tutor's explicit
     # "none of my sources" and must NOT widen to the whole library.
     raw_sources = meta.get("source_ids")
     source_ids = None if raw_sources is None else [uuid.UUID(s) for s in raw_sources]
-    library = build_library_context(db, source_ids)
+    # SAME ROUTING as the course's own draft used — so an add-module call reads
+    # the same representation (library or canon) and hits the same warm prefix.
+    library = build_curriculum_context(db, source_ids)
 
     module_json = generate_module_json(db, course=course, library=library, topic=topic)
     return materialize_module(db, course, module_json)

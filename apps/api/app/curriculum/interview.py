@@ -57,7 +57,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.brain.retrieve import MIN_PASSAGE_CHARS
-from app.curriculum.corpus import build_library_context
+from app.curriculum.corpus import build_curriculum_context, build_library_context
 from app.curriculum.outline import (
     GAP_POLICIES,
     POLICY_GENERAL,
@@ -482,7 +482,7 @@ def generate_interview_outline(db: Session, interview: CurriculumInterview) -> d
         uuid.UUID(s) for s in (interview.answers.get("sources") or {}).get("source_ids") or []
     ]
     student_id = _parse_uuid(who.get("student_id")) if who.get("student_id") else None
-    library = build_library_context(db, source_ids)
+    library = build_curriculum_context(db, source_ids)
     return generate_outline(
         db,
         title=interview.title,
@@ -521,7 +521,7 @@ def _answer_confirm(db: Session, interview: CurriculumInterview, answer) -> dict
         title=interview.title,
         language=language,
         shape=shape,
-        library=build_library_context(db, source_ids),
+        library=build_curriculum_context(db, source_ids),
         brief=interview.brief,
         gap_policy=interview.gap_policy or POLICY_GENERAL,
         student_id=student_id,
