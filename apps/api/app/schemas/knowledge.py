@@ -172,6 +172,63 @@ class SearchResponse(BaseModel):
     hits: list[HitOut]
 
 
+class ConceptSearchRequest(BaseModel):
+    """`POST /knowledge/concepts/search` — the concept-canon search (C8).
+
+    Same query/k bounds as `SearchRequest`. No `source_ids`: a concept's whole
+    POINT is that it spans books, so scoping the search to one book would throw
+    away the cross-book synthesis and the divergences that are the reason this
+    search exists.
+    """
+
+    query: str = Field(max_length=_MAX_QUERY_CHARS)
+    k: int = Field(default=8, ge=_MIN_K, le=_MAX_K)
+
+
+class ConceptCitationOut(BaseModel):
+    """One citation on a concept position. `source_id` + a page number is exactly
+    the Reader deep-link (`GET /knowledge/sources/{source_id}/pages/{page_no}`);
+    `grounding` carries the [FIGURE] contract to the UI (a "figure" citation is
+    OUR description of a picture — citable, never quotable)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    source_id: UUID
+    source_title: str
+    pages: list[int]
+    pages_label: str
+    grounding: str
+
+
+class ConceptPositionOut(BaseModel):
+    """One position on a concept. `kind` is `consensus` | `divergence` | `only_in`,
+    mirroring the canon block the drafting model reads."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    kind: str
+    position: str
+    books: list[str]
+    citations: list[ConceptCitationOut]
+
+
+class ConceptHitOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    concept_id: UUID
+    key: str
+    label_en: str
+    label_el: str | None
+    score: float
+    coverage: int
+    divergence: bool
+    positions: list[ConceptPositionOut]
+
+
+class ConceptSearchResponse(BaseModel):
+    hits: list[ConceptHitOut]
+
+
 class AskRequest(BaseModel):
     query: str = Field(max_length=_MAX_QUERY_CHARS)
     locale: str

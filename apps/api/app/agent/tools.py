@@ -104,6 +104,7 @@ from sqlalchemy import select
 
 from app.artifacts.generate import generate_artifact as _generate_artifact_service
 from app.brain.retrieve import answer, search
+from app.canon.search import search_concepts as _search_concepts_service
 from app.curriculum.assign import clone_content_subtree
 from app.curriculum.generate import generate_curriculum as _generate_curriculum_service
 from app.curriculum.progress import upsert_progress as _upsert_progress_service
@@ -264,6 +265,54 @@ def _explain_concept(db, *, query: str, locale: str = DEFAULT_LOCALE, k: int = 8
             {"n": i, "source": h.source_title} for i, h in enumerate(result.citations, start=1)
         ],
     }
+
+
+def _search_concepts(db, *, query: str, k: int = 6) -> list[dict]:
+    """The concept canon, made answerable in chat (C8).
+
+    This exists because `search_knowledge` STRUCTURALLY CANNOT do what it does:
+    it returns chunks from ONE book and has no notion that two books disagree.
+    The canon compiled every book into concepts, keeping each author's own
+    position, so this returns the CROSS-BOOK picture of a topic — and when the
+    books disagree, the DIVERGENCE is the answer, not a bug to smooth over. So the
+    result foregrounds it: `divergence: true` plus each position under its own
+    `kind` (`consensus`/`divergence`/`only_in`), every one carrying its real
+    citations. The model's instruction (this tool's description) is to surface
+    both sides, not average them.
+
+    `grounding: "figure"` on a citation is the [FIGURE] contract reaching the
+    surface — that page is OUR description of a picture, citable but never
+    quotable as the author's words.
+
+    Kept compact (the model re-reads the whole result on every loop step): a hit
+    is its label, coverage, the divergence flag, and its positions with citations
+    — not the raw claim rows.
+    """
+    hits = _search_concepts_service(db, query, k=k)
+    out: list[dict] = []
+    for hit in hits:
+        label = hit.label_en
+        if hit.label_el:
+            label = f"{hit.label_en} / {hit.label_el}"
+        out.append({
+            "concept": label,
+            "coverage": f"{hit.coverage} book{'s' if hit.coverage != 1 else ''}",
+            "divergence": hit.divergence,
+            "positions": [
+                {
+                    "kind": p.kind,
+                    "position": p.position,
+                    "books": p.books,
+                    "citations": [
+                        {"source": c.source_title, "pages": c.pages_label,
+                         "grounding": c.grounding}
+                        for c in p.citations
+                    ],
+                }
+                for p in hit.positions
+            ],
+        })
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1005,6 +1054,47 @@ TOOLS: dict[str, ToolEntry] = {
             },
         },
         fn=_explain_concept,
+        kind="read",
+    ),
+    "search_concepts": ToolEntry(
+        schema={
+            "type": "function",
+            "function": {
+                "name": "search_concepts",
+                "description": (
+                    "Search the CONCEPT CANON — the tutor's ENTIRE library "
+                    "distilled into concepts, each carrying what EVERY book "
+                    "says about it. Use this for 'what do my books say about "
+                    "X?' / 'do my books agree on X?' questions (pickup height, "
+                    "tone, bias, string gauge, technique). Unlike "
+                    "search_knowledge, which returns raw excerpts from a SINGLE "
+                    "book, this returns the CROSS-BOOK picture: where the books "
+                    "agree, and — most valuable — where they DISAGREE, with each "
+                    "author's own position and its real page citations. When a "
+                    "result reports divergence:true, TEACH THE DISAGREEMENT: "
+                    "present BOTH positions with their citations and let the "
+                    "tutor choose — never average two disagreeing authors into "
+                    "one bland claim. A citation with grounding:'figure' is our "
+                    "description of a picture/diagram — cite it, never quote it "
+                    "as the author's words."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "the concept or topic to look up across all the books",
+                        },
+                        "k": {
+                            "type": "integer",
+                            "description": "how many concepts to return (default 6)",
+                        },
+                    },
+                    "required": ["query"],
+                },
+            },
+        },
+        fn=_search_concepts,
         kind="read",
     ),
     "list_students": ToolEntry(

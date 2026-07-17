@@ -29,6 +29,7 @@ from app.brain.reembed import reembed_all
 from app.brain.retrieve import answer as run_answer
 from app.brain.retrieve import search as run_search
 from app.brain.urlsafe import assert_public_url
+from app.canon.search import search_concepts as run_concept_search
 from app.db import get_db
 from app.models.knowledge import Chunk, KnowledgeSource
 from app.schemas.knowledge import (
@@ -38,6 +39,9 @@ from app.schemas.knowledge import (
     BulkSourceResponse,
     BulkSourceResultOut,
     ChunkPreviewOut,
+    ConceptHitOut,
+    ConceptSearchRequest,
+    ConceptSearchResponse,
     HitOut,
     SearchRequest,
     SearchResponse,
@@ -318,6 +322,24 @@ def reindex_endpoint(db: Session = Depends(get_db)) -> dict:
 def search_endpoint(payload: SearchRequest, db: Session = Depends(get_db)) -> SearchResponse:
     hits = run_search(db, payload.query, k=payload.k, source_ids=payload.source_ids)
     return SearchResponse(hits=[HitOut.model_validate(h, from_attributes=True) for h in hits])
+
+
+@router.post("/concepts/search", response_model=ConceptSearchResponse)
+def search_concepts_endpoint(
+    payload: ConceptSearchRequest, db: Session = Depends(get_db),
+) -> ConceptSearchResponse:
+    """Search the concept canon — a searchable KIND alongside pages/chunks (C8).
+
+    Distinct from `POST /knowledge/search` (which returns chunks from individual
+    books): a concept hit is the CROSS-BOOK picture of one idea — where the books
+    agree, and where they DISAGREE, each position carrying its own citations. Its
+    citations deep-link into the Reader via `source_id` + a page number, the same
+    `GET /knowledge/sources/{source_id}/pages/{page_no}` a chunk citation uses.
+    """
+    hits = run_concept_search(db, payload.query, k=payload.k)
+    return ConceptSearchResponse(
+        hits=[ConceptHitOut.model_validate(h, from_attributes=True) for h in hits]
+    )
 
 
 @router.post("/ask", response_model=AskResponse)

@@ -43,17 +43,17 @@ def setup_module(_):
 # Registry shape
 # ---------------------------------------------------------------------------
 
-def test_registry_has_exactly_the_seven_read_tools_registered_so_far():
-    """`TOOLS` is a SHARED registry dict (Plan 5 Task 3 adds 7 "mutation"
-    entries into this same dict — see `test_agent_hitl.py`'s own registry
-    test for those), so this only asserts the READ subset: the original six
-    this task (Plan 5 Task 2) registers, plus `find_lesson` (Plan 11 Task 2,
-    C5) — same registry, same "kind" convention, so this test's set grows
-    rather than a new one replacing it.
+def test_registry_has_exactly_the_read_tools_registered_so_far():
+    """`TOOLS` is a SHARED registry dict (Plan 5 Task 3 adds "mutation" entries
+    into this same dict — see `test_agent_hitl.py`'s own registry test for
+    those), so this only asserts the READ subset: the original six (Plan 5 Task
+    2), `find_lesson` (Plan 11 Task 2, C5), and `search_concepts` (C8) — same
+    registry, same "kind" convention, so this set grows rather than a new one
+    replacing it.
     """
     read_names = {name for name, entry in TOOLS.items() if entry.kind == "read"}
     assert read_names == {
-        "search_knowledge", "explain_concept",
+        "search_knowledge", "explain_concept", "search_concepts",
         "list_students", "list_curricula", "list_artifacts", "get_curriculum",
         "find_lesson",
     }
@@ -250,3 +250,53 @@ def test_explain_concept_wraps_answer_with_numbered_citations(monkeypatch):
         {"n": 1, "source": "Pickups"},
         {"n": 2, "source": "Delay"},
     ]
+
+
+# ---------------------------------------------------------------------------
+# search_concepts (C8) — the cross-book tool `search_knowledge` cannot be
+# ---------------------------------------------------------------------------
+
+def test_search_concepts_surfaces_divergence_with_both_positions_and_citations():
+    """THE POINT OF THE TOOL. Two books disagree on one concept; the tool result
+    must flag the divergence and carry BOTH positions, each with its own book and
+    real page — never averaged into one line. An English query needs no
+    translation, so this runs the real search with no model."""
+    import app.canon.search as canon_search
+    from app.models.canon import Concept, ConceptClaim
+    from app.models.knowledge import KnowledgeSource, Page
+
+    canon_search.reset_concept_index()
+    db = SessionLocal()
+    try:
+        hunter = KnowledgeSource(type="pdf", title="Tone Manual (Hunter)", status="ready")
+        gallagher = KnowledgeSource(type="pdf", title="Guitar Tone (Gallagher)", status="ready")
+        db.add_all([hunter, gallagher])
+        db.flush()
+        for src in (hunter, gallagher):
+            db.add(Page(source_id=src.id, page_no=1, text="p", status="ready"))
+        concept = Concept(key="pickup-height", label_en="Pickup height", label_el="Ύψος μαγνήτη")
+        db.add(concept)
+        db.flush()
+        db.add(ConceptClaim(concept_id=concept.id, source_id=hunter.id,
+                            text="Lowering the pickup kills sustain", pages=[113],
+                            stance="warns a low pickup kills sustain", grounding="author"))
+        db.add(ConceptClaim(concept_id=concept.id, source_id=gallagher.id,
+                            text="A lower treble-side pickup fixes harshness", pages=[201],
+                            stance="prefers a lower treble-side height", grounding="author"))
+        db.commit()
+
+        result = TOOLS["search_concepts"].fn(db, query="pickup height")
+    finally:
+        db.close()
+        canon_search.reset_concept_index()
+
+    hit = next(r for r in result if r["concept"].startswith("Pickup height"))
+    assert hit["divergence"] is True
+    positions = {p["position"] for p in hit["positions"]}
+    assert "warns a low pickup kills sustain" in positions
+    assert "prefers a lower treble-side height" in positions
+    # Each position names its own book and carries a real page — cross-book, cited.
+    books = {b for p in hit["positions"] for b in p["books"]}
+    assert books == {"Tone Manual (Hunter)", "Guitar Tone (Gallagher)"}
+    pages = {c["pages"] for p in hit["positions"] for c in p["citations"]}
+    assert {"p.113", "p.201"} <= pages
