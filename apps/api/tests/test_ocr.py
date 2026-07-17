@@ -63,7 +63,7 @@ def test_transcribes_each_pending_page_and_embeds_chunks_linked_to_it(db, tmp_pa
         p = tmp_path / str(src.id); p.mkdir(exist_ok=True)
         (p / f"{i:04d}.jpg").write_bytes(b"jpeg")
     fake = _Vision(["Page one, about humbuckers and how their two coils cancel mains hum.", "Page two, about Tube Screamer overdrive pedals and their midrange hump."])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     result = ocr_source(db, src.id)
@@ -89,7 +89,7 @@ def test_a_failing_page_is_retried_once_then_marked_failed_without_losing_good_p
         (p / f"{i:04d}.jpg").write_bytes(b"jpeg")
     # page 1 succeeds; page 2 fails twice (initial + one retry)
     fake = _Vision(["A good page of transcribed text about amplifier gain staging.", RuntimeError("vl timeout"), RuntimeError("vl timeout")])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     result = ocr_source(db, src.id)
@@ -108,7 +108,7 @@ def test_a_page_the_model_reads_as_blank_is_empty_not_ready(db, tmp_path, monkey
     monkeypatch.setattr("app.brain.ocr.settings.media_dir", str(tmp_path))
     p = tmp_path / str(src.id); p.mkdir(exist_ok=True)
     (p / "0001.jpg").write_bytes(b"jpeg")
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: _Vision([""]))
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: _Vision([""]))
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: _Vision([""]))
 
     result = ocr_source(db, src.id)
@@ -133,7 +133,7 @@ def test_a_response_near_the_max_tokens_ceiling_is_treated_as_suspected_truncati
     # Well past the truncation-suspicion threshold, both attempts.
     huge = "word " * 4000
     fake = _Vision([huge, huge])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     result = ocr_source(db, src.id)
@@ -151,7 +151,7 @@ def test_a_normal_length_page_is_not_flagged_as_truncated(db, tmp_path, monkeypa
     p = tmp_path / str(src.id); p.mkdir(exist_ok=True)
     (p / "0001.jpg").write_bytes(b"jpeg")
     fake = _Vision(["A perfectly ordinary page of transcribed text."])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     result = ocr_source(db, src.id)
@@ -178,7 +178,7 @@ def test_embed_failure_on_one_page_does_not_abort_the_batch(db, tmp_path, monkey
         ["Page one text, transcribed from the scan and long enough to chunk.", "Page two text, transcribed from the scan and long enough to chunk.", "Page three text, transcribed from the scan and long enough to chunk."],
         fail_calls={1},   # embed() raises only for page 1's chunks
     )
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     result = ocr_source(db, src.id)
@@ -213,7 +213,7 @@ def test_invariant_ready_pages_always_have_chunks(db, tmp_path, monkeypatch):
         (p / f"{i:04d}.jpg").write_bytes(b"jpeg")
     # page 1's embed fails; page 2 succeeds fully
     fake = _VisionWithFailingEmbed(["Page one of the book, transcribed in full and quite legible.", "Page two of the book, transcribed in full and also legible."], fail_calls={1})
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     ocr_source(db, src.id)
@@ -243,7 +243,7 @@ def test_page_with_no_image_path_is_skipped_not_failed(db, tmp_path, monkeypatch
     db.add(page); db.commit()
     monkeypatch.setattr("app.brain.ocr.settings.media_dir", str(tmp_path))
     fake = _Vision([])   # vision() must never be called for this page
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     ocr_source(db, src.id)
@@ -261,7 +261,7 @@ def test_missing_jpeg_on_disk_yields_a_clear_error_not_a_raw_traceback(db, tmp_p
     p = tmp_path / str(src.id); p.mkdir(exist_ok=True)
     (p / "0002.jpg").write_bytes(b"jpeg")
     fake = _Vision(["Page two text, transcribed from the scan and long enough to chunk."])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     result = ocr_source(db, src.id)
@@ -292,7 +292,7 @@ def test_ocr_source_rolls_up_to_ready_with_summed_char_count(db, tmp_path, monke
         p = tmp_path / str(src.id); p.mkdir(exist_ok=True)
         (p / f"{i:04d}.jpg").write_bytes(b"jpeg")
     fake = _Vision(["Page one, about humbuckers and how their two coils cancel mains hum.", "Page two, about Tube Screamer overdrive pedals and their midrange hump."])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     ocr_source(db, src.id)
@@ -314,7 +314,7 @@ def test_ocr_source_all_pages_blank_leaves_source_empty_never_ready(db, tmp_path
         p = tmp_path / str(src.id); p.mkdir(exist_ok=True)
         (p / f"{i:04d}.jpg").write_bytes(b"jpeg")
     fake = _Vision(["", ""])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     ocr_source(db, src.id)
@@ -340,7 +340,7 @@ def test_ocr_source_partial_success_rolls_up_to_PARTIAL_never_green(
         (p / f"{i:04d}.jpg").write_bytes(b"jpeg")
     # page 1 succeeds; page 2 fails twice (initial + one retry)
     fake = _Vision(["Good page text, transcribed from the scan and long enough to chunk.", RuntimeError("vl timeout"), RuntimeError("vl timeout")])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     ocr_source(db, src.id)
@@ -365,7 +365,7 @@ def test_ocr_source_rollup_failure_does_not_undo_committed_page_work(db, tmp_pat
     p = tmp_path / str(src.id); p.mkdir(exist_ok=True)
     (p / "0001.jpg").write_bytes(b"jpeg")
     fake = _Vision(["Some transcribed text from a real page of the tutor's book."])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     real_commit = db.commit
@@ -405,7 +405,7 @@ def test_a_page_stuck_at_ocr_running_is_resumed_on_the_next_run(db, tmp_path, mo
     p = tmp_path / str(src.id); p.mkdir(exist_ok=True)
     (p / "0001.jpg").write_bytes(b"jpeg")
     fake = _Vision(["Recovered page text, transcribed from the scan and long enough to chunk."])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     result = ocr_source(db, src.id)
@@ -443,7 +443,7 @@ def test_an_empty_page_is_picked_up_again_on_the_next_run(db, tmp_path, monkeypa
     db.commit()
 
     fake = _Vision(["The page was readable the second time, and this is long enough to chunk."])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     result = ocr_source(db, src.id)
@@ -463,7 +463,7 @@ def test_a_page_that_has_burned_its_attempts_is_left_alone(db, tmp_path, monkeyp
     db.commit()
 
     fake = _Vision(["never called"])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     result = ocr_source(db, src.id)
@@ -475,7 +475,7 @@ def test_a_page_that_has_burned_its_attempts_is_left_alone(db, tmp_path, monkeyp
 def test_every_pickup_spends_exactly_one_attempt(db, tmp_path, monkeypatch):
     src = _prep(db, monkeypatch, tmp_path)
     fake = _Vision(["A page of real transcribed text, long enough for the chunker to keep."])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     ocr_source(db, src.id)
@@ -494,7 +494,7 @@ def test_the_model_narrating_that_a_page_is_blank_is_EMPTY_not_failed(db, tmp_pa
         "A real page of the tutor's book, with enough text on it to chunk and embed.",
         "There is no visible text on this page.",
     ])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     result = ocr_source(db, src.id)
@@ -513,7 +513,7 @@ def test_a_genuinely_short_page_with_real_content_stays_ready(db, tmp_path, monk
     garbage screen has a length floor beneath which it does not fire at all."""
     src = _prep(db, monkeypatch, tmp_path)
     fake = _Vision(["Chapter 3"])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     ocr_source(db, src.id)
@@ -531,7 +531,7 @@ def test_a_mojibake_transcription_is_retried_then_failed_never_indexed(db, tmp_p
     src = _prep(db, monkeypatch, tmp_path)
     garbage = "�▓" * 60
     fake = _Vision([garbage, garbage])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     result = ocr_source(db, src.id)
@@ -553,7 +553,7 @@ def test_greek_prose_is_not_mistaken_for_garbage(db, tmp_path, monkeypatch):
              "Μιλάμε για τον "
              "ήχο της κιθάρας. ") * 3
     fake = _Vision([greek])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     result = ocr_source(db, src.id)
@@ -571,7 +571,7 @@ def test_a_book_with_a_failed_page_is_partial_and_stays_citable(db, tmp_path, mo
         RuntimeError("vl timeout"), RuntimeError("vl timeout"),
         "Page three of the book, with plenty of transcribed text on it to chunk.",
     ])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     ocr_source(db, src.id)
@@ -639,7 +639,7 @@ def test_an_image_region_page_keeps_its_publisher_text_and_gains_a_description(
                    "5th and 7th frets of the A string, marked with down and up "
                    "pick strokes above each note.")
     fake = _Vision([description])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     ocr_source(db, src.id)
@@ -660,7 +660,7 @@ def test_a_figure_description_is_marked_so_it_cannot_be_read_as_a_quotation(
     quoting it as one would be a fabricated citation."""
     src, page = _image_region_page(db, monkeypatch, tmp_path)
     fake = _Vision(["A photo of an amp face; the knobs are labelled VOLUME and MASTER."])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     ocr_source(db, src.id)
@@ -678,7 +678,7 @@ def test_an_image_region_page_is_asked_to_describe_the_picture_not_re_transcribe
     a page whose text we already hold is a vision call bought for nothing."""
     src, _page = _image_region_page(db, monkeypatch, tmp_path)
     fake = _Vision(["A tab staff."])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     ocr_source(db, src.id)
@@ -695,7 +695,7 @@ def test_re_reading_an_image_region_page_does_not_stack_a_second_description(
     which would stack description onto description onto description."""
     src, page = _image_region_page(db, monkeypatch, tmp_path)
     fake = _Vision(["First description of the tab.", "Second description of the tab."])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     ocr_source(db, src.id)
@@ -720,7 +720,7 @@ def test_an_image_region_page_whose_picture_yields_nothing_keeps_its_text(
     tutor's book deleted by a model shrug."""
     src, page = _image_region_page(db, monkeypatch, tmp_path)
     fake = _Vision([""])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     ocr_source(db, src.id)
@@ -739,7 +739,7 @@ def test_an_inherited_ocr_page_is_transcribed_whole_and_replaces_nothing(
     src, page = _inherited_ocr_page(db, monkeypatch, tmp_path)
     transcription = "Use a ¼-inch instrument cable, never a speaker cable, between the guitar and the amp."
     fake = _Vision([transcription])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     ocr_source(db, src.id)
@@ -795,7 +795,7 @@ def test_ocr_records_that_claude_wrote_the_text(db, tmp_path, monkeypatch):
     src = _prep(db, monkeypatch, tmp_path)
     monkeypatch.setattr("app.config.settings.llm_provider", "claude_cli")
     fake = _Vision(["Use a ¼-inch instrument cable between the guitar and the amp head."])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     ocr_source(db, src.id)
@@ -808,7 +808,7 @@ def test_ocr_records_that_qwen_wrote_the_text(db, tmp_path, monkeypatch):
     src = _prep(db, monkeypatch, tmp_path)
     monkeypatch.setattr("app.config.settings.llm_provider", "qwen")
     fake = _Vision(["A page of text transcribed by the local model, long enough to chunk."])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     ocr_source(db, src.id)
@@ -827,7 +827,7 @@ def test_a_merged_page_credits_the_publisher_AND_the_model_not_just_one(
     src, page = _image_region_page(db, monkeypatch, tmp_path)
     monkeypatch.setattr("app.config.settings.llm_provider", "claude_cli")
     fake = _Vision(["A tab staff showing the first four bars."])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     ocr_source(db, src.id)
@@ -845,7 +845,7 @@ def test_an_image_region_page_with_no_picture_described_still_credits_the_publis
     src, page = _image_region_page(db, monkeypatch, tmp_path)
     monkeypatch.setattr("app.config.settings.llm_provider", "claude_cli")
     fake = _Vision([""])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     ocr_source(db, src.id)
@@ -861,7 +861,7 @@ def test_a_page_that_could_not_be_read_says_so_rather_than_leaving_text_source_n
     must say so rather than being indistinguishable from history."""
     src = _prep(db, monkeypatch, tmp_path)
     fake = _Vision([RuntimeError("vl timeout"), RuntimeError("vl timeout")])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     ocr_source(db, src.id)
@@ -890,7 +890,7 @@ def test_garbage_transcription_is_marked_failed_not_committed_as_content(
     store as if it were a page of the tutor's book."""
     src = _prep(db, monkeypatch, tmp_path)
     fake = _Vision([_KAHN_P40_NOISE, _KAHN_P40_NOISE])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     result = ocr_source(db, src.id)
@@ -915,7 +915,7 @@ def test_the_garbage_screen_does_not_judge_a_figure_description(
     `image_region` exists for. So the screen belongs to transcribe mode only."""
     src, page = _image_region_page(db, monkeypatch, tmp_path)
     fake = _Vision([_KAHN_P40_NOISE])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     ocr_source(db, src.id)
@@ -945,7 +945,7 @@ def test_vision_pages_are_rendered_at_the_ocr_dpi_not_the_stored_110(
 
     monkeypatch.setattr("app.brain.ocr._render_for_vision", _fake_render)
     fake = _Vision(["A page of the book transcribed from the 150dpi render."])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     ocr_source(db, src.id)
@@ -984,7 +984,7 @@ def test_a_source_with_no_stored_pdf_falls_back_to_its_page_scan(
     un-re-readable instead."""
     src = _prep(db, monkeypatch, tmp_path)          # writes 0001.jpg, no source.pdf
     fake = _Vision(["Transcribed from the stored scan, because there is no PDF to re-render."])
-    monkeypatch.setattr("app.brain.ocr.get_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     result = ocr_source(db, src.id)

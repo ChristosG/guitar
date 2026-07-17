@@ -25,7 +25,7 @@ from app.brain.textlayer import looks_like_ocr_garbage
 from app.config import settings
 from app.llm.embed_factory import get_embedder
 from app.llm.errors import LLMError
-from app.llm.factory import get_provider
+from app.llm.factory import get_ocr_provider
 from app.models.generation_job import GenerationJob
 from app.models.knowledge import Chunk, KnowledgeSource, Page
 from app.settings_store import resolve_llm_config
@@ -404,12 +404,19 @@ _TEXT_SOURCE_BY_PROVIDER = {"claude": "claude", "claude_cli": "claude", "qwen": 
 def _current_text_source() -> str:
     """Which model is doing this run's reading. Resolved once per run.
 
+    `resolve_llm_config(settings.ocr_provider)` — NOT the zero-arg chat
+    resolution — because this labels the provider `get_ocr_provider()` actually
+    dispatched to. When `OCR_PROVIDER` is unset the two are identical
+    (`provider or settings.llm_provider` falls through), so every existing
+    install's provenance is unchanged; when it is set, this is what stops the
+    column claiming chat's provider read a page that OCR's provider did.
+
     Falls back to the raw provider name rather than a guess: a provider this map
     has never heard of is a fact worth recording honestly, and every value here
     is written to a `String(20)` column that nothing parses.
     """
     try:
-        provider = resolve_llm_config().provider
+        provider = resolve_llm_config(settings.ocr_provider).provider
     except Exception:            # noqa: BLE001 — provenance must never fail a run
         log.warning("ocr: could not resolve the provider name for text_source", exc_info=True)
         return "unknown"
@@ -439,7 +446,7 @@ def ocr_source(db, source_id) -> OcrResult:
     # Two seams now, not one: the vision model that READS the page (Claude/Qwen,
     # remote) and the embedder that INDEXES it (local CPU). They were the same
     # object while one vLLM box served both; they are not any more.
-    provider = get_provider()
+    provider = get_ocr_provider()
     embedder = get_embedder()
     reader = _current_text_source()          # which model is doing this run's reading
     ready = failed = 0

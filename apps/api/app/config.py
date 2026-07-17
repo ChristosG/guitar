@@ -77,6 +77,18 @@ class Settings(BaseSettings):
 
     media_dir: str = "/media"     # page scans live here; mounted volume
 
+    # WHICH provider transcribes a page scan. `None` = "whatever chat uses",
+    # which is what every existing install gets — including the live one
+    # (`LLM_PROVIDER=claude_cli`, this unset).
+    #
+    # It exists because those two answers legitimately differ. Before this,
+    # `ocr.py` called `get_provider()` zero-arg, so one knob picked both — and
+    # the combination the tutor actually wants (chat on the subscription via
+    # `claude_cli`, which costs nothing per token; OCR on a real key, which is
+    # pennies for the whole library and does not burn a 5-hour rolling cap)
+    # was simply unreachable. See `llm/factory.py::get_ocr_provider`.
+    ocr_provider: str | None = None
+
     # Pages ROUTED TO VISION are re-rendered from the source PDF at this DPI.
     # `paginate.RENDER_DPI = 110` is a QWEN CEILING, not a quality choice: at
     # 150dpi the local vLLM rejects the image outright ("image item with length

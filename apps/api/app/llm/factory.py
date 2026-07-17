@@ -1,5 +1,6 @@
 from fastapi import HTTPException
 
+from app.config import settings
 from app.llm.base import LLMProvider
 from app.llm.claude import ClaudeProvider
 from app.llm.claude_cli import ClaudeCLIProvider
@@ -41,6 +42,19 @@ def _build(cfg: LLMConfig) -> LLMProvider:
     )
 
 
+def _get_cached(cfg: LLMConfig) -> LLMProvider:
+    """The one path that ever reads or writes `_PROVIDERS`. Both `get_provider()`
+    and `get_ocr_provider()` go through this, so there is exactly one cache,
+    keyed the one way described above — never a second, differently-keyed cache
+    that `clear_provider_cache()` could forget to clear."""
+    fp = cfg.fingerprint
+    provider = _PROVIDERS.get(fp)
+    if provider is None:
+        provider = _build(cfg)
+        _PROVIDERS[fp] = provider
+    return provider
+
+
 def get_provider() -> LLMProvider:
     """The chat/vision provider. Embeddings come from `llm/embed_factory.py`
     (Claude has no embeddings endpoint — see `llm/base.py`).
@@ -55,13 +69,31 @@ def get_provider() -> LLMProvider:
     Raises `LLMNotConfigured` when the provider is Claude and no key has been
     pasted. `main.py` turns that into a 409, never a 500.
     """
-    cfg = resolve_llm_config()
-    fp = cfg.fingerprint
-    provider = _PROVIDERS.get(fp)
-    if provider is None:
-        provider = _build(cfg)
-        _PROVIDERS[fp] = provider
-    return provider
+    return _get_cached(resolve_llm_config())
+
+
+def get_ocr_provider() -> LLMProvider:
+    """The provider that transcribes a page scan. `brain/ocr.py` calls this in
+    place of `get_provider()`.
+
+    `OCR_PROVIDER` UNSET (every install today, including the live one —
+    `LLM_PROVIDER=claude_cli`) returns exactly `get_provider()`: identical
+    object, identical cache entry, nothing changes for anyone until the knob is
+    touched.
+
+    SET, it resolves a fresh `LLMConfig` for THAT provider via the same
+    `resolve_llm_config()` model/key logic chat uses — not by reusing chat's
+    already-resolved `LLMConfig` (which, when chat is `claude_cli`, carries an
+    empty `api_key` that would silently starve a `claude` OCR provider of the
+    real key it needs). This is what makes `OCR_PROVIDER=claude` fail with the
+    SAME honest `LLMNotConfigured` a bare `claude` chat provider raises when no
+    key is configured, instead of quietly building a broken client that 401s
+    forty pages into a run.
+    """
+    override = settings.ocr_provider
+    if not override:
+        return get_provider()
+    return _get_cached(resolve_llm_config(override))
 
 
 def clear_provider_cache() -> None:

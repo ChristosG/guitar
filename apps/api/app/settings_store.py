@@ -174,8 +174,17 @@ def _model_from_db() -> str:
         return DEFAULT_MODEL
 
 
-def resolve_llm_config() -> LLMConfig:
+def resolve_llm_config(provider: str | None = None) -> LLMConfig:
     """What provider should we build RIGHT NOW.
+
+    `provider`, if given, resolves for THAT provider instead of
+    `settings.llm_provider` — reusing the exact same DB-model / DB-or-env-key
+    logic below for a provider that is not necessarily the one chat is using.
+    This is how `llm/factory.py::get_ocr_provider()` asks "what would 'claude'
+    need right now" while chat runs on `claude_cli`: it gets the SAME honest
+    `LLMNotConfigured` a bare `claude` chat provider would raise for a missing
+    key, rather than a silently empty one. Every existing zero-arg call site is
+    unaffected — `provider or settings.llm_provider` is a no-op when omitted.
 
     `qwen` (today's default) needs no key: it is a local vLLM server, and the
     whole point of the Settings screen is the *Claude* era. So this returns the
@@ -202,7 +211,7 @@ def resolve_llm_config() -> LLMConfig:
     a key the tutor pasted into the UI is his explicit, most recent intent, and
     an env var that silently overrode it would make the Settings screen a lie.
     """
-    provider = settings.llm_provider
+    provider = provider or settings.llm_provider
 
     if provider == "claude_cli":
         # api_key="" — there is nothing to hold. The fingerprint still keys the
