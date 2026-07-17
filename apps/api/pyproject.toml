@@ -36,6 +36,13 @@ dependencies = [
   # κιθάρας/κιθάρα both stem to κιθαρ. It is also a C extension with no data
   # files to download at runtime, which matters for a bundled desktop app.
   "PyStemmer>=2.2",
+  # Candidate blocking for the canon's reconcile pass (app/canon/reconcile.py).
+  # It NEVER decides a merge — measured, real synonyms and real distinctions share
+  # one score range ("pickup adjustment"/"adjusting pickup height" scores 45;
+  # "6th chord"/"9th chord" scores 88.9), so no threshold separates them and a
+  # model adjudicates every surviving pair. What this buys is the ~1M pairwise
+  # comparisons that shrink 1,000 names to a handful of clusters, in C, for free.
+  "rapidfuzz>=3.9",
 ]
 
 [project.optional-dependencies]

@@ -87,6 +87,13 @@ from app.canon.compile import (
     BookContext,
     build_compile_messages,
 )
+from app.canon.reconcile import (
+    RECONCILE_SYSTEM,
+    RECONCILE_SYSTEM_SLICE_ID,
+    RECONCILE_TASK,
+    RECONCILE_TASK_SLICE_ID,
+    build_reconcile_messages,
+)
 from app.brain.retrieve import (
     GROUNDED_SLICE_ID,
     GROUNDED_SYSTEM,
@@ -531,6 +538,25 @@ _SAMPLE_BOOK = BookContext(
     figure_pages={15},
 )
 
+# THE NEAR-MISSES, as the reconcile pass sees them (Part B, Pass 2). This is the
+# plan's own worked example, and it is deliberately the AMBIGUOUS one: three names
+# that a human can see are one idea, next to a fourth that looks just as similar
+# and is a different concept entirely. A sample where the right answer were obvious
+# would render a viewer that hides what this prompt is actually for — talking a
+# model OUT of the merge it wants to make.
+_SAMPLE_CLUSTERS = [
+    ["pickup height", "pickup adjustment", "adjusting pickup height", "pickup type"],
+    ["major scale", "minor scale"],
+]
+_SAMPLE_CLUSTER_BOOKS = {
+    "pickup height": ["Tone Manual (Hunter)"],
+    "pickup adjustment": ["Guitar Tone (Gallagher)"],
+    "adjusting pickup height": ["Modern guitar rigs (Kahn)"],
+    "pickup type": ["Tone Manual (Hunter)"],
+    "major scale": ["Guitar Fretboard Workbook"],
+    "minor scale": ["Getting Great Guitar Sounds"],
+}
+
 _EMPTY_LIBRARY = LibraryContext(text="", token_count=0, fits=True)
 
 _OVERSIZED_LIBRARY = LibraryContext(
@@ -725,6 +751,24 @@ def _build_canon_compile(locale: str, db, course_language=None) -> _Built:
     # steering the whole call.
     return _msgs(build_compile_messages(_SAMPLE_BOOK, db)), [
         ("book", "Το βιβλίο που διαβάζεται, ολόκληρο", _SAMPLE_BOOK_TEXT),
+    ]
+
+
+def _build_canon_reconcile(locale: str, db, course_language=None) -> _Built:
+    # NOT locale-driven, same reasoning as `_build_canon_compile` above this call
+    # never faces the student — it reads book-vocabulary NAMES and returns a JSON
+    # partition, nothing in it is prose a student would ever see.
+    #
+    # `_SAMPLE_CLUSTERS`/`_SAMPLE_CLUSTER_BOOKS` are the plan's own worked example
+    # (defined above, near the compile sample) and are deliberately the AMBIGUOUS
+    # one: three names a human can see are one idea, next to a fourth that looks
+    # just as similar and is a different concept. A sample where the right answer
+    # is obvious would hide what this prompt actually exists to do.
+    return _msgs(build_reconcile_messages(_SAMPLE_CLUSTERS, _SAMPLE_CLUSTER_BOOKS, db)), [
+        ("real_synonym", "Ονόματα που μάλλον είναι η ίδια έννοια",
+         "- pickup height  [Tone Manual (Hunter)]"),
+        ("false_friend", "Ονόματα που ΜΟΙΑΖΟΥΝ αλλά ΔΕΝ είναι η ίδια έννοια",
+         "- major scale  [Guitar Fretboard Workbook]"),
     ]
 
 
@@ -1752,6 +1796,59 @@ _ENTRIES = [
                 id=COMPILE_TASK_SLICE_ID,
                 label_el="Το κείμενο της οδηγίας",
                 default=COMPILE_TASK,
+                kind="replace",
+            ),
+        ),
+    ),
+    PromptEntry(
+        id="canon.reconcile",
+        flow="canon",
+        kind="prompt",
+        # The continuation line of the system message's own `resolve(...)` call,
+        # inside the `return [system, the candidate groups, the task]` that
+        # assembles this prompt — mirrors `canon.compile`'s `source_ref` above.
+        source_ref="app/canon/reconcile.py:256",
+        title_el="Το ταίριασμα των ονομάτων που κρύβουν την ίδια έννοια",
+        what_it_does_el=(
+            "Αφού κάθε βιβλίο έχει διαβαστεί χωριστά (το προηγούμενο βήμα), κάθε "
+            "συγγραφέας έχει ονομάσει τις ίδιες ιδέες με τα δικά του λόγια — π.χ. "
+            "«ύψος μαγνήτη» σε ένα βιβλίο και «ρύθμιση ύψους μαγνήτη» σε άλλο. "
+            "Αυτό το βήμα δεν ξαναδιαβάζει κανένα βιβλίο· συγκρίνει μόνο τα "
+            "ΟΝΟΜΑΤΑ των εννοιών μεταξύ των βιβλίων, για να βρει πού δύο "
+            "συγγραφείς εννοούσαν το ίδιο πράγμα με άλλα λόγια. Πρώτα, μια απλή "
+            "μηχανική σύγκριση ορθογραφίας (όχι το μοντέλο) φτιάχνει μια σύντομη "
+            "λίστα από ζευγάρια ονομάτων που ΜΟΙΑΖΟΥΝ στη γραφή — σκόπιμα χαλαρή "
+            "λίστα, γιατί αφήνει μέσα και ζευγάρια που απλώς μοιάζουν στα "
+            "γράμματα αλλά είναι εντελώς διαφορετικά (π.χ. «5η συγχορδία» και «9η "
+            "συγχορδία»). Μόνο τότε μπαίνει το μοντέλο, και μόνο για να κρίνει "
+            "ποια από αυτά τα ζευγάρια είναι πράγματι η ίδια έννοια. Η οδηγία του "
+            "είναι ξεκάθαρη: όταν αμφιβάλλει, να ΜΗΝ ενώνει — δύο συνώνυμα που "
+            "έμειναν χώρια κοστίζουν μία παραπάνω γραμμή στο ευρετήριο, ενώ μια "
+            "λανθασμένη ένωση σβήνει σιωπηλά τη διδασκαλία ενός συγγραφέα και "
+            "κανείς δεν θα το καταλάβει ποτέ. Καμία ένωση δεν διαγράφει τίποτα: "
+            "κάθε αρχικό όνομα και το βιβλίο από το οποίο προήλθε κρατιέται σαν "
+            "απόδειξη, ώστε μια λανθασμένη ένωση να μπορεί να αναιρεθεί αργότερα "
+            "χωρίς να ξαναδιαβαστεί — και να ξαναπληρωθεί — το βιβλίο."
+        ),
+        when_it_runs_el=(
+            "Αυτόματα, μία φορά, αφού καταγραφούν όλα τα βιβλία μιας παρτίδας — "
+            "δεν το ενεργοποιείς εσύ ο ίδιος. Αν κανένα όνομα δεν μοιάζει αρκετά "
+            "με άλλο, το μοντέλο δεν καλείται καν και δεν κοστίζει τίποτα."
+        ),
+        source_of_truth=lambda: build_reconcile_messages,
+        build=_build_canon_reconcile,
+        call_sites=("canon/reconcile.py:375",),
+        slices=(
+            Slice(
+                id=RECONCILE_SYSTEM_SLICE_ID,
+                label_el="Ο ρόλος του βοηθού",
+                default=RECONCILE_SYSTEM,
+                kind="replace",
+            ),
+            Slice(
+                id=RECONCILE_TASK_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=RECONCILE_TASK,
                 kind="replace",
             ),
         ),
