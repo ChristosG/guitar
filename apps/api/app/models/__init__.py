@@ -9,3 +9,6 @@ from app.models.note import Note                # noqa: F401
 from app.models.interview import CurriculumInterview  # noqa: F401
 from app.models.setting import AppSetting        # noqa: F401
 from app.models.prompt import PromptOverride, PromptOverrideHistory  # noqa: F401
+from app.models.canon import (  # noqa: F401
+    BookCompile, Concept, ConceptAlias, ConceptClaim,
+)
