@@ -99,7 +99,7 @@ test("a partially-read book is AMBER with a retry for just the failed pages — 
   const partial = [{
     id: "s8", type: "pdf", title: "Getting Great Guitar Sounds",
     status: "partial", char_count: 88000, collection_id: null,
-    pages_total: 77, pages_ready: 71, pages_failed: 6, ocr_active: false,
+    pages_total: 77, pages_ready: 71, pages_failed: 6, pages_pending: 0, ocr_active: false,
   }];
   await page.route("**/knowledge/sources", (r) => r.fulfill({ json: partial }));
   await page.goto("/en/library");
@@ -111,6 +111,68 @@ test("a partially-read book is AMBER with a retry for just the failed pages — 
   await expect(row.getByTestId("retry-s8")).toBeVisible();
   // A partial book is still a book: the Reader must open it.
   await expect(row.getByRole("link").first()).toHaveAttribute("href", /\/library\/s8/);
+});
+
+// --- Footgun fix: "partial" now also means "never read", and that must NOT
+// route through the cheap, no-confirmation retry button above (b886bd5 made
+// status honest about unread pages; source-row.tsx had not yet been taught
+// the difference between "a few pages failed" and "nobody pressed read yet"). ---
+
+test("a freshly uploaded, never-read book invites reading — NOT a no-confirmation retry that would silently start an 8-hour run", async ({ page }) => {
+  const neverRead = [{
+    id: "s10", type: "pdf", title: "Gallagher — 388 pages",
+    status: "partial", char_count: 0, collection_id: null,
+    pages_total: 388, pages_ready: 0, pages_failed: 0, pages_pending: 388, ocr_active: false,
+  }];
+  await page.route("**/knowledge/sources", (r) => r.fulfill({ json: neverRead }));
+  await page.goto("/en/library");
+
+  const row = page.getByTestId("source-s10");
+  // The old, cheap, no-confirmation retry button must NOT be offered for this shape.
+  await expect(row.getByTestId("retry-s10")).toHaveCount(0);
+  await expect(row.getByTestId("status-partial-s10")).toHaveCount(0);
+  // It must read as an invitation, not an error: no "failed" framing.
+  await expect(row.getByTestId("status-unread-s10")).toBeVisible();
+  await expect(row.getByTestId("status-unread-s10")).not.toContainText(/failed/i);
+
+  // Pressing the CTA must go through the SAME confirming dialog as "reocr" —
+  // stating the page count and the cost — not fire the request directly.
+  let retryHit = false;
+  let reocrHit = false;
+  await page.route("**/knowledge/sources/s10/retry", (r) => { retryHit = true; return r.fulfill({ status: 202, json: { job_id: "j1" } }); });
+  await page.route("**/knowledge/sources/s10/reocr", (r) => { reocrHit = true; return r.fulfill({ status: 202, json: { job_id: "j1" } }); });
+
+  await row.getByTestId("start-reading-s10").click();
+  await expect(page.getByTestId("confirm-dialog")).toBeVisible();
+  await expect(page.getByTestId("confirm-body")).toContainText("388");
+  expect(retryHit, "must not have fired the request before confirmation").toBe(false);
+
+  await page.getByTestId("confirm-accept").click();
+  await expect.poll(() => reocrHit).toBe(true);
+  expect(retryHit, "a never-read book must start via reocr, not retry").toBe(false);
+});
+
+test("an interrupted run (some read, some still pending) is a RESUME, not 'failed pages' — also confirms first", async ({ page }) => {
+  const interrupted = [{
+    id: "s11", type: "pdf", title: "Hunter — 184 pages",
+    status: "partial", char_count: 40000, collection_id: null,
+    pages_total: 184, pages_ready: 30, pages_failed: 0, pages_pending: 154, ocr_active: false,
+  }];
+  await page.route("**/knowledge/sources", (r) => r.fulfill({ json: interrupted }));
+  await page.goto("/en/library");
+
+  const row = page.getByTestId("source-s11");
+  await expect(row.getByTestId("retry-s11")).toHaveCount(0);
+  await expect(row.getByTestId("status-unread-s11")).toContainText("30 of 184 pages read so far");
+  await expect(row.getByTestId("status-unread-s11")).not.toContainText(/failed/i);
+
+  let reocrHit = false;
+  await page.route("**/knowledge/sources/s11/reocr", (r) => { reocrHit = true; return r.fulfill({ status: 202, json: { job_id: "j1" } }); });
+
+  await row.getByTestId("start-reading-s11").click();
+  await expect(page.getByTestId("confirm-dialog")).toBeVisible();
+  await page.getByTestId("confirm-accept").click();
+  await expect.poll(() => reocrHit).toBe(true);
 });
 
 // --- Stage 8: ask your library --------------------------------------------

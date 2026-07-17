@@ -124,6 +124,11 @@ export function SourceRow({
   const total = progress?.total ?? source.pages_total ?? 0;
   const ready = progress?.ready ?? source.pages_ready ?? 0;
   const failed = progress?.failed ?? source.pages_failed ?? 0;
+  // Added alongside the `source_status_from_page_counts` fix (`b886bd5`) that
+  // made `pending > 0` force `"partial"` even at `ready === 0`. This is what
+  // lets the row tell "a few pages failed" apart from "nobody has pressed
+  // read yet" — see the `isPartial` branch below.
+  const pending = progress?.pending ?? source.pages_pending ?? 0;
   // Before the first poll lands there is no `current_page`; `ready + 1` is the
   // page it is almost certainly on, and it is never worse than showing nothing.
   const currentPage = progress?.current_page ?? Math.min(ready + 1, total || 1);
@@ -199,10 +204,15 @@ export function SourceRow({
               ? t("ocrProgress", { page: currentPage, total })
               : t("status.ocr_running")}
           </span>
-        ) : isPartial ? (
+        ) : isPartial && pending === 0 ? (
           // AMBER, not green. 71 of 77 pages read is not "Ready" — and it is not
           // broken either. The failed pages have their own retry, which re-reads
           // ONLY them (`ocr_source` never re-reads a page that is already ready).
+          //
+          // Gated on `pending === 0` on purpose: this is the ONLY shape where the
+          // remaining work is cheap and bounded (a handful of already-attempted
+          // pages), which is what earns a bare, no-confirmation button. See the
+          // branch below for the other shape `isPartial` now covers.
           <div
             data-testid={`status-partial-${source.id}`}
             className="flex flex-wrap items-center gap-2 text-amber-600 dark:text-amber-500"
@@ -220,6 +230,51 @@ export function SourceRow({
               onClick={() => onRetry(source.id)}
             >
               {retrying ? t("retrying") : t("retryFailedPages")}
+            </Button>
+          </div>
+        ) : isPartial ? (
+          // `pending > 0` — the footgun `b886bd5` opened. Before that fix,
+          // `"partial"` was reachable only via `char_count > 0 AND failed > 0`,
+          // which REQUIRES `ready > 0` (some real progress already made), so
+          // "retry the stragglers, no confirmation" was a fair default: cheap
+          // and bounded. `b886bd5` made `"partial"` truthfully cover any source
+          // with unread pages too — including `ready=0, failed=0, pending=total`,
+          // a book that has NEVER been opened. Routing that shape through the
+          // SAME no-confirmation button above would have made one misread click
+          // start the full 8-12 hour read. So instead this shape reuses
+          // `requestReocr` — THE SAME confirming dialog `reocr` already uses,
+          // stating the page count and the hours-long cost before it starts.
+          //
+          // Two sub-shapes share this branch:
+          //   - `ready === 0`: nothing has been read at all. Reads as an
+          //     invitation ("not read yet"), not an error — no AlertTriangle,
+          //     no amber/destructive color.
+          //   - `ready > 0`: an interrupted run (e.g. parked by a rate limit
+          //     mid-book). This is genuinely a RESUME, not "a few pages failed"
+          //     (the unread pages are `pending`, not `failed`) and not a fresh
+          //     book either — but its cost is the same open question as a fresh
+          //     book's (an unknown, possibly large number of pages still
+          //     unread), so it earns the same confirmation. Only the copy
+          //     differs, to say how far the book already got.
+          <div
+            data-testid={`status-unread-${source.id}`}
+            className="flex flex-wrap items-center gap-2 text-sky-600 dark:text-sky-400"
+          >
+            <span className="flex items-center gap-1.5 text-sm font-medium">
+              <RefreshCw className="size-3.5 shrink-0" />
+              {ready > 0
+                ? t("status.resuming", { ready, total, pending })
+                : t("status.unread", { total })}
+            </span>
+            <Button
+              type="button"
+              size="xs"
+              variant="outline"
+              disabled={retrying}
+              data-testid={`start-reading-${source.id}`}
+              onClick={requestReocr}
+            >
+              {retrying ? t("retrying") : ready > 0 ? t("continueReading") : t("startReading")}
             </Button>
           </div>
         ) : isBroken ? (

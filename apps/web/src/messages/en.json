@@ -410,7 +410,9 @@
       "empty": "Empty — nothing was read from this source",
       "failed": "Couldn't read this source",
       "ocr_running": "Reading your book…",
-      "partial": "{ready} of {total} pages read · {failed} failed"
+      "partial": "{ready} of {total} pages read · {failed} failed",
+      "unread": "Not read yet — {total} pages waiting",
+      "resuming": "{ready} of {total} pages read so far — {pending} left"
     },
     "types": {
       "pdf": "PDF",
@@ -484,6 +486,8 @@
     "deleteCollectionError": "Could not delete this folder.",
     "pageCount": "{count} pages",
     "retryFailedPages": "Retry failed pages",
+    "startReading": "Start reading",
+    "continueReading": "Continue reading",
     "rename": "Rename",
     "renameCollection": "Rename folder",
     "reocr": "Read this book again with Claude",
