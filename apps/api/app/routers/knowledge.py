@@ -31,6 +31,7 @@ from app.brain.retrieve import search as run_search
 from app.brain.urlsafe import assert_public_url
 from app.canon.search import search_concepts as run_concept_search
 from app.db import get_db
+from app.models.canon import BookCompile
 from app.models.knowledge import Chunk, KnowledgeSource
 from app.schemas.knowledge import (
     AskRequest,
@@ -39,6 +40,7 @@ from app.schemas.knowledge import (
     BulkSourceResponse,
     BulkSourceResultOut,
     ChunkPreviewOut,
+    CompileStatusOut,
     ConceptHitOut,
     ConceptSearchRequest,
     ConceptSearchResponse,
@@ -68,10 +70,12 @@ def _to_source_out(
     source: KnowledgeSource,
     counts: PageCounts | None = None,
     ocr_active: bool = False,
+    compile: BookCompile | None = None,
 ) -> SourceOut:
-    """`counts`/`ocr_active` are passed in, never queried here: `list_sources`
-    resolves them for the WHOLE list in two queries (see `_decorate`), and doing
-    it per row would turn one list request into 2N."""
+    """`counts`/`ocr_active`/`compile` are passed in, never queried here:
+    `list_sources` resolves them for the WHOLE list in a fixed number of queries
+    (see `_decorate`), and doing it per row would turn one list request into
+    O(N) round trips."""
     out = SourceOut.model_validate(source, from_attributes=True)
     c = counts or PageCounts()
     return out.model_copy(update={
@@ -80,18 +84,39 @@ def _to_source_out(
         "pages_failed": c.failed,
         "pages_pending": c.pending,
         "ocr_active": ocr_active,
+        # `None` stays `None` (never compiled); a real row becomes the canon
+        # compile state the Library row shows beside OCR status (Part B, C7).
+        "compile": CompileStatusOut.model_validate(compile, from_attributes=True)
+        if compile is not None else None,
     })
 
 
+def _compiles(db: Session, ids: list[UUID]) -> dict[UUID, BookCompile]:
+    """`book_compile` rows for a list of sources, keyed by source_id, in one query
+    — the canon-compile analogue of `page_counts`/`active_ocr_jobs`. Only sources
+    that have ever been compiled appear; the rest map to nothing (= never
+    compiled)."""
+    if not ids:
+        return {}
+    rows = db.scalars(
+        select(BookCompile).where(BookCompile.source_id.in_(ids))
+    ).all()
+    return {r.source_id: r for r in rows}
+
+
 def _decorate(db: Session, sources: list[KnowledgeSource]) -> list[SourceOut]:
-    """Attach page counts + in-flight-OCR to a list of sources — the two facts
-    that let the Library render an honest row (Stage 7.2) and, after a reload
-    mid-OCR, a LIVE one. Two queries total, regardless of list length."""
+    """Attach page counts, in-flight-OCR AND canon-compile state to a list of
+    sources — the facts that let the Library render an honest row (Stage 7.2), a
+    LIVE one after a reload mid-OCR, and (Part B, C7) whether each book has been
+    read into the concept canon. A fixed number of queries total, regardless of
+    list length."""
     ids = [s.id for s in sources]
     counts = page_counts(db, ids)
     active = active_ocr_jobs(db, ids)
+    compiles = _compiles(db, ids)
     return [
-        _to_source_out(s, counts.get(s.id), str(s.id) in active) for s in sources
+        _to_source_out(s, counts.get(s.id), str(s.id) in active, compiles.get(s.id))
+        for s in sources
     ]
 
 

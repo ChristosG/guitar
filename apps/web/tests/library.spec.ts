@@ -207,3 +207,87 @@ test("a search with no hits says so, honestly", async ({ page }) => {
   await page.getByTestId("library-search-submit").click();
   await expect(page.getByTestId("library-search-empty")).toContainText("theremin");
 });
+
+// --- C7: concept-canon compile status on the source row -------------------
+
+test("a compiled book shows its concept count and links into the canon", async ({ page }) => {
+  await page.route("**/knowledge/sources", (r) =>
+    r.fulfill({
+      json: [
+        {
+          id: "s1", type: "pdf", title: "Modern Guitar Rigs (Kahn)",
+          status: "ready", char_count: 120000, collection_id: null,
+          pages_total: 200, pages_ready: 200, pages_failed: 0, ocr_active: false,
+          compile: { status: "ready", concept_count: 34, compiled_at: "2026-07-17T00:00:00Z", model: "claude-sonnet-5", error: null },
+        },
+      ],
+    }),
+  );
+  await page.goto("/en/library");
+  const line = page.getByTestId("compile-ready-s1");
+  await expect(line).toContainText("34 concepts in the canon");
+  await expect(line).toHaveAttribute("href", "/en/canon");
+});
+
+test("a book being read into the canon shows an honest 'reading' status", async ({ page }) => {
+  await page.route("**/knowledge/sources", (r) =>
+    r.fulfill({
+      json: [
+        {
+          id: "s1", type: "pdf", title: "Tone Manual (Hunter)",
+          status: "ready", char_count: 300000, collection_id: null,
+          pages_total: 388, pages_ready: 388, pages_failed: 0, ocr_active: false,
+          compile: { status: "running", concept_count: null, compiled_at: null, model: "claude-sonnet-5", error: null },
+        },
+      ],
+    }),
+  );
+  await page.goto("/en/library");
+  await expect(page.getByTestId("compile-running-s1")).toBeVisible();
+});
+
+test("an uncompiled but readable book offers a Compile button that calls the API", async ({ page }) => {
+  await page.route("**/knowledge/sources", (r) =>
+    r.fulfill({
+      json: [
+        {
+          id: "s1", type: "pdf", title: "A readable, uncompiled book",
+          status: "ready", char_count: 50000, collection_id: null,
+          pages_total: 60, pages_ready: 60, pages_failed: 0, ocr_active: false,
+          compile: null,
+        },
+      ],
+    }),
+  );
+  let called = false;
+  await page.route("**/knowledge/sources/s1/compile", (r) => {
+    called = true;
+    return r.fulfill({ status: 202, json: { job_id: "j1", already_running: false } });
+  });
+  await page.goto("/en/library");
+  await expect(page.getByTestId("compile-none-s1")).toBeVisible();
+  await page.getByTestId("compile-s1").click();
+  // The confirm dialog states the cost before spending anything.
+  await expect(page.getByTestId("confirm-dialog")).toBeVisible();
+  await page.getByTestId("confirm-accept").click();
+  await expect.poll(() => called).toBe(true);
+});
+
+test("an API that does not report compile status shows no compile line (no false 'not compiled')", async ({ page }) => {
+  await page.route("**/knowledge/sources", (r) =>
+    r.fulfill({
+      json: [
+        {
+          id: "s1", type: "pdf", title: "Book from an older API",
+          status: "ready", char_count: 50000, collection_id: null,
+          pages_total: 60, pages_ready: 60, pages_failed: 0, ocr_active: false,
+          // no `compile` key at all — the API predates C7
+        },
+      ],
+    }),
+  );
+  await page.goto("/en/library");
+  await expect(page.getByTestId("status-ok-s1")).toBeVisible();
+  await expect(page.getByTestId("compile-none-s1")).toHaveCount(0);
+  await expect(page.getByTestId("compile-ready-s1")).toHaveCount(0);
+});

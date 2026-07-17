@@ -6,6 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
 import {
   Calendar,
+  Combine,
   GraduationCap,
   Guitar,
   LayoutGrid,
@@ -31,6 +32,7 @@ const NAV_ITEMS = [
   { segment: "students", icon: Users },
   { segment: "curricula", icon: GraduationCap },
   { segment: "library", icon: Library },
+  { segment: "canon", icon: Combine },
   { segment: "lessons", icon: ListTree },
   { segment: "notes", icon: StickyNote },
   { segment: "artifacts", icon: LayoutGrid },

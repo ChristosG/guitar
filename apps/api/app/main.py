@@ -22,6 +22,7 @@ from app.llm.errors import LLMNotConfigured
 from app.routers import (
     artifacts,
     auth,
+    canon,
     chat,
     curriculum,
     health,
@@ -158,3 +159,4 @@ app.include_router(notes.router)
 app.include_router(library.router)
 app.include_router(lessons.router)
 app.include_router(prompts.router)
+app.include_router(canon.router)

@@ -70,6 +70,21 @@ export type SourceKind = "text" | "url";
  * server fact (an in-flight `GenerationJob`), not a React state. */
 export type SourceStatus = "ingesting" | "ready" | "partial" | "empty" | "failed";
 
+/** One book's concept-canon compile state (Part B, C7) — mirrors
+ * `app.schemas.knowledge.CompileStatusOut`. `SourceOut.compile` is `null`/absent
+ * when the book has NEVER been read into the canon (the honest "not compiled yet,
+ * here is the button" state). A present object with `status: "running"` means it
+ * is being read into the canon right now; `"ready"` carries `concept_count`;
+ * `"failed"` means a compile raised (`error` is server prose the tutor never
+ * reads — the UI turns `status` into one Greek sentence). */
+export interface CompileStatus {
+  status: "running" | "ready" | "failed" | (string & {});
+  concept_count: number | null;
+  compiled_at: string | null;
+  model: string | null;
+  error: string | null;
+}
+
 export interface SourceOut {
   id: string;
   title: string;
@@ -97,6 +112,12 @@ export interface SourceOut {
   pages_failed?: number;
   pages_pending?: number;
   ocr_active?: boolean;
+
+  /** Concept-canon compile state (Part B, C7), decorated server-side per request
+   * from `book_compile` (not a column — same posture as the page counts above).
+   * `null` = never compiled into the canon; absent on any API old enough not to
+   * send it (handled the same as `null`). */
+  compile?: CompileStatus | null;
 }
 
 export interface ChunkPreviewOut {
@@ -348,6 +369,113 @@ export function askKnowledge(input: AskInput): Promise<AskResponse> {
     method: "POST",
     body: JSON.stringify(input),
   });
+}
+
+/**
+ * THE CONCEPT CANON (Part B) — the tutor's whole library distilled into concepts,
+ * each carrying what EVERY book says about it, and — the entire point — where the
+ * books DISAGREE. Two entry points, one shape:
+ *
+ *   - BROWSE (`GET /canon/concepts`, C7) — the canon's front page: every compiled
+ *     concept, most-divergent first, with the counts a beginner needs to read it.
+ *   - SEARCH (`POST /knowledge/concepts/search`, C8) — "what do my books say about
+ *     X?", BM25 over the same concepts.
+ *
+ * Both return the same `ConceptHit`, so one component renders either. A concept
+ * with `divergence: true` MUST render its positions against each other (Hunter vs
+ * Gallagher), never averaged into one line — that divergence is the product.
+ */
+
+/** One pointer into a real book. `source_id` + a page from `pages` is exactly the
+ * Reader deep-link (`/library/{source_id}?page={page}`), the same contract the
+ * lesson provenance chip uses. `pages_label` is the pre-rendered, gap-aware
+ * display string ("p.113" / "pp.57-58" / "pp.110-112, 118") — the server does not
+ * bridge gaps, so trust it over re-deriving one from `pages`. `grounding:
+ * "figure"` means the citation is OUR description of a picture/diagram — cite it,
+ * never quote it as the author's words (the [FIGURE] contract). */
+export interface ConceptCitation {
+  source_id: string;
+  source_title: string;
+  pages: number[];
+  pages_label: string;
+  grounding: "author" | "figure" | (string & {});
+}
+
+/** One position on a concept. `kind`:
+ *   - "consensus"  — two or more DIFFERENT books, the same position verbatim.
+ *   - "divergence" — a book departing from what the others said. THE PRODUCT.
+ *   - "only_in"    — one book covers this concept; a unique take, nobody to
+ *                    disagree with. Honest under its own label, never dropped. */
+export interface ConceptPosition {
+  kind: "consensus" | "divergence" | "only_in" | (string & {});
+  position: string;
+  books: string[];
+  citations: ConceptCitation[];
+}
+
+/** One concept and its full cross-book picture — mirrors
+ * `app.schemas.knowledge.ConceptHitOut`. `score` is BM25 (search only, ordering);
+ * on a browse hit it is 0 and meaningless. `coverage` is how many distinct books
+ * treat this concept; `divergence` is whether they disagree. */
+export interface ConceptHit {
+  concept_id: string;
+  key: string;
+  label_en: string;
+  label_el: string | null;
+  score: number;
+  coverage: number;
+  divergence: boolean;
+  positions: ConceptPosition[];
+}
+
+/** `GET /canon/concepts` — mirrors `app.schemas.canon.CanonOverviewOut`. The
+ * counts are the honest header a beginner sees before the concepts: how many
+ * books were read into the canon, how many are still reading, how many concepts
+ * came out, and — the headline — on how many the books DISAGREE. */
+export interface CanonOverview {
+  concepts: ConceptHit[];
+  total_concepts: number;
+  divergence_count: number;
+  books_compiled: number;
+  books_compiling: number;
+}
+
+/** `ConceptSearchResponse` — `POST /knowledge/concepts/search` (C8). Same
+ * `ConceptHit` as the browse view. */
+export interface ConceptSearchResponse {
+  hits: ConceptHit[];
+}
+
+/** Browse the whole compiled canon. 404 (endpoint not yet deployed) surfaces as
+ * an `ApiError` the caller can special-case into the "still being built" empty
+ * state, since the canon route ships slightly ahead of the API that serves it. */
+export function browseCanon(): Promise<CanonOverview> {
+  return request<CanonOverview>("/canon/concepts");
+}
+
+/** Search the concept canon (C8). No `source_ids` — a concept spans books, so
+ * scoping to one would throw away the cross-book picture (the whole point). */
+export function searchConcepts(query: string, k = 8): Promise<ConceptSearchResponse> {
+  return request<ConceptSearchResponse>("/knowledge/concepts/search", {
+    method: "POST",
+    body: JSON.stringify({ query, k }),
+  });
+}
+
+/** Read a book INTO the concept canon (`POST /knowledge/sources/{id}/compile`,
+ * C6). THE MONEY GUARD lives server-side: pressing this on an already-compiled
+ * book starts no job (`already_compiled: true`); pressing it twice on an
+ * un-compiled one returns the SAME job. Reading a book costs real model time
+ * against the tutor's subscription, so callers confirm first and say so. Returns
+ * a 202 job envelope (poll `getJob`) or `{already_compiled: true}`. */
+export interface CompileResponse {
+  job_id?: string;
+  already_running?: boolean;
+  already_compiled?: boolean;
+}
+
+export function compileSource(id: string): Promise<CompileResponse> {
+  return request<CompileResponse>(`/knowledge/sources/${id}/compile`, { method: "POST" });
 }
 
 /**

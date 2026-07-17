@@ -6,6 +6,7 @@ import Link from "next/link";
 import {
   AlertTriangle,
   CheckCircle2,
+  Combine,
   FileText,
   Link2,
   Loader2,
@@ -18,7 +19,7 @@ import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm";
 import { RenameDialog } from "@/components/library/rename-dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { renameSource, type SourceOut, type SourceProgressOut } from "@/lib/api";
+import { compileSource, renameSource, type SourceOut, type SourceProgressOut } from "@/lib/api";
 
 /** Statuses the honesty requirement (spec D6) applies to: a source that
  * genuinely has nothing readable in it. Rendered LOUD/red/destructive with a
@@ -109,6 +110,7 @@ export function SourceRow({
   const t = useTranslations("library");
   const confirm = useConfirm();
   const [renaming, setRenaming] = useState(false);
+  const [compiling, setCompiling] = useState(false);
 
   // `ocr_active` (a server fact — an in-flight GenerationJob) is the authority on
   // "is this book being read right now", not the presence of a poll result.
@@ -166,6 +168,36 @@ export function SourceRow({
       confirmLabel: t("confirmReocr.confirm"),
     });
     if (ok) onReocr(source.id);
+  }
+
+  /** Read this book INTO the concept canon (Part B, C7 → `POST .../compile`).
+   * Self-contained like the rename dialog (which owns its own PATCH) rather than
+   * routed through the parent, since the whole library page does not otherwise
+   * know about the canon. THE MONEY GUARD is server-side: an already-compiled
+   * book starts no job and re-spends nothing (`compileSource`'s docstring), and a
+   * second press returns the same running job — but the FIRST read of a book is
+   * real model time against the tutor's subscription, so this asks first and says
+   * so. A failed/absent key surfaces through the app-shell's global banner, not
+   * here. On success we just refresh; the row then shows "reading into the
+   * canon…" from the server's own `compile.status`. */
+  async function requestCompile() {
+    const ok = await confirm({
+      title: t("compile.confirmTitle", { title: source.title }),
+      body: t("compile.confirmBody"),
+      confirmLabel: t("compile.confirmButton"),
+    });
+    if (!ok) return;
+    setCompiling(true);
+    try {
+      await compileSource(source.id);
+      onChanged();
+    } catch {
+      // Quiet: the one actionable failure (no LLM key) is already shown by the
+      // shell's global banner on every page; a compile that could not start has
+      // written nothing and can simply be pressed again.
+    } finally {
+      setCompiling(false);
+    }
   }
 
   return (
@@ -319,6 +351,76 @@ export function SourceRow({
             <Loader2 className="size-3.5 shrink-0 animate-spin" />
             {t("status.ingesting")}
           </span>
+        )}
+
+        {/* CONCEPT-CANON compile status, beside the OCR status (Part B, C7).
+            Rendered ONLY when the API actually reports the field: `undefined`
+            means an API build that predates C7 (the field is decorated from
+            `book_compile`, so an older API simply omits it) — showing "not
+            compiled · Compile" on every book in that window would be a lie, so
+            the row looks exactly as it did before until the field arrives. Once
+            it does: `ready` links to the canon with its concept count, `running`
+            spins, `failed` offers a retry, and `null` (never compiled) offers the
+            Compile button the ethos asks for. Hidden while the book is being OCR'd
+            (compile runs after a book is readable). */}
+        {!reading && source.compile !== undefined && (
+          source.compile?.status === "ready" ? (
+            <Link
+              href={`/${locale}/canon`}
+              data-testid={`compile-ready-${source.id}`}
+              className="mt-0.5 flex w-fit items-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+            >
+              <Combine className="size-3 shrink-0 text-primary" />
+              {source.compile.concept_count != null
+                ? t("compile.ready", { count: source.compile.concept_count })
+                : t("compile.readyNoCount")}
+            </Link>
+          ) : source.compile?.status === "running" ? (
+            <span
+              data-testid={`compile-running-${source.id}`}
+              className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground"
+            >
+              <Loader2 className="size-3 shrink-0 animate-spin" />
+              {t("compile.running")}
+            </span>
+          ) : source.compile?.status === "failed" ? (
+            <span
+              data-testid={`compile-failed-${source.id}`}
+              className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-destructive"
+            >
+              <span className="flex items-center gap-1.5">
+                <AlertTriangle className="size-3 shrink-0" />
+                {t("compile.failed")}
+              </span>
+              <Button
+                type="button"
+                size="xs"
+                variant="outline"
+                disabled={compiling}
+                data-testid={`compile-${source.id}`}
+                onClick={requestCompile}
+              >
+                {compiling ? t("compile.compiling") : t("compile.retry")}
+              </Button>
+            </span>
+          ) : isReadable && source.compile === null ? (
+            <span
+              data-testid={`compile-none-${source.id}`}
+              className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-muted-foreground"
+            >
+              {t("compile.none")}
+              <Button
+                type="button"
+                size="xs"
+                variant="outline"
+                disabled={compiling}
+                data-testid={`compile-${source.id}`}
+                onClick={requestCompile}
+              >
+                {compiling ? t("compile.compiling") : t("compile.start")}
+              </Button>
+            </span>
+          ) : null
         )}
       </div>
 

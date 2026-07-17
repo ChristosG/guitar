@@ -43,6 +43,26 @@ class SourceCreate(BaseModel):
         return self
 
 
+class CompileStatusOut(BaseModel):
+    """One book's concept-canon compile state, carried on the Library row so the
+    tutor can SEE which books have been read into the canon (Part B, C7). Mirrors
+    the meaningful columns of `app.models.canon.BookCompile`.
+
+    `None` on `SourceOut.compile` means NO compile row exists — the book has never
+    been read into the canon (the honest "not compiled yet, here is the button"
+    state). A present object with `status="running"` means it is being read RIGHT
+    NOW; `"ready"` carries `concept_count`; `"failed"` carries `error`. The tutor
+    never sees `error` verbatim — the UI turns `status` into one Greek sentence."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    status: str  # "running" | "ready" | "failed" (app.models.canon.COMPILE_STATUSES)
+    concept_count: int | None = None
+    compiled_at: datetime | None = None
+    model: str | None = None
+    error: str | None = None
+
+
 class SourceOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -78,6 +98,15 @@ class SourceOut(BaseModel):
     pages_failed: int = 0
     pages_pending: int = 0
     ocr_active: bool = False
+
+    # Concept-canon compile state (Part B, C7), decorated per request from
+    # `book_compile` in `_decorate` — NOT a column on this table, same posture as
+    # the page counts above. `None` = the book has never been compiled into the
+    # canon. This is what lets the Library row show "34 concepts · read into the
+    # canon", "reading into the canon…", or an honest "not compiled · [Compile]"
+    # beside the OCR status. Absent (defaults to None) on any API old enough not
+    # to send it.
+    compile: CompileStatusOut | None = None
 
 
 class BulkSourceCreate(BaseModel):
