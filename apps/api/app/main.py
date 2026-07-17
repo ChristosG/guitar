@@ -30,6 +30,7 @@ from app.routers import (
     lessons,
     library,
     notes,
+    prompts,
     settings as settings_router,
     students,
 )
@@ -156,3 +157,4 @@ app.include_router(chat.router)
 app.include_router(notes.router)
 app.include_router(library.router)
 app.include_router(lessons.router)
+app.include_router(prompts.router)

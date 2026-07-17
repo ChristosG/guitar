@@ -97,8 +97,13 @@ from app.lessons.draft import _build_messages as _selection_messages
 from app.llm.claude_cli import _tool_system_prompt
 from app.models.note import Note
 from app.models.student import Student
+from app.prompts import overrides
 from app.routers.settings import _PROBE_PROMPT
-from app.students.context import STUDENT_PITCH, build_student_brief
+from app.students.context import (
+    STUDENT_PITCH,
+    STUDENT_PITCH_SLICE_ID,
+    build_student_brief,
+)
 
 # ---------------------------------------------------------------------------
 # The types P2 (routes + overrides) and P3 (the Settings card) consume
@@ -148,6 +153,15 @@ class Slice:
     default: str
     kind: Literal["replace", "append"]
 
+    # The ceiling `overrides.validate` enforces. Per-slice, per the spec, though
+    # every slice today takes the default — it is a SPEND guard, not a tidiness
+    # rule: this text ships on every call the prompt makes, so a pasted chapter
+    # is a recurring line on the invoice rather than a one-off mistake. 2,000
+    # chars is ~500 tokens and about ten times the longest thing the one shipped
+    # slice has ever said, which is the right amount of room for a tutor and the
+    # wrong amount for a book.
+    max_chars: int = 2000
+
 
 @dataclass(frozen=True)
 class RenderedMessage:
@@ -194,6 +208,15 @@ class RenderedPrompt:
 # A builder returns the messages plus the samples it interpolated. Samples are
 # `(name, label_el, value)`; `_render` turns them into `Span`s once the text
 # exists, because an offset into a text that has not been joined yet is a guess.
+#
+# `db` IS THE SECOND ARGUMENT OF EVERY BUILDER, and it is not a sample source —
+# it is the only way to render an OVERRIDE. A preview built from code defaults
+# while the live path sends the tutor's edited text is the viewer lying again,
+# just in the one place he is most certain it is not: the text he typed himself.
+# Uniform across all 28 builders even though four use it, because a heterogeneous
+# signature would make `PromptEntry.build` un-callable without knowing which
+# builder is behind it. `db=None` means "code defaults only" and is the honest
+# render for a caller with no session (P1's own tests take that path).
 _Sample = tuple[str, str, str]
 _Built = tuple[list[RenderedMessage], list[_Sample]]
 
@@ -236,14 +259,14 @@ class PromptEntry:
     what_it_does_el: str
     when_it_runs_el: str
     source_of_truth: Callable[[], object]
-    build: Callable[[str], _Built]
+    build: Callable[[str, object | None], _Built]
     call_sites: tuple[str, ...] = ()
     slices: tuple[Slice, ...] = ()
     provider: str | None = None
     cache_prefix: bool = False
 
-    def render(self, locale: str = DEFAULT_LOCALE) -> RenderedPrompt:
-        built, samples = self.build(locale)
+    def render(self, locale: str = DEFAULT_LOCALE, db=None) -> RenderedPrompt:
+        built, samples = self.build(locale, db)
         messages = tuple(built)
         # Joined the same way `RenderedPrompt.text` joins, because that is what
         # the spans have to index into.
@@ -330,25 +353,46 @@ class _SampleRows:
 
 
 class _SampleDb:
-    """NOT a database — the two accessors `build_student_brief` happens to use.
+    """NOT a database — a shim over the accessors `build_student_brief` uses, that
+    fakes the STUDENT and forwards everything else to the real session.
 
     This exists so the preview runs the REAL `build_student_brief`, unmodified,
     against sample rows. The alternative was to re-implement the brief's shape in
     here, which is a copy, or to open a session from a Settings page render, which
     is a database query to draw a picture of a prompt. The fake is the honest one:
-    every label, every ordering rule, and `STUDENT_PITCH` itself come out of the
-    live function, so a change to it changes this preview on the same commit.
+    every label, every ordering rule, and the pitch itself come out of the live
+    function, so a change to it changes this preview on the same commit.
+
+    IT FORWARDS BECAUSE THE FAKE IS ONLY MEANT TO FAKE HIS DATA. Since P2, the
+    same live function also reads a real row — the tutor's `student.pitch`
+    override — through the same `db` handle. A fake that answered every `get()`
+    with `_SAMPLE_STUDENT` (as this did when the only reader was the student
+    lookup) would hand a `Student` to `overrides.resolve` and blow up on
+    `.text`; a fake that answered None would show him the code default in the
+    very card where his own edited sentence is supposed to appear. So: sample
+    rows for the sample student, the real session for everything else, and None
+    when there is no session — which is exactly "code defaults only".
     """
 
+    def __init__(self, db=None):
+        self._db = db
+
     def get(self, model, pk):
-        return _SAMPLE_STUDENT
+        if model is Student:
+            return _SAMPLE_STUDENT
+        return self._db.get(model, pk) if self._db is not None else None
 
     def scalars(self, statement):
+        # `build_student_brief`'s only `scalars` is its `select(Note)`. If a
+        # future edit adds a second one, this returns notes for it too and the
+        # preview goes quietly wrong — so it is asserted rather than assumed.
+        entity = statement.column_descriptions[0]["entity"]
+        assert entity is Note, f"_SampleDb has no sample rows for {entity!r}"
         return _SampleRows(_SAMPLE_NOTES)
 
 
-def _sample_student_brief() -> str:
-    return build_student_brief(_SampleDb(), _SAMPLE_STUDENT_ID)
+def _sample_student_brief(db) -> str:
+    return build_student_brief(_SampleDb(db), _SAMPLE_STUDENT_ID)
 
 
 # A page of his library, verbatim in shape: an English book, page-marked, as
@@ -456,7 +500,7 @@ def _msgs(built: list[dict]) -> list[RenderedMessage]:
     ]
 
 
-def _build_chat_system(locale: str) -> _Built:
+def _build_chat_system(locale: str, db) -> _Built:
     # loop.py's own builder, called with an empty transcript so it takes the
     # prepend branch. NOT `f"{SYSTEM_PROMPT}\n\n{language_directive(locale)}"`
     # re-typed here: that shape is `_ensure_system_prompt`'s to own, and a second
@@ -466,7 +510,7 @@ def _build_chat_system(locale: str) -> _Built:
     ]
 
 
-def _build_chat_grounding(locale: str) -> _Built:
+def _build_chat_grounding(locale: str, db) -> _Built:
     block = _grounding_block(_SAMPLE_HITS, locale)
     # Appended to the END of the tutor's OWN user turn, never as a second system
     # message — see `_grounding_block`'s docstring for why (the chat template
@@ -478,48 +522,48 @@ def _build_chat_grounding(locale: str) -> _Built:
     ]
 
 
-def _build_chat_no_hits(locale: str) -> _Built:
+def _build_chat_no_hits(locale: str, db) -> _Built:
     return [RenderedMessage(role="user", content=_grounding_block([], locale))], [
         (*_ANSWER_IN, answer_in(locale)),
     ]
 
 
-def _build_curriculum_system(locale: str) -> _Built:
+def _build_curriculum_system(locale: str, db) -> _Built:
     # Index 0 of the live prefix is `CURRICULUM_SYSTEM` in every branch.
     return _msgs(prefix_messages(_SAMPLE_LIBRARY)[:1]), []
 
 
-def _build_curriculum_library(locale: str) -> _Built:
+def _build_curriculum_library(locale: str, db) -> _Built:
     return _msgs([library_message(_SAMPLE_LIBRARY)]), [
         (*_LIBRARY, _SAMPLE_LIBRARY_TEXT),
     ]
 
 
-def _build_curriculum_no_library(locale: str) -> _Built:
+def _build_curriculum_no_library(locale: str, db) -> _Built:
     return _msgs(prefix_messages(_EMPTY_LIBRARY)[1:]), []
 
 
-def _build_curriculum_library_too_large(locale: str) -> _Built:
+def _build_curriculum_library_too_large(locale: str, db) -> _Built:
     return _msgs(prefix_messages(_OVERSIZED_LIBRARY)[1:]), []
 
 
-def _build_curriculum_outline(locale: str) -> _Built:
+def _build_curriculum_outline(locale: str, db) -> _Built:
     built = build_outline_messages(
         title=_SAMPLE_COURSE_TITLE, brief=_SAMPLE_COURSE_BRIEF, language=locale,
         shape=_SAMPLE_SHAPE, library=_SAMPLE_LIBRARY,
-        student_brief=_sample_student_brief(), gap_policy=POLICY_GENERAL,
+        student_brief=_sample_student_brief(db), gap_policy=POLICY_GENERAL,
     )
     return _msgs(built), [
         (*_LIBRARY, _SAMPLE_LIBRARY_TEXT),
         ("course_title", "Ο τίτλος του προγράμματος", _SAMPLE_COURSE_TITLE),
         ("course_brief", "Τι ζήτησες, με τα δικά σου λόγια", _SAMPLE_COURSE_BRIEF),
-        (*_STUDENT, _sample_student_brief()),
+        (*_STUDENT, _sample_student_brief(db)),
         (*_LANG, language_directive(locale)),
         (*_ANSWER_IN, answer_in(locale)),
     ]
 
 
-def _build_curriculum_extend(locale: str) -> _Built:
+def _build_curriculum_extend(locale: str, db) -> _Built:
     built = build_module_messages(
         course_title=_SAMPLE_COURSE_TITLE, brief=_SAMPLE_COURSE_BRIEF, language=locale,
         existing="1. Πρώτες συγχορδίες\n2. Ρυθμικά σχήματα", topic="Το σύστημα CAGED",
@@ -536,7 +580,7 @@ def _build_curriculum_extend(locale: str) -> _Built:
     ]
 
 
-def _build_curriculum_refine(locale: str) -> _Built:
+def _build_curriculum_refine(locale: str, db) -> _Built:
     instruction = "Κάν' το πιο απλό, μιλάει σε δωδεκάχρονο."
     built = build_refine_messages(
         instruction=instruction, title="Το σχήμα C και η ρίζα του",
@@ -554,29 +598,29 @@ def _build_curriculum_refine(locale: str) -> _Built:
     ]
 
 
-def _build_lesson_draft(locale: str) -> _Built:
+def _build_lesson_draft(locale: str, db) -> _Built:
     built = build_lesson_messages(
         ctx=_SAMPLE_LESSON_CTX, library=_SAMPLE_LIBRARY, language=locale,
-        student_brief=_sample_student_brief(), course_brief=_SAMPLE_COURSE_BRIEF,
+        student_brief=_sample_student_brief(db), course_brief=_SAMPLE_COURSE_BRIEF,
     )
     return _msgs(built), [
         (*_LIBRARY, _SAMPLE_LIBRARY_TEXT),
         ("course_brief", "Τι ζήτησες, με τα δικά σου λόγια", _SAMPLE_COURSE_BRIEF),
-        (*_STUDENT, _sample_student_brief()),
+        (*_STUDENT, _sample_student_brief(db)),
         (*_LANG, language_directive(locale)),
         (*_ANSWER_IN, answer_in(locale)),
     ]
 
 
-def _build_lesson_deepen(locale: str) -> _Built:
+def _build_lesson_deepen(locale: str, db) -> _Built:
     built = build_lesson_messages(
         ctx=_SAMPLE_LESSON_CTX, library=_SAMPLE_LIBRARY, language=locale,
-        student_brief=_sample_student_brief(), course_brief=_SAMPLE_COURSE_BRIEF,
+        student_brief=_sample_student_brief(db), course_brief=_SAMPLE_COURSE_BRIEF,
         deepen=_SAMPLE_MEASUREMENT, previous=_SAMPLE_PREVIOUS_DRAFT,
     )
     return _msgs(built), [
         (*_LIBRARY, _SAMPLE_LIBRARY_TEXT),
-        (*_STUDENT, _sample_student_brief()),
+        (*_STUDENT, _sample_student_brief(db)),
         # The live builder json-dumps the previous draft, so the sample's span is
         # its serialization — still the sample's own data, not authored text.
         ("previous_draft", "Η προηγούμενη γραφή του μαθήματος",
@@ -585,12 +629,12 @@ def _build_lesson_deepen(locale: str) -> _Built:
     ]
 
 
-def _build_lesson_repair(locale: str) -> _Built:
+def _build_lesson_repair(locale: str, db) -> _Built:
     built = _repair_message(_SAMPLE_BAD_CITATIONS, _SAMPLE_LIBRARY)
     return _msgs([built]), []
 
 
-def _build_lesson_from_selection(locale: str) -> _Built:
+def _build_lesson_from_selection(locale: str, db) -> _Built:
     passage = _SAMPLE_HITS[0].text
     built = _selection_messages(
         text=passage, page_from=14, page_to=15,
@@ -605,12 +649,12 @@ def _build_lesson_from_selection(locale: str) -> _Built:
 
 
 def _tier_fragment(tier: str):
-    def build(locale: str) -> _Built:
+    def build(locale: str, db) -> _Built:
         return [RenderedMessage(role="user", content=_tier_directive(tier))], []
     return build
 
 
-def _build_retrieval_translate(locale: str) -> _Built:
+def _build_retrieval_translate(locale: str, db) -> _Built:
     # `_translate_call` assembles these two turns inline. The system turn IS
     # `_TRANSLATE_SYSTEM` (pointed at, not copied); the user turn is the tutor's
     # query, i.e. his data. No prompt text is authored here.
@@ -620,7 +664,7 @@ def _build_retrieval_translate(locale: str) -> _Built:
     ], [("query", "Αυτό που έγραψες στην αναζήτηση", _SAMPLE_QUERY)]
 
 
-def _build_retrieval_grounded(locale: str) -> _Built:
+def _build_retrieval_grounded(locale: str, db) -> _Built:
     built = build_grounded_messages(_SAMPLE_QUERY, _SAMPLE_HITS, locale=locale)
     return _msgs(built), [
         ("query", "Η ερώτησή σου", _SAMPLE_QUERY),
@@ -631,7 +675,7 @@ def _build_retrieval_grounded(locale: str) -> _Built:
     ]
 
 
-def _build_retrieval_no_hits(locale: str) -> _Built:
+def _build_retrieval_no_hits(locale: str, db) -> _Built:
     built = build_grounded_messages(_SAMPLE_QUERY, [], locale=locale)
     return _msgs(built), [
         ("query", "Η ερώτησή σου", _SAMPLE_QUERY),
@@ -643,7 +687,7 @@ def _build_retrieval_no_hits(locale: str) -> _Built:
 _SAMPLE_ARTIFACT_PROMPT = "Μια ταμπλατούρα με τη σκάλα Σολ ματζόρε σε δύο μέτρα"
 
 
-def _build_artifacts_generate(locale: str) -> _Built:
+def _build_artifacts_generate(locale: str, db) -> _Built:
     built = _artifact_messages(
         kind="tab", prompt=_SAMPLE_ARTIFACT_PROMPT, hits=_SAMPLE_HITS, locale=locale,
     )
@@ -658,7 +702,7 @@ def _build_artifacts_generate(locale: str) -> _Built:
 _SAMPLE_REPAIR_ERROR = "1 validation error for TabSpec\nalphaTex\n  Field required"
 
 
-def _build_artifacts_repair(locale: str) -> _Built:
+def _build_artifacts_repair(locale: str, db) -> _Built:
     built = _artifact_messages(
         kind="tab", prompt=_SAMPLE_ARTIFACT_PROMPT, hits=_SAMPLE_HITS, locale=locale,
         repair_error=_SAMPLE_REPAIR_ERROR,
@@ -670,12 +714,12 @@ def _build_artifacts_repair(locale: str) -> _Built:
     ]
 
 
-def _build_artifacts_tab_guidance(locale: str) -> _Built:
+def _build_artifacts_tab_guidance(locale: str, db) -> _Built:
     return [RenderedMessage(role="system", content=_KIND_PROMPT_GUIDANCE["tab"])], []
 
 
 def _vision_prompt(prompt: str):
-    def build(locale: str) -> _Built:
+    def build(locale: str, db) -> _Built:
         # `vision()` sends the prompt as the user turn beside the page image.
         # No locale: a transcription is in the language the page is printed in,
         # and `language_directive` would be an instruction to mistranslate a book.
@@ -683,36 +727,44 @@ def _vision_prompt(prompt: str):
     return build
 
 
-def _build_settings_probe(locale: str) -> _Built:
+def _build_settings_probe(locale: str, db) -> _Built:
     return [RenderedMessage(role="user", content=_PROBE_PROMPT)], []
 
 
-def _build_shared_language_directive(locale: str) -> _Built:
+def _build_shared_language_directive(locale: str, db) -> _Built:
     return [RenderedMessage(role="system", content=language_directive(locale))], []
 
 
-def _build_shared_answer_in(locale: str) -> _Built:
+def _build_shared_answer_in(locale: str, db) -> _Built:
     return [RenderedMessage(role="user", content=answer_in(locale))], []
 
 
-def _build_shared_student_brief(locale: str) -> _Built:
-    brief = _sample_student_brief()
+def _build_shared_student_brief(locale: str, db) -> _Built:
+    brief = _sample_student_brief(db)
     return [RenderedMessage(role="user", content=brief)], [
         ("goals", "Οι στόχοι του μαθητή, όπως τους έγραψες", _SAMPLE_STUDENT.goals),
         ("struggle_note", "Μια σημείωση που σήμανες ως δυσκολία", _SAMPLE_NOTES[0].body),
         ("other_note", "Μια απλή σημείωσή σου", _SAMPLE_NOTES[1].body),
-        ("pitch", "Η οδηγία που μπορείς να αλλάξεις", STUDENT_PITCH),
+        # The RESOLVED pitch, not `STUDENT_PITCH`. `_locate` raises when a sample
+        # is not in the rendered text — deliberately, because a chip drawn over
+        # the wrong words is the viewer lying where it claims to be precise. So
+        # naming the constant here would not merely mislabel the chip once he
+        # saves an override: `build_student_brief` would have put his text in the
+        # brief, the constant would no longer be findable, and the Settings page
+        # would 500 the instant he pressed Save. The same `resolve` the live
+        # builder just used is the only value that can be correct here.
+        ("pitch", "Η οδηγία που μπορείς να αλλάξεις", resolve(db, STUDENT_PITCH_SLICE_ID)),
     ]
 
 
-def _build_tools_descriptions(locale: str) -> _Built:
+def _build_tools_descriptions(locale: str, db) -> _Built:
     # `loop._tool_schemas()` — the exact list the loop hands the provider, so a
     # tool added, removed or re-described shows up here on the same commit.
     schemas = json.dumps(_tool_schemas(), indent=2, ensure_ascii=False)
     return [RenderedMessage(role="system", content=schemas)], []
 
 
-def _build_tools_system_claude_cli(locale: str) -> _Built:
+def _build_tools_system_claude_cli(locale: str, db) -> _Built:
     # `tool_choice="auto"` is what BOTH live call sites pass (`loop.py:671`,
     # `loop.py:905`); the "required"/"none" branches have no caller today.
     return [RenderedMessage(
@@ -1316,7 +1368,7 @@ _ENTRIES = [
         id="shared.student_brief",
         flow="shared",
         kind="fragment",
-        source_ref="app/students/context.py:79",
+        source_ref="app/students/context.py:88",
         title_el="Το προφίλ του μαθητή",
         what_it_does_el=(
             "Όσα ξέρεις για τον μαθητή, γραμμένα σε κανονικές προτάσεις που "
@@ -1335,7 +1387,11 @@ _ENTRIES = [
         build=_build_shared_student_brief,
         slices=(
             Slice(
-                id="student.pitch",
+                # The id comes from `students/context.py` too, beside the text it
+                # names. A literal here would be a second definition of a live-path
+                # identifier, living in the viewer — one typo from an override that
+                # saves, reports success, and changes nothing.
+                id=STUDENT_PITCH_SLICE_ID,
                 label_el="Πώς να απευθύνεται στον μαθητή",
                 default=STUDENT_PITCH,
                 kind="replace",
@@ -1346,15 +1402,53 @@ _ENTRIES = [
 
 REGISTRY: dict[str, PromptEntry] = {e.id: e for e in _ENTRIES}
 
+# Every editable slice, keyed by its id, with the prompt that OWNS it.
+#
+# The owner is carried because two of the router's answers are the owner's, not
+# the slice's: which card to refresh after a save, and whether editing costs
+# money (a slice inside a cache-prefix prompt re-mints ~$0.34 today, ~$2.20 once
+# his four books land). Deriving the owner by scanning `_ENTRIES` per request
+# would work equally well at 31 entries; a dict is built once and, more to the
+# point, `test_the_slice_map_and_the_registry_cannot_disagree` can then check the
+# two structures against each other, which a loop hidden in a function body could
+# not be asked about.
+SLICES: dict[str, tuple[PromptEntry, Slice]] = {
+    s.id: (e, s) for e in _ENTRIES for s in e.slices
+}
 
-def render(prompt_id: str, locale: str = DEFAULT_LOCALE) -> RenderedPrompt:
+
+def render(prompt_id: str, locale: str = DEFAULT_LOCALE, db=None) -> RenderedPrompt:
     """The prompt `prompt_id` as the model gets it, with sample interpolations.
 
-    Raises `KeyError` for an unknown id — the route layer (P2) turns that into a
+    `db` is what makes "as the model gets it" true rather than aspirational: with
+    a session, any slice the tutor has overridden renders as HIS text, because the
+    builders call the same `resolve` the live path calls. Without one, it renders
+    the code defaults — the honest answer for a caller that has no session, and
+    what an un-edited install sends.
+
+    Raises `KeyError` for an unknown id — the route layer turns that into a
     machine-readable code the web renders as one Greek sentence, per the existing
     convention. Never a stack trace at the tutor.
     """
-    return REGISTRY[prompt_id].render(locale)
+    return REGISTRY[prompt_id].render(locale, db)
+
+
+def resolve(db, slice_id: str) -> str:
+    """The registry's view of the resolution rule: his override, else the code.
+
+    A one-line wrapper over `overrides.resolve`, and deliberately not a second
+    implementation of it — the live builders call THAT function directly (see
+    `students/context.py`), and this exists only so the router and the previews
+    can ask the same question without repeating where each default lives. The rule
+    itself has exactly one home; if these two could disagree, the Settings page
+    could show a sentence the model never gets, which is the whole failure this
+    feature was built to end.
+
+    Raises `KeyError` for an unknown slice, rather than inventing a default for an
+    id nobody registered.
+    """
+    _, sl = SLICES[slice_id]
+    return overrides.resolve(db, slice_id, sl.default)
 
 
 def by_flow() -> dict[str, list[PromptEntry]]:

@@ -38,6 +38,7 @@ from sqlalchemy import select
 from app.i18n import language_name
 from app.models.note import Note
 from app.models.student import Student
+from app.prompts.overrides import resolve
 
 # Notes carrying this tag are what the tutor has flagged as "he is stuck on this".
 # Surfaced FIRST in the brief, before the general notes, because a lesson that
@@ -65,6 +66,14 @@ STUDENT_PITCH = (
     "Write for THIS student: pitch the explanations at his level, and where "
     "his notes say he is stuck, address it directly instead of teaching past it."
 )
+
+# The id the tutor's override is stored under, defined HERE — beside the default
+# it overrides — rather than in the registry that displays it. The registry POINTS
+# AT this, exactly as it points at the text: it is a viewer, and a viewer must not
+# be the place a live-path identifier is defined. Two string literals reading
+# "student.pitch" in two files is one typo away from an override that saves,
+# reports success, and changes nothing.
+STUDENT_PITCH_SLICE_ID = "student.pitch"
 
 
 def _age(birthdate: date | None) -> int | None:
@@ -123,5 +132,14 @@ def build_student_brief(db, student_id: UUID | None) -> str | None:
         lines.append("The tutor's other notes on him:")
         lines.extend(f"  - {n.title}: {n.body.strip()}" for n in others)
 
-    lines.append(STUDENT_PITCH)
+    # THE ONE LINE IN THIS APP A TUTOR CAN REWRITE, and this is where his rewrite
+    # actually reaches a model — not the Settings page, which only shows it. The
+    # three live callers (`jobs/curriculum_draft.py:322`, `curriculum/generate.py:137`,
+    # `curriculum/interview.py:493`) all pass a real session, so an override he
+    # saves is in the next lesson prompt. Without this call the whole feature is a
+    # textarea that writes to a table nothing reads.
+    #
+    # `resolve` returns STUDENT_PITCH itself when he has not touched it, so the
+    # un-edited path is byte-identical to what this function has always returned.
+    lines.append(resolve(db, STUDENT_PITCH_SLICE_ID, STUDENT_PITCH))
     return "\n".join(lines)
