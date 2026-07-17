@@ -201,3 +201,29 @@ def db():
 def client():
     """FastAPI TestClient for API endpoint tests."""
     return TestClient(app)
+
+
+@pytest.fixture
+def tmp_media(tmp_path, monkeypatch, db):
+    """A throwaway media_dir plus a real KnowledgeSource row for paginate
+    tests that call `_paginate_pdf` directly (below `paginate_source`'s own
+    setup).
+
+    Two things a bare tmp_path can't give `_paginate_pdf` on its own:
+    `settings.media_dir` redirected there (it writes page JPEGs under
+    `<media_dir>/<source_id>/NNNN.jpg`), and a `source_id` that really exists
+    — `Page.source_id` FKs to `knowledge_source.id`, so committing a Page
+    against a made-up UUID would fail at the database, not in the test.
+    """
+    monkeypatch.setattr("app.brain.paginate.settings.media_dir", str(tmp_path))
+    from app.models.knowledge import KnowledgeSource
+
+    source = KnowledgeSource(type="pdf", title="tmp_media fixture", status="ingesting")
+    db.add(source)
+    db.commit()
+
+    class _TmpMedia:
+        source_id = source.id
+        media_dir = tmp_path
+
+    return _TmpMedia()

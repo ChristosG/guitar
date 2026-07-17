@@ -22,6 +22,7 @@ import fitz
 
 from app.brain.extract import extract_text
 from app.brain.media import purge_source_media
+from app.brain.textlayer import text_layer_kind
 from app.config import settings
 from app.models.knowledge import Page
 
@@ -80,13 +81,26 @@ def _paginate_pdf(db, source_id, data: bytes) -> list[Page]:
             with open(os.path.join(settings.media_dir, rel), "wb") as fh:
                 fh.write(pix.tobytes("jpeg"))
 
-            # A page that already has a text layer needs no OCR at all — take it
-            # for free and mark it ready. (The book has none; other PDFs may.)
-            layer = (doc[i].get_text() or "").strip()
+            # WHAT the text layer is decides whether we may keep it. A real font
+            # is publisher text — take it, free, and no model ever needs to look.
+            # A GlyphLessFont layer is an invisible OCR layer over a scan: it is
+            # someone else's Tesseract, it lost every fraction glyph in the book
+            # (measured: 0 of `¼½¾` survive in 2,012,859 chars across the three
+            # scanned books), and adopting it would make that permanent, because
+            # `ready` means nothing revisits the page. So we drop it and re-read
+            # the scan ourselves.
+            kind = text_layer_kind(doc[i])
+            if kind == "digital":
+                text, status, reason, provenance = (
+                    (doc[i].get_text() or "").strip(), "ready", None, "text_layer")
+            else:
+                text, status, provenance = None, "pending", None
+                reason = "no_text_layer" if kind == "none" else "inherited_ocr"
+
             page = Page(
                 source_id=source_id, page_no=page_no, image_path=rel,
-                text=layer or None,
-                status="ready" if layer else "pending",
+                text=text or None, status=status,
+                text_source=provenance, ocr_reason=reason,
             )
             db.add(page)
             pages.append(page)
