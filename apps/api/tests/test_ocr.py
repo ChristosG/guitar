@@ -1,10 +1,12 @@
 import fitz
 import pytest
 from app.brain.ocr import (
+    FIGURE_END,
     FIGURE_MARKER,
     FIGURE_PROMPT,
     MAX_PAGE_ATTEMPTS,
     OCR_PROMPT,
+    book_text,
     ocr_source,
 )
 from app.models.knowledge import EMBED_DIM, Chunk, KnowledgeSource, Page
@@ -659,16 +661,20 @@ def test_a_figure_description_is_marked_so_it_cannot_be_read_as_a_quotation(
     is which. A description of a photo is NOT a sentence from the book, and
     quoting it as one would be a fabricated citation."""
     src, page = _image_region_page(db, monkeypatch, tmp_path)
-    fake = _Vision(["A photo of an amp face; the knobs are labelled VOLUME and MASTER."])
+    description = "A photo of an amp face; the knobs are labelled VOLUME and MASTER."
+    fake = _Vision([description])
     monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
     ocr_source(db, src.id)
 
     text = db.get(Page, page.id).text
-    assert FIGURE_MARKER in text
-    # everything BEFORE the marker is the book's own words; everything after is ours
-    assert text.split(FIGURE_MARKER, 1)[0].strip() == _PUBLISHER_TEXT
+    # THE CONTRACT: text inside a [FIGURE]...[/FIGURE] region is ours; everything
+    # outside one is the page's own words. Both ends of the region are present, so
+    # the description is BOUNDED rather than merely begun.
+    assert FIGURE_MARKER in text and FIGURE_END in text
+    assert book_text(text) == _PUBLISHER_TEXT
+    assert description not in book_text(text)
 
 
 def test_an_image_region_page_is_asked_to_describe_the_picture_not_re_transcribe_it(
@@ -748,6 +754,259 @@ def test_an_inherited_ocr_page_is_transcribed_whole_and_replaces_nothing(
     assert reloaded.text == transcription
     assert fake.prompts == [OCR_PROMPT]
     assert reloaded.status == "ready"
+
+
+# =========================================================================
+# Final review, CRITICAL 1 — THE [FIGURE] CONTRACT ON THE TRANSCRIBE PATH
+# =========================================================================
+#
+# The module used to state the contract POSITIONALLY ("everything from the first
+# marker on is ours") while `OCR_PROMPT` asked for markers INTERLEAVED in reading
+# order with no terminator. That contract is true in `describe` mode and FALSE on
+# the transcribe path — i.e. on 845 of the tutor's 888 pages, none of which had a
+# single test. Both failure directions were live, and the second is the one this
+# whole module is architected against:
+#
+#   split at the first marker  -> the book's real prose after a figure is
+#                                 discarded as "ours" -> content silently lost;
+#   take only the marker's line -> a multi-line description's continuation reads
+#                                 as the book's words -> OUR DESCRIPTION OF A
+#                                 PHOTO IS CITED AS A VERBATIM QUOTATION WITH A
+#                                 REAL PAGE NUMBER ON IT.
+#
+# The contract is now DELIMITED and total: text inside a [FIGURE]...[/FIGURE]
+# region is ours, everything outside one is the page's own words, and an
+# unterminated [FIGURE] runs to the end of the text. `book_text` is that rule,
+# executable, for every reader downstream (Part B's canon compile above all).
+
+# A real transcribed page shape: the author's prose, a figure in the middle of it
+# where the picture actually sits, and THE AUTHOR'S PROSE RESUMING AFTERWARDS.
+# Kahn p.63 is exactly this page.
+_PROSE_BEFORE = "The humbucker cancels hum by wiring two coils out of phase."
+_PROSE_AFTER = "Seth Lover filed the patent in 1955, and Gibson shipped it in 1957."
+_FIGURE_BODY = ('A photo of a PAF humbucker with its cover removed, labelled\n'
+                '"1957". Both coils and the maple spacer are visible.')
+
+
+def _transcribed_page_with_a_figure() -> str:
+    return (f"{_PROSE_BEFORE}\n"
+            f"{FIGURE_MARKER}\n{_FIGURE_BODY}\n{FIGURE_END}\n"
+            f"{_PROSE_AFTER}")
+
+
+def test_book_text_keeps_prose_that_resumes_AFTER_a_figure_on_a_transcribed_page():
+    """THE BUG, at its smallest. A transcribed page's prose does not stop at the
+    first figure — the figure sits in the middle of it. Splitting at the first
+    marker throws the rest of the page away; not splitting at all quotes our
+    photo caption as the author's sentence."""
+    text = _transcribed_page_with_a_figure()
+
+    words = book_text(text)
+
+    assert _PROSE_BEFORE in words
+    assert _PROSE_AFTER in words, "the book's prose after the figure was discarded as ours"
+    assert _FIGURE_BODY not in words, "our description of a photo read as the book's words"
+
+
+def test_book_text_separates_every_figure_on_a_page_with_several():
+    """Reading order means N figures interleaved with N+1 runs of prose. The rule
+    is per-REGION, not per-page, so it holds however many there are."""
+    text = (f"First paragraph.\n{FIGURE_MARKER} A wiring diagram. {FIGURE_END}\n"
+            f"Second paragraph.\n{FIGURE_MARKER} A photo of a Tele. {FIGURE_END}\n"
+            "Third paragraph.")
+
+    words = book_text(text)
+
+    for prose in ("First paragraph.", "Second paragraph.", "Third paragraph."):
+        assert prose in words
+    for ours in ("wiring diagram", "photo of a Tele"):
+        assert ours not in words
+
+
+def test_book_text_never_fuses_the_words_either_side_of_an_inline_figure():
+    """A region lifted out of the middle of a line must not weld its neighbours
+    into a word that is in neither the book nor our description."""
+    assert "hum" in book_text(f"hum{FIGURE_MARKER}x{FIGURE_END}bucker")
+    assert "humbucker" not in book_text(f"hum{FIGURE_MARKER}x{FIGURE_END}bucker")
+
+
+def test_an_unterminated_figure_runs_to_the_end_of_the_text():
+    """THE TOTALITY CLAUSE, and it exists for the pages already in his library:
+    Powers' 43 describe-mode pages were written before there was a terminator, in
+    a format whose rule was "everything from the marker on is ours" — which was
+    TRUE for describe mode. So the reader keeps resolving that shape, in the only
+    direction that cannot fabricate a citation.
+
+    Verified against all 46 marker-carrying pages in the live library: zero are
+    misread, so none of them needs re-reading."""
+    legacy = f"{_PUBLISHER_TEXT}\n\n{FIGURE_MARKER} A six-line tab staff, 5th to 7th fret."
+
+    assert book_text(legacy) == _PUBLISHER_TEXT
+
+
+def test_a_page_that_is_nothing_but_an_unterminated_figure_has_no_words_of_its_own():
+    """The OTHER legacy shape, and it is the sharper one — Powers p.47 and p.54,
+    live in his library right now, are a bare `[FIGURE]` at position 0 followed
+    by a description that runs for a THOUSAND CHARACTERS over several lines
+    ("Measure 1: under 'Am' — columns of 1/2/2...").
+
+    A reader that took only the marker's own line as ours would hand every line
+    after the first to the canon compile as Maxwell Powers' own prose. The page
+    has no words of its own: all of it is ours."""
+    all_figure = (f"{FIGURE_MARKER} A tablature exercise in 4/4.\n"
+                  "Measure 1: under \"Am\" — columns of 1/2/2 repeated twice.\n"
+                  "Measure 2: under \"F\" — columns of 1/2/3 repeated.")
+
+    assert book_text(all_figure) == ""
+
+
+def test_a_transcribed_page_round_trips_with_the_two_halves_still_separable(
+    db, tmp_path, monkeypatch
+):
+    """End to end, through `ocr_source`, on the path 845 of 888 pages take: what
+    lands in `Page.text` must be parseable back into the book's words and ours
+    with no guessing."""
+    src, page = _inherited_ocr_page(db, monkeypatch, tmp_path)
+    fake = _Vision([_transcribed_page_with_a_figure()])
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    ocr_source(db, src.id)
+
+    reloaded = db.get(Page, page.id)
+    assert reloaded.status == "ready"
+    assert fake.prompts == [OCR_PROMPT]
+    assert _PROSE_AFTER in book_text(reloaded.text)
+    assert _FIGURE_BODY not in book_text(reloaded.text)
+
+
+def test_a_transcription_whose_figure_is_never_closed_is_failed_not_stored(
+    db, tmp_path, monkeypatch
+):
+    """The one shape we cannot parse and must not guess at. An open [FIGURE] with
+    prose after it is either a description that swallowed the page's tail, or a
+    page whose tail we are about to discard — and nothing downstream could tell.
+
+    So it is a FAILED page: amber, retryable, visible. Cheap and honest, against
+    a silent permanent lie in either direction. `describe` mode never reaches
+    here — there, every word IS ours, so `_marked` can close the region itself
+    without guessing at anything (see the test below)."""
+    src, page = _inherited_ocr_page(db, monkeypatch, tmp_path)
+    unclosed = f"{_PROSE_BEFORE}\n{FIGURE_MARKER}\n{_FIGURE_BODY}\n{_PROSE_AFTER}"
+    fake = _Vision([unclosed, unclosed])
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    result = ocr_source(db, src.id)
+
+    assert (result.ready, result.failed) == (0, 1)
+    assert fake.calls == 2                       # initial + one retry, like any failure
+    reloaded = db.get(Page, page.id)
+    assert reloaded.status == "failed"
+    assert reloaded.text is None                 # never stored
+    assert db.query(Chunk).filter_by(page_id=reloaded.id).count() == 0
+    assert reloaded.ocr_reason == "inherited_ocr"   # not garbage — the markup, not the page
+
+
+def test_a_clean_transcription_with_no_pictures_at_all_is_untouched(
+    db, tmp_path, monkeypatch
+):
+    """THE FALSE-FAILURE GUARD for the screen above. Most pages have no figure on
+    them; the screen must be silent on every one of them."""
+    src, _page = _inherited_ocr_page(db, monkeypatch, tmp_path)
+    plain = "A page of ordinary prose about gain staging, with no picture on it."
+    fake = _Vision([plain])
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    result = ocr_source(db, src.id)
+
+    assert result.ready == 1
+    assert db.query(Page).filter_by(source_id=src.id).one().text == plain
+
+
+def test_a_describe_response_is_closed_for_the_model_rather_than_failed(
+    db, tmp_path, monkeypatch
+):
+    """The asymmetry with the transcribe screen, and why it is not an oversight:
+    in `describe` mode EVERY word of the response is ours — the prompt forbids
+    transcription outright — so "the region ends where the response ends" is a
+    fact, not a guess. Nothing is ambiguous, so nothing needs to fail; failing
+    would only throw away a correct description of one of Powers' 43 tab pages."""
+    src, page = _image_region_page(db, monkeypatch, tmp_path)
+    fake = _Vision([f"{FIGURE_MARKER}\nA six-line tab staff, 5th to 7th fret."])
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    ocr_source(db, src.id)
+
+    reloaded = db.get(Page, page.id)
+    assert reloaded.status == "ready"
+    assert "tab staff" in reloaded.text
+    assert book_text(reloaded.text) == _PUBLISHER_TEXT   # the region got closed
+
+
+def test_a_describe_response_that_ignores_the_markers_entirely_is_still_bounded(
+    db, tmp_path, monkeypatch
+):
+    """`_marked`'s reason for existing, restated for the delimited contract: an
+    UNMARKED description is indistinguishable from the book's words, and a
+    HALF-marked one is worse — it reads as the book's words from the point the
+    model stopped writing markup."""
+    src, page = _image_region_page(db, monkeypatch, tmp_path)
+    fake = _Vision(["A six-line tab staff, 5th to 7th fret."])
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    ocr_source(db, src.id)
+
+    text = db.get(Page, page.id).text
+    assert text.count(FIGURE_MARKER) == 1 and text.count(FIGURE_END) == 1
+    assert book_text(text) == _PUBLISHER_TEXT
+
+
+def test_re_reading_a_closed_describe_page_still_merges_onto_the_publisher_text(
+    db, tmp_path, monkeypatch
+):
+    """Idempotency, re-proved against the delimited format: `_publisher_text` now
+    strips REGIONS rather than truncating at the first marker, and a page picked
+    up twice must still merge onto the publisher's words — not onto the previous
+    run's description."""
+    src, page = _image_region_page(db, monkeypatch, tmp_path)
+    fake = _Vision([f"{FIGURE_MARKER}\nFirst description.\n{FIGURE_END}",
+                    f"{FIGURE_MARKER}\nSecond description.\n{FIGURE_END}"])
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    ocr_source(db, src.id)
+    page = db.get(Page, page.id)
+    page.status = "pending"
+    db.commit()
+    ocr_source(db, src.id)
+
+    text = db.get(Page, page.id).text
+    assert text.count(FIGURE_MARKER) == 1
+    assert "First description" not in text
+    assert "Second description" in text
+    assert book_text(text) == _PUBLISHER_TEXT
+
+
+def test_both_prompts_ask_for_a_figure_region_that_is_opened_AND_closed():
+    """PROMPTS ARE THE CONTRACT'S OTHER HALF. `_marked` can only guarantee the
+    describe path; on the transcribe path the model's compliance is what produces
+    a parseable page, so the prompt must ask for the terminator explicitly — and
+    say why, because a model told the stakes complies better than one given a
+    bare rule."""
+    for prompt in (OCR_PROMPT, FIGURE_PROMPT):
+        assert FIGURE_MARKER in prompt
+        assert FIGURE_END in prompt, f"the prompt never asks for {FIGURE_END}"
+
+
+def test_the_transcribe_prompt_says_where_the_books_words_resume():
+    """The interleaving is the whole difficulty of the transcribe path: prose,
+    figure, prose. The prompt has to name the boundary, not just the marker."""
+    assert "reading order" in OCR_PROMPT
+    assert "resumes" in OCR_PROMPT
 
 
 # --- Task 9: the prompt must also describe pictures -----------------------

@@ -66,14 +66,24 @@ const PASSWORD = process.env.APP_PASSWORD ?? "guitar24";
  * burns an hour before failing. */
 const READ_TIMEOUT_MS = 50 * 60 * 1000;
 
-/** `ocr.py`'s `FIGURE_MARKER` — the contract between the model's description and
+/** `ocr.py`'s figure region — the contract between the model's description and
  * the publisher's words, asserted here in the browser exactly as it is written
- * there. `_marked()` guarantees it even when the model forgets it, so its
- * absence in the Reader means the page was never described. */
+ * there: text INSIDE a [FIGURE]…[/FIGURE] region is ours, everything outside one
+ * is the page's own words. `_marked()` guarantees BOTH ends on the describe path
+ * even when the model forgets them, so the marker's absence in the Reader means
+ * the page was never described. */
 const FIGURE_MARKER = "[FIGURE]";
+const FIGURE_END = "[/FIGURE]";
 
 /** Wall-clock, for the progress log below (and the report). A 40-minute test
  * that prints nothing for 40 minutes is indistinguishable from a hung one. */
+/** The markers are literal brackets — regex metacharacters. Escaped rather than
+ * hand-written as `\[FIGURE\]` so the constants above stay the single source of
+ * the strings this test is checking for. */
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function elapsed(startedAt: number): string {
   const secs = Math.round((Date.now() - startedAt) / 1000);
   return `${String(Math.floor(secs / 60)).padStart(2, "0")}:${String(secs % 60).padStart(2, "0")}`;
@@ -281,20 +291,40 @@ test.describe("ingesting a real book, the way the tutor does", () => {
 
     // --- 7. THE MERGE: kept AND added, on the same page -----------------------
     const text = (await described.first().textContent()) ?? "";
-    const [publisher, figure] = text.split(FIGURE_MARKER);
+    // The contract as `book_text()` applies it, re-implemented here on purpose:
+    // this asserts what a READER downstream can recover from the DOM, so it must
+    // not borrow the producer's own parser to do it.
+    const region = new RegExp(
+      `${escapeRe(FIGURE_MARKER)}([\\s\\S]*?)${escapeRe(FIGURE_END)}`,
+    );
+    const match = text.match(region);
+    // A BOUNDED description, not merely a begun one. An opener with no closer is
+    // the whole of CRITICAL 1: a reader cannot tell where our description of the
+    // tab stops and Powers' own words resume, so it quotes ours as his.
+    expect(
+      match,
+      "the description must be CLOSED — an unterminated [FIGURE] is a description that gets cited as the author's words",
+    ).not.toBeNull();
+    const figure = match?.[1] ?? "";
+    const publisher = text.replace(region, "\n").trim();
 
     // The publisher's caption is still there. If this is empty, the model
     // OVERWROTE the book — the exact failure `_publisher_text`/`merge` exist to
     // prevent, and the one that would be invisible from a page count alone.
     expect(
-      publisher.trim().length,
+      publisher.length,
       "the publisher's own text must SURVIVE the read — a description must be added, never substituted",
     ).toBeGreaterThan(0);
     // …and the model genuinely described the tab, rather than shrugging.
     expect(
-      figure?.trim().length ?? 0,
+      figure.trim().length,
       "the [FIGURE] block must actually describe the tab",
     ).toBeGreaterThan(40);
+    // …and nothing of OURS is sitting in what a reader would quote as his.
+    expect(
+      publisher.includes(figure.trim().slice(0, 40)),
+      "our description of the tab must not survive into the page's own words",
+    ).toBe(false);
 
     const pageTestId = await described.first().getAttribute("data-testid");
     log(`--- ${pageTestId} as the Reader renders it -------------------------`);

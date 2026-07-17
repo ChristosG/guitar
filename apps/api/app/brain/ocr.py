@@ -34,19 +34,94 @@ log = logging.getLogger(__name__)
 
 # --- what we ask the model, and why ---------------------------------------
 #
-# THE MARKER. A description of a picture is NOT a sentence from the book, and
-# once both are in `page.text` nothing downstream can tell them apart by
+# THE FIGURE REGION. A description of a picture is NOT a sentence from the book,
+# and once both are in `page.text` nothing downstream can tell them apart by
 # reading them — the canon compile (Part B) and `retrieve.py` both quote this
 # text back to the tutor as the book's own words. Quoting our description of a
 # photo as if the author wrote it is a fabricated citation with a real page
 # number on it, which is worse than having no description at all.
 #
-# So: one stable sentinel, and the whole contract is positional. Everything
-# before the first marker is the page's words; everything from it on is ours.
-# ASCII and greppable on purpose — `_publisher_text` splits on it, a human
-# reading the Reader sees what it means, and it survives a model that decides
-# to reformat the markdown around it.
+# THE CONTRACT, and it is TOTAL — every character of a page is classified, and
+# no reader ever has to guess:
+#
+#     text INSIDE a [FIGURE]...[/FIGURE] region is OURS;
+#     everything outside one is the PAGE'S OWN WORDS;
+#     an unterminated [FIGURE] runs to the end of the text.
+#
+# `book_text()` IS that rule, executable. Call it; do not re-derive it.
+#
+# WHY IT IS DELIMITED AND NOT POSITIONAL. This contract used to read "everything
+# from the first marker on is ours". That is true in `describe` mode — the
+# publisher's text comes first and every marker follows it — and FALSE on the
+# transcribe path, which is 845 of the tutor's 888 pages: `OCR_PROMPT` asks for
+# markers INTERLEAVED in reading order, because that is where the pictures
+# actually are, so the author's prose RESUMES after a marker. With no terminator
+# both readings were wrong, and the second one is the failure this whole module
+# exists to prevent:
+#
+#     split at the first marker  -> the book's real prose is discarded as ours;
+#     take the marker's line only -> a multi-line description's continuation is
+#                                    read as the book's words, and gets cited as
+#                                    a verbatim quotation with a real page number.
+#
+# A region has an END, so a description is bounded WHEREVER it appears — which
+# makes the same rule true in both modes rather than in the one mode that had
+# tests. The last clause ("an unterminated [FIGURE] runs to the end") is what
+# keeps the rule total for the 43 pages of Powers already in his library, which
+# were written in the old format: there, "from the marker on is ours" was true,
+# and this resolves them to exactly that — the only direction that cannot
+# fabricate a citation.
+#
+# ASCII and greppable on purpose: a human reading the Reader sees what it means,
+# and it survives a model that decides to reformat the markdown around it.
 FIGURE_MARKER = "[FIGURE]"
+FIGURE_END = "[/FIGURE]"
+
+# Non-greedy, DOTALL: a region runs from an opener to the FIRST closer after it,
+# across the newlines a multi-line description is full of. A stray opener nested
+# inside a well-formed region is harmless and deliberately not special-cased —
+# it sits in text this rule already calls ours.
+_FIGURE_REGION = re.compile(
+    re.escape(FIGURE_MARKER) + r".*?" + re.escape(FIGURE_END), re.DOTALL
+)
+_ANY_FIGURE_MARKER = re.compile(
+    f"{re.escape(FIGURE_MARKER)}|{re.escape(FIGURE_END)}"
+)
+
+
+def book_text(text: str) -> str:
+    """The page's OWN words: everything outside a [FIGURE]...[/FIGURE] region.
+
+    THE CONTRACT'S ONE READER — for `_publisher_text` here, and for Part B's
+    canon compile, which is the caller this was written for. It quotes this text
+    back to the tutor as the author's sentences, so anything this function gets
+    wrong becomes a citation he will click on and trust.
+
+    Substitutes a newline rather than "" for a lifted region: a figure marked up
+    inline would otherwise weld the words either side of it into one word that
+    appears in neither the book nor our description.
+    """
+    outside = _FIGURE_REGION.sub("\n", text or "")
+    # The totality clause. An opener with no closer left standing after the
+    # well-formed regions are gone owns the rest of the text — the fail-safe
+    # direction: mistaking the book's prose for our description costs a
+    # paragraph, mistaking our description for the book's prose is a fabricated
+    # quotation. Only legacy `describe` text can reach this — a transcription
+    # whose markup does not close is refused outright (`_UnclosedFigureRegion`).
+    head, marker, _ours = outside.partition(FIGURE_MARKER)
+    return (head if marker else outside).strip()
+
+
+def _figure_markup_is_closed(text: str) -> bool:
+    """True when every marker in `text` belongs to a well-formed region — i.e.
+    when the contract can be applied to it without the totality clause having to
+    rescue anything.
+
+    Removes the well-formed regions and asks whether any marker survived: one
+    check that catches an unterminated opener, an orphaned closer, and a crossed
+    pair alike.
+    """
+    return not _ANY_FIGURE_MARKER.search(_FIGURE_REGION.sub("", text))
 
 # THE TRANSCRIBE PROMPT — for a page with no trustworthy text (`inherited_ocr`,
 # `no_text_layer`).
@@ -78,12 +153,20 @@ OCR_PROMPT = (
     "superscripts must be transcribed as they are printed, never flattened to "
     "the nearest plain digit or letter.\n"
     "2. PICTURES. A photograph, diagram, illustration, chord box, tab staff or "
-    f"table is content too, and no transcription describes one. Add a {FIGURE_MARKER} "
-    "line for each, where it appears in reading order, describing plainly what "
-    "it shows and reproducing any text, numbers or labels printed inside it. "
+    "table is content too, and no transcription describes one. Where each one "
+    f"appears in reading order, open a {FIGURE_MARKER} line, describe plainly "
+    "what it shows and reproduce any text, numbers or labels printed inside it, "
+    f"then close it with a {FIGURE_END} line before the page's text resumes. "
     "Describe only what is visible — if you cannot make it out, say that "
     "instead of guessing.\n"
-    "3. SHAPE. No preamble, no sign-off, no commentary about how you read the "
+    f"3. CLOSE EVERY FIGURE. {FIGURE_MARKER} and {FIGURE_END} are how a reader "
+    "downstream tells your words from the author's: what you write BETWEEN them "
+    "is a description of a picture, and everything OUTSIDE them is quoted back "
+    "to a teacher as the author's own sentences, with this page's number on it. "
+    f"So a {FIGURE_MARKER} you never close turns the rest of the page into a "
+    "quotation the author never wrote. Every one gets its closing line, even "
+    "the last figure on the page.\n"
+    "4. SHAPE. No preamble, no sign-off, no commentary about how you read the "
     "page, no markdown fences, no headings of your own. Begin with the page's "
     f"first word, or with {FIGURE_MARKER} if the page is all picture. If the page "
     "is genuinely blank, reply with nothing at all."
@@ -111,9 +194,12 @@ FIGURE_PROMPT = (
     "Describe only what is visible. Do not invent detail you cannot make out, "
     "and do not explain, teach, or comment on the music.\n"
     "\n"
-    f"Begin each picture with {FIGURE_MARKER} on its own line. No preamble, no "
-    "sign-off, no commentary about how you read the page, no markdown fences. "
-    "If the page has no picture on it at all, reply with nothing at all."
+    f"Open each picture with {FIGURE_MARKER} on its own line and close it with "
+    f"{FIGURE_END} on its own line. Those lines are how a reader downstream tells "
+    "your description of a picture from the sentences the author actually wrote "
+    "on this page. No preamble, no sign-off, no commentary about how you read "
+    "the page, no markdown fences. If the page has no picture on it at all, "
+    "reply with nothing at all."
 )
 
 _MAX_ATTEMPTS = 2       # initial + one retry
@@ -198,6 +284,28 @@ class _SuspectedTruncation(RuntimeError):
     failure — there is still no manual-edit path."""
 
 
+class _UnclosedFigureRegion(RuntimeError):
+    """A TRANSCRIPTION whose figure markup does not close — an opener with no
+    `[/FIGURE]` after it, an orphaned closer, a crossed pair.
+
+    THE ONE SHAPE THE CONTRACT CANNOT RESOLVE WITHOUT GUESSING, on the one path
+    where guessing costs something. The totality clause says an unterminated
+    marker runs to the end of the text; on a transcribed page that is very
+    possibly the author's prose, silently discarded. The other reading — the
+    description ends at its line — cites our photo caption as his sentence.
+    Nothing in the response distinguishes them.
+
+    So it is routed like any other unreadable page: one retry, then `failed` —
+    amber, retryable, and visible to the tutor. A page we could not parse is
+    cheap; a page we parsed wrongly is permanent, silent, and green.
+
+    `describe` mode never raises this, and that asymmetry is a decision rather
+    than an oversight: there, `FIGURE_PROMPT` forbids transcription outright, so
+    every word of the response IS ours and "the region ends where the response
+    ends" is a fact rather than a guess. `_marked` closes it and the page stays
+    `ready` — see `_VisionTask.screens_figure_markup`."""
+
+
 class _GarbageTranscription(RuntimeError):
     """The response was long enough to judge and is not a transcription of a
     page. TWO detectors raise this, because there are two ways to get here and
@@ -262,14 +370,19 @@ def _publisher_text(page: Page) -> str:
     """The page's OWN words as currently stored — never our description of its
     pictures.
 
-    Splits at the first `FIGURE_MARKER` because a page can be picked up more
-    than once (an embed hiccup, a resumed run, an explicit re-read), and what it
-    must merge onto EVERY time is the publisher's text — not the previous run's
-    output, which would stack a description onto a description onto a
-    description. Idempotent by construction: the only writer of that marker is
+    Strips every `[FIGURE]...[/FIGURE]` REGION because a page can be picked up
+    more than once (an embed hiccup, a resumed run, an explicit re-read), and
+    what it must merge onto EVERY time is the publisher's text — not the previous
+    run's output, which would stack a description onto a description onto a
+    description. Idempotent by construction: the only writer of those markers is
     `_VisionTask.merge`.
+
+    Regions, not "everything from the first marker on" — which was correct only
+    because this is called on the describe path today, and would have thrown away
+    the back half of a transcribed page the moment anything called it on one. The
+    contract holds in both modes now, so this holds for whoever calls it next.
     """
-    return (page.text or "").split(FIGURE_MARKER, 1)[0].strip()
+    return book_text(page.text or "")
 
 
 @dataclass(frozen=True)
@@ -286,6 +399,7 @@ class _VisionTask:
     prompt: str
     preserved_text: str         # publisher text this page must not lose ("" if none)
     screens_ocr_garbage: bool
+    screens_figure_markup: bool
 
     def merge(self, response: str) -> str:
         """This page's final text. MERGE, never overwrite.
@@ -324,15 +438,33 @@ class _VisionTask:
 
 
 def _marked(description: str) -> str:
-    """Guarantee the description carries its marker even if the model dropped it.
+    """Guarantee a `describe` response is BOUNDED by our markers, however the
+    model marked it up — or didn't.
 
-    NOT scrubbing the model's prose — the prompt asks for the marker and this
-    only makes our own output contract true regardless of whether it complied.
-    An unmarked description is indistinguishable from the book's words, which is
-    the one thing this must never be.
+    An unmarked description is indistinguishable from the book's words. A
+    HALF-marked one is worse: it reads as the book's words from wherever the
+    model stopped writing markup, which is a fabricated quotation with a real
+    page number, arriving quietly. So the contract cannot rest on compliance
+    here, and it does not have to: `FIGURE_PROMPT` forbids transcription, so
+    EVERY word of a describe response is ours, and wrapping the whole of it from
+    first character to last is a true statement about it no matter what shape it
+    came back in.
+
+    A compliant response (regions, nothing outside them) is returned untouched,
+    keeping the model's own per-picture split. Only a non-compliant one is
+    re-wrapped as a single region, and only there are stray markers dropped —
+    that is not the prose-scrubbing this module refuses elsewhere: it removes OUR
+    OWN sentinel from text that is entirely ours, changes no attribution, and
+    cannot eat a line of a real page, because the page's own words are never in a
+    describe response.
     """
-    return description if description.lstrip().startswith(FIGURE_MARKER) else \
-        f"{FIGURE_MARKER} {description}"
+    text = description.strip()
+    if not text:
+        return text
+    outside_any_region = _FIGURE_REGION.sub("", text).strip()
+    if not outside_any_region:
+        return text            # already nothing but well-formed regions — compliant
+    return f"{FIGURE_MARKER}\n{_ANY_FIGURE_MARKER.sub('', text).strip()}\n{FIGURE_END}"
 
 
 def _vision_task_for(page: Page) -> _VisionTask:
@@ -363,8 +495,15 @@ def _vision_task_for(page: Page) -> _VisionTask:
     """
     preserved = _publisher_text(page)
     if page.ocr_reason == "image_region" and preserved:
+        # `screens_figure_markup` is False for the reason `_marked`'s docstring
+        # gives: every word of a describe response is ours, so unclosed markup is
+        # repairable here without guessing at anything, and failing the page
+        # instead would only throw away a correct description of one of Powers'
+        # 43 tab pages. On the transcribe path the same repair WOULD be a guess —
+        # see `_UnclosedFigureRegion`.
         return _VisionTask(mode="describe", prompt=FIGURE_PROMPT,
-                           preserved_text=preserved, screens_ocr_garbage=False)
+                           preserved_text=preserved, screens_ocr_garbage=False,
+                           screens_figure_markup=False)
     # `screens_ocr_garbage` is False above, and that is a decision, not an
     # oversight: `looks_like_ocr_garbage` judges a TRANSCRIPTION against the
     # shape of real prose, and a description of a tab diagram is neither — it is
@@ -374,7 +513,8 @@ def _vision_task_for(page: Page) -> _VisionTask:
     # pages, which is what `image_region` exists for. Mojibake
     # (`_looks_like_garbage`, a unicode-category screen) still applies to both.
     return _VisionTask(mode="transcribe", prompt=OCR_PROMPT,
-                       preserved_text="", screens_ocr_garbage=True)
+                       preserved_text="", screens_ocr_garbage=True,
+                       screens_figure_markup=True)
 
 
 # --- WHOSE words these are --------------------------------------------------
@@ -842,6 +982,20 @@ def _transcribe_with_retry(provider, page: Page, task: _VisionTask) -> str:
                     f"vision() returned {len(text)} chars that are mostly "
                     "1-2 character stubs rather than words — the page did not "
                     "read (it may be damaged in the PDF itself)"
+                )
+            # THE CONTRACT'S ENFORCEMENT, in the retry loop for the same reason
+            # the screens above are: dropped markup is exactly the kind of
+            # one-off non-compliance a second attempt comes back clean from, and
+            # if it does not, this lands on the same `failed` path as any other
+            # page we could not read. The alternative is committing a page whose
+            # two halves nothing downstream can separate.
+            if task.screens_figure_markup and not _figure_markup_is_closed(text):
+                raise _UnclosedFigureRegion(
+                    f"vision() returned a transcription with {FIGURE_MARKER} markup "
+                    f"that never closes — without a {FIGURE_END} there is no way to "
+                    "tell where our description of a picture stops and the book's "
+                    "own words resume, and this page's text is quoted back as the "
+                    "author's"
                 )
             return text
         except LLMError as e:
