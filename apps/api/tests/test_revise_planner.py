@@ -13,6 +13,7 @@ stubbed to a tiny LibraryContext so the planner never reads the real library.
 Mirrors test_agent_tools.py's DB-reachable skip guard + create_all setup.
 """
 import copy
+import json
 import uuid
 
 import pytest
@@ -58,7 +59,18 @@ def _seed(db):
 
 
 def _snapshot(db):
-    return {b.id: (b.title, b.order, b.parent_id, b.body) for b in db.query(Block).all()}
+    """(title, order, parent_id, body, meta) per block. `meta` is a JSON-stable
+    copy (sort_keys, so key order never causes a false mismatch), not the live
+    `dict` reference — plan_revision provably never writes meta today, but this
+    is the read-only-contract test, and a reference would silently keep passing
+    even if a future op reassigned `block.meta` to an equal-looking dict built
+    fresh (Global Constraint #4's whole-dict-reassignment rule means the OLD
+    object is never mutated in place, but asserting on a stable serialisation
+    is the honest form of "nothing changed", not an artifact of Python identity)."""
+    return {
+        b.id: (b.title, b.order, b.parent_id, b.body, json.dumps(b.meta, sort_keys=True))
+        for b in db.query(Block).all()
+    }
 
 
 def _stub_library(monkeypatch):

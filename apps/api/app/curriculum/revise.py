@@ -222,7 +222,16 @@ def validate_ops(db, root_id: uuid.UUID, raw: dict) -> dict:
         elif name in ("modify_lesson", "remove_lesson"):
             ok = op["lesson_id"] in lesson_ids
         elif name == "move_lesson":
-            ok = (op["lesson_id"] in lesson_ids and op["to_module_id"] in module_ids and
+            # A lesson "moved after itself" (after_lesson_id == lesson_id) resolves
+            # fine id-by-id — both are the SAME live lesson — but is a degenerate op:
+            # edit._move_block excludes the block being moved from its destination
+            # siblings, so `after` can never be found once it equals the block's own
+            # id, and it raises StopIteration mid apply_revision (rolling back the
+            # whole approved plan). Caught here instead, same as any other op whose
+            # id/payload does not resolve.
+            self_move = (op.get("after_lesson_id") not in (None, "") and
+                         op.get("after_lesson_id") == op.get("lesson_id"))
+            ok = (not self_move and op["lesson_id"] in lesson_ids and op["to_module_id"] in module_ids and
                   (op.get("after_lesson_id") in (None, "") or
                    (lesson_ids.get(op["after_lesson_id"]) is not None
                     and _lesson_module(db, lesson_ids[op["after_lesson_id"]]) == module_ids[op["to_module_id"]])))

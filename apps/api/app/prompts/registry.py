@@ -1440,7 +1440,10 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: build_revise_messages,
         build=_build_curriculum_revise,
-        call_sites=("curriculum/revise.py:263",),
+        # NOTE: this pins an exact line in revise.py (test_registered_call_sites_
+        # still_point_at_provider_calls enforces it byte-for-byte) — bump it if a
+        # future edit adds/removes lines in revise.py ABOVE the guided_json() call.
+        call_sites=("curriculum/revise.py:272",),
         slices=(
             Slice(
                 id=REVISE_SLICE_ID,

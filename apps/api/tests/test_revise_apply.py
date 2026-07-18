@@ -196,6 +196,30 @@ def test_apply_revalidates_and_drops_a_bogus_id(db_and_tree):
     assert _children(db, m2.id, "lesson") == []
 
 
+def test_apply_drops_a_self_referential_move_lesson_and_applies_the_rest(db_and_tree):
+    """A move_lesson whose after_lesson_id equals its own lesson_id is a
+    degenerate "moved after itself" op. Before the fix it PASSED validate_ops
+    (both ids individually resolve — they are just the SAME id), then
+    edit._move_block raised StopIteration: `dest` excludes the block being
+    moved, so `after` can never be found in it once `after == block_id`. That
+    exception propagated out of apply_revision's `try` and rolled back the
+    WHOLE approved plan — one degenerate model op sinking an otherwise-good
+    revision. validate_ops now drops it like any other unresolved op, so the
+    rest of the plan still applies and apply_revision never raises."""
+    db, course, m1, m2, l1, l2, l3 = db_and_tree
+    plan = {"summary": "x", "ops": [
+        {"op": "move_lesson", "lesson_id": str(l1.id), "after_lesson_id": str(l1.id),
+         "to_module_id": str(m1.id), "reason": "moved after itself — degenerate"},
+        {"op": "remove_lesson", "lesson_id": str(l3.id), "reason": "a valid op"}]}
+
+    validated = revise.validate_ops(db, course.id, plan)
+    assert [o["op"] for o in validated["ops"]] == ["remove_lesson"]   # self-move dropped
+
+    out = revise.apply_revision(db, course.id, plan)                  # must not raise
+    assert out["applied"] == 1
+    assert _children(db, m2.id, "lesson") == []
+
+
 # ---------------------------------------------------------------------------
 # update_blueprint — controller op (2026-07-18): writes meta, requeues NOTHING
 # ---------------------------------------------------------------------------
