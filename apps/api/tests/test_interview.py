@@ -115,6 +115,12 @@ def _walk_to(db, interview, step, *, source_ids=None):
     if interview.step == "scope":
         answer_interview(db, interview, {"brief": "COURSE_BRIEF_MARKER",
                                          "gap_policy": "general_knowledge"})
+    if step == "structure":
+        return
+    if interview.step == "structure":
+        # The (optional, Plan C) "structure" step — skipped here so every existing
+        # walk still lands on the settings default, exactly as if it never asked.
+        answer_interview(db, interview, {"skip": True})
     if step == "sources":
         return
     if interview.step == "sources":
@@ -152,8 +158,14 @@ def test_the_state_machine_advances_deterministically_through_every_step(db):
     r = answer_interview(db, interview, {"brief": "get him playing blues",
                                          "gap_policy": "general_knowledge"})
     assert r["ok"]
-    assert interview.step == "sources"
+    assert interview.step == "structure"
     assert interview.brief == "get him playing blues"
+
+    # The (optional, Plan C) "structure" step — skipped here; its own machine is
+    # pinned in `test_interview_structure_step.py`.
+    r = answer_interview(db, interview, {"skip": True})
+    assert r["ok"]
+    assert interview.step == "sources"
 
     r = answer_interview(db, interview, {"source_ids": [str(source.id)]})
     assert r["ok"]
@@ -319,7 +331,7 @@ def test_the_scope_step_takes_a_free_text_brief_and_a_gap_policy(db):
     })
 
     assert r["ok"]
-    assert interview.step == "sources"
+    assert interview.step == "structure"
     assert interview.brief == "He wants to play 12-bar blues at his sister's wedding."
     assert interview.gap_policy == "library_only"
 
@@ -653,6 +665,7 @@ def test_the_student_reaches_the_course_meta_so_every_lesson_draft_can_see_him(d
     answer_interview(db, interview, {"weeks": 8, "sessions_per_week": 1,
                                      "minutes_per_session": 50})
     answer_interview(db, interview, {"brief": "b", "gap_policy": "general_knowledge"})
+    answer_interview(db, interview, {"skip": True})  # the (optional, Plan C) "structure" step
     answer_interview(db, interview, {"source_ids": [str(source.id)]})
     answer_interview(db, interview, {"regenerate": True})
     interview.outline = generate_interview_outline(db, interview)  # the async job's work
@@ -721,6 +734,7 @@ def test_confirm_returns_202_with_BOTH_a_job_id_and_a_root_id(client, db, monkey
     post({"student_id": None, "level": "all_levels"})
     post({"weeks": 8, "sessions_per_week": 1, "minutes_per_session": 50})
     post({"brief": "get him playing blues", "gap_policy": "general_knowledge"})
+    post({"skip": True})  # the (optional, Plan C) "structure" step
     post({"source_ids": [str(source.id)]})
     outline_202 = post({"regenerate": True})
     assert outline_202.status_code == 202, outline_202.text

@@ -306,6 +306,12 @@
             "web": "Search the web where it's needed, with the sources in front of me."
           }
         },
+        "structure": {
+          "heading": "The lesson structure — an optional step",
+          "hint": "This is how every lesson in this course is split up. The standard structure works well for most courses — change it only if you want something different, otherwise just press below.",
+          "skip": "Use the standard structure",
+          "continue": "Use this structure"
+        },
         "sources": {
           "heading": "Which of your library sources should this be built from?",
           "hint": "I read them WHOLE — not a search over them. What you pick here is literally what the model reads.",

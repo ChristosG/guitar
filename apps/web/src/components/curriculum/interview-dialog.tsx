@@ -32,6 +32,7 @@ import { cn } from "@/lib/utils";
 import { InterviewWhoStep } from "./interview-who-step";
 import { InterviewDurationStep } from "./interview-duration-step";
 import { InterviewScopeStep } from "./interview-scope-step";
+import { InterviewStructureStep } from "./interview-structure-step";
 import { InterviewSourcesStep } from "./interview-sources-step";
 import { InterviewOutlineStep } from "./interview-outline-step";
 import { InterviewConfirmStep } from "./interview-confirm-step";
@@ -39,7 +40,7 @@ import { InterviewConfirmStep } from "./interview-confirm-step";
 /** `app.curriculum.interview.STEP_ORDER`, for the progress trail only — the state
  * machine itself is entirely server-side and this client never decides what comes
  * next. It renders whatever step the API says it is on. */
-const STEP_ORDER = ["who", "duration", "scope", "sources", "outline", "confirm"] as const;
+const STEP_ORDER = ["who", "duration", "scope", "structure", "sources", "outline", "confirm"] as const;
 
 interface InterviewDialogProps {
   /** Called the moment `confirm` returns its 202: the tree ALREADY EXISTS (every
@@ -318,6 +319,15 @@ export function InterviewDialog({ onMaterialized }: InterviewDialogProps) {
               <InterviewScopeStep
                 key={state.step}
                 options={state.options ?? []}
+                submitting={submitting}
+                error={state.error}
+                onSubmit={handleAnswer}
+              />
+            )}
+            {state.step === "structure" && (
+              <InterviewStructureStep
+                key={state.step}
+                blueprint={findings?.blueprint}
                 submitting={submitting}
                 error={state.error}
                 onSubmit={handleAnswer}

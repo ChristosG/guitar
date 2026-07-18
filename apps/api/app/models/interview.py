@@ -66,7 +66,13 @@ from app.models.base import PkMixin, TimestampMixin
 # could no longer exclude anything at all. It never tagged the curriculum and
 # never rendered. A free-text COURSE BRIEF in its place is the thing he was
 # reaching for: what this course is actually about, in his words.
-STEPS = ("who", "duration", "scope", "sources", "outline", "confirm", "done")
+#
+# "structure" is Plan C's addition (Task 5): the OPTIONAL, SKIPPABLE lesson
+# blueprint step, pre-filled with the settings default. It sits between "scope"
+# and "sources" (Resolved design call #1) — it doesn't disturb the existing
+# "sources -> outline" auto-regenerate handoff, and the blueprint shapes lesson
+# DRAFTING, not the outline the "outline" step edits.
+STEPS = ("who", "duration", "scope", "structure", "sources", "outline", "confirm", "done")
 
 
 class CurriculumInterview(Base, PkMixin, TimestampMixin):

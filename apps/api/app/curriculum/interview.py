@@ -11,7 +11,7 @@ would break exactly the same way. Every step, transition and validation rule bel
 is a plain Python `if`. The model is reached in exactly ONE place — the outline
 call — and it never sees `step` or `answers`.
 
-SIX STEPS:
+SEVEN STEPS:
 
   who      -> THE STUDENT IS FULLY OPTIONAL. Chris, verbatim: "this has to be
               optional dude.. the student part here has to be TOTALLY optional".
@@ -34,6 +34,14 @@ SIX STEPS:
               standing in for the thing he actually wanted to say, which is what
               this course is FOR — so now he says it, in his own words, and it
               reaches the outline prompt AND every lesson-draft prompt.
+  structure -> Plan C's addition. OPTIONAL + SKIPPABLE, pre-filled with the
+              settings default (`resolve_default_blueprint`): the 8-section
+              lesson skeleton every lesson in this course will draft from. Skip
+              -> the settings default is used at confirm (spec invariant #7).
+              Sits here (between scope and sources) rather than later, because
+              it shapes lesson DRAFTING, not the outline the "outline" step
+              edits — it must not disturb that step's existing auto-regenerate
+              handoff with "sources".
   sources  -> which of his library sources to draw on. Every source is listed
               with its size, and the step reports what the selection MEASURES:
               "3 sources · 92,400 tokens · fits whole". Above the budget it says
@@ -57,6 +65,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.brain.retrieve import MIN_PASSAGE_CHARS
+from app.curriculum.blueprint import BlueprintInvalid, validate_blueprint
 from app.curriculum.blueprint_store import resolve_default_blueprint
 from app.curriculum.corpus import build_curriculum_context, build_library_context
 from app.curriculum.outline import (
@@ -72,7 +81,7 @@ from app.models.knowledge import KnowledgeSource
 from app.models.student import Student
 from app.students.context import build_student_brief
 
-STEP_ORDER = ["who", "duration", "scope", "sources", "outline", "confirm"]
+STEP_ORDER = ["who", "duration", "scope", "structure", "sources", "outline", "confirm"]
 
 # The levels offered when no student is chosen. "all_levels" is the DEFAULT and it
 # is not a cop-out: a tutor building a course for his whole roster is the common
@@ -172,6 +181,22 @@ def describe_step(db: Session, interview: CurriculumInterview) -> dict:
                 },
             ],
             "findings": None,
+        }
+
+    if step == "structure":
+        return {
+            "question": (
+                "This is the STRUCTURE every lesson in this course will follow — "
+                "the sections, how much of the lesson time each one gets, and "
+                "who it's for. The standard structure works well for most "
+                "courses; skip this if you don't want to change it."
+            ),
+            "options": None,
+            # The pre-fill: his edited settings default if he has one, else the
+            # code default (`resolve_default_blueprint`'s own contract) — never
+            # `default_blueprint()` directly, which would silently ignore a
+            # settings-level customisation the moment he opens the wizard.
+            "findings": {"blueprint": resolve_default_blueprint(db)},
         }
 
     if step == "sources":
@@ -364,6 +389,39 @@ def _answer_scope(interview: CurriculumInterview, answer) -> dict:
     interview.answers = {
         **interview.answers, "scope": {"brief": brief.strip(), "gap_policy": policy},
     }
+    return _ok()
+
+
+def _answer_structure(db: Session, interview: CurriculumInterview, answer) -> dict:
+    """OPTIONAL + SKIPPABLE (spec invariant #7). `{"skip": true}` advances with
+    NOTHING recorded in `interview.answers["structure"]` — `_answer_confirm`
+    (Task 3) then falls back to `resolve_default_blueprint(db)`, exactly as if
+    this step had never existed. `{"blueprint": {...}}` is validated via
+    `validate_blueprint`; on success the NORMALIZED result is stored (never the
+    tutor's raw payload, same "store what was actually accepted" rule
+    `_answer_scope` follows with `brief.strip()`); on failure this re-asks and
+    leaves `interview.step` unchanged, same contract every other step honours."""
+    if not isinstance(answer, dict):
+        return _reask(
+            'Send {"skip": true} to use the standard lesson structure, or '
+            '{"blueprint": {...}} to use your own.'
+        )
+
+    if answer.get("skip") is True:
+        return _ok()
+
+    raw = answer.get("blueprint")
+    if not isinstance(raw, dict):
+        return _reask(
+            'Send {"skip": true} to use the standard lesson structure, or '
+            '{"blueprint": {...}} to use your own.'
+        )
+    try:
+        blueprint = validate_blueprint(raw)
+    except BlueprintInvalid as e:
+        return _reask(f"That structure isn't valid ({e.code}). Fix it, or skip to use the standard one.")
+
+    interview.answers = {**interview.answers, "structure": {"blueprint": blueprint}}
     return _ok()
 
 
@@ -569,6 +627,8 @@ def answer_interview(db: Session, interview: CurriculumInterview, answer) -> dic
         result = _answer_duration(interview, answer)
     elif step == "scope":
         result = _answer_scope(interview, answer)
+    elif step == "structure":
+        result = _answer_structure(db, interview, answer)
     elif step == "sources":
         result = _answer_sources(db, interview, answer)
     elif step == "outline":
