@@ -72,6 +72,15 @@ The chat session is **bound to one curriculum**: a new nullable `chat_session.ro
 8. **CPU-only, provider-agnostic.** The planner is `get_provider().guided_json(..., role="plan")`. No hardcoded `claude_cli`. Reuse `GenerationJob` with `kind="curriculum_revise"` — **no new table**. One additive migration only: a nullable `chat_session.root_id` column (a column, not a table — justified in D2a).
 9. **`REVISION_PLAN_SCHEMA` is a flat tagged object, not `oneOf`.** Guided-JSON portability across providers (Claude CLI now, API later) is not guaranteed for `oneOf`/discriminated unions (see `depth.py`/`extend.py` — every existing schema is a flat object). Each op is one object with an `op` enum discriminator and all per-op fields optional; Python enforces the per-op required set in `validate_ops`. This is a deliberate, documented choice.
 
+## Resolved design calls (controller, 2026-07-18)
+
+The planner flagged three risks; a fourth is a scope addition from Chris. All settled — implementers follow these:
+
+1. **`modify_lesson` = full re-draft — KEPT.** Queue the lesson + `meta["revise_instruction"]` + store `meta["prev_body"]` for one-step undo. REQUIREMENT: the `RevisionPlanCard` must label a modify op as **"Rewrite lesson «X»"** (not "edit"), so the tutor approves a rewrite knowingly.
+2. **Synchronous inline planner for chat `propose` — KEPT.** The ship target is a local/bundled CPU app (no Cloudflare 100s cap), so a ~20-60s planner tool call is fine. REQUIREMENT: the drawer shows a clear "Planning the revision…" progress state. Async job+poll is the documented fallback only if a proxy timeout ever bites.
+3. **Approved == applied must be EXACT.** VALIDATE the plan when apply is invoked (chat tool OR REST endpoint) BEFORE the ApprovalCard suspends; store the *validated* plan on the ApprovalRequest and render THAT; apply it VERBATIM. Ops dropped by id-validation must never reach the card. Apply-time re-validation stays as defense-in-depth but is a no-op when the card already showed the validated plan.
+4. **NEW (Chris) — the chat/revise can also edit an existing curriculum's BLUEPRINT.** Add an `update_blueprint` op (see the op table). Apply writes `course.meta["blueprint"]` (whole-dict reassignment) after `blueprint.validate_blueprint`. **Re-drafting existing lessons under the new blueprint stays the OPT-IN button** (Unit C's `POST /curricula/{root_id}/redraft`) — a blueprint change NEVER auto-re-drafts. The `RevisionPlanCard` labels it clearly ("Change lesson structure: …") and notes existing lessons keep their content until re-drafted. Blueprint is now editable in three places: wizard (new), settings default (future), chat (existing).
+
 ## Op vocabulary (canonical — the schema and the validator both key off this)
 
 | `op` | required fields (beyond `op`, `reason`) | applied by |
@@ -81,6 +90,7 @@ The chat session is **bound to one curriculum**: a new nullable `chat_session.ro
 | `modify_lesson` | `lesson_id`, `instruction` | requeue + `meta["revise_instruction"]` |
 | `move_lesson` | `lesson_id`, `to_module_id`; optional `after_lesson_id` | `edit._move_block` (NEW) |
 | `remove_lesson` | `lesson_id` | `db.delete` + `_renormalise` |
+| `update_blueprint` | `blueprint` (full blueprint object) | `blueprint.validate_blueprint` → `course.meta["blueprint"]` (whole-dict); **NO auto-redraft** (opt-in `/redraft`) |
 
 Every op carries a human-readable `reason` (the "why it belongs"). `tier ∈ TIER_ORDER` (`outline.TIER_ORDER`), clamped to the course's `gap_policy` via `outline.clamp_tier` at apply time (mirrors `extend.generate_module_json:247-250`).
 
