@@ -95,6 +95,14 @@ const LESSON_RETRIEVED = summary({
 const OUTLINE_EL = "YOUR TASK: design the outline of a course.\n\nLANGUAGE: write everything you produce in Greek (el)";
 const LANG_LABEL = "Ο κανόνας γλώσσας — τον ορίζει η γλώσσα του μαθητή/προγράμματος, όχι αυτή η οθόνη";
 
+const CURRICULUM_OUTLINE = summary({
+  id: "curriculum.outline", flow: "curriculum", curriculum_group: true,
+  language_from_course: true,
+  title_el: "Ο σκελετός του προγράμματος",
+  what_it_does_el: "Ζητάει μόνο τη δομή του προγράμματος.",
+  when_it_runs_el: "Μία φορά, μόλις πατήσεις δημιουργία προγράμματος.",
+});
+
 const CURRICULUM_GROUP_PROMPTS = [
   summary({
     id: "curriculum.system", flow: "curriculum", curriculum_group: true,
@@ -110,13 +118,7 @@ const CURRICULUM_GROUP_PROMPTS = [
     when_it_runs_el: "Κάθε φορά που φτιάχνεις πρόγραμμα σπουδών.",
     cache_prefix: true, cache_cost_warning: true,
   }),
-  summary({
-    id: "curriculum.outline", flow: "curriculum", curriculum_group: true,
-    language_from_course: true,
-    title_el: "Ο σκελετός του προγράμματος",
-    what_it_does_el: "Ζητάει μόνο τη δομή του προγράμματος.",
-    when_it_runs_el: "Μία φορά, μόλις πατήσεις δημιουργία προγράμματος.",
-  }),
+  CURRICULUM_OUTLINE,
   summary({
     id: "curriculum.extend", flow: "curriculum", curriculum_group: true,
     language_from_course: true,
@@ -168,7 +170,7 @@ const PROMPTS = [CHAT_SYSTEM, CURRICULUM_REFINE, LESSON_RETRIEVED, ...CURRICULUM
 
 const DETAILS: Record<string, Record<string, unknown>> = {
   "curriculum.outline": {
-    ...CURRICULUM_GROUP_PROMPTS.find((p) => p.id === "curriculum.outline"),
+    ...CURRICULUM_OUTLINE,
     source_ref: "app/curriculum/outline.py:161",
     course_language: "el",
     text: OUTLINE_EL,

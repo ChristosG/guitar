@@ -1,10 +1,11 @@
 "use client";
 
-import { useCallback, useState, type FormEvent } from "react";
+import { useCallback, useMemo, useState, type FormEvent } from "react";
 import { useTranslations } from "next-intl";
-import { AlertTriangle, BookOpen, Loader2, Plus, Sparkles } from "lucide-react";
+import { AlertTriangle, BookOpen, Loader2, Plus, RefreshCw, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { useConfirm } from "@/components/ui/confirm";
 import { BlockCard } from "@/components/curriculum/block-card";
 import { DraftProgressBar } from "@/components/curriculum/draft-progress-bar";
 import {
@@ -13,6 +14,7 @@ import {
   generateModule,
   getCurriculum,
   getJob,
+  redraftCurriculum,
   type BlockNode,
 } from "@/lib/api";
 
@@ -67,12 +69,15 @@ const MODULE_POLL_DEADLINE_MS = 6 * 60_000;
  */
 export function TreeBoard({ root, locale, onRootDeleted }: TreeBoardProps) {
   const t = useTranslations("curricula.tree");
+  const confirm = useConfirm();
 
   const [tree, setTree] = useState<BlockNode>(root);
   const [addOpen, setAddOpen] = useState(false);
   const [topic, setTopic] = useState("");
   const [adding, setAdding] = useState(false);       // the plain empty-module POST
   const [generating, setGenerating] = useState(false); // the AI job, enqueue → done
+  const [redrafting, setRedrafting] = useState(false);
+  const [redraftError, setRedraftError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   /** Refetch the whole tree. Returns whether it landed — the progress bar's poll
@@ -161,6 +166,41 @@ export function TreeBoard({ root, locale, onRootDeleted }: TreeBoardProps) {
       n + module.children.filter((lesson) => lesson.meta?.draft_status === "queued").length,
     0,
   );
+
+  // NON-GAP lessons only — a gap module has none by construction (`outline.py`:
+  // "nothing to draft, no call is made"), so this is naturally every lesson a
+  // redraft would actually touch. Computed here, client-side, purely so the
+  // confirm dialog can NAME the count before he commits to it — the server is
+  // the one that actually decides who gets requeued.
+  const redraftableCount = useMemo(
+    () =>
+      tree.children.reduce(
+        (n, module) => (module.meta?.tier === "gap" ? n : n + module.children.length),
+        0,
+      ),
+    [tree],
+  );
+
+  async function handleRedraft() {
+    const ok = await confirm({
+      title: t("redraftConfirmTitle"),
+      body: t("redraftConfirmBody", { count: redraftableCount }),
+      confirmLabel: t("redraftConfirm"),
+      destructive: true,
+    });
+    if (!ok) return;
+
+    setRedrafting(true);
+    setRedraftError(null);
+    try {
+      await redraftCurriculum(tree.id);
+      await refresh();
+    } catch (err) {
+      setRedraftError(err instanceof ApiError ? err.detail : t("redraftError"));
+    } finally {
+      setRedrafting(false);
+    }
+  }
 
   const library = tree.meta?.library;
   const shape = tree.meta?.shape;
@@ -279,6 +319,31 @@ export function TreeBoard({ root, locale, onRootDeleted }: TreeBoardProps) {
         {error && (
           <p role="alert" data-testid="board-add-error" className="text-xs text-destructive">
             {error}
+          </p>
+        )}
+
+        {/* OPT-IN, EXPLICIT, CONFIRM-GATED (Plan C, Task 8). This is the ONLY
+            path that rewrites lessons that already drafted — it never fires as
+            a side effect of a blueprint edit (invariant #8). Hidden entirely
+            once there is nothing it could touch (every lesson lives under a
+            gap module, or the curriculum has none yet). */}
+        {redraftableCount > 0 && (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="self-start"
+            data-testid="board-redraft"
+            disabled={redrafting}
+            onClick={handleRedraft}
+          >
+            {redrafting ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+            {t("redraft")}
+          </Button>
+        )}
+        {redraftError && (
+          <p role="alert" data-testid="board-redraft-error" className="text-xs text-destructive">
+            {redraftError}
           </p>
         )}
       </footer>

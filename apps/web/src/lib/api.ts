@@ -727,6 +727,18 @@ export function deepenLesson(lessonId: string): Promise<JobAccepted> {
   return request<JobAccepted>(`/blocks/${lessonId}/deepen`, { method: "POST" });
 }
 
+/** RE-DRAFT UNDER THE CURRENT STRUCTURE (Plan C, Task 8) — the ONLY path that
+ * rewrites lessons that already drafted. Unlike `resumeCurriculumDraft` above
+ * (which leaves a `ready` lesson alone), this flips EVERY non-gap lesson back
+ * to `queued`, `ready` ones included, and reschedules the same fan-out — which
+ * reads the course's OWN blueprint fresh, so this is what actually rebuilds
+ * every lesson under a blueprint the tutor just changed. It NEVER fires on its
+ * own: a blueprint save never calls this, only an explicit, confirm-gated
+ * button press does. */
+export function redraftCurriculum(rootId: string): Promise<JobAccepted> {
+  return request<JobAccepted>(`/curricula/${rootId}/redraft`, { method: "POST" });
+}
+
 export interface AddModuleInput {
   title: string;
   objective?: string;

@@ -25,6 +25,7 @@ from app.curriculum import from_chat as from_chat_service
 from app.curriculum import interview as interview_service
 from app.curriculum.assign import clone_content_subtree
 from app.curriculum.draft import draft_progress
+from app.curriculum.outline import TIER_GAP
 from app.curriculum.refine import refine_block, undo_refine
 from app.curriculum.segment import segment_block
 from app.db import get_db
@@ -382,6 +383,68 @@ def resume_curriculum_draft(
     the same state.
     """
     _get_block_or_404(db, root_id)
+    job = GenerationJob(
+        kind="curriculum_draft", status="pending", params={"root_id": str(root_id)},
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    background_tasks.add_task(run_curriculum_draft_job, job.id)
+    return JobAccepted(job_id=job.id, status=job.status)
+
+
+@router.post("/curricula/{root_id}/redraft", response_model=JobAccepted, status_code=202,
+             dependencies=[Depends(require_llm_configured)])
+def redraft_curriculum(
+    root_id: UUID, background_tasks: BackgroundTasks, db: Session = Depends(get_db),
+) -> JobAccepted:
+    """RE-DRAFT UNDER THE CURRENT STRUCTURE: the ONLY route that rewrites lessons
+    that already drafted.
+
+    A blueprint edit must NEVER re-draft on its own (spec invariant #8) — the
+    blueprint routes (`routers/blueprint.py`) never call this or anything like
+    it. This is the explicit, tutor-pressed opt-in: every non-gap lesson under
+    the root, `ready` or `failed` or `queued` alike, goes back to `queued`, and
+    the ordinary fan-out (`run_curriculum_draft_job`) is scheduled exactly as
+    `resume_curriculum_draft`/`deepen_lesson` above already do.
+
+    THIS DIFFERS FROM RESUME IN EXACTLY ONE WAY, AND IT IS THE WHOLE POINT.
+    `POST .../draft` (Resume, above) only picks up lessons already `queued` or
+    `failed` — a `ready` lesson is left alone, because Resume exists to FINISH a
+    curriculum, not rewrite one. This route flips `ready` lessons back to
+    `queued` too, because the tutor changed the lesson BLUEPRINT (added/removed
+    a section, reweighted one) and wants every lesson rebuilt under it. No new
+    blueprint plumbing is needed here: `run_curriculum_draft_job`'s Phase A
+    already resolves `blueprint_from_course_meta(course.meta)` FRESH on every
+    run, so simply requeueing and rescheduling the same job is sufficient — the
+    course's frozen blueprint is what gets drafted from, whatever it is now.
+
+    A GAP module has no lessons at materialize time — "nothing to draft, no call
+    is made" (`outline.py`) — but a tutor can add one manually later
+    (`edit.add_lesson` does not check the module's tier). Such a lesson is
+    excluded here: nothing under a gap module was ever meant to be drafted, and
+    a redraft must not start drafting it for the first time as a side effect.
+    """
+    course = _get_block_or_404(db, root_id)
+    if course.kind != "course":
+        raise HTTPException(status_code=404, detail="not a curriculum root")
+
+    modules = db.scalars(
+        select(Block).where(Block.parent_id == course.id, Block.kind == "module")
+    ).all()
+    for module in modules:
+        if (module.meta or {}).get("tier") == TIER_GAP:
+            continue
+        lessons = db.scalars(
+            select(Block).where(Block.parent_id == module.id, Block.kind == "lesson")
+        ).all()
+        for lesson in lessons:
+            # Whole-dict reassignment (invariant #9) — `Block.meta` is plain
+            # `sa.JSON`, no `MutableDict`; `lesson.meta["k"] = v` would not
+            # persist at all.
+            lesson.meta = {**(lesson.meta or {}), "draft_status": "queued", "error": None}
+    db.commit()
+
     job = GenerationJob(
         kind="curriculum_draft", status="pending", params={"root_id": str(root_id)},
     )
