@@ -868,6 +868,56 @@
       "en": "English"
     }
   },
+  "blueprint": {
+    "title": "The lesson structure",
+    "help": "Every lesson the app writes is split into these pieces, in this order. Here you decide how much time goes to each one and who it's for — this applies to every NEW curriculum, not to the ones that already exist.",
+    "loading": "Loading…",
+    "overridden": "You've changed this",
+    "keyLabel": "Key",
+    "labelElLabel": "Title (Greek)",
+    "labelEnLabel": "Title (English)",
+    "descriptionLabel": "What the app writes here",
+    "weightLabel": "Weight",
+    "weightHelp": "How big this piece is relative to the others — they don't need to add up to 1.",
+    "audienceLabel": "Who it's for",
+    "enabledLabel": "Enabled",
+    "moveUp": "Move up",
+    "moveDown": "Move down",
+    "remove": "Remove",
+    "add": "Add a piece",
+    "newSectionKey": "new_piece",
+    "newSectionLabel": "New piece",
+    "lockedTitle": "This piece is fixed",
+    "lockedWhy": "Its key and title don't change and it can't be removed — but you can change its weight, its audience, or turn it off.",
+    "save": "Save",
+    "saving": "Saving…",
+    "saved": "Saved.",
+    "restore": "Restore the standard structure",
+    "restoreConfirmTitle": "Restore the standard structure?",
+    "restoreConfirmBody": "The structure you built will be deleted and replaced with the app's standard one. It doesn't affect curricula that already exist — only new ones will start from the standard structure from now on.",
+    "audience": {
+      "teacher": "Teacher",
+      "student": "Student",
+      "both": "Both"
+    },
+    "errors": {
+      "bad_version": "Something's off with the structure's format. Refresh the page and try again.",
+      "no_sections": "It needs at least one piece.",
+      "bad_key": "One of the pieces has an invalid key — only lowercase letters, numbers and underscores, starting with a letter.",
+      "dup_key": "Two pieces have the same key. Change one of them.",
+      "bad_label": "Every piece needs a title in both Greek and English.",
+      "bad_description": "Every piece needs a description — it can't be left empty.",
+      "bad_weight": "Weight must be a number between 0 and 1.",
+      "bad_kind": "One of the pieces has an unrecognized kind.",
+      "bad_audience": "Pick who the piece is for: teacher, student, or both.",
+      "bad_enabled": "Something's off with a piece's enabled/disabled state.",
+      "structured_section_missing": "One of the fixed pieces (Exercises or Q&A and discussion) is missing. You can turn it off, but not remove it.",
+      "structured_section_renamed": "The key of a fixed piece (Exercises or Q&A and discussion) changed — that isn't allowed. Refresh the page and try again.",
+      "save_failed": "It didn't save. Try again.",
+      "load_failed": "The structure didn't load. Refresh the page.",
+      "network": "Couldn't reach the server. Check your connection."
+    }
+  },
   "confirm": {
     "cancel": "Cancel",
     "confirm": "Delete"

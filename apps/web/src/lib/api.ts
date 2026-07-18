@@ -913,12 +913,18 @@ export interface InterviewShape {
 
 /** The `findings` field of `InterviewStateOut` — a different payload per step,
  * all optional. "who" carries the level list, "sources" the derived shape echo,
- * and "outline"/"confirm" carry the outline itself. */
+ * "structure" the pre-filled blueprint, and "outline"/"confirm" carry the
+ * outline itself. */
 export interface InterviewFindings {
   levels?: string[];
   shape?: InterviewShape;
   title?: string;
   modules?: OutlineModule[];
+  /** "structure" step only — `resolve_default_blueprint(db)`, the SETTINGS
+   * default pre-filled into the (optional, skippable) editor. Skipping leaves no
+   * blueprint in `interview.answers`, and confirm falls back to this same
+   * settings default (spec invariant #7). */
+  blueprint?: BlueprintShape;
 }
 
 /** The `{interview_id, step, question, options?, findings?, error?}` envelope
@@ -2278,4 +2284,88 @@ export function getPromptSliceHistory(sliceId: string): Promise<PromptSliceHisto
   return request<PromptSliceHistoryEntry[]>(
     `/prompts/slices/${encodeURIComponent(sliceId)}/history`,
   );
+}
+
+/**
+ * Typed fetch helpers for the LESSON BLUEPRINT (`/blueprint/*`, Plan C, Task 6) —
+ * the 8-section lesson skeleton, lifted out of code and into per-curriculum DATA
+ * so a tutor can reshape it without touching the engine. Mirrors
+ * `app/routers/blueprint.py`'s response models and `app.curriculum.blueprint`'s
+ * shape field-for-field.
+ *
+ * TWO resolvers exist on the server and this file mirrors both, never conflating
+ * them: `getBlueprintDefault` is the SETTINGS default (the tutor's edit if he has
+ * one, else the code default) — read/written here and pre-filled into the wizard's
+ * "structure" step. `getBlueprintCodeDefault` is ALWAYS the git-backed default —
+ * the Restore target, never affected by a save. Editing the settings default never
+ * touches a course that already exists (spec invariant #3); that guarantee is
+ * entirely server-side, this file only reads and writes the row.
+ */
+
+/** One section of a blueprint. `kind` decides what is locked in the editor:
+ * `exercises` (keyed `exercises`) and `qa` (keyed `qa_prompts`) are STRUCTURED —
+ * they keep their key and label forever (invariant #4) and may only be
+ * reweighted, re-audienced, reordered or disabled. Only `prose` sections may be
+ * added, removed or renamed. `audience` is forward-looking plumbing only (no
+ * print/handout UI consumes it yet, by design — Resolved design call #3). */
+export interface BlueprintSection {
+  key: string;
+  label: { el: string; en: string };
+  description: string;
+  kind: "prose" | "exercises" | "qa" | (string & {});
+  weight: number;
+  audience: "teacher" | "student" | "both" | (string & {});
+  enabled: boolean;
+}
+
+/** The whole lesson skeleton — mirrors `app.curriculum.blueprint`'s canonical
+ * shape. `version` is always `1` today; kept on the wire so a future shape bump
+ * has somewhere to branch on the client without guessing. */
+export interface BlueprintShape {
+  version: number;
+  sections: BlueprintSection[];
+}
+
+export interface BlueprintDefaultOut {
+  blueprint: BlueprintShape;
+  /** Whether the tutor has saved a settings default (a `blueprint_default` row
+   * exists). Drives the Settings card's "you've customised this" / Restore
+   * affordance — there is no history table (Resolved design call #4): Restore is
+   * simply deleting the row, and the code default is the target. */
+  is_override: boolean;
+}
+
+/** The RESOLVED settings default — his edit if he has one, else the code
+ * default — plus whether it is a customisation. What NEW curricula are seeded
+ * with, and what the wizard's "structure" step pre-fills. */
+export function getBlueprintDefault(): Promise<BlueprintDefaultOut> {
+  return request<BlueprintDefaultOut>("/blueprint/default");
+}
+
+/** ALWAYS the git-backed code default — never affected by a save. The Restore
+ * target and the diff baseline for "what did I change from the original". */
+export function getBlueprintCodeDefault(): Promise<{ blueprint: BlueprintShape }> {
+  return request<{ blueprint: BlueprintShape }>("/blueprint/code-default");
+}
+
+/** Validate + save the tutor's settings default. Throws `ApiError` with `code`
+ * one of `BlueprintInvalid`'s: `bad_version`, `no_sections`, `bad_key`,
+ * `dup_key`, `bad_label`, `bad_description`, `bad_weight`, `bad_kind`,
+ * `bad_audience`, `bad_enabled`, `structured_section_missing`,
+ * `structured_section_renamed` — each mapped to one Greek sentence under
+ * `blueprint.errors.<code>`. Validation runs BEFORE the write, so a rejected
+ * blueprint leaves any existing default untouched. */
+export function saveBlueprintDefault(blueprint: BlueprintShape): Promise<BlueprintDefaultOut> {
+  return request<BlueprintDefaultOut>("/blueprint/default", {
+    method: "PUT",
+    body: JSON.stringify({ blueprint }),
+  });
+}
+
+/** Reset to the code default by deleting the row. IDEMPOTENT: resetting an
+ * already-default settings is a 200 with `is_override: false`, not a 404. Never
+ * re-drafts anything and never touches an existing course (Task 8's opt-in
+ * "re-draft" button is the only path that rewrites lessons). */
+export function resetBlueprintDefault(): Promise<BlueprintDefaultOut> {
+  return request<BlueprintDefaultOut>("/blueprint/default", { method: "DELETE" });
 }

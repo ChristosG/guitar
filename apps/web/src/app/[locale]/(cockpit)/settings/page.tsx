@@ -16,6 +16,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PromptList } from "@/components/settings/prompt-list";
+import { BlueprintDefaultCard } from "@/components/settings/blueprint-default-card";
 import { cn } from "@/lib/utils";
 
 const CONSOLE_URL = "https://console.anthropic.com/settings/keys";
@@ -299,6 +300,12 @@ export default function SettingsPage() {
        * since showing a prompt the app is not sending is the failure this whole
        * feature exists to prevent. */}
       <PromptList provider={settings?.provider ?? null} />
+
+      {/* --- the lesson blueprint -----------------------------------------
+       * The 8-section lesson skeleton (Plan C, Task 6), now tutor-editable —
+       * what every NEW curriculum is seeded with. Editing it never touches a
+       * course that already exists (spec invariant #3); the card says so. */}
+      <BlueprintDefaultCard />
     </div>
   );
 }
