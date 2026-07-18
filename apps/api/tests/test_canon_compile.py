@@ -271,30 +271,32 @@ def test_the_model_is_shown_the_authors_words_and_our_descriptions_LABELLED_APAR
     assert "[p.31 FIGURE]" in prompt, "our description was shown as the author's words"
 
 
-def test_the_prompt_forbids_citing_a_folio_printed_inside_the_page_body(db):
-    """MEASURED BUG. Every page block reads `[p.N] <body>`, where N is the
-    PHYSICAL page_no we injected and the body is OCR'd scan text that ALSO shows
-    the PRINTED folio (a scan of physical page 86 shows "62" on it, because the
-    book has 24 pages of front matter). Left to itself the model cites the printed
-    folio, not our injected marker: on Gallagher, 17 of 20 random claims came back
-    off by exactly the front-matter offset. Every citation then lands 24 pages from
-    the content, and the validator misses it because the offset number is still a
-    real page_no.
+def test_the_prompt_demotes_the_page_number_to_a_hint_and_pins_the_page_on_the_anchor(db):
+    """MEASURED BUG, killed differently under Unit B. Every page block reads
+    `[p.N] <body>`, where N is the PHYSICAL page_no we injected and the body is
+    OCR'd scan text that ALSO shows the PRINTED folio (a scan of physical page 86
+    shows "62" on it, because the book has 24 pages of front matter). Left to itself
+    the model cited the printed folio: on Gallagher, 17 of 20 random claims came
+    back off by exactly the front-matter offset, and `_valid_pages` missed it
+    because the offset number is still a real page_no.
 
-    The only defence is the prompt: it must tell the model, emphatically and with a
-    concrete example, that the ONLY citation is the number inside the injected
-    [p.N] marker at the START of a block, and that a number printed within the page
-    text is never a citation."""
+    Unit B stops the model reporting a NUMBER as the citation at all. It copies a
+    verbatim `anchor` quote and `canon/resolve.py` derives the page from it — a
+    made-up number costs nothing when the QUOTE, not the number, pins the page. So
+    the prompt must (a) ask for the verbatim anchor quote, and (b) demote `pages`
+    to a HINT read only from the [p.N] marker at the START of a block, still naming
+    the folio it must never read a number from."""
     lower = COMPILE_TASK.lower()
     assert "folio" in lower, "the prompt never names the folio it must not cite"
-    assert "[p.86] ... 62" in COMPILE_TASK, (
-        "the concrete `[p.86] ... 62` example — the one that teaches the rule — is "
-        "missing"
+    assert "anchor" in lower and "verbatim" in lower, (
+        "the prompt does not ask for the verbatim anchor quote that now pins the page"
     )
-    # The rule must actually forbid the in-body number, not merely mention it.
+    assert "hint" in lower, "the prompt does not demote `pages` to a hint"
+    # The number, when recorded at all, comes from the marker at the START; the
+    # in-body folio number is NEVER what the page is read from.
     assert "never" in lower and "start" in lower, (
-        "the prompt does not say the in-body number is NEVER a citation and that "
-        "the page comes from the marker at the START of the block"
+        "the prompt does not say the in-body number is NEVER read and that the page "
+        "number comes from the marker at the START of the block"
     )
 
 
@@ -576,3 +578,22 @@ def test_build_book_context_indexes_the_pages_it_actually_showed(db):
     assert ctx.author_pages == {12}
     assert ctx.figure_pages == {31}
     assert ctx.token_count > 0
+
+
+# ---------------------------------------------------------------------------
+# 7. The anchor quote — schema + prompt (Unit B)
+# ---------------------------------------------------------------------------
+
+def test_schema_and_prompt_ask_for_an_anchor_quote():
+    """Quote-based citations (Unit B): the model emits a verbatim author quote per
+    claim, from which the pure-CPU resolver derives the page — not a page number."""
+    from app.canon.compile import CONCEPT_SCHEMA, COMPILE_TASK
+    claim_props = (CONCEPT_SCHEMA["properties"]["concepts"]["items"]
+                   ["properties"]["claims"]["items"]["properties"])
+    assert "anchor" in claim_props
+    assert claim_props["anchor"]["type"] == "string"
+    # the prompt must ask for a VERBATIM quote from the AUTHOR's own words
+    low = COMPILE_TASK.lower()
+    assert "anchor" in low
+    assert "verbatim" in low or "word-for-word" in low or "exactly" in low
+    assert "8" in COMPILE_TASK and "15" in COMPILE_TASK  # the 8-15 word window

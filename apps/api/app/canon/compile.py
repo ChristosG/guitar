@@ -305,29 +305,41 @@ COMPILE_SYSTEM = (
 # what is asked for, in the author's own emphasis, including the parts other books
 # would disagree with.
 #
-# The anti-folio paragraph in point 3 is not belt-and-braces — it fixes a MEASURED
-# bug. Every page block is `[p.N] <body>`, where N is the PHYSICAL page_no we
-# inject and `<body>` is OCR'd scan text that ALSO carries the number printed on
-# the page (the folio). Those two numbers DISAGREE by the book's front matter: a
-# scan of physical page 86 shows "62" printed on it because 24 pages of front
-# matter precede the folio's page 1. Left to itself the model copies the number it
-# can SEE on the page — the folio — instead of our injected marker. Measured on
-# Gallagher: of 20 random claims, 17 cited `physical - 24` (the folio) and only 3
-# cited the true page. Every such citation then opens 24 pages from the content,
-# and `_valid_pages` cannot catch it because the folio is still a real page_no that
-# passes the existence check. The only place this is fixable is here, in words: the
-# model must be told, with a concrete example, that the page number is READ FROM
-# THE MARKER, never from the page body.
+# UNIT B — THE ANCHOR SUPERSEDES THE PAGE NUMBER AS THE CITATION. Point 3 now asks
+# for a verbatim `anchor` quote (8-15 words of the author's own text); off-model,
+# `canon/resolve.py` locates that quote in the book and derives the physical page
+# deterministically. The `pages` the model reports are demoted to a HINT (point 4)
+# that nothing cites from — a made-up number costs nothing when the QUOTE, not the
+# number, pins the page. So the folio narrative below, though still true, is no
+# longer load-bearing for the citation; the folio guidance (now point 4, condensed)
+# and `strip_printed_folio` both stay as belt-and-suspenders (invariant 7). The
+# point numbers referenced below shifted by one when the anchor point was inserted.
 #
-# NAMING THE EXACT SHAPE OF THE FOLIO EARNS ITS KEYSTROKES. A first pass with only
-# a generic "don't cite in-body numbers" rule was recompiled and MEASURED against
-# the live books: on Kahn (front matter = 14) it halved the error but left a hard
-# cluster — ~29 of 61 confident claims still cited `physical - 14`. Inspection of
-# those claims showed WHY: in these scans the folio is a BARE NUMBER alone at the
-# very END of the page's text (`...once you go rack, you never go back!  25`), and
-# that trailing digit reads to the model exactly like a page number. So the rule
-# below does not just forbid in-body numbers in the abstract; it points at that
-# specific trailing-number shape, which is the one the model actually fell for.
+# The anti-folio paragraph (now point 4) fixes a MEASURED bug. Every page block is
+# `[p.N] <body>`, where N is the PHYSICAL page_no we inject and `<body>` is OCR'd
+# scan text that ALSO carries the number printed on the page (the folio). Those two
+# numbers DISAGREE by the book's front matter: a scan of physical page 86 shows
+# "62" printed on it because 24 pages of front matter precede the folio's page 1.
+# Left to itself the model copied the number it could SEE on the page — the folio —
+# instead of our injected marker. Measured on Gallagher: of 20 random claims, 17
+# cited `physical - 24` (the folio) and only 3 cited the true page. Every such
+# citation then opened 24 pages from the content, and `_valid_pages` could not
+# catch it because the folio is still a real page_no that passes the existence
+# check. That is the drift Unit B's anchor resolution exists to kill for good.
+#
+# WHY THE FOLIO GUIDANCE IS NOW A CONDENSED HINT, NOT A VERBOSE RULE. Before Unit B
+# the citation WAS the model's number, so the prompt fought the folio in detail: a
+# generic "don't cite in-body numbers" rule was recompiled and MEASURED against the
+# live books and left a hard cluster — on Kahn (front matter = 14), ~29 of 61
+# confident claims still cited `physical - 14`, because the folio is a BARE NUMBER
+# alone at the very END of the page's text (`...once you go rack, you never go
+# back!  25`) and that trailing digit read to the model exactly like a page number.
+# The old point 3 therefore pointed at that specific trailing-number shape with a
+# concrete example. Unit B makes the model's number a discarded HINT — the anchor
+# quote is the citation — so point 4 keeps only the one-line "read the number from
+# the marker" reminder, and `strip_printed_folio` (invariant 7) still deletes the
+# folio before the model ever sees it. The measured history is kept above because
+# it is the reason the anchor exists at all.
 COMPILE_TASK = (
     "Above is the ENTIRE book. Go through it and write down every concept it "
     "teaches.\n"
@@ -349,33 +361,26 @@ COMPILE_TASK = (
     "argues with another view, that IS the claim worth recording. Keep `stance` "
     "under 40 characters — it is a label, not a sentence.\n"
     "\n"
-    "3. CITE ONLY [p.N] MARKERS YOU ACTUALLY READ ABOVE. Every claim needs the "
-    "real page(s) it is made on. The teacher CLICKS these page numbers and lands "
-    "on the page — a number you did not read above is worse than no citation at "
-    "all, because it is one he will trust. If you are not certain of the page, "
-    "leave the claim out.\n"
+    "3. GIVE A VERBATIM ANCHOR QUOTE, NOT A PAGE NUMBER. For each claim, copy an "
+    "`anchor`: 8 to 15 words taken WORD-FOR-WORD from THIS AUTHOR's own text on "
+    "the page where he makes the claim — his exact wording, not your paraphrase, "
+    "not tidied up. We find the page ourselves by locating that quote in the book, "
+    "so the anchor must be a real, distinctive run of his words (avoid a generic "
+    "phrase that appears on many pages). NEVER quote from inside a [p.N FIGURE] "
+    "block: that text is OUR description of a picture, not his sentence, and quoting it "
+    "would fabricate a citation. If a claim has no author sentence you can quote "
+    "word-for-word (it rests entirely on a diagram or tab), leave `anchor` empty "
+    "and set `grounding` to \"figure\".\n"
     "\n"
-    "   THE PAGE NUMBER IS THE ONE INSIDE THE [p.N] MARKER AT THE START OF THE "
-    "BLOCK — AND NOTHING ELSE. Each block begins with the marker WE injected: "
-    "`[p.N]` or `[p.N FIGURE]`. That N is the only valid citation. A number "
-    "printed WITHIN the page's text is NEVER a citation: not the folio at the foot "
-    "of the page (\"62\", \"Page 62\"), not a chapter or section number, not a "
-    "figure, plate or exercise number, not a year. These books open with front "
-    "matter, so the marker we injected and the folio printed on the page routinely "
-    "DISAGREE by ten, fourteen, twenty or more. When they differ, the marker is "
-    "right and the printed number is wrong.\n"
-    "   WATCH THE END OF EACH BLOCK ESPECIALLY. The folio is almost always a BARE "
-    "NUMBER sitting alone at the very END of a page's text — a block will read like "
-    "`[p.86] Wet/dry rigs pull your effects out of the direct path ... re-amping "
-    "your dry parts.  62`, and that trailing `62` is the folio, NOT the page. The "
-    "page is 86. Do not let a number that trails off the end of the text become the "
-    "citation.\n"
-    "   CONCRETE: if a block reads `[p.86] ... 62`, the page is 86 and the citation "
-    "is 86 — NEVER 62, even though 62 is the number you can see on the page. Read "
-    "the page number only from the [p.N] / [p.N FIGURE] marker at the START of the "
-    "block; ignore every number the page body shows, wherever it sits.\n"
+    "4. THE `pages` FIELD IS A HINT WE VERIFY, NOT THE CITATION. You may still "
+    "record the [p.N] marker you read the claim under, but WE resolve the real "
+    "page from your `anchor` quote — so a wrong number here costs nothing. Read "
+    "any page number ONLY from the [p.N] / [p.N FIGURE] marker at the START of a "
+    "block, never from a number printed in the page body (a folio like \"62\" at "
+    "the foot of the page, a chapter, figure or year). These books have front "
+    "matter, so the injected marker and the printed folio routinely disagree.\n"
     "\n"
-    "4. TWO KINDS OF TEXT ARE ABOVE, AND THEY ARE NOT THE SAME.\n"
+    "5. TWO KINDS OF TEXT ARE ABOVE, AND THEY ARE NOT THE SAME.\n"
     "   [p.N]        — the PAGE'S OWN WORDS. The author wrote these.\n"
     "   [p.N FIGURE] — OUR DESCRIPTION of a picture, diagram, photo or tab staff "
     "on that page. The author did NOT write these; we did, by looking at the "
@@ -387,11 +392,11 @@ COMPILE_TASK = (
     "record and cite; it just must never be repeated as the author's own "
     "sentence. If a claim draws on both, say \"figure\".\n"
     "\n"
-    "5. `depth`: \"primary\" if this book is where you would send someone to learn "
+    "6. `depth`: \"primary\" if this book is where you would send someone to learn "
     "this concept, \"secondary\" if it is covered properly but is not the focus, "
     "\"mention\" if it goes by in passing.\n"
     "\n"
-    "6. `name_el`: the concept's name in GREEK. The teacher is Greek and reads "
+    "7. `name_el`: the concept's name in GREEK. The teacher is Greek and reads "
     "the canon's index in Greek."
 )
 
@@ -436,6 +441,18 @@ CONCEPT_SCHEMA = {
                                         "author's position, not a neutral summary."
                                     ),
                                 },
+                                "anchor": {
+                                    "type": "string",
+                                    "description": (
+                                        "A VERBATIM quote, 8-15 words, copied "
+                                        "WORD-FOR-WORD from THIS AUTHOR's own text "
+                                        "on the page where he makes this claim — "
+                                        "NEVER from inside a [p.N FIGURE] block "
+                                        "(that is our description, not his words). This "
+                                        "quote, not any page number, is what pins "
+                                        "the claim to a page."
+                                    ),
+                                },
                                 "pages": {
                                     "type": "array",
                                     "items": {"type": "integer"},
@@ -466,7 +483,7 @@ CONCEPT_SCHEMA = {
                                     ),
                                 },
                             },
-                            "required": ["text", "pages", "stance", "depth", "grounding"],
+                            "required": ["text", "anchor", "pages", "stance", "depth", "grounding"],
                             "additionalProperties": False,
                         },
                     },
