@@ -306,19 +306,33 @@ def section_words(section: dict | None) -> int:
     return total
 
 
-def measure(lesson: dict, *, teaching_minutes: int) -> Measurement:
+def measure(
+    lesson: dict, blueprint: dict | None = None, *, teaching_minutes: int,
+) -> Measurement:
     """Word-count one drafted lesson against its own target, and name the thin
-    sections so a deepen pass can be aimed rather than sprayed."""
+    sections so a deepen pass can be aimed rather than sprayed.
+
+    The set of sections, their ORDER, and their thin-detection weights all come from
+    `blueprint` — `None` means the code default, which reproduces the old
+    `SECTIONS`/`SECTION_WEIGHTS` behaviour byte-for-byte (that is the point of the
+    default: an un-edited course measures exactly as it did before the blueprint
+    existed). Imported lazily to avoid a depth<->blueprint import cycle."""
+    from app.curriculum import blueprint as _bp
+
+    bp = blueprint if blueprint is not None else _bp.default_blueprint()
+    keys = _bp.section_keys(bp)
+    weights = _bp.section_weights(bp)
+
     target = target_words(teaching_minutes)
     floor = floor_words(teaching_minutes)
 
-    per_section = {name: section_words(lesson.get(name)) for name in SECTIONS}
+    per_section = {name: section_words(lesson.get(name)) for name in keys}
     total = count_words(lesson.get("summary")) + sum(per_section.values())
 
     thin = [
         name
         for name, words in per_section.items()
-        if words < _SECTION_THIN_RATIO * SECTION_WEIGHTS[name] * target
+        if words < _SECTION_THIN_RATIO * weights[name] * target
     ]
     return Measurement(
         total_words=total, target=target, floor=floor,

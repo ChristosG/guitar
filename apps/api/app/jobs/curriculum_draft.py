@@ -48,6 +48,7 @@ from sqlalchemy.orm import aliased
 from app.config import settings
 from app.curriculum.corpus import CurriculumContextError, build_curriculum_context
 from app.curriculum.depth import floor_words, target_words
+from app.curriculum.blueprint import default_blueprint
 from app.curriculum.draft import LessonContext, draft_lesson, draft_progress, persist_lesson
 from app.curriculum.outline import TIER_GENERAL
 from app.curriculum.shape import MIN_TEACHING_MINUTES, QA_MINUTES
@@ -226,6 +227,7 @@ def _draft_one(lesson_id: uuid.UUID, plan: dict) -> None:
     try:
         lesson_json, m = draft_lesson(
             db, ctx=ctx, library=library, language=language,
+            blueprint=default_blueprint(),
             student_brief=student_brief, course_brief=course_brief,
             source_ids=source_ids, prompts=prompts,
         )
@@ -262,7 +264,7 @@ def _draft_one(lesson_id: uuid.UUID, plan: dict) -> None:
             log.info("draft: lesson %s was deleted while it was being drafted", lesson_id)
             return
         persist_lesson(
-            db, lesson_block, lesson_json, m, library,
+            db, lesson_block, lesson_json, m, library, default_blueprint(),
             qa_minutes=size["qa_minutes"], teaching_minutes=size["teaching_minutes"],
         )
         db.commit()

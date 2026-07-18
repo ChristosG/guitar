@@ -1388,7 +1388,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: build_lesson_messages,
         build=_build_lesson_draft,
-        call_sites=("curriculum/draft.py:375",),
+        call_sites=("curriculum/draft.py:399",),
         slices=(
             Slice(
                 id=LESSON_SLICE_ID,
@@ -1417,7 +1417,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: build_lesson_messages,
         build=_build_lesson_deepen,
-        call_sites=("curriculum/draft.py:397",),
+        call_sites=("curriculum/draft.py:421",),
         slices=(
             Slice(
                 id=LESSON_DEEPEN_SLICE_ID,
@@ -1461,7 +1461,7 @@ _ENTRIES = [
         id="lesson.repair",
         flow="lesson",
         kind="prompt",
-        source_ref="app/curriculum/draft.py:306",
+        source_ref="app/curriculum/draft.py:321",
         title_el="Όταν παραπέμπει σε σελίδα που δεν υπάρχει",
         what_it_does_el=(
             "Η εφαρμογή ελέγχει κάθε παραπομπή σε σελίδα που γράφει ο βοηθός. "
@@ -1474,7 +1474,7 @@ _ENTRIES = [
         when_it_runs_el="Μόνο όταν πιαστεί λάθος παραπομπή. Το πολύ μία φορά ανά μάθημα.",
         source_of_truth=lambda: _repair_message,
         build=_build_lesson_repair,
-        call_sites=("curriculum/draft.py:381",),
+        call_sites=("curriculum/draft.py:405",),
         slices=(
             Slice(
                 id=REPAIR_SLICE_ID,

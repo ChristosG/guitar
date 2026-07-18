@@ -39,8 +39,7 @@ from dataclasses import dataclass
 from app.curriculum.corpus import LibraryContext, prefix_messages
 from app.curriculum.depth import (
     DEEPEN_MAX_PASSES,
-    LESSON_DRAFT_SCHEMA,
-    SECTIONS,
+    SECTIONS,  # re-exported: `draft.SECTIONS` is read by other modules/tests
     Measurement,
     measure,
 )
@@ -178,6 +177,7 @@ def build_lesson_messages(
     ctx: LessonContext,
     library: LibraryContext,
     language: str,
+    blueprint: dict | None = None,
     student_brief: str | None,
     course_brief: str | None,
     retrieved: str | None = None,
@@ -198,6 +198,14 @@ def build_lesson_messages(
     cache hit), plus the previous draft and the sections that came back thin.
     """
     messages = prefix_messages(library, source)
+
+    # `blueprint` is accepted for symmetry with the rest of the draft path (and for
+    # future per-section prose), but it does NOT change the tail text today: the
+    # section descriptions reach the model through the guided-json SCHEMA
+    # (`build_lesson_schema(blueprint)`), which `draft_lesson` passes to the provider,
+    # not through this prompt. `LESSON_TAIL` is therefore untouched — the prompt
+    # byte-identity tests stay green. See the plan's Task 2.
+    _ = blueprint
 
     # ---- volatile, and strictly after the cache breakpoint ----
     deepen_block = ""
@@ -250,14 +258,19 @@ def build_lesson_messages(
 # Citations
 # ---------------------------------------------------------------------------
 
-def _iter_citation_lists(lesson: dict):
-    for name in SECTIONS:
+def _iter_citation_lists(lesson: dict, blueprint: dict | None = None):
+    from app.curriculum import blueprint as _bp
+
+    bp = blueprint if blueprint is not None else _bp.default_blueprint()
+    for name in _bp.section_keys(bp):
         section = lesson.get(name)
         if isinstance(section, dict) and isinstance(section.get("citations"), list):
             yield name, section
 
 
-def invalid_citations(lesson: dict, library: LibraryContext) -> list[tuple[str, str, int]]:
+def invalid_citations(
+    lesson: dict, library: LibraryContext, blueprint: dict | None = None,
+) -> list[tuple[str, str, int]]:
     """Every `(section, source_ref, page)` the model cited that it was never shown.
 
     Checked against `LibraryContext.page_index` — the pages ACTUALLY in the prompt
@@ -267,7 +280,7 @@ def invalid_citations(lesson: dict, library: LibraryContext) -> list[tuple[str, 
     it is a fabrication even though the row exists.
     """
     bad: list[tuple[str, str, int]] = []
-    for name, section in _iter_citation_lists(lesson):
+    for name, section in _iter_citation_lists(lesson, blueprint):
         for cite in section["citations"]:
             if not isinstance(cite, dict):
                 continue
@@ -278,11 +291,13 @@ def invalid_citations(lesson: dict, library: LibraryContext) -> list[tuple[str, 
     return bad
 
 
-def strip_invalid_citations(lesson: dict, library: LibraryContext) -> dict:
+def strip_invalid_citations(
+    lesson: dict, library: LibraryContext, blueprint: dict | None = None,
+) -> dict:
     """Drop the citations that do not resolve, keep the lesson. See the module
     docstring: after one repair attempt, a false citation is the only part worth
     destroying."""
-    for _name, section in _iter_citation_lists(lesson):
+    for _name, section in _iter_citation_lists(lesson, blueprint):
         section["citations"] = [
             c for c in section["citations"]
             if isinstance(c, dict)
@@ -329,6 +344,7 @@ def draft_lesson(
     ctx: LessonContext,
     library: LibraryContext,
     language: str,
+    blueprint: dict | None = None,
     student_brief: str | None = None,
     course_brief: str | None = None,
     source_ids: list[uuid.UUID] | None = None,
@@ -357,6 +373,14 @@ def draft_lesson(
     """
     provider = get_provider()
 
+    # The blueprint decides the section shape the model is asked for, the sections
+    # `measure` counts, and the sections whose citations are validated. `None` is the
+    # code default — a byte-identical reproduction of the old fixed skeleton.
+    from app.curriculum import blueprint as _bp
+
+    bp = blueprint if blueprint is not None else _bp.default_blueprint()
+    schema = _bp.build_lesson_schema(bp)
+
     retrieved = None
     if not library.fits and not library.is_empty:
         passages = ground_topic(
@@ -368,27 +392,27 @@ def draft_lesson(
         )
 
     messages = build_lesson_messages(
-        ctx=ctx, library=library, language=language,
+        ctx=ctx, library=library, language=language, blueprint=bp,
         student_brief=student_brief, course_brief=course_brief, retrieved=retrieved,
         source=prompts,
     )
-    lesson = provider.guided_json(messages, LESSON_DRAFT_SCHEMA, role="draft")
+    lesson = provider.guided_json(messages, schema, role="draft")
 
-    bad = invalid_citations(lesson, library)
+    bad = invalid_citations(lesson, library, bp)
     if bad:
         log.warning("lesson %r cited %d page(s) it was never shown — repairing",
                     ctx.lesson_title, len(bad))
         repaired = provider.guided_json(
-            [*messages, _repair_message(bad, library, prompts)], LESSON_DRAFT_SCHEMA,
+            [*messages, _repair_message(bad, library, prompts)], schema,
             role="draft",
         )
         lesson = repaired
-        if invalid_citations(lesson, library):
+        if invalid_citations(lesson, library, bp):
             log.warning("lesson %r still cites unknown pages after one repair — "
                         "dropping the bad citations, keeping the prose", ctx.lesson_title)
-            lesson = strip_invalid_citations(lesson, library)
+            lesson = strip_invalid_citations(lesson, library, bp)
 
-    m = measure(lesson, teaching_minutes=ctx.teaching_minutes)
+    m = measure(lesson, bp, teaching_minutes=ctx.teaching_minutes)
     passes = 0
     while m.needs_deepening and passes < DEEPEN_MAX_PASSES:
         passes += 1
@@ -396,15 +420,15 @@ def draft_lesson(
                  ctx.lesson_title, m.total_words, m.floor, passes)
         deeper = provider.guided_json(
             build_lesson_messages(
-                ctx=ctx, library=library, language=language,
+                ctx=ctx, library=library, language=language, blueprint=bp,
                 student_brief=student_brief, course_brief=course_brief,
                 retrieved=retrieved, deepen=m, previous=lesson, source=prompts,
             ),
-            LESSON_DRAFT_SCHEMA, role="draft",
+            schema, role="draft",
         )
-        if invalid_citations(deeper, library):
-            deeper = strip_invalid_citations(deeper, library)
-        deeper_m = measure(deeper, teaching_minutes=ctx.teaching_minutes)
+        if invalid_citations(deeper, library, bp):
+            deeper = strip_invalid_citations(deeper, library, bp)
+        deeper_m = measure(deeper, bp, teaching_minutes=ctx.teaching_minutes)
         # Keep the LONGER draft. A deepen pass that came back shorter has not
         # deepened anything, and silently accepting it would make the tutor's
         # "Deepen" button able to shrink his lesson.
@@ -448,12 +472,16 @@ SECTION_LABELS: dict[str, dict[str, str]] = {
 # How the taught minutes are spread across the sections on the printed script.
 # Derived from the same weights `depth` measures against, so a section that is 25%
 # of the words is 25% of the clock — the two numbers cannot drift apart.
-def _section_minutes(name: str, teaching_minutes: int, qa_minutes: int) -> int:
-    from app.curriculum.depth import SECTION_WEIGHTS
+def _section_minutes(
+    name: str, teaching_minutes: int, qa_minutes: int, blueprint: dict | None = None,
+) -> int:
+    from app.curriculum import blueprint as _bp
 
-    if name == "qa_prompts":
+    bp = blueprint if blueprint is not None else _bp.default_blueprint()
+    kinds = {s["key"]: s["kind"] for s in bp["sections"]}
+    if kinds.get(name) == "qa":
         return max(1, qa_minutes)
-    return max(1, round(SECTION_WEIGHTS[name] * teaching_minutes))
+    return max(1, round(_bp.section_weights(bp)[name] * teaching_minutes))
 
 
 def _render_section(name: str, section: dict) -> str:
@@ -485,6 +513,7 @@ def persist_lesson(
     lesson: dict,
     m: Measurement,
     library: LibraryContext,
+    blueprint: dict | None = None,
     *,
     qa_minutes: int,
     teaching_minutes: int,
@@ -511,18 +540,26 @@ def persist_lesson(
 
     from app.models.block import Block
 
+    from app.curriculum import blueprint as _bp
+
+    bp = blueprint if blueprint is not None else _bp.default_blueprint()
+
     for old in db.scalars(select(Block).where(Block.parent_id == lesson_block.id)).all():
         db.delete(old)
     db.flush()
 
     # Fallback is "el", not "en" — i18n.py's own rule: anything in this codebase
     # still defaulting to English is a bug. A student row carrying "el-GR" used
-    # to make a Greek lesson persist English section headings.
+    # to make a Greek lesson persist English section headings. `section_labels`
+    # applies the same el-fallback internally; the SECTION_LABELS membership check
+    # keeps `lang` to a known key so a default course's titles are byte-identical.
     lang = lesson_block.language if lesson_block.language in SECTION_LABELS else "el"
+    labels = _bp.section_labels(bp, lang)
+    sections_by_key = {s["key"]: s for s in bp["sections"]}
     citations_all: list[dict] = []
 
     order = 0
-    for name in SECTIONS:
+    for name in _bp.section_keys(bp):
         section = lesson.get(name)
         if not isinstance(section, dict):
             continue
@@ -544,13 +581,17 @@ def persist_lesson(
         citations_all.extend(cites)
         db.add(Block(
             kind="segment",
-            title=SECTION_LABELS[lang][name],
+            title=labels[name],
             body=body,
-            est_minutes=_section_minutes(name, teaching_minutes, qa_minutes),
+            est_minutes=_section_minutes(name, teaching_minutes, qa_minutes, bp),
             order=order,
             parent_id=lesson_block.id,
             language=lesson_block.language,
-            meta={"section": name, "citations": cites},
+            meta={
+                "section": name,
+                "audience": sections_by_key[name].get("audience"),
+                "citations": cites,
+            },
         ))
         order += 1
 
