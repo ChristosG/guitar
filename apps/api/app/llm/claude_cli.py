@@ -144,6 +144,15 @@ _EFFORT: dict[str, str] = {
 # at the default below.
 _GUIDED_TIMEOUT_S: dict[str, float] = {
     "compile": 1800.0,
+    # A single lesson draft (~2,200 words) lands in 2-4 min unloaded, but the
+    # subscription CLI THROTTLES under the fan-out's concurrent calls (2 workers,
+    # and far worse when a "resume" stacks a second job -> ~4 concurrent). Under
+    # that pressure `claude -p` crawled past the 600s default and the app gave up
+    # with a ReadTimeout even though the model had actually finished — the bridge
+    # logged a Broken pipe writing the late response. 1200s covers the throttled
+    # case; a genuine hang still dies here. The real cure is the API key (no
+    # subscription throttle, true parallelism) — this is the claude -p stopgap.
+    "draft": 1200.0,
 }
 _DEFAULT_GUIDED_TIMEOUT_S = 600.0
 
