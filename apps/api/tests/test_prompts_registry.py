@@ -309,3 +309,32 @@ def test_the_only_editable_slice_carries_no_placeholder():
     a 500 where a lesson should be.
     """
     assert "{" not in STUDENT_PITCH and "}" not in STUDENT_PITCH
+
+
+# ---------------------------------------------------------------------------
+# C1 — the curriculum-crucial group
+# ---------------------------------------------------------------------------
+
+_CURRICULUM_GROUP = {
+    "curriculum.system",
+    "curriculum.library",
+    "curriculum.outline",
+    "curriculum.extend",
+    "lesson.draft",
+    "lesson.tier_library",
+    "lesson.tier_web",
+    "lesson.gap",
+    "lesson.deepen",
+    "lesson.repair",
+}
+
+
+def test_the_curriculum_group_is_exactly_the_spec_s_set():
+    """A drift guard, not a taste check. The Settings page renders a synthetic
+    'Curriculum' group at the top from `curriculum_group=True` entries — if a new
+    curriculum-shaping prompt is added later without the flag, it silently misses
+    the shortcut, and if an unrelated one is flagged by accident it silently
+    clutters it. Both directions fail here.
+    """
+    actual = {e.id for e in REGISTRY.values() if e.curriculum_group}
+    assert actual == _CURRICULUM_GROUP

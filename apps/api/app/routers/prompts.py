@@ -94,6 +94,10 @@ class PromptSummary(BaseModel):
     # sentence for these and offers the toggle below — see `registry._SAMPLE_COURSE_LANGUAGE`
     # for the bug this exists to end.
     language_from_course: bool
+    # C1: this prompt is one of the ten that actually shape a course/lesson.
+    # `prompt-list.tsx` renders the subset as a synthetic "Curriculum" group at the
+    # top of the page — a shortcut into the existing groups, not a new API surface.
+    curriculum_group: bool
 
 
 class PromptDetail(PromptSummary):
@@ -185,6 +189,7 @@ def _summary(entry: registry.PromptEntry, overridden: set[str]) -> dict:
         # rule the API already knows.
         "cache_cost_warning": entry.cache_prefix,
         "language_from_course": entry.language_from_course,
+        "curriculum_group": entry.curriculum_group,
         "has_override": any(s.id in overridden for s in entry.slices),
     }
 

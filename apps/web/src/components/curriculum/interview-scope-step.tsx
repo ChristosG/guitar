@@ -1,7 +1,9 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
-import { useTranslations } from "next-intl";
+import Link from "next/link";
+import { useLocale, useTranslations } from "next-intl";
+import { Settings } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import type { InterviewOption } from "@/lib/api";
@@ -33,6 +35,7 @@ interface InterviewScopeStepProps {
  */
 export function InterviewScopeStep({ options, submitting, error, onSubmit }: InterviewScopeStepProps) {
   const t = useTranslations("curricula.interview");
+  const locale = useLocale();
 
   const [brief, setBrief] = useState("");
   const [policy, setPolicy] = useState(options[0]?.value ?? "general_knowledge");
@@ -98,14 +101,30 @@ export function InterviewScopeStep({ options, submitting, error, onSubmit }: Int
         </p>
       )}
 
-      <Button
-        type="submit"
-        disabled={submitting || !canSubmit}
-        data-testid="interview-answer-submit"
-        className="self-end"
-      >
-        {t("continue")}
-      </Button>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        {/* THE STEP-3 DEEP-LINK (Plan C, Task 7). A plain navigation, not a form
+            control — it must never submit this step's answer, it just opens
+            Settings on the "Curriculum" prompt group so he can see (or change)
+            what will actually write this course, before he commits to it. */}
+        <Link
+          href={`/${locale}/settings?promptGroup=curriculum`}
+          target="_blank"
+          rel="noopener noreferrer"
+          data-testid="interview-scope-prompts-link"
+          className="flex items-center gap-1.5 text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+        >
+          <Settings className="size-3.5" />
+          {t("steps.scope.promptsLink")}
+        </Link>
+
+        <Button
+          type="submit"
+          disabled={submitting || !canSubmit}
+          data-testid="interview-answer-submit"
+        >
+          {t("continue")}
+        </Button>
+      </div>
     </form>
   );
 }

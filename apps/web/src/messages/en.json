@@ -304,7 +304,8 @@
             "library_only": "Only my library. Show me the gaps instead of filling them.",
             "general_knowledge": "Fill the gaps from your general knowledge, clearly labelled.",
             "web": "Search the web where it's needed, with the sources in front of me."
-          }
+          },
+          "promptsLink": "See / change the prompts that will build this course"
         },
         "structure": {
           "heading": "The lesson structure — an optional step",
@@ -872,6 +873,10 @@
     "languageName": {
       "el": "Greek",
       "en": "English"
+    },
+    "curriculumGroup": {
+      "title": "Curriculum — the core prompts",
+      "help": "The ten prompts that actually shape your curriculum and lessons — gathered here so you don't have to hunt for them inside the groups below."
     }
   },
   "blueprint": {

@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { Check, ChevronDown, ChevronRight, Languages, Loader2, Lock, TriangleAlert } from "lucide-react";
 
@@ -85,15 +86,38 @@ import { cn } from "@/lib/utils";
  */
 export function PromptList({ provider }: { provider: string | null }) {
   const t = useTranslations("prompts");
+  const searchParams = useSearchParams();
   const [prompts, setPrompts] = useState<PromptSummary[] | null>(null);
   const [errorCode, setErrorCode] = useState<string | null>(null);
   const [openFlows, setOpenFlows] = useState<string[]>([]);
+  const [curriculumGroupOpen, setCurriculumGroupOpen] = useState(false);
+  const curriculumGroupRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     listPrompts()
       .then(setPrompts)
       .catch((e) => setErrorCode(codeOf(e, "load_failed")));
   }, []);
+
+  /** THE STEP-3 DEEP-LINK LANDS HERE (`interview-scope-step.tsx` ->
+   * `/{locale}/settings?promptGroup=curriculum`). Opens the synthetic Curriculum
+   * group and scrolls to it — but only once `prompts` has loaded, since the
+   * group's DOM node does not exist before then. */
+  useEffect(() => {
+    if (!prompts || searchParams.get("promptGroup") !== "curriculum") return;
+    setCurriculumGroupOpen(true);
+    curriculumGroupRef.current?.scrollIntoView({ block: "start" });
+  }, [prompts, searchParams]);
+
+  /** The C1 subset (`curriculum_group=True` — exactly ten of them), IN
+   * REGISTRATION ORDER, same provider-drop rule as the flow groups below: a
+   * prompt only the inactive provider sends must not appear here either. This is
+   * a SHORTCUT into the groups below, not a second copy of the mechanism — the
+   * same `PromptRow` renders it, against the same `/prompts/{id}` route. */
+  const curriculumItems = useMemo(
+    () => (prompts ?? []).filter((p) => p.curriculum_group && (!p.provider || p.provider === provider)),
+    [prompts, provider],
+  );
 
   /** Grouped in REGISTRATION ORDER (`registry.by_flow` — chat first, because it
    * is the thing he uses every day), never sorted alphabetically: the order the
@@ -147,6 +171,35 @@ export function PromptList({ provider }: { provider: string | null }) {
         )}
 
         <div className="flex flex-col gap-1.5">
+          {curriculumItems.length > 0 && (
+            <div ref={curriculumGroupRef}>
+              <Collapsible open={curriculumGroupOpen} onOpenChange={setCurriculumGroupOpen}>
+                <CollapsibleTrigger
+                  data-testid="prompt-flow-curriculum-group"
+                  aria-label={curriculumGroupOpen ? t("collapse") : t("expand")}
+                  className="flex w-full cursor-pointer items-center gap-2 rounded-lg p-2 text-left transition-colors hover:bg-muted"
+                >
+                  {curriculumGroupOpen ? (
+                    <ChevronDown className="size-4 shrink-0 text-muted-foreground" />
+                  ) : (
+                    <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
+                  )}
+                  <span className="font-medium">{t("curriculumGroup.title")}</span>
+                  <span className="ms-auto text-xs text-muted-foreground">
+                    {t("count", { count: curriculumItems.length })}
+                  </span>
+                </CollapsibleTrigger>
+                <CollapsibleContent className="overflow-hidden transition-[height] duration-200 ease-out">
+                  <div className="flex flex-col gap-1.5 ps-6 pt-1.5">
+                    <p className="text-xs text-muted-foreground">{t("curriculumGroup.help")}</p>
+                    {curriculumItems.map((p) => (
+                      <PromptRow key={`curriculum-group-${p.id}`} summary={p} groupPrefix="curriculum-group-" />
+                    ))}
+                  </div>
+                </CollapsibleContent>
+              </Collapsible>
+            </div>
+          )}
           {groups.map(({ flow, items }) => {
             const open = openFlows.includes(flow);
             return (
@@ -183,8 +236,18 @@ export function PromptList({ provider }: { provider: string | null }) {
 }
 
 /** One prompt: shut, it is a Greek title and nothing else. Open, it fetches
- * itself and shows the real thing. */
-function PromptRow({ summary }: { summary: PromptSummary }) {
+ * itself and shows the real thing.
+ *
+ * `groupPrefix` exists ONLY so the synthetic "Curriculum" shortcut group
+ * (`PromptList` above) can render the SAME ten prompts a second time — at the
+ * top of the page — without a duplicate `data-testid` fighting its "home" flow
+ * group for Playwright's strict-mode uniqueness. It namespaces exactly the
+ * handful of ids that are unconditionally in the DOM the moment `prompts`
+ * loads (the section, its toggle, the "you changed this" badge, the cache
+ * note) — not a new rendering path, the same component, same fetch, same
+ * slice/span machinery underneath. Defaulting to `""` leaves every existing
+ * id byte-identical for the flow groups below. */
+function PromptRow({ summary, groupPrefix = "" }: { summary: PromptSummary; groupPrefix?: string }) {
   const t = useTranslations("prompts");
   const [open, setOpen] = useState(false);
   const [detail, setDetail] = useState<PromptDetail | null>(null);
@@ -239,12 +302,12 @@ function PromptRow({ summary }: { summary: PromptSummary }) {
   return (
     <section
       className="rounded-xl ring-1 ring-foreground/10"
-      data-testid={`prompt-${summary.id}`}
+      data-testid={`${groupPrefix}prompt-${summary.id}`}
       data-flow={summary.flow}
     >
       <Collapsible open={open} onOpenChange={toggle}>
         <CollapsibleTrigger
-          data-testid={`prompt-toggle-${summary.id}`}
+          data-testid={`${groupPrefix}prompt-toggle-${summary.id}`}
           aria-label={open ? t("collapse") : t("expand")}
           className="flex w-full cursor-pointer items-start gap-2 rounded-xl p-3 text-left transition-colors hover:bg-muted/50"
         >
@@ -256,7 +319,7 @@ function PromptRow({ summary }: { summary: PromptSummary }) {
           <span className="font-medium">{summary.title_el}</span>
           {overridden && (
             <span
-              data-testid={`prompt-overridden-${summary.id}`}
+              data-testid={`${groupPrefix}prompt-overridden-${summary.id}`}
               className="ms-auto shrink-0 rounded-md bg-primary/10 px-1.5 py-0.5 text-xs text-primary"
             >
               {t("overridden")}
@@ -284,7 +347,7 @@ function PromptRow({ summary }: { summary: PromptSummary }) {
 
             {summary.cache_cost_warning && (
               <p
-                data-testid={`prompt-cache-${summary.id}`}
+                data-testid={`${groupPrefix}prompt-cache-${summary.id}`}
                 className="rounded-lg bg-muted p-2.5 text-sm text-muted-foreground"
               >
                 {t("cacheNote")}

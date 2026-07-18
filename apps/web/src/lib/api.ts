@@ -2166,6 +2166,13 @@ export interface PromptSummary {
    * is what an edit costs. Never re-derive it from `cache_prefix` here — the API
    * already knows the rule. */
   cache_cost_warning: boolean;
+  /** One of the ten prompts that actually shape a course/lesson (`curriculum.system`,
+   * `curriculum.library`, `curriculum.outline`, `curriculum.extend`, `lesson.draft`,
+   * `lesson.tier_library`, `lesson.tier_web`, `lesson.gap`, `lesson.deepen`,
+   * `lesson.repair`). `prompt-list.tsx` renders these as a synthetic "Curriculum"
+   * group at the top — a shortcut into the flow groups below, not a second copy
+   * of them. */
+  curriculum_group: boolean;
   has_override: boolean;
 }
 

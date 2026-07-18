@@ -361,6 +361,22 @@ class PromptEntry:
     # where that is knowable, and a UI re-deriving it would be a second copy of it.
     language_from_course: bool = False
 
+    # C1 (Unit C): the CURRICULUM-CRUCIAL subset — the prompts that actually shape
+    # what a course/lesson becomes, as opposed to the surrounding machinery (the
+    # no-library/library-too-large substitutions, refine, from-selection, …). Set
+    # `True` on exactly ten entries (spec's own list): `curriculum.system`,
+    # `curriculum.library`, `curriculum.outline`, `curriculum.extend`,
+    # `lesson.draft`, `lesson.tier_library`, `lesson.tier_web`, `lesson.gap`,
+    # `lesson.deepen`, `lesson.repair`. `prompt-list.tsx` renders these as a
+    # synthetic "Curriculum" group at the TOP of the page — a shortcut into the
+    # existing flow groups, not a new override system (invariant #10): the same
+    # `Slice`/span machinery renders them either way.
+    #
+    # `test_prompts_registry.py::test_the_curriculum_group_is_exactly_the_spec_s_set`
+    # pins the set exactly, so a new curriculum-shaping prompt added later without
+    # this flag fails loudly instead of silently missing the shortcut.
+    curriculum_group: bool = False
+
     def render(
         self, locale: str = DEFAULT_LOCALE, db=None, course_language: str | None = None,
     ) -> RenderedPrompt:
@@ -1172,6 +1188,7 @@ _ENTRIES = [
     # ---- curriculum ----
     PromptEntry(
         id="curriculum.system",
+        curriculum_group=True,
         flow="curriculum",
         kind="prompt",
         source_ref="app/curriculum/corpus.py:349",
@@ -1202,6 +1219,7 @@ _ENTRIES = [
     ),
     PromptEntry(
         id="curriculum.library",
+        curriculum_group=True,
         flow="curriculum",
         kind="prompt",
         source_ref="app/curriculum/corpus.py:457",
@@ -1282,6 +1300,7 @@ _ENTRIES = [
     ),
     PromptEntry(
         id="curriculum.outline",
+        curriculum_group=True,
         language_from_course=True,
         flow="curriculum",
         kind="prompt",
@@ -1309,6 +1328,7 @@ _ENTRIES = [
     ),
     PromptEntry(
         id="curriculum.extend",
+        curriculum_group=True,
         language_from_course=True,
         flow="curriculum",
         kind="prompt",
@@ -1369,6 +1389,7 @@ _ENTRIES = [
     # ---- lesson ----
     PromptEntry(
         id="lesson.draft",
+        curriculum_group=True,
         language_from_course=True,
         flow="lesson",
         kind="prompt",
@@ -1400,6 +1421,7 @@ _ENTRIES = [
     ),
     PromptEntry(
         id="lesson.deepen",
+        curriculum_group=True,
         language_from_course=True,
         flow="lesson",
         kind="prompt",
@@ -1459,6 +1481,7 @@ _ENTRIES = [
     ),
     PromptEntry(
         id="lesson.repair",
+        curriculum_group=True,
         flow="lesson",
         kind="prompt",
         source_ref="app/curriculum/draft.py:321",
@@ -1486,6 +1509,7 @@ _ENTRIES = [
     ),
     PromptEntry(
         id="lesson.tier_library",
+        curriculum_group=True,
         flow="lesson",
         kind="fragment",
         source_ref="app/curriculum/draft.py:111",
@@ -1511,6 +1535,7 @@ _ENTRIES = [
     ),
     PromptEntry(
         id="lesson.gap",
+        curriculum_group=True,
         flow="lesson",
         kind="fragment",
         source_ref="app/curriculum/draft.py:111",
@@ -1536,6 +1561,7 @@ _ENTRIES = [
     ),
     PromptEntry(
         id="lesson.tier_web",
+        curriculum_group=True,
         flow="lesson",
         kind="fragment",
         source_ref="app/curriculum/draft.py:111",
