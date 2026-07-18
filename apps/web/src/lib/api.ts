@@ -2363,10 +2363,15 @@ export function getPromptSliceHistory(sliceId: string): Promise<PromptSliceHisto
 
 /** One section of a blueprint. `kind` decides what is locked in the editor:
  * `exercises` (keyed `exercises`) and `qa` (keyed `qa_prompts`) are STRUCTURED —
- * they keep their key and label forever (invariant #4) and may only be
- * reweighted, re-audienced, reordered or disabled. Only `prose` sections may be
- * added, removed or renamed. `audience` is forward-looking plumbing only (no
- * print/handout UI consumes it yet, by design — Resolved design call #3). */
+ * their model-facing schema is a fixed shape built in code, keyed by `kind`, so
+ * their `key` stays read-only while they exist. They may be reweighted,
+ * re-audienced, reordered, relabelled, disabled, or REMOVED ENTIRELY and later
+ * re-added from the editor's Add menu (2026-07-19 follow-up: full tutor
+ * control, not just enable/disable) — the one thing that never changes is the
+ * canonical key a present structured section carries. `prose` sections may be
+ * freely added, removed, or renamed. `audience` is forward-looking plumbing
+ * only (no print/handout UI consumes it yet, by design — Resolved design call
+ * #3). */
 export interface BlueprintSection {
   key: string;
   label: { el: string; en: string };
@@ -2410,10 +2415,17 @@ export function getBlueprintCodeDefault(): Promise<{ blueprint: BlueprintShape }
 /** Validate + save the tutor's settings default. Throws `ApiError` with `code`
  * one of `BlueprintInvalid`'s: `bad_version`, `no_sections`, `bad_key`,
  * `dup_key`, `bad_label`, `bad_description`, `bad_weight`, `bad_kind`,
- * `bad_audience`, `bad_enabled`, `structured_section_missing`,
- * `structured_section_renamed` — each mapped to one Greek sentence under
- * `blueprint.errors.<code>`. Validation runs BEFORE the write, so a rejected
- * blueprint leaves any existing default untouched. */
+ * `bad_audience`, `bad_enabled`, `structured_section_duplicate`,
+ * `structured_section_renamed`, `no_enabled_sections` — each mapped to one
+ * Greek sentence under `blueprint.errors.<code>`. Validation runs BEFORE the
+ * write, so a rejected blueprint leaves any existing default untouched.
+ *
+ * A structured (`exercises`/`qa`) section may now be entirely ABSENT — full
+ * delete + re-add is legal (2026-07-19 follow-up to Plan C's Task 6). What is
+ * still rejected: two sections of the same structured kind
+ * (`structured_section_duplicate`), a structured section present under any key
+ * but its canonical one (`structured_section_renamed`), and a blueprint with no
+ * ENABLED section at all (`no_enabled_sections`). */
 export function saveBlueprintDefault(blueprint: BlueprintShape): Promise<BlueprintDefaultOut> {
   return request<BlueprintDefaultOut>("/blueprint/default", {
     method: "PUT",

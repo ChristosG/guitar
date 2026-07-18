@@ -1,54 +1,71 @@
 "use client";
 
-import { ChevronDown, ChevronUp, Lock, Plus, Trash2 } from "lucide-react";
+import { useState } from "react";
+import { ChevronDown, ChevronUp, Info, Plus, Trash2 } from "lucide-react";
 import { useTranslations } from "next-intl";
 
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import type { BlueprintSection, BlueprintShape } from "@/lib/api";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { getBlueprintCodeDefault, type BlueprintSection, type BlueprintShape } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const AUDIENCES: BlueprintSection["audience"][] = ["teacher", "student", "both"];
+
+type StructuredKind = "exercises" | "qa";
 
 interface BlueprintEditorProps {
   value: BlueprintShape;
   onChange: (next: BlueprintShape) => void;
 }
 
-/** THE SHARED BLUEPRINT EDITOR (Plan C, Task 6) — the lesson skeleton every
- * curriculum drafts from, editable. Mounted twice: as the Settings default
- * (`blueprint-default-card.tsx`, against `/blueprint/default`) and inside the
- * wizard's optional "structure" step (`interview-structure-step.tsx`, seeded
- * from `findings.blueprint` and folded into `interview.answers.structure` — see
- * that component's own docstring). One component, one set of rules, because a
- * tutor who learns the shape once in Settings must find the exact same controls
- * when he reaches for it mid-wizard.
+/** THE SHARED BLUEPRINT EDITOR (Plan C, Task 6; full delete/re-add follow-up
+ * 2026-07-19) — the lesson skeleton every curriculum drafts from, editable.
+ * Mounted twice: as the Settings default (`blueprint-default-card.tsx`, against
+ * `/blueprint/default`) and inside the wizard's optional "structure" step
+ * (`interview-structure-step.tsx`, seeded from `findings.blueprint` and folded
+ * into `interview.answers.structure` — see that component's own docstring). One
+ * component, one set of rules, because a tutor who learns the shape once in
+ * Settings must find the exact same controls when he reaches for it mid-wizard.
  *
- * PURELY CONTROLLED: no fetch, no save button, no confirm dialog lives here —
- * every keystroke calls `onChange` with a brand-new `BlueprintShape` and the two
- * call sites own loading/saving/persisting. That split is what let the wizard
- * step and the settings card share this file without either one importing the
- * other's plumbing.
+ * MOSTLY CONTROLLED: every keystroke and reorder calls `onChange` with a
+ * brand-new `BlueprintShape`, and the two call sites still own loading/saving/
+ * persisting — no save button, no confirm dialog lives here. The ONE thing this
+ * component fetches itself is the canonical STRUCTURED section template when the
+ * tutor re-adds one from the Add menu (`getBlueprintCodeDefault()`) — sourced
+ * live from the server rather than retyped here, so a backend wording change can
+ * never silently drift out of sync with what "Add Exercises"/"Add Q&A" restores.
  *
- * THE LOCK IS THE WHOLE POINT (spec invariant #4). `exercises` (kind
- * `"exercises"`) and `qa_prompts` (kind `"qa"`) are STRUCTURED: the model's
- * guided-json schema for them is a fixed nested shape the app builds in code
- * (`depth._exercises_section`/`_qa_section`), keyed by their `kind`. Renaming one
- * or deleting it would silently break every future lesson draft with no error
- * until the model tries to fill a schema that no longer exists. So their `key`
- * and both label inputs are `disabled`, and there is no Remove button for them —
- * everything else (description, weight, audience, enabled, reorder) stays live,
- * because reweighting or disabling a structured section is a normal thing to
- * want (a tutor who never quizzes at the end can turn Q&A off).
+ * `exercises` (kind `"exercises"`) and `qa_prompts` (kind `"qa"`) are STRUCTURED:
+ * the model's guided-json schema for them is a fixed nested shape the app builds
+ * in code (`depth._exercises_section`/`_qa_section`), keyed by their `kind`, not
+ * their `key` string. FULL TUTOR CONTROL (2026-07-19): a structured section can
+ * now be turned off, REMOVED entirely, or re-added from the Add menu — the only
+ * things that stay fixed are its `kind` (so the model schema builder still knows
+ * which shape to build) and, while it exists, its canonical `key` (so
+ * `_section_minutes`/`persist_lesson` keep finding it by name). So only the KEY
+ * input stays `disabled` for a structured row; its labels, description, weight,
+ * audience, and order are exactly as live as any prose section's, and its Remove
+ * button works like any other row's — an informational "Structured" badge
+ * explains the one thing that is still true about it.
  *
- * Only `prose` sections may be added, removed or renamed — `addSection` always
- * appends a fresh `kind: "prose"` row, and `removeSection` is only ever wired to
- * one.
+ * The Add control is a small menu: "Add a text piece" is always offered (a fresh
+ * `kind: "prose"` row); "Add Exercises" / "Add Q&A" are offered only while no
+ * section of that kind currently exists — offering to add a second one would
+ * just be rejected server-side (`structured_section_duplicate`), so the menu
+ * simply does not present that dead end.
  */
 export function BlueprintEditor({ value, onChange }: BlueprintEditorProps) {
   const t = useTranslations("blueprint");
+  const [addError, setAddError] = useState<string | null>(null);
 
   function patchSection(i: number, patch: Partial<BlueprintSection>) {
     const sections = [...value.sections];
@@ -74,7 +91,8 @@ export function BlueprintEditor({ value, onChange }: BlueprintEditorProps) {
     onChange({ ...value, sections: value.sections.filter((_, idx) => idx !== i) });
   }
 
-  function addSection() {
+  function addProseSection() {
+    setAddError(null);
     onChange({
       ...value,
       sections: [
@@ -92,11 +110,31 @@ export function BlueprintEditor({ value, onChange }: BlueprintEditorProps) {
     });
   }
 
+  /** Re-add a deleted STRUCTURED section. Fetches the canonical section from the
+   * live code default rather than keeping a second, hand-typed copy of its
+   * label/description here — see this component's docstring. */
+  async function addStructuredSection(kind: StructuredKind) {
+    setAddError(null);
+    try {
+      const { blueprint: codeDefault } = await getBlueprintCodeDefault();
+      const template = codeDefault.sections.find((s) => s.kind === kind);
+      if (!template) return;
+      onChange({
+        ...value,
+        sections: [...value.sections, { ...template, label: { ...template.label } }],
+      });
+    } catch {
+      setAddError(t("addStructuredFailed"));
+    }
+  }
+
+  const hasStructured = (kind: StructuredKind) => value.sections.some((s) => s.kind === kind);
+
   return (
     <div className="flex flex-col gap-3" data-testid="blueprint-editor">
       <div className="flex flex-col gap-2.5">
         {value.sections.map((section, i) => {
-          const locked = section.kind !== "prose";
+          const structured = section.kind !== "prose";
           const rowId = section.key || `blank-${i}`;
           return (
             <article
@@ -130,15 +168,23 @@ export function BlueprintEditor({ value, onChange }: BlueprintEditorProps) {
                 </div>
 
                 <div className="flex min-w-0 flex-1 flex-col gap-2">
-                  {locked && (
-                    <span
-                      data-testid={`blueprint-locked-${rowId}`}
-                      title={t("lockedWhy")}
-                      className="flex w-fit items-center gap-1.5 rounded-md bg-muted px-1.5 py-0.5 text-xs text-muted-foreground"
-                    >
-                      <Lock className="size-3 shrink-0" />
-                      {t("lockedTitle")}
-                    </span>
+                  {structured && (
+                    <Tooltip>
+                      <TooltipTrigger render={<span className="inline-flex w-fit" />}>
+                        <span
+                          data-testid={`blueprint-structured-${rowId}`}
+                          className="flex items-center gap-1.5 rounded-md bg-muted px-1.5 py-0.5 text-xs text-muted-foreground"
+                        >
+                          <Info className="size-3 shrink-0" />
+                          {t("structuredBadge")}
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent className="max-w-xs">
+                        {t(section.kind === "exercises"
+                          ? "structuredTooltipExercises"
+                          : "structuredTooltipQa")}
+                      </TooltipContent>
+                    </Tooltip>
                   )}
 
                   <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
@@ -146,7 +192,7 @@ export function BlueprintEditor({ value, onChange }: BlueprintEditorProps) {
                       <Label className="text-xs">{t("keyLabel")}</Label>
                       <Input
                         value={section.key}
-                        disabled={locked}
+                        disabled={structured}
                         data-testid={`blueprint-key-${rowId}`}
                         onChange={(e) => patchSection(i, { key: e.target.value })}
                         className="h-8 font-mono text-xs"
@@ -156,7 +202,6 @@ export function BlueprintEditor({ value, onChange }: BlueprintEditorProps) {
                       <Label className="text-xs">{t("labelElLabel")}</Label>
                       <Input
                         value={section.label.el}
-                        disabled={locked}
                         data-testid={`blueprint-label-el-${rowId}`}
                         onChange={(e) => patchLabel(i, "el", e.target.value)}
                         className="h-8"
@@ -166,7 +211,6 @@ export function BlueprintEditor({ value, onChange }: BlueprintEditorProps) {
                       <Label className="text-xs">{t("labelEnLabel")}</Label>
                       <Input
                         value={section.label.en}
-                        disabled={locked}
                         data-testid={`blueprint-label-en-${rowId}`}
                         onChange={(e) => patchLabel(i, "en", e.target.value)}
                         className="h-8"
@@ -234,33 +278,66 @@ export function BlueprintEditor({ value, onChange }: BlueprintEditorProps) {
                   </div>
                 </div>
 
-                {!locked && (
-                  <Button
-                    type="button" variant="ghost" size="icon-sm"
-                    data-testid={`blueprint-remove-${rowId}`}
-                    aria-label={t("remove")}
-                    onClick={() => removeSection(i)}
-                    className="shrink-0"
-                  >
-                    <Trash2 />
-                  </Button>
-                )}
+                <Button
+                  type="button" variant="ghost" size="icon-sm"
+                  data-testid={`blueprint-remove-${rowId}`}
+                  aria-label={t("remove")}
+                  onClick={() => removeSection(i)}
+                  className="shrink-0"
+                >
+                  <Trash2 />
+                </Button>
               </div>
             </article>
           );
         })}
       </div>
 
-      <Button
-        type="button"
-        variant="outline"
-        onClick={addSection}
-        data-testid="blueprint-add-section"
-        className="self-start"
-      >
-        <Plus />
-        {t("add")}
-      </Button>
+      <DropdownMenu>
+        <DropdownMenuTrigger
+          render={
+            <Button
+              type="button"
+              variant="outline"
+              data-testid="blueprint-add-section"
+              className="self-start"
+            />
+          }
+        >
+          <Plus />
+          {t("add")}
+        </DropdownMenuTrigger>
+        <DropdownMenuContent>
+          <DropdownMenuItem data-testid="blueprint-add-prose" onClick={addProseSection}>
+            <Plus />
+            {t("addProse")}
+          </DropdownMenuItem>
+          {!hasStructured("exercises") && (
+            <DropdownMenuItem
+              data-testid="blueprint-add-exercises"
+              onClick={() => void addStructuredSection("exercises")}
+            >
+              <Plus />
+              {t("addExercises")}
+            </DropdownMenuItem>
+          )}
+          {!hasStructured("qa") && (
+            <DropdownMenuItem
+              data-testid="blueprint-add-qa"
+              onClick={() => void addStructuredSection("qa")}
+            >
+              <Plus />
+              {t("addQa")}
+            </DropdownMenuItem>
+          )}
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      {addError && (
+        <p role="alert" data-testid="blueprint-add-error" className="text-xs text-destructive">
+          {addError}
+        </p>
+      )}
     </div>
   );
 }

@@ -3,16 +3,21 @@ import { join } from "node:path";
 import { test, expect, type Page, type Route } from "@playwright/test";
 
 /**
- * THE SETTINGS BLUEPRINT EDITOR (Plan C, Task 6) — the tutor-editable default
- * lesson skeleton (`GET/PUT/DELETE /blueprint/default`). Every NEW curriculum is
- * seeded from this; editing it never touches a course that already exists
- * (spec invariant #3 — that guarantee lives entirely on the API side, this card
- * just reads/writes the resolved default).
+ * THE SETTINGS BLUEPRINT EDITOR (Plan C, Task 6; full delete/re-add follow-up
+ * 2026-07-19) — the tutor-editable default lesson skeleton
+ * (`GET/PUT/DELETE /blueprint/default`). Every NEW curriculum is seeded from
+ * this; editing it never touches a course that already exists (spec invariant
+ * #3 — that guarantee lives entirely on the API side, this card just
+ * reads/writes the resolved default).
  *
- * The two STRUCTURED sections (`exercises`, `qa_prompts`) are LOCKED here: no
- * Remove, no rename — only `prose` sections may be added, removed or renamed
- * (invariant #4). That is the one behavioural rule this spec exists to pin, on
- * top of the ordinary load/edit/save/restore loop every settings card has.
+ * The two STRUCTURED sections (`exercises`, `qa_prompts`) can now be REMOVED and
+ * RE-ADDED, same as any `prose` section — only their `key` stays read-only while
+ * they exist (their model-facing schema is keyed by `kind` in code). Deleting
+ * one and saving must PUT a blueprint that genuinely omits it; the Add menu
+ * offers "Add Exercises"/"Add Q&A" only while that kind is absent, and re-adding
+ * fetches the canonical section from `/blueprint/code-default`. That is the
+ * behavioural rule this spec exists to pin, on top of the ordinary
+ * load/edit/save/restore loop every settings card has.
  *
  * The API origin is mocked wholesale, same convention as `prompts.spec.ts`: a
  * per-glob route would also swallow the `/el/settings` navigation itself, and
@@ -183,12 +188,13 @@ test("editing a prose description and Save sends the mutated blueprint", async (
   expect(sentSections).toHaveLength(8);
 });
 
-test("Add section then Save sends nine sections", async ({ page }) => {
+test("Add section menu offers a prose piece, and Save sends nine sections", async ({ page }) => {
   const calls = await mockApi(page);
   await page.goto("/el/settings");
   const card = page.getByTestId("blueprint-default-card");
 
   await card.getByTestId("blueprint-add-section").click();
+  await page.getByTestId("blueprint-add-prose").click();
   await card.getByTestId("blueprint-save").click();
 
   await expect(card.getByTestId("blueprint-saved")).toBeVisible();
@@ -197,25 +203,31 @@ test("Add section then Save sends nine sections", async ({ page }) => {
   expect(sentSections).toHaveLength(9);
 });
 
-test("the structured `exercises` row has no Remove button and a read-only key", async ({ page }) => {
+test("the structured `exercises` row has a working Remove button and a read-only key", async ({ page }) => {
   await mockApi(page);
   await page.goto("/el/settings");
   const card = page.getByTestId("blueprint-default-card");
 
   const row = card.getByTestId("blueprint-section-exercises");
-  await expect(row.getByTestId("blueprint-remove-exercises")).toHaveCount(0);
+  await expect(row.getByTestId("blueprint-remove-exercises")).toBeVisible();
   await expect(row.getByTestId("blueprint-key-exercises")).toBeDisabled();
-  await expect(row.getByTestId("blueprint-locked-exercises")).toBeVisible();
+  await expect(row.getByTestId("blueprint-structured-exercises")).toBeVisible();
+
+  await row.getByTestId("blueprint-remove-exercises").click();
+  await expect(card.getByTestId("blueprint-section-exercises")).toHaveCount(0);
 });
 
-test("the structured `qa_prompts` row has no Remove button and a read-only key", async ({ page }) => {
+test("the structured `qa_prompts` row has a working Remove button and a read-only key", async ({ page }) => {
   await mockApi(page);
   await page.goto("/el/settings");
   const card = page.getByTestId("blueprint-default-card");
 
   const row = card.getByTestId("blueprint-section-qa_prompts");
-  await expect(row.getByTestId("blueprint-remove-qa_prompts")).toHaveCount(0);
+  await expect(row.getByTestId("blueprint-remove-qa_prompts")).toBeVisible();
   await expect(row.getByTestId("blueprint-key-qa_prompts")).toBeDisabled();
+
+  await row.getByTestId("blueprint-remove-qa_prompts").click();
+  await expect(card.getByTestId("blueprint-section-qa_prompts")).toHaveCount(0);
 });
 
 test("a prose row has a working Remove button", async ({ page }) => {
@@ -226,6 +238,51 @@ test("a prose row has a working Remove button", async ({ page }) => {
   await expect(card.getByTestId("blueprint-section-recap")).toBeVisible();
   await card.getByTestId("blueprint-remove-recap").click();
   await expect(card.getByTestId("blueprint-section-recap")).toHaveCount(0);
+});
+
+test("removing Exercises then Save PUTs a blueprint with no exercises section", async ({ page }) => {
+  const calls = await mockApi(page);
+  await page.goto("/el/settings");
+  const card = page.getByTestId("blueprint-default-card");
+
+  await card.getByTestId("blueprint-remove-exercises").click();
+  await expect(card.getByTestId("blueprint-section-exercises")).toHaveCount(0);
+  await card.getByTestId("blueprint-save").click();
+
+  await expect(card.getByTestId("blueprint-saved")).toBeVisible();
+  const put = calls.find((c) => c.method === "PUT" && c.pathname === "/blueprint/default");
+  const sentSections = (put!.body as { blueprint: { sections: Section[] } }).blueprint.sections;
+  expect(sentSections.some((s) => s.key === "exercises" || s.kind === "exercises")).toBe(false);
+  expect(sentSections).toHaveLength(7);
+});
+
+test("once Exercises is removed, the Add menu offers Add Exercises and re-adds the canonical section", async ({ page }) => {
+  await mockApi(page);
+  await page.goto("/el/settings");
+  const card = page.getByTestId("blueprint-default-card");
+
+  await card.getByTestId("blueprint-remove-exercises").click();
+  await expect(card.getByTestId("blueprint-section-exercises")).toHaveCount(0);
+
+  await card.getByTestId("blueprint-add-section").click();
+  await expect(page.getByTestId("blueprint-add-exercises")).toBeVisible();
+  await page.getByTestId("blueprint-add-exercises").click();
+
+  const row = card.getByTestId("blueprint-section-exercises");
+  await expect(row).toBeVisible();
+  await expect(row.getByTestId("blueprint-key-exercises")).toBeDisabled();
+  await expect(row.getByTestId("blueprint-key-exercises")).toHaveValue("exercises");
+});
+
+test("while Exercises and Q&A both exist, the Add menu does not offer to add either again", async ({ page }) => {
+  await mockApi(page);
+  await page.goto("/el/settings");
+  const card = page.getByTestId("blueprint-default-card");
+
+  await card.getByTestId("blueprint-add-section").click();
+  await expect(page.getByTestId("blueprint-add-prose")).toBeVisible();
+  await expect(page.getByTestId("blueprint-add-exercises")).toHaveCount(0);
+  await expect(page.getByTestId("blueprint-add-qa")).toHaveCount(0);
 });
 
 test("Restore opens the confirm modal and, on accept, issues DELETE", async ({ page }) => {
