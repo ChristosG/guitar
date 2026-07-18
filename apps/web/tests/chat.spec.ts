@@ -306,6 +306,7 @@ async function mockChatApi(page: Page) {
 async function mockJobsApi(page: Page, { pendingPolls = 1, outcome = "succeeded" as "succeeded" | "failed" } = {}) {
   let polls = 0;
   const calls = { job: 0 };
+  const rootId = randomUUID();
 
   await page.route(`${API_ORIGIN}/jobs/**`, async (route) => {
     const { pathname } = new URL(route.request().url());
@@ -358,14 +359,14 @@ async function mockJobsApi(page: Page, { pendingPolls = 1, outcome = "succeeded"
       body: JSON.stringify({
         ...base,
         status: "succeeded",
-        result_root_id: randomUUID(),
+        result_root_id: rootId,
         error: null,
         error_kind: null,
       }),
     });
   });
 
-  return { calls };
+  return { calls, rootId };
 }
 
 test.describe("chat cockpit (mocked API)", () => {
@@ -461,7 +462,7 @@ test.describe("chat cockpit (mocked API)", () => {
     expect(mock.unexpected).toEqual([]);
   });
 
-  test("an approved async generate_curriculum job polls to completion and links to the curricula page", async ({
+  test("an approved async generate_curriculum job polls to completion and links to that curriculum's own page", async ({
     page,
   }) => {
     const mock = await mockChatApi(page);
@@ -499,7 +500,9 @@ test.describe("chat cockpit (mocked API)", () => {
 
     await expect(page.getByTestId("chat-job-pending")).toBeHidden({ timeout: 10_000 });
     await expect(page.getByTestId("chat-message-link")).toBeVisible();
-    await expect(page.getByTestId("chat-message-link")).toHaveAttribute("href", "/en/curricula");
+    // Unit A: deep-links straight to the materialized curriculum's own detail
+    // route, not the plain index — `result_root_id` is known here.
+    await expect(page.getByTestId("chat-message-link")).toHaveAttribute("href", `/en/curricula/${jobs.rootId}`);
     await expect(page.getByTestId("chat-input")).toBeEnabled();
 
     expect(jobs.calls.job).toBe(2);

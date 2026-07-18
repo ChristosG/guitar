@@ -178,7 +178,7 @@ export function AddToCurriculumDialog({ content, citations, sessionId, question 
               <span>
                 {t("done")}{" "}
                 <Link
-                  href={`/${locale}/curricula`}
+                  href={`/${locale}/curricula/${rootId}`}
                   className="underline underline-offset-2"
                   data-testid="add-to-curriculum-open-board"
                   onClick={() => setOpen(false)}

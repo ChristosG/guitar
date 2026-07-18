@@ -74,9 +74,11 @@ function toDisplayMessage(row: ChatMessageOut): ChatDisplayMessage | null {
  *  - "job_pending" (resolve only, `generate_curriculum`) -> show a
  *    "generating…" status row and poll `getJob` (see `POLL_INTERVAL_MS`/
  *    `MAX_POLLS` above) until it's terminal, then append a success message
- *    linking to `/{locale}/curricula` (or surface the failure/still-
- *    generating case as a composer-area error) and re-enable the composer
- *    either way.
+ *    linking to `/{locale}/curricula/{result_root_id}` (Unit A's detail
+ *    route) when the job returned one, falling back to the plain
+ *    `/{locale}/curricula` index in the defensive case where it didn't (or
+ *    surface the failure/still-generating case as a composer-area error) and
+ *    re-enable the composer either way.
  *
  * The session comes in as a PROP from the URL (`/{locale}/chat/{sessionId}`)
  * and this component HYDRATES from it on mount (Plan 13 Stage 5.6) — it used
@@ -206,13 +208,15 @@ export function ChatPanel({ sessionId }: ChatPanelProps) {
       }
 
       if (job.status === "succeeded") {
-        // A generic link to the Curricula list, not a `getCurriculum
-        // (result_root_id)` deep link — the brief only asks for a hand-off
-        // back to that page, and a list link degrades gracefully even in
-        // the defensive edge case where `result_root_id` came back unset.
+        // Deep-link straight to the materialized curriculum's own board
+        // (Unit A's `/curricula/[rootId]` route) when the job says which one
+        // it is; fall back to the plain Curricula index in the defensive
+        // edge case where `result_root_id` came back unset.
         appendMessage("assistant", t("job.succeeded"), {
           label: t("job.viewCurriculum"),
-          href: `/${locale}/curricula`,
+          href: job.result_root_id
+            ? `/${locale}/curricula/${job.result_root_id}`
+            : `/${locale}/curricula`,
         });
       } else if (job.status === "failed") {
         setComposerError(jobErrorText(job, tJobErrors));

@@ -9,13 +9,12 @@ interface AssignmentsListProps {
   assignments: AssignmentSummary[];
 }
 
-/** Lists a student's assigned curricula: title + a link to the Curricula
- * board. Links to the general `/curricula` page (not a deep link to this
- * specific template) — `AssignmentSummary.curriculum_block_id` is the
- * TEMPLATE's id (see `lib/api.ts`'s docstring), and that template is always
- * listed there (`GET /curricula` only ever omits non-template/non-root
- * blocks), so "open Curricula and pick it from the list" is a real, working
- * path even without a query-string deep link. */
+/** Lists a student's assigned curricula: title + a link straight to that
+ * curriculum's board. `AssignmentSummary.curriculum_block_id` is the
+ * TEMPLATE's id (see `lib/api.ts`'s docstring), and Unit A gave every
+ * template its own detail route (`/curricula/[rootId]`) — so this can link
+ * directly to it instead of sending the tutor to the index to pick it out of
+ * the list by hand. */
 export function AssignmentsList({ assignments }: AssignmentsListProps) {
   const t = useTranslations("students.detail.assignments");
   const locale = useLocale();
@@ -40,7 +39,7 @@ export function AssignmentsList({ assignments }: AssignmentsListProps) {
             {a.title}
           </span>
           <Link
-            href={`/${locale}/curricula`}
+            href={`/${locale}/curricula/${a.curriculum_block_id}`}
             data-testid="assignment-view-link"
             className="flex items-center gap-1.5 text-xs font-medium text-primary hover:underline"
           >
