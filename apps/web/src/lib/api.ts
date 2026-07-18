@@ -1363,6 +1363,38 @@ export interface PendingApprovalOut {
   created_at: string;
 }
 
+/** One row of a `RevisionPlan.ops` — mirrors `curriculum/revise.py`'s FLAT,
+ * tagged op schema field-for-field (constraint #9 there: not `oneOf`, one
+ * object per op with `op` as the discriminator and every per-op field
+ * optional at this level). Rendered by `RevisionPlanCard`, never
+ * reconstructed client-side: the approval card shows exactly the plan the
+ * backend already validated (`approved == applied`). */
+export interface RevisionPlanOp {
+  op: string;
+  reason: string;
+  module_id?: string;
+  after_lesson_id?: string;
+  after_module_id?: string;
+  to_module_id?: string;
+  lesson_id?: string;
+  title?: string;
+  objective?: string;
+  instruction?: string;
+  tier?: string;
+  lessons?: { title: string; objective: string }[];
+  blueprint?: Record<string, unknown>;
+}
+
+/** `propose_curriculum_revision`'s return value / `apply_curriculum_
+ * revision`'s `plan` argument — mirrors `curriculum/revise.py`'s
+ * `{summary, ops}` shape, id-validated server-side before it ever reaches
+ * an `ApprovalRequest` (see `routers/chat.py`'s `_validate_pending_
+ * revision`). */
+export interface RevisionPlan {
+  summary: string;
+  ops: RevisionPlanOp[];
+}
+
 export interface ResolveApprovalInput {
   decision: "approve" | "reject";
   /** Only meaningful alongside `decision: "approve"` — the tutor's edited
@@ -1401,14 +1433,22 @@ export interface ChatSessionSummary extends ChatSessionOut {
  * `ChatSessionCreated`: just enough to start posting messages/resolving
  * approvals against this session. `studentId` is optional (a chat session
  * need not be scoped to one student). `locale` records which UI language the
- * conversation was STARTED in — persisted, not re-derived at resume time. */
+ * conversation was STARTED in — persisted, not re-derived at resume time.
+ * `rootId` (Unit D, Task D2b) BINDS the session to one curriculum — the
+ * revise drawer on `curricula/[rootId]` is the only caller that passes it.
+ * The API transiently injects that curriculum's compact tree onto every
+ * turn (`routers/chat.py`'s `_inject_curriculum_context`) so the model
+ * always has the right `root_id` to pass to `propose_curriculum_revision`/
+ * `apply_curriculum_revision`, without it ever entering the cached
+ * system+tools prefix or the persisted transcript. */
 export function createChatSession(
   studentId?: string | null,
   locale?: string,
+  rootId?: string | null,
 ): Promise<{ session_id: string }> {
   return request<{ session_id: string }>("/chat", {
     method: "POST",
-    body: JSON.stringify({ student_id: studentId ?? null, locale: locale ?? null }),
+    body: JSON.stringify({ student_id: studentId ?? null, locale: locale ?? null, root_id: rootId ?? null }),
   });
 }
 

@@ -398,6 +398,26 @@
       "undoError": "Could not undo that.",
       "error": "Could not rewrite this block.",
       "working": "Rewriting…"
+    },
+    "revise": {
+      "open": "Revise with AI",
+      "heading": "Revise with AI",
+      "description": "Chat to propose changes to this curriculum — nothing changes until you approve.",
+      "close": "Close",
+      "createError": "Could not start the revision chat.",
+      "planHeading": "Proposed revision",
+      "approve": "Approve",
+      "reject": "Reject",
+      "unknownBlock": "this item",
+      "blueprintNote": "Existing lessons keep their current content until you re-draft them — use “Re-draft under the current structure” on the board.",
+      "op": {
+        "insert_lesson": "Add lesson “{title}”",
+        "insert_module": "Add module “{title}”",
+        "modify_lesson": "Rewrite lesson “{title}”",
+        "move_lesson": "Move lesson “{title}” to “{module}”",
+        "remove_lesson": "Remove lesson “{title}”",
+        "update_blueprint": "Change lesson structure"
+      }
     }
   },
   "library": {
@@ -748,6 +768,10 @@
       "failed": "Curriculum generation failed.",
       "stillGenerating": "Still generating — check the Curricula page again shortly.",
       "pollError": "Lost track of the generation job — check the Curricula page shortly."
+    },
+    "revise": {
+      "planning": "Planning the revision — reading the whole course and your library, this can take a minute…",
+      "applied": "Done — the curriculum below now reflects this revision."
     },
     "resuming": "Opening your conversation…",
     "history": {

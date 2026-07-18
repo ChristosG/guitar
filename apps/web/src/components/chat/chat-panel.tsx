@@ -6,6 +6,7 @@ import { Loader2, Send } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ApprovalCard } from "@/components/chat/approval-card";
+import { RevisionPlanCard } from "@/components/chat/revision-plan-card";
 import { MessageList, type ChatDisplayMessage } from "@/components/chat/message-list";
 import { useChatSessions } from "@/components/chat/chat-sessions";
 import {
@@ -19,6 +20,7 @@ import {
   type ChatCitation,
   type ChatMessageOut,
   type ChatTurnOut,
+  type RevisionPlan,
 } from "@/lib/api";
 import { jobErrorText } from "@/lib/job-errors";
 
@@ -48,6 +50,25 @@ interface ChatPanelProps {
    * The page keys this component on it, so a change here is a fresh mount,
    * never a stale-transcript re-render. */
   sessionId: string;
+  /** Set when this panel is scoped to one curriculum — the revise drawer on
+   * `curricula/[rootId]` (Unit D, Task D2b) is the only caller that passes
+   * it. Not read for its value, only as a SIGNAL, in two places: `pollJob`
+   * hands an async mutation's success to `onJobDone` (refresh the board the
+   * tutor is already looking at) instead of narrating a "view curriculum"
+   * link away from it, and the composer shows a "Planning the revision…"
+   * status instead of a bare spinner while a turn is in flight — this
+   * drawer's whole reason to exist, `propose_curriculum_revision`, is a
+   * synchronous 20-60s call over the whole library (resolved design call
+   * #2, `docs/superpowers/plans/2026-07-18-unit-d-revise-chat.md`). */
+  rootId?: string;
+  /** id -> title, built from the curriculum's own tree by the revise drawer
+   * (its only caller). `RevisionPlanCard` uses it to label a `modify_lesson`/
+   * `move_lesson`/`remove_lesson` op with the block's real name — those ops
+   * carry only a bare id (`curriculum/revise.py`'s flat op schema). */
+  blockTitles?: Record<string, string>;
+  /** Called INSTEAD of appending the "view curriculum" link once an async
+   * mutation job succeeds, when `rootId` is set. */
+  onJobDone?: () => void;
 }
 
 /** A persisted transcript row becomes a bubble. Rows with no `content` are
@@ -99,7 +120,7 @@ function toDisplayMessage(row: ChatMessageOut): ChatDisplayMessage | null {
  *    being rendered as a stray bubble above it — exactly where it sits in the
  *    live (never-reloaded) flow.
  */
-export function ChatPanel({ sessionId }: ChatPanelProps) {
+export function ChatPanel({ sessionId, rootId, blockTitles, onJobDone }: ChatPanelProps) {
   const t = useTranslations("chat");
   const tJobErrors = useTranslations("jobErrors");
   const locale = useLocale();
@@ -208,16 +229,27 @@ export function ChatPanel({ sessionId }: ChatPanelProps) {
       }
 
       if (job.status === "succeeded") {
-        // Deep-link straight to the materialized curriculum's own board
-        // (Unit A's `/curricula/[rootId]` route) when the job says which one
-        // it is; fall back to the plain Curricula index in the defensive
-        // edge case where `result_root_id` came back unset.
-        appendMessage("assistant", t("job.succeeded"), {
-          label: t("job.viewCurriculum"),
-          href: job.result_root_id
-            ? `/${locale}/curricula/${job.result_root_id}`
-            : `/${locale}/curricula`,
-        });
+        if (rootId && onJobDone && job.kind === "curriculum_revise") {
+          // The revise drawer (Unit D, Task D2b): a curriculum_revise job just
+          // applied to THIS curriculum, and the tutor is already looking at its
+          // board — refresh IT instead of narrating a link away. Gated on the
+          // job KIND, not just rootId: a different async tool called from the
+          // drawer (e.g. generate_curriculum) must fall through to the deep-link
+          // below rather than misreport a revision and refresh the wrong board.
+          appendMessage("assistant", t("revise.applied"));
+          onJobDone();
+        } else {
+          // Deep-link straight to the materialized curriculum's own board
+          // (Unit A's `/curricula/[rootId]` route) when the job says which
+          // one it is; fall back to the plain Curricula index in the
+          // defensive edge case where `result_root_id` came back unset.
+          appendMessage("assistant", t("job.succeeded"), {
+            label: t("job.viewCurriculum"),
+            href: job.result_root_id
+              ? `/${locale}/curricula/${job.result_root_id}`
+              : `/${locale}/curricula`,
+          });
+        }
       } else if (job.status === "failed") {
         setComposerError(jobErrorText(job, tJobErrors));
       } else {
@@ -359,17 +391,49 @@ export function ChatPanel({ sessionId }: ChatPanelProps) {
         <MessageList messages={messages} sessionId={sessionId} />
       )}
 
-      {pendingApproval && (
-        <ApprovalCard
-          key={pendingApproval.approvalId}
-          description={pendingApproval.description}
-          toolName={pendingApproval.toolName}
-          toolArgs={pendingApproval.toolArgs}
-          resolving={resolving}
-          error={approvalError}
-          onApprove={(editedArgs) => resolvePending("approve", editedArgs)}
-          onReject={() => resolvePending("reject")}
-        />
+      {pendingApproval &&
+        (pendingApproval.toolName === "apply_curriculum_revision" ? (
+          // The Unit D `RevisionPlanCard` variant: same Approve/Reject shell,
+          // but rendered from the VALIDATED plan itself (`tool_args.plan`)
+          // rather than a raw `tool_args` dump — and applied VERBATIM, so
+          // `onApprove` carries no `editedArgs` (there is no edit affordance
+          // on this card at all; see its own docstring for why).
+          <RevisionPlanCard
+            key={pendingApproval.approvalId}
+            plan={(pendingApproval.toolArgs.plan as RevisionPlan | undefined) ?? { summary: "", ops: [] }}
+            blockTitles={blockTitles ?? {}}
+            resolving={resolving}
+            error={approvalError}
+            onApprove={() => resolvePending("approve")}
+            onReject={() => resolvePending("reject")}
+          />
+        ) : (
+          <ApprovalCard
+            key={pendingApproval.approvalId}
+            description={pendingApproval.description}
+            toolName={pendingApproval.toolName}
+            toolArgs={pendingApproval.toolArgs}
+            resolving={resolving}
+            error={approvalError}
+            onApprove={(editedArgs) => resolvePending("approve", editedArgs)}
+            onReject={() => resolvePending("reject")}
+          />
+        ))}
+
+      {sending && rootId && (
+        // Resolved design call #2: a clear "Planning the revision…" state
+        // while `propose_curriculum_revision` runs inline in this turn
+        // (20-60s over the whole course + library) — this drawer's whole
+        // reason to exist, so any turn sent from it gets this label rather
+        // than a bare composer spinner.
+        <div
+          role="status"
+          data-testid="chat-planning-revision"
+          className="flex items-center gap-2 rounded-lg border border-border bg-muted/50 px-3 py-2 text-sm text-muted-foreground"
+        >
+          <Loader2 className="size-4 shrink-0 animate-spin" />
+          {t("revise.planning")}
+        </div>
       )}
 
       {jobPending && (
