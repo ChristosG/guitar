@@ -271,3 +271,29 @@ def test_claim_requires_a_real_source_and_concept():
         db.rollback()
     finally:
         db.close()
+
+
+def test_concept_claim_anchor_is_nullable_text(db):
+    """The verbatim quote quote-based citations resolve from (Unit B). Nullable:
+    the four books compiled before Unit B carry no anchor, and a figure-grounded
+    claim stores NULL on purpose so `reresolve_source` skips it."""
+    from app.models.canon import Concept, ConceptClaim
+    from app.models.knowledge import KnowledgeSource
+
+    src = KnowledgeSource(type="pdf", title="Anchor Book", status="ready")
+    db.add(src); db.flush()
+    concept = Concept(key="tonewoods", label_en="Tonewoods")
+    db.add(concept); db.flush()
+
+    # anchor present
+    c1 = ConceptClaim(concept_id=concept.id, source_id=src.id,
+                      text="mahogany is warm", pages=[12], grounding="author",
+                      anchor="mahogany bodies read warm and thick through the mids")
+    # anchor absent (pre-Unit-B / figure claim) — must be allowed to be NULL
+    c2 = ConceptClaim(concept_id=concept.id, source_id=src.id,
+                      text="see the diagram", pages=[31], grounding="figure",
+                      anchor=None)
+    db.add_all([c1, c2]); db.commit()
+    db.refresh(c1); db.refresh(c2)
+    assert c1.anchor.startswith("mahogany bodies read warm")
+    assert c2.anchor is None

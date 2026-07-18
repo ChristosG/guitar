@@ -180,6 +180,16 @@ class ConceptClaim(Base, PkMixin):
     # See CLAIM_GROUNDINGS. Not nullable and no server default: a claim whose
     # provenance nobody decided is exactly the claim that gets quoted wrongly.
     grounding: Mapped[str] = mapped_column(String(20))
+    # THE ANCHOR QUOTE — a verbatim 8-15 word span copied from the AUTHOR's own
+    # text, from which `canon/resolve.py` derives `pages` deterministically (no
+    # LLM). Persisted, not transient, and that is the point: with the anchor on
+    # disk, re-resolving (re-tuning the threshold, fixing a resolver bug, rolling
+    # quote-based to another book) is a free, pure-CPU re-run over stored rows —
+    # never a ~$13 recompile. NULL for the four books compiled before Unit B, and
+    # NULL by design on a `grounding="figure"` claim (whose page is the model's
+    # declared `[p.N FIGURE]` marker, not a resolved author quote) — which is why
+    # `reresolve_source` skips a claim with no anchor and never blanks its page.
+    anchor: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[object] = mapped_column(
         DateTime(timezone=True), server_default=func.now())
 
