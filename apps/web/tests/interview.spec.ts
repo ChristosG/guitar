@@ -76,6 +76,53 @@ const SOURCES: FixtureSource[] = [
   { id: "spine-1", title: "Guitar Tone & Gear — Course Spine", type: "text", char_count: 16_141, default_selected: true },
 ];
 
+interface BlueprintSection {
+  key: string;
+  label: { el: string; en: string };
+  description: string;
+  weight: number;
+  kind: "prose" | "exercises" | "qa";
+  audience: "teacher" | "student" | "both";
+  enabled: boolean;
+}
+interface Blueprint {
+  version: number;
+  sections: BlueprintSection[];
+}
+
+/** `findings.blueprint` on the "structure" step — `resolve_default_blueprint(db)`
+ * on the real API, i.e. the settings default pre-filled into the (optional,
+ * skippable) editor. Shaped exactly like `app.curriculum.blueprint`'s canonical
+ * table; only a couple of sections are enough to exercise the wizard step. */
+function makeDefaultBlueprint(): Blueprint {
+  const section = (over: Partial<BlueprintSection> & Pick<BlueprintSection, "key">): BlueprintSection => ({
+    label: { el: over.key, en: over.key },
+    description: `Description for ${over.key}.`,
+    weight: 0.1,
+    kind: "prose",
+    audience: "teacher",
+    enabled: true,
+    ...over,
+  });
+  return {
+    version: 1,
+    sections: [
+      section({ key: "warm_up", label: { el: "Ζέσταμα", en: "Warm-up" }, weight: 0.07 }),
+      section({ key: "theory", label: { el: "Θεωρία", en: "Theory" }, weight: 0.25 }),
+      section({
+        key: "exercises", label: { el: "Ασκήσεις", en: "Exercises" }, weight: 0.22,
+        kind: "exercises", audience: "student",
+        description: "Prose introducing and sequencing the exercises.",
+      }),
+      section({
+        key: "qa_prompts", label: { el: "Ερωτήσεις & συζήτηση", en: "Q&A and discussion" }, weight: 0.06,
+        kind: "qa", audience: "teacher",
+        description: "How to open the 10-minute discussion block.",
+      }),
+    ],
+  };
+}
+
 /** The model's outline — the thing the tutor is about to disagree with. */
 function makeOutline(): Outline {
   return {
@@ -180,6 +227,7 @@ async function mockInterviewApi(page: Page, { readyFromStart = false }: MockOpti
   let tree: FixtureBlock | null = null;
   let polls = 0;
   let resumed = 0;
+  let redrafted = 0;
   // Flipped by the test when it wants the remaining lessons to land. Deterministic,
   // unlike counting polls: Next's dev-mode StrictMode double-mounts effects, so a
   // poll COUNT is not a clock.
@@ -266,6 +314,19 @@ async function mockInterviewApi(page: Page, { readyFromStart = false }: MockOpti
         );
       }
       if (step === "scope") {
+        // STEP_ORDER inserted "structure" here between "scope" and "sources"
+        // (Plan C, Task 5) — an optional, skippable "lesson structure" step,
+        // pre-filled with the settings-default blueprint.
+        step = "structure";
+        return json(
+          state({
+            step: "structure",
+            question: "The lesson structure — an optional step",
+            findings: { blueprint: makeDefaultBlueprint() },
+          }),
+        );
+      }
+      if (step === "structure") {
         step = "sources";
         return json(
           state({
@@ -275,7 +336,18 @@ async function mockInterviewApi(page: Page, { readyFromStart = false }: MockOpti
               value: s.id, label: s.title, type: s.type,
               char_count: s.char_count, default_selected: s.default_selected,
             })),
-            findings: { shape: "3 sessions -> 1 module x 3 lessons -> ~2,200 words each" },
+            // THE REAL SHAPE OF `findings.shape`: an OBJECT of numbers
+            // (`InterviewShape`), never the formatted sentence this fixture used
+            // to send — `interview-sources-step.tsx:66-71` reads
+            // `shape.lessons_total/modules/lessons_per_module.join("+")/
+            // target_words_per_lesson/teaching_minutes/qa_minutes`, and a string
+            // has none of those, which is exactly what made this whole file RED.
+            findings: {
+              shape: {
+                lessons_total: 3, modules: 1, lessons_per_module: [3],
+                target_words_per_lesson: 2200, teaching_minutes: 40, qa_minutes: 10,
+              },
+            },
           }),
         );
       }
@@ -346,6 +418,11 @@ async function mockInterviewApi(page: Page, { readyFromStart = false }: MockOpti
       return json({ job_id: randomUUID(), status: "pending" }, 202);
     }
 
+    if (pathname.match(/^\/curricula\/[^/]+\/redraft$/) && method === "POST") {
+      redrafted++;
+      return json({ job_id: randomUUID(), status: "pending" }, 202);
+    }
+
     const deepenMatch = pathname.match(/^\/blocks\/([^/]+)\/deepen$/);
     if (deepenMatch && method === "POST") {
       deepened.push(deepenMatch[1]);
@@ -385,7 +462,7 @@ async function mockInterviewApi(page: Page, { readyFromStart = false }: MockOpti
 
   return {
     calls, answerBodies, unexpected, deepened, refinements,
-    resumeCount: () => resumed, rootId,
+    resumeCount: () => resumed, redraftCount: () => redrafted, rootId,
     finishDraft: () => {
       finished = true;
     },
@@ -395,7 +472,7 @@ async function mockInterviewApi(page: Page, { readyFromStart = false }: MockOpti
 /** Drive the interview up to (not through) `target`. */
 async function startToStep(
   page: Page,
-  target: "who" | "duration" | "scope" | "sources" | "outline" | "confirm",
+  target: "who" | "duration" | "scope" | "structure" | "sources" | "outline" | "confirm",
 ) {
   await page.goto("/en/curricula");
   await page.getByTestId("curricula-generate-button").click();
@@ -414,6 +491,12 @@ async function startToStep(
 
   await page.getByTestId("interview-scope-brief").fill("Get him a usable live tone.");
   await page.getByTestId("interview-answer-submit").click();
+  if (target === "structure") return;
+
+  // STRUCTURE IS OPTIONAL AND SKIPPABLE (spec invariant #7) — every step past
+  // it is driven with the standard structure, exactly as a tutor who never
+  // touches this screen gets.
+  await page.getByTestId("interview-structure-skip").click();
   if (target === "sources") return;
 
   await page.getByTestId("interview-answer-submit").click(); // sources: accept the default selection
@@ -422,6 +505,29 @@ async function startToStep(
 
   await page.getByTestId("interview-answer-submit").click(); // outline: accept as-is
   await expect(page.getByTestId("interview-confirm-heading")).toBeVisible();
+}
+
+/** THE BOARD RENDERS COLLAPSED BY DEFAULT NOW (`block-card.tsx`: "everything is
+ * expanded and a chaos" — only the course root opens expanded), and its
+ * `CollapsibleContent` does not just hide a closed card's children, it does not
+ * mount them at all. So every assertion below that reaches into a LESSON's own
+ * badges (`lesson-status`, `lesson-word-count`, `lesson-deepen` — all rendered
+ * in the card's header, unconditionally once the card itself exists) needs its
+ * MODULE expanded first; reaching into a SEGMENT (`provenance-chip`, the
+ * extend controls) needs the LESSON expanded too, one level further in. */
+async function expandModule(page: Page, index = 0) {
+  const modules = page.locator('[data-testid="block-card"][data-kind="module"]');
+  await modules.nth(index).getByTestId("block-card-toggle").click();
+}
+
+/** The lesson only GROWS a toggle once it has segments to show (a `queued`
+ * lesson has no children yet) — so this waits for it to be `ready` first. */
+async function expandFirstLesson(page: Page, moduleIndex = 0) {
+  const modules = page.locator('[data-testid="block-card"][data-kind="module"]');
+  const lessons = modules.nth(moduleIndex).locator('[data-testid="block-card"][data-kind="lesson"]');
+  const first = lessons.first();
+  await expect(first.getByTestId("lesson-status")).toHaveAttribute("data-status", "ready");
+  await first.getByTestId("block-card-toggle").click();
 }
 
 test.describe("the guided interview, v2 (mocked API)", () => {
@@ -455,12 +561,60 @@ test.describe("the guided interview, v2 (mocked API)", () => {
     });
   });
 
+  test("the scope step deep-links into the Curriculum prompt group, without submitting the step", async ({ page }) => {
+    // Plan C, Task 7: a secondary link beside Continue, opening Settings on the
+    // exact prompts that will build this course — it must be a plain
+    // navigation, never a form submit (he has not answered this step yet).
+    await mockInterviewApi(page);
+    await startToStep(page, "scope");
+
+    const link = page.getByTestId("interview-scope-prompts-link");
+    await expect(link).toBeVisible();
+    await expect(link).toHaveAttribute("href", "/en/settings?promptGroup=curriculum");
+    // Still on the scope step — the button did not submit anything.
+    await expect(page.getByTestId("interview-scope-brief")).toBeVisible();
+  });
+
+  test("the structure step is optional and skippable, pre-filled with the settings default", async ({ page }) => {
+    const mock = await mockInterviewApi(page);
+    await startToStep(page, "structure");
+
+    await expect(page.getByTestId("interview-structure-step")).toBeVisible();
+    // Pre-filled from `findings.blueprint` — he sees a working structure before
+    // touching anything (spec invariant #7).
+    await expect(page.getByTestId("blueprint-editor")).toBeVisible();
+    await expect(page.getByTestId("blueprint-section-warm_up")).toBeVisible();
+
+    await page.getByTestId("interview-structure-skip").click();
+
+    // Skip records NOTHING custom — `_answer_structure` treats this identically
+    // to never having visited the step (the settings default is what ends up on
+    // the course either way).
+    expect(mock.answerBodies.at(-1)).toEqual({ skip: true });
+    await expect(page.getByTestId("interview-source-row-book-1")).toBeVisible();
+  });
+
+  test("the structure step's edited blueprint is what gets sent on Continue", async ({ page }) => {
+    const mock = await mockInterviewApi(page);
+    await startToStep(page, "structure");
+
+    await page.getByTestId("blueprint-description-warm_up").fill("A custom warm-up routine.");
+    await page.getByTestId("interview-answer-submit").click();
+
+    const sent = mock.answerBodies.at(-1) as { blueprint: { sections: { key: string; description: string }[] } };
+    const warmUp = sent.blueprint.sections.find((s) => s.key === "warm_up");
+    expect(warmUp?.description).toBe("A custom warm-up routine.");
+    await expect(page.getByTestId("interview-source-row-book-1")).toBeVisible();
+  });
+
   test("the sources step echoes the derived shape and lets him drop the filler source", async ({ page }) => {
     const mock = await mockInterviewApi(page);
     await startToStep(page, "sources");
 
-    // He is agreeing to a SIZE before anyone spends his money on it.
-    await expect(page.getByTestId("interview-shape-echo")).toContainText("~2,200 words each");
+    // He is agreeing to a SIZE before anyone spends his money on it. (The
+    // message interpolates the raw number — no thousands separator — so this
+    // matches what `steps.sources.shape` in en.json actually renders.)
+    await expect(page.getByTestId("interview-shape-echo")).toContainText("~2200 words each");
 
     await expect(page.getByTestId("interview-source-spine-1")).toBeChecked();
     await page.getByTestId("interview-source-spine-1").uncheck();
@@ -571,6 +725,7 @@ test.describe("the guided interview, v2 (mocked API)", () => {
     expect(mock.answerBodies.at(-1)).toEqual({ approved: true });
 
     // He reads module 1 while the rest is still being written. THE FLAGSHIP CLAIM.
+    await expandModule(page, 0);
     await expect(page.getByTestId("lesson-status").first()).toHaveAttribute("data-status", "ready");
     await expect(page.getByTestId("lesson-word-count").first()).toContainText("2,340");
     await expect(page.getByTestId("draft-progress")).toHaveAttribute("data-done", "false");
@@ -591,6 +746,8 @@ test.describe("the guided interview, v2 (mocked API)", () => {
 
     await expect(page.getByTestId("tree-board")).toBeVisible();
     await expect(page.getByTestId("block-card").first()).toBeVisible();
+    await expandModule(page, 0);
+    await expandFirstLesson(page, 0);
     await expect(page.getByTestId("provenance-chip").first()).toBeVisible(); // segments rendered
     await page.waitForTimeout(300);
 
@@ -603,6 +760,8 @@ test.describe("the guided interview, v2 (mocked API)", () => {
     await startToStep(page, "confirm");
     await page.getByTestId("interview-confirm-submit").click();
 
+    await expandModule(page, 0);
+    await expandFirstLesson(page, 0);
     const chip = page.getByTestId("provenance-chip").first();
     await expect(chip).toBeVisible();
     await expect(chip).toHaveAttribute("href", "/en/library/book-1?page=56");
@@ -614,6 +773,7 @@ test.describe("the guided interview, v2 (mocked API)", () => {
     const mock = await mockInterviewApi(page);
     await startToStep(page, "confirm");
     await page.getByTestId("interview-confirm-submit").click();
+    await expandModule(page, 0);
 
     // By KIND, not just by "a card containing a word count": BlockCards nest inside
     // one another (that is what makes the indentation work), so the course card also
@@ -632,6 +792,29 @@ test.describe("the guided interview, v2 (mocked API)", () => {
     await expect(drafted.getByTestId("lesson-status")).toHaveAttribute("data-status", "queued");
   });
 
+  test("'Re-draft under the current structure' is confirm-gated and hits the redraft route, never the plain draft one", async ({ page }) => {
+    // Plan C, Task 8: the ONLY button that rewrites lessons that already
+    // drafted — a count-aware confirm names what is about to happen before it
+    // fires, and it must never be reachable as a side effect of anything else.
+    const mock = await mockInterviewApi(page);
+    await startToStep(page, "confirm");
+    await page.getByTestId("interview-confirm-submit").click();
+
+    const button = page.getByTestId("board-redraft");
+    await expect(button).toBeVisible();
+    await button.click();
+
+    // Names the count — 3 lessons total (2 + 1), none of them under a gap
+    // module (this fixture's two modules are "library"/"general_knowledge").
+    await expect(page.getByTestId("confirm-title")).toBeVisible();
+    await expect(page.getByTestId("confirm-body")).toContainText("3");
+
+    await page.getByTestId("confirm-accept").click();
+
+    await expect.poll(() => mock.redraftCount()).toBe(1);
+    expect(mock.resumeCount()).toBe(0);
+  });
+
   test("a board whose lessons finished a moment ago is NOT left showing stale rows", async ({ page }) => {
     // The board fetches the tree, then the progress bar starts polling. If the draft
     // finished in between, the first poll reports lessons ready that the tree it is
@@ -642,6 +825,7 @@ test.describe("the guided interview, v2 (mocked API)", () => {
     await page.getByTestId("interview-confirm-submit").click();
 
     await expect(page.getByTestId("tree-board")).toBeVisible();
+    await expandModule(page, 0);
     await expect(page.getByTestId("lesson-status").first()).toHaveAttribute("data-status", "ready");
     await expect(page.getByTestId("lesson-word-count").first()).toBeVisible();
     expect(mock.unexpected).toEqual([]);
@@ -653,6 +837,8 @@ test.describe("the guided interview, v2 (mocked API)", () => {
     const mock = await mockInterviewApi(page);
     await startToStep(page, "confirm");
     await page.getByTestId("interview-confirm-submit").click();
+    await expandModule(page, 0);
+    await expandFirstLesson(page, 0);
 
     const segment = page.locator('[data-testid="block-card"][data-kind="segment"]').first();
     await expect(segment).toBeVisible();
