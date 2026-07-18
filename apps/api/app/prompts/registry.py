@@ -139,6 +139,7 @@ from app.curriculum.draft import (
     build_lesson_messages,
 )
 from app.curriculum.extend import MODULE_SLICE_ID, MODULE_TAIL, build_module_messages
+from app.curriculum.revise import REVISE_SLICE_ID, REVISE_TAIL, build_revise_messages
 from app.curriculum.outline import (
     OUTLINE_SLICE_ID,
     OUTLINE_TAIL,
@@ -611,6 +612,22 @@ _SAMPLE_COURSE_BRIEF = (
 )
 _SAMPLE_SHAPE = plan_shape(weeks=20, sessions_per_week=1, minutes=50)
 
+# The compact tree the revision planner reads — ids + titles + objectives, NO
+# lesson bodies (that discipline IS the prompt, so the sample shows it). The ids
+# are stable placeholders, not a live course's, for the same reason every other
+# sample here is his DATA and never his rows.
+_SAMPLE_REVISE_TREE = (
+    "M1 [11111111-1111-1111-1111-111111111111] Το σύστημα CAGED — "
+    "ο μαθητής βλέπει το μπράτσο σαν πέντε σχήματα\n"
+    "  L1 [22222222-2222-2222-2222-222222222222] Το σχήμα C και η ρίζα του — "
+    "βρίσκει τη ρίζα οπουδήποτε στο μπράτσο\n"
+    "  L2 [33333333-3333-3333-3333-333333333333] Το σχήμα A — "
+    "μετακίνηση του σχήματος προς τα πάνω"
+)
+_SAMPLE_REVISE_INSTRUCTION = (
+    "Πρόσθεσε ένα μάθημα για το σχήμα G ανάμεσα στο C και το A."
+)
+
 _SAMPLE_LESSON_CTX = LessonContext(
     lesson_title="Το σχήμα C και η ρίζα του",
     lesson_objective="Ο μαθητής βρίσκει τη ρίζα του σχήματος C οπουδήποτε στο μπράτσο.",
@@ -838,6 +855,24 @@ def _build_curriculum_refine(locale: str, db, course_language=None) -> _Built:
         ("instruction", "Η οδηγία σου", instruction),
         ("block_body", "Το κείμενο που διορθώνεις",
          "Το σχήμα C είναι ένα από τα πέντε μετακινούμενα σχήματα του CAGED."),
+        (*_LANG_FROM_COURSE, language_directive(lang, db)),
+        (*_ANSWER_IN_FROM_COURSE, answer_in(lang, db)),
+    ]
+
+
+def _build_curriculum_revise(locale: str, db, course_language=None) -> _Built:
+    lang = _course_language(locale, course_language)
+    built = build_revise_messages(
+        course_title=_SAMPLE_COURSE_TITLE, brief=_SAMPLE_COURSE_BRIEF, language=lang,
+        tree_text=_SAMPLE_REVISE_TREE, instruction=_SAMPLE_REVISE_INSTRUCTION,
+        library=_SAMPLE_LIBRARY, source=db,
+    )
+    return _msgs(built), [
+        (*_LIBRARY, _SAMPLE_LIBRARY_TEXT),
+        ("course_title", "Ο τίτλος του προγράμματος", _SAMPLE_COURSE_TITLE),
+        ("course_brief", "Τι ζήτησες, με τα δικά σου λόγια", _SAMPLE_COURSE_BRIEF),
+        ("tree", "Το πρόγραμμα όπως είναι σήμερα", _SAMPLE_REVISE_TREE),
+        ("instruction", "Η οδηγία σου", _SAMPLE_REVISE_INSTRUCTION),
         (*_LANG_FROM_COURSE, language_directive(lang, db)),
         (*_ANSWER_IN_FROM_COURSE, answer_in(lang, db)),
     ]
@@ -1381,6 +1416,36 @@ _ENTRIES = [
                 id=REFINE_USER_SLICE_ID,
                 label_el="Πώς παρουσιάζεται το κείμενο που διορθώνεις",
                 default=REFINE_USER,
+                kind="replace",
+            ),
+        ),
+    ),
+    PromptEntry(
+        id="curriculum.revise",
+        language_from_course=True,
+        flow="curriculum",
+        kind="prompt",
+        source_ref="app/curriculum/revise.py:161",
+        title_el="Η αναθεώρηση ενός τελειωμένου προγράμματος",
+        what_it_does_el=(
+            "Δείχνει στον βοηθό ΟΛΟΚΛΗΡΟ το πρόγραμμα όπως είναι σήμερα — μόνο "
+            "τίτλους, στόχους και τα id, ποτέ το ίδιο το κείμενο των μαθημάτων — "
+            "και του ζητάει να προτείνει ΔΟΜΙΚΕΣ αλλαγές: να προσθέσει, να "
+            "μετακινήσει, να ξαναγράψει ή να αφαιρέσει μαθήματα και ενότητες, με "
+            "έναν λόγο για την καθεμία. ΔΕΝ αλλάζει τίποτα μόνο του: γυρίζει ένα "
+            "σχέδιο που το εγκρίνεις εσύ πριν εφαρμοστεί."
+        ),
+        when_it_runs_el=(
+            "Όταν συζητάς αλλαγές σε ένα ήδη φτιαγμένο πρόγραμμα από το πλαϊνό chat."
+        ),
+        source_of_truth=lambda: build_revise_messages,
+        build=_build_curriculum_revise,
+        call_sites=("curriculum/revise.py:263",),
+        slices=(
+            Slice(
+                id=REVISE_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=REVISE_TAIL,
                 kind="replace",
             ),
         ),
