@@ -7,6 +7,7 @@ models per this codebase's established split (mirrors `schemas/knowledge.py`
 vs `app.models.knowledge`) — this module is only the HTTP boundary's shape.
 """
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -166,6 +167,21 @@ class ReorderRequest(BaseModel):
 class RefineRequest(BaseModel):
     """The Extend-with-chat instruction, in the tutor's own words."""
     instruction: str = Field(min_length=1)
+
+
+class ReviseRequest(BaseModel):
+    """`POST /curricula/{root_id}/revise` body — one shape, two modes.
+
+    `mode="plan"` (default) runs the read-only planner and stores the plan on
+    `job.progress["plan"]`; `mode="apply"` applies the approved `plan` in one
+    transaction and chains the draft fan-out. `plan` is required (422) for
+    apply and ignored for plan. `instruction` is always required — apply mode
+    keeps it too (it is what the plan was FOR, and cheap to carry for the
+    audit/params record), even though apply reads only `plan`.
+    """
+    instruction: str = Field(min_length=1)
+    mode: Literal["plan", "apply"] = "plan"
+    plan: dict | None = None
 
 
 class DraftProgressOut(BaseModel):

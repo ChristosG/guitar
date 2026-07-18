@@ -27,9 +27,11 @@ from app.curriculum.assign import clone_content_subtree
 from app.curriculum.draft import draft_progress
 from app.curriculum.outline import TIER_GAP
 from app.curriculum.refine import refine_block, undo_refine
+from app.curriculum.revise import validate_ops
 from app.curriculum.segment import segment_block
 from app.db import get_db
 from app.jobs.curriculum_draft import run_curriculum_draft_job
+from app.jobs.curriculum_revise import run_curriculum_revise_job
 from app.jobs.module_generate import run_module_generate_job
 from app.jobs.runner import run_curriculum_job, run_outline_job
 from app.llm.factory import require_llm_configured
@@ -52,6 +54,7 @@ from app.schemas.curriculum import (
     ModuleGenerateRequest,
     RefineRequest,
     ReorderRequest,
+    ReviseRequest,
     SegmentRequest,
 )
 from app.schemas.interview import InterviewAnswerRequest, InterviewStartRequest, InterviewStateOut
@@ -491,6 +494,44 @@ def generate_curriculum_module(
     db.commit()
     db.refresh(job)
     background_tasks.add_task(run_module_generate_job, job.id)
+    return JobAccepted(job_id=job.id, status=job.status)
+
+
+@router.post("/curricula/{root_id}/revise", response_model=JobAccepted, status_code=202,
+             dependencies=[Depends(require_llm_configured)])
+def revise_curriculum(
+    root_id: UUID, payload: ReviseRequest,
+    background_tasks: BackgroundTasks, db: Session = Depends(get_db),
+) -> JobAccepted:
+    """PLAN or APPLY a curriculum revision — 202 + a `curriculum_revise` job.
+
+    `mode="plan"` (default): the job runs the read-only planner and stores the
+    plan on `job.progress["plan"]` (poll `GET /jobs/{id}`) — it MUTATES NOTHING.
+    `mode="apply"`: the job applies the approved `plan` in one transaction and
+    chains the ordinary draft fan-out over the new/changed lessons. The planner
+    reads the whole library (20-60s) — exactly the timeout class the job table
+    exists for.
+
+    APPROVED == APPLIED, EXACT (controller, 2026-07-18): the plan is VALIDATED
+    HERE, the moment apply is invoked, and the VALIDATED plan is what gets stored
+    on the job params and applied verbatim — an op an id-validation would drop
+    never reaches apply. `apply_revision` re-validates as defence-in-depth, a
+    no-op now that the stored plan is already clean.
+    """
+    course = _get_block_or_404(db, root_id)
+    if course.kind != "course":
+        raise HTTPException(status_code=404, detail="not a curriculum root")
+    if payload.mode == "apply" and not payload.plan:
+        raise HTTPException(status_code=422, detail="apply requires a plan")
+
+    params = {"root_id": str(root_id), "instruction": payload.instruction}
+    if payload.mode == "apply":
+        params["plan"] = validate_ops(db, root_id, payload.plan)
+    job = GenerationJob(kind="curriculum_revise", status="pending", params=params)
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    background_tasks.add_task(run_curriculum_revise_job, job.id)
     return JobAccepted(job_id=job.id, status=job.status)
 
 
