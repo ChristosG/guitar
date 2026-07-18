@@ -169,6 +169,7 @@
     "heading": "Curricula",
     "subheading": "Generate and manage curriculum templates.",
     "generateButton": "Generate curriculum",
+    "backToList": "All curricula",
     "templatesHeading": "Templates",
     "templatesEmpty": "No curricula yet — generate one to get started.",
     "templatesLoading": "Loading curricula…",
