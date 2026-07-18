@@ -36,6 +36,13 @@ def resolve_default_blueprint(db) -> dict:
     return copy.deepcopy(row.blueprint) if row is not None else default_blueprint()
 
 
+def has_default_override(db) -> bool:
+    """Whether the tutor has saved a settings default (a row exists). The Settings
+    UI's `is_override` flag — "you've customised this", offer Restore. Kept here so
+    `blueprint_store` stays the single reader of the `blueprint_default` table."""
+    return db is not None and db.get(BlueprintDefault, _SINGLETON_ID) is not None
+
+
 def save_default_blueprint(db, bp: dict) -> None:
     """Validate + normalize `bp`, then upsert the single row. Commits.
 
