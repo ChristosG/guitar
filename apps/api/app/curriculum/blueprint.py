@@ -106,6 +106,21 @@ def default_blueprint() -> dict:
     return {"version": BLUEPRINT_VERSION, "sections": copy.deepcopy(_DEFAULT_SECTIONS)}
 
 
+def blueprint_from_course_meta(meta: dict | None) -> dict:
+    """The blueprint a course DRAFTS FROM: its own frozen `meta["blueprint"]` if it
+    has one, else the CODE default — never the settings table (spec invariant #3).
+
+    This is the draft-path resolver, and its fallback being `default_blueprint()`
+    rather than `blueprint_store.resolve_default_blueprint(db)` is the entire reason a
+    settings-default edit cannot mutate an existing or blueprintless course. Every
+    course that exists today has no `meta["blueprint"]`, so it drafts byte-identically
+    to before (invariant #2). A missing, non-dict, or section-less value is treated as
+    absent — an honest fall-through to the default, never a half-blueprint.
+    """
+    bp = (meta or {}).get("blueprint")
+    return bp if isinstance(bp, dict) and bp.get("sections") else default_blueprint()
+
+
 # ---------------------------------------------------------------------------
 # Reading a blueprint
 # ---------------------------------------------------------------------------

@@ -48,7 +48,7 @@ from sqlalchemy.orm import aliased
 from app.config import settings
 from app.curriculum.corpus import CurriculumContextError, build_curriculum_context
 from app.curriculum.depth import floor_words, target_words
-from app.curriculum.blueprint import default_blueprint
+from app.curriculum.blueprint import blueprint_from_course_meta
 from app.curriculum.draft import LessonContext, draft_lesson, draft_progress, persist_lesson
 from app.curriculum.outline import TIER_GENERAL
 from app.curriculum.shape import MIN_TEACHING_MINUTES, QA_MINUTES
@@ -227,7 +227,7 @@ def _draft_one(lesson_id: uuid.UUID, plan: dict) -> None:
     try:
         lesson_json, m = draft_lesson(
             db, ctx=ctx, library=library, language=language,
-            blueprint=default_blueprint(),
+            blueprint=plan["blueprint"],
             student_brief=student_brief, course_brief=course_brief,
             source_ids=source_ids, prompts=prompts,
         )
@@ -264,7 +264,7 @@ def _draft_one(lesson_id: uuid.UUID, plan: dict) -> None:
             log.info("draft: lesson %s was deleted while it was being drafted", lesson_id)
             return
         persist_lesson(
-            db, lesson_block, lesson_json, m, library, default_blueprint(),
+            db, lesson_block, lesson_json, m, library, plan["blueprint"],
             qa_minutes=size["qa_minutes"], teaching_minutes=size["teaching_minutes"],
         )
         db.commit()
@@ -314,6 +314,13 @@ def run_curriculum_draft_job(job_id: uuid.UUID) -> None:
 
         meta = course.meta or {}
         shape = meta.get("shape") or {}
+        # THE LESSON BLUEPRINT, resolved ONCE here in Phase A where a session is
+        # legitimately held, then handed to every worker as plain data on the `plan`
+        # dict — threaded exactly like `course_brief` (invariant #6). A course frozen
+        # with its own blueprint drafts from it; a blueprintless legacy course falls
+        # back to the CODE default and drafts byte-identically to before (invariant
+        # #2). The settings table is never consulted on this path.
+        blueprint = blueprint_from_course_meta(meta)
         # `[]` and `None` are DIFFERENT answers and stay different all the way
         # down: the interview documents [] as "deliberately none of my sources"
         # (an honest, ungrounded course), while None/missing means "everything".
@@ -344,6 +351,7 @@ def run_curriculum_draft_job(job_id: uuid.UUID) -> None:
             "library": library,
             "student_brief": student_brief,
             "prompts": prompt_overrides,
+            "blueprint": blueprint,
             "course_brief": meta.get("brief"),
             "source_ids": source_ids,
             "positions": positions,

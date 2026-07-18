@@ -343,9 +343,20 @@ def materialize_outline(
     student_id: uuid.UUID | None = None,
     source_ids: list[uuid.UUID] | None = None,
     profile: dict | None = None,
+    blueprint: dict | None = None,
 ) -> uuid.UUID:
     """Persist course -> module -> lesson Blocks from an APPROVED outline, every
     lesson `queued`. Returns the course (root) Block id. Commits.
+
+    `blueprint` is FROZEN onto the new course here, once, and read from `course.meta`
+    forever after — a per-course copy that a later settings-default edit cannot reach
+    (spec invariant #3). `None` seeds the RESOLVED settings default
+    (`resolve_default_blueprint`): the tutor's edited default if he has one, else the
+    code default. The wizard "structure" step passes an explicit blueprint; the
+    non-interview `generate_curriculum_endpoint` passes `None` and gets the settings
+    default. `blueprint_store` is imported lazily because `outline` sits inside the
+    `blueprint -> draft -> outline` import cycle, resolved the same way `draft.py`
+    lazily imports `blueprint`.
 
     The tree exists before a single lesson has been drafted. That is deliberate and
     it is the whole live-progress model: the board renders immediately, `GET
@@ -357,6 +368,9 @@ def materialize_outline(
     it works in dev (the identity map returns the same dict) and silently does
     nothing in production.
     """
+    from app.curriculum.blueprint_store import resolve_default_blueprint
+
+    resolved_blueprint = blueprint or resolve_default_blueprint(db)
     course = Block(
         kind="course",
         title=outline.get("title") or title,
@@ -395,6 +409,10 @@ def materialize_outline(
                 # exists to remove.
                 "full_context": library.fits and not library.is_empty,
             },
+            # THE LESSON BLUEPRINT, frozen onto this course. Read on the draft path
+            # by `blueprint_from_course_meta(course.meta)` and nowhere else — this is
+            # the per-course copy invariant #3 protects from settings-default edits.
+            "blueprint": resolved_blueprint,
         },
     )
     db.add(course)

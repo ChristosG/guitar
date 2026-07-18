@@ -57,6 +57,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.brain.retrieve import MIN_PASSAGE_CHARS
+from app.curriculum.blueprint_store import resolve_default_blueprint
 from app.curriculum.corpus import build_curriculum_context, build_library_context
 from app.curriculum.outline import (
     GAP_POLICIES,
@@ -515,6 +516,14 @@ def _answer_confirm(db: Session, interview: CurriculumInterview, answer) -> dict
     student_id = _parse_uuid(who.get("student_id")) if who.get("student_id") else None
     language = who.get("language") or DEFAULT_LOCALE
 
+    # THE LESSON BLUEPRINT for this course: what the (optional) "structure" step
+    # chose, else the settings default. `materialize_outline` freezes it onto
+    # `course.meta["blueprint"]`. A skipped/absent structure step leaves no blueprint
+    # in `answers`, so the settings default is used (invariant #7).
+    structure = interview.answers.get("structure") or {}
+    chosen_bp = structure.get("blueprint")
+    blueprint = chosen_bp if isinstance(chosen_bp, dict) else resolve_default_blueprint(db)
+
     root_id = materialize_outline(
         db,
         interview.outline,
@@ -531,6 +540,7 @@ def _answer_confirm(db: Session, interview: CurriculumInterview, answer) -> dict
             "student_name": who.get("name"),
             "level": who.get("level"),
         },
+        blueprint=blueprint,
     )
     interview.root_id = root_id
     interview.answers = {**interview.answers, "confirm": {"approved": True}}
