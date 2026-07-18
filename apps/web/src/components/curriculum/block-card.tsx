@@ -149,6 +149,8 @@ export function BlockCard({
   const [draftTitle, setDraftTitle] = useState(node.title);
   // Collapsed by default — the root is the only node that opens expanded, so the
   // board reads as a table of contents.
+  // NOTE FOR E2E AUTHORS: non-root nodes mount collapsed, so a test must expand
+  // one (e.g. click its title) before asserting on lesson content beneath it.
   const [expanded, setExpanded] = useState(isRoot);
   const [editingBody, setEditingBody] = useState(false);
   const [draftBody, setDraftBody] = useState("");

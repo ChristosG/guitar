@@ -39,8 +39,8 @@ from dataclasses import dataclass
 from app.curriculum.corpus import LibraryContext, prefix_messages
 from app.curriculum.depth import (
     DEEPEN_MAX_PASSES,
-    SECTIONS,  # re-exported: `draft.SECTIONS` is read by other modules/tests
     Measurement,
+    SECTION_LABELS,  # re-exported: now lives in `depth`, a pure module (see depth.py)
     measure,
 )
 from app.curriculum.ground import ground_topic
@@ -441,33 +441,6 @@ def draft_lesson(
 # ---------------------------------------------------------------------------
 # Persisting a drafted lesson
 # ---------------------------------------------------------------------------
-
-# The section headings that land on `Block.title` (a NOT NULL column). The FRONTEND
-# renders from `meta.section` — the stable machine key — and is free to ignore
-# these; they exist so a segment row is legible in the database, in a CSV export,
-# and in the printed handout, without every consumer needing a translation table.
-SECTION_LABELS: dict[str, dict[str, str]] = {
-    "el": {
-        "warm_up": "Ζέσταμα",
-        "theory": "Θεωρία",
-        "demonstration": "Επίδειξη",
-        "exercises": "Ασκήσεις",
-        "common_mistakes": "Συνήθη λάθη",
-        "recap": "Ανακεφαλαίωση",
-        "homework": "Εργασία για το σπίτι",
-        "qa_prompts": "Ερωτήσεις & συζήτηση",
-    },
-    "en": {
-        "warm_up": "Warm-up",
-        "theory": "Theory",
-        "demonstration": "Demonstration",
-        "exercises": "Exercises",
-        "common_mistakes": "Common mistakes",
-        "recap": "Recap",
-        "homework": "Homework",
-        "qa_prompts": "Q&A and discussion",
-    },
-}
 
 # How the taught minutes are spread across the sections on the printed script.
 # Derived from the same weights `depth` measures against, so a section that is 25%

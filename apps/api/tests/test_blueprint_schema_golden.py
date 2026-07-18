@@ -367,6 +367,16 @@ def test_build_lesson_schema_of_default_equals_todays_schema():
     assert build_lesson_schema(default_blueprint()) == GOLDEN_LESSON_SCHEMA
 
 
+def test_property_order_matches_todays_schema():
+    """Property order is load-bearing — it is what the model is actually sent, and a
+    dict equality check (above) does not see key order. This pins it to the byte."""
+    schema = build_lesson_schema(default_blueprint())
+    assert list(schema["properties"].keys()) == [
+        "title", "summary", "warm_up", "theory", "demonstration", "exercises",
+        "common_mistakes", "recap", "homework", "qa_prompts",
+    ]
+
+
 def test_default_blueprint_is_deep_copied_each_call():
     """`default_blueprint()` must hand back an independent object every time — a
     shared mutable default would let one course's edit bleed into another's."""

@@ -55,7 +55,7 @@ _LEGACY_PER_SECTION = {
 }
 _LEGACY_THIN = ["warm_up", "common_mistakes", "recap", "homework", "qa_prompts"]
 
-# Captured `draft.SECTION_LABELS` values (the strings that land on Block.title).
+# Captured `depth.SECTION_LABELS` values (the strings that land on Block.title).
 _LABELS_EL = {
     "warm_up": "Ζέσταμα",
     "theory": "Θεωρία",

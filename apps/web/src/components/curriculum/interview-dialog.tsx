@@ -50,7 +50,7 @@ interface InterviewDialogProps {
   onMaterialized: (rootId: string) => void;
 }
 
-/** Six quiet segments, not a numbered wizard chrome. */
+/** Seven quiet segments, not a numbered wizard chrome. */
 function StepTrail({ currentStep }: { currentStep: string }) {
   const currentIndex = STEP_ORDER.indexOf(currentStep as (typeof STEP_ORDER)[number]);
   return (

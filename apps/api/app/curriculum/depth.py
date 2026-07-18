@@ -73,6 +73,39 @@ SECTION_WEIGHTS: dict[str, float] = {
 }
 SECTIONS: tuple[str, ...] = tuple(SECTION_WEIGHTS)
 
+# The section headings that land on `Block.title` (a NOT NULL column). The FRONTEND
+# renders from `meta.section` — the stable machine key — and is free to ignore
+# these; they exist so a segment row is legible in the database, in a CSV export,
+# and in the printed handout, without every consumer needing a translation table.
+#
+# Lives here (a pure module) rather than in `draft.py` so that `blueprint.py` —
+# and anything importing it, e.g. the settings router — is not dragged through
+# `draft.py`'s retrieval/LLM import chain (corpus, ground, llm.factory,
+# prompts.overrides) just to read a label dict. `draft.py` re-exports it below
+# for any external consumer still resolving `draft.SECTION_LABELS`.
+SECTION_LABELS: dict[str, dict[str, str]] = {
+    "el": {
+        "warm_up": "Ζέσταμα",
+        "theory": "Θεωρία",
+        "demonstration": "Επίδειξη",
+        "exercises": "Ασκήσεις",
+        "common_mistakes": "Συνήθη λάθη",
+        "recap": "Ανακεφαλαίωση",
+        "homework": "Εργασία για το σπίτι",
+        "qa_prompts": "Ερωτήσεις & συζήτηση",
+    },
+    "en": {
+        "warm_up": "Warm-up",
+        "theory": "Theory",
+        "demonstration": "Demonstration",
+        "exercises": "Exercises",
+        "common_mistakes": "Common mistakes",
+        "recap": "Recap",
+        "homework": "Homework",
+        "qa_prompts": "Q&A and discussion",
+    },
+}
+
 # A section is THIN below this fraction of its own share. Deliberately generous:
 # the aggregate floor (`FLOOR_RATIO`) is the real gate, and a per-section rule
 # that fired on every small deviation would send every lesson through a deepen

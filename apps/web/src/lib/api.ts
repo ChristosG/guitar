@@ -942,11 +942,11 @@ export interface InterviewFindings {
 /** The `{interview_id, step, question, options?, findings?, error?}` envelope
  * every interview route returns (mirrors `schemas/interview.py`'s
  * `InterviewStateOut`). `step` is one of `STEP_ORDER` ("who" | "duration" |
- * "scope" | "sources" | "outline" | "confirm") or the terminal "done" — kept as
- * a plain `string` here (not a union), same "an unrecognized future step still
- * round-trips" reasoning as `BlockNode.kind`/`JobOut.status` elsewhere in this
- * file. `error` is set only when the previous answer was invalid and this
- * response is re-asking the same step's question. */
+ * "scope" | "structure" | "sources" | "outline" | "confirm") or the terminal
+ * "done" — kept as a plain `string` here (not a union), same "an unrecognized
+ * future step still round-trips" reasoning as `BlockNode.kind`/`JobOut.status`
+ * elsewhere in this file. `error` is set only when the previous answer was
+ * invalid and this response is re-asking the same step's question. */
 export interface InterviewStateOut {
   interview_id: string;
   step: string;

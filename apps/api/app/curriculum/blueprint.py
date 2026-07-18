@@ -3,12 +3,14 @@ DATA so a tutor can reshape it per curriculum without touching the engine.
 
 `default_blueprint()` is the code default — the single source for every course that
 carries no blueprint of its own (i.e. every course that exists today). It is built
-from the SAME constants `app.curriculum.depth` and `app.curriculum.draft` already
-own — the section `description` strings (`depth._DESC_*`), the weights
-(`depth.SECTION_WEIGHTS`) and the el/en labels (`draft.SECTION_LABELS`) — so that
-`build_lesson_schema(default_blueprint())` reproduces `depth.LESSON_DRAFT_SCHEMA`
-byte-for-byte BY CONSTRUCTION, not by careful re-typing. That invariant is the whole
-point of this unit, and `tests/test_blueprint_schema_golden.py` guards it.
+from the SAME constants `app.curriculum.depth` already owns — the section
+`description` strings (`depth._DESC_*`), the weights (`depth.SECTION_WEIGHTS`) and
+the el/en labels (`depth.SECTION_LABELS`) — so that `build_lesson_schema(default_blueprint())`
+reproduces `depth.LESSON_DRAFT_SCHEMA` byte-for-byte BY CONSTRUCTION, not by careful
+re-typing. That invariant is the whole point of this unit, and
+`tests/test_blueprint_schema_golden.py` guards it. (`depth` is a pure module — no
+retrieval/LLM imports — which is why this module imports only from it, not from
+`app.curriculum.draft`; see `depth.SECTION_LABELS`'s own comment for why.)
 
 A blueprint is plain JSON (see the plan's canonical shape):
 
@@ -27,7 +29,7 @@ from __future__ import annotations
 import copy
 
 from app.curriculum import depth
-from app.curriculum.draft import SECTION_LABELS as _LABELS
+from app.curriculum.depth import SECTION_LABELS as _LABELS
 
 BLUEPRINT_VERSION = 1
 
@@ -56,7 +58,7 @@ class BlueprintInvalid(Exception):
 
 
 def _label(key: str) -> dict:
-    """This section's el/en label, sourced from `draft.SECTION_LABELS` — the same
+    """This section's el/en label, sourced from `depth.SECTION_LABELS` — the same
     strings that land on `Block.title` — so the two can never disagree."""
     return {"el": _LABELS["el"][key], "en": _LABELS["en"][key]}
 

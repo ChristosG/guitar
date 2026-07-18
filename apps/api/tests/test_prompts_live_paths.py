@@ -162,6 +162,7 @@ def test_the_draft_worker_gets_the_override_without_touching_the_database(db, mo
     """
     from app.curriculum import draft as draft_mod
     from app.curriculum.corpus import LibraryContext
+    from app.curriculum.depth import SECTIONS
     from app.curriculum.draft import LessonContext, draft_lesson
 
     _override(db, "lesson.draft")
@@ -170,7 +171,7 @@ def test_the_draft_worker_gets_the_override_without_touching_the_database(db, mo
 
     rec = _Recorder({
         "title": "L", "objective": "o",
-        **{s: {"body": "x " * 900, "citations": []} for s in draft_mod.SECTIONS},
+        **{s: {"body": "x " * 900, "citations": []} for s in SECTIONS},
     })
     monkeypatch.setattr(draft_mod, "get_provider", lambda: rec)
 

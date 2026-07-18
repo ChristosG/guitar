@@ -1393,7 +1393,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="lesson",
         kind="prompt",
-        source_ref="app/curriculum/draft.py:176",
+        source_ref="app/curriculum/draft.py:175",
         title_el="Η συγγραφή ενός μαθήματος",
         what_it_does_el=(
             "Ζητάει το ίδιο το μάθημα — τις σελίδες που θα διδάξεις, όχι ένα "
@@ -1425,7 +1425,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="lesson",
         kind="prompt",
-        source_ref="app/curriculum/draft.py:176",
+        source_ref="app/curriculum/draft.py:175",
         title_el="Το ξαναγράψιμο ενός κοντού μαθήματος",
         what_it_does_el=(
             "Αν το μάθημα βγήκε πιο κοντό από το όριο, γυρίζει πίσω με την "
@@ -1453,7 +1453,7 @@ _ENTRIES = [
         id="lesson.retrieved",
         flow="lesson",
         kind="fragment",
-        source_ref="app/curriculum/draft.py:157",
+        source_ref="app/curriculum/draft.py:156",
         title_el="Όταν η βιβλιοθήκη σου δεν χώρεσε: τα αποσπάσματα του μαθήματος",
         what_it_does_el=(
             "Αν τα βιβλία που διάλεξες είναι πάρα πολλά για να διαβαστούν "
@@ -1512,7 +1512,7 @@ _ENTRIES = [
         curriculum_group=True,
         flow="lesson",
         kind="fragment",
-        source_ref="app/curriculum/draft.py:111",
+        source_ref="app/curriculum/draft.py:110",
         title_el="Οδηγία: η ενότητα είναι μέσα στα βιβλία σου",
         what_it_does_el=(
             "Μπαίνει στη συγγραφή του μαθήματος όταν η ενότητα έχει "
@@ -1538,7 +1538,7 @@ _ENTRIES = [
         curriculum_group=True,
         flow="lesson",
         kind="fragment",
-        source_ref="app/curriculum/draft.py:111",
+        source_ref="app/curriculum/draft.py:110",
         title_el="Οδηγία: η ενότητα ΔΕΝ είναι στα βιβλία σου",
         what_it_does_el=(
             "Μπαίνει όταν η ενότητα δεν καλύπτεται από τη βιβλιοθήκη σου και "
@@ -1564,7 +1564,7 @@ _ENTRIES = [
         curriculum_group=True,
         flow="lesson",
         kind="fragment",
-        source_ref="app/curriculum/draft.py:111",
+        source_ref="app/curriculum/draft.py:110",
         title_el="Οδηγία: η ενότητα θέλει πρόσφατες πληροφορίες",
         what_it_does_el=(
             "Μπαίνει όταν η ενότητα δεν είναι στα βιβλία σου και χρειάζεται "
