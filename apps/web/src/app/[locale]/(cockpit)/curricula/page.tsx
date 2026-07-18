@@ -1,33 +1,34 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
 import { InterviewDialog } from "@/components/curriculum/interview-dialog";
-import { TreeBoard } from "@/components/curriculum/tree-board";
 import { Badge } from "@/components/ui/badge";
-import {
-  ApiError,
-  getCurriculum,
-  listCurricula,
-  type BlockNode,
-  type CurriculumListItem,
-} from "@/lib/api";
-import { cn } from "@/lib/utils";
+import { Input } from "@/components/ui/input";
+import { ApiError, listCurricula, type CurriculumListItem } from "@/lib/api";
 
 // Client component for the same reason as knowledge/page.tsx and
 // students/page.tsx: it calls the API straight from the browser.
+//
+// Unit A: this page is now a plain navigable INDEX — cards link out to
+// `/[locale]/curricula/[rootId]` (the new detail route) instead of opening a
+// board inline. The interview's confirm step still materializes the tree
+// here, but `handleMaterialized` now navigates to the detail route rather
+// than fetching and holding it in local state — the "read module 1 while
+// module 5 drafts" flagship flow survives unchanged, just one route further
+// along (the detail page's own mount-only fetch + TreeBoard is where that
+// now lives).
 export default function CurriculaPage() {
   const t = useTranslations("curricula");
   const locale = useLocale();
+  const router = useRouter();
 
   const [templates, setTemplates] = useState<CurriculumListItem[]>([]);
   const [templatesLoading, setTemplatesLoading] = useState(true);
   const [templatesError, setTemplatesError] = useState<string | null>(null);
-
-  const [activeTree, setActiveTree] = useState<BlockNode | null>(null);
-  const [activeId, setActiveId] = useState<string | null>(null);
-  const [boardLoading, setBoardLoading] = useState(false);
-  const [boardError, setBoardError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
 
   const fetchTemplates = useCallback(() => {
     return listCurricula()
@@ -40,56 +41,21 @@ export default function CurriculaPage() {
     fetchTemplates();
   }, [fetchTemplates]);
 
-  const refreshTemplates = useCallback(() => {
-    setTemplatesLoading(true);
-    setTemplatesError(null);
-    return fetchTemplates();
-  }, [fetchTemplates]);
-
   /** The interview's confirm step MATERIALIZED the tree — it exists right now, with
-   * every lesson `queued` and not one word drafted. So this fetches it and opens the
-   * board on it IMMEDIATELY, with a progress bar, instead of holding the tutor on a
-   * spinner for the four minutes the lessons take to write. He reads module 1 while
-   * module 5 is still being written; that is the whole flagship claim, and this
-   * function is where it becomes true. */
+   * every lesson `queued` and not one word drafted. So this navigates straight to
+   * its detail route instead of holding the tutor on a spinner for the four
+   * minutes the lessons take to write: the detail page's own fetch + TreeBoard's
+   * progress bar is what lets him read module 1 while module 5 is still being
+   * written; that is the whole flagship claim, and this function is where it
+   * hands off to it. */
   const handleMaterialized = useCallback(
-    async (rootId: string) => {
-      setActiveId(rootId);
-      setBoardLoading(true);
-      setBoardError(null);
-      try {
-        setActiveTree(await getCurriculum(rootId));
-      } catch (err) {
-        setActiveTree(null);
-        setBoardError(err instanceof ApiError ? err.detail : t("boardError"));
-      } finally {
-        setBoardLoading(false);
-      }
-      refreshTemplates();
+    (rootId: string) => {
+      router.push(`/${locale}/curricula/${rootId}`);
     },
-    [refreshTemplates, t],
+    [router, locale],
   );
 
-  async function handleSelectTemplate(item: CurriculumListItem) {
-    setActiveId(item.id);
-    setBoardLoading(true);
-    setBoardError(null);
-    try {
-      const tree = await getCurriculum(item.id);
-      setActiveTree(tree);
-    } catch (err) {
-      setActiveTree(null);
-      setBoardError(err instanceof ApiError ? err.detail : t("boardError"));
-    } finally {
-      setBoardLoading(false);
-    }
-  }
-
-  function handleRootDeleted() {
-    setActiveTree(null);
-    setActiveId(null);
-    refreshTemplates();
-  }
+  const shown = templates.filter((tm) => tm.title.toLowerCase().includes(query.trim().toLowerCase()));
 
   return (
     <div className="flex flex-col gap-6">
@@ -117,18 +83,28 @@ export default function CurriculaPage() {
           </p>
         )}
         {templates.length > 0 && (
+          <Input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder={t("searchPlaceholder")}
+            aria-label={t("searchPlaceholder")}
+            data-testid="curricula-search"
+            className="max-w-sm"
+          />
+        )}
+        {templates.length > 0 && shown.length === 0 && (
+          <p className="text-sm text-muted-foreground" data-testid="curricula-search-no-match">
+            {t("searchNoMatch")}
+          </p>
+        )}
+        {shown.length > 0 && (
           <div className="flex flex-wrap gap-3" data-testid="templates-list">
-            {templates.map((item) => (
-              <button
+            {shown.map((item) => (
+              <Link
                 key={item.id}
-                type="button"
-                onClick={() => handleSelectTemplate(item)}
+                href={`/${locale}/curricula/${item.id}`}
                 data-testid="template-item"
-                aria-current={activeId === item.id ? "true" : undefined}
-                className={cn(
-                  "flex w-56 flex-col gap-1 rounded-xl border border-border bg-card p-3 text-left text-sm ring-1 ring-foreground/10 transition-colors hover:bg-muted/50",
-                  activeId === item.id && "border-primary ring-primary/40",
-                )}
+                className="flex w-56 flex-col gap-1 rounded-xl border border-border bg-card p-3 text-left text-sm ring-1 ring-foreground/10 transition-colors hover:bg-muted/50"
               >
                 <span className="truncate font-medium" data-testid="template-title">
                   {item.title}
@@ -137,38 +113,9 @@ export default function CurriculaPage() {
                   <Badge variant="outline">{item.language}</Badge>
                   {typeof item.target_profile?.level === "string" && <span>{item.target_profile.level}</span>}
                 </span>
-              </button>
+              </Link>
             ))}
           </div>
-        )}
-      </div>
-
-      <div className="flex flex-col gap-2">
-        {boardLoading && (
-          <p className="text-sm text-muted-foreground" data-testid="board-loading">
-            {t("boardLoading")}
-          </p>
-        )}
-        {boardError && (
-          <p role="alert" data-testid="board-error" className="text-sm text-destructive">
-            {boardError}
-          </p>
-        )}
-        {!boardLoading && !boardError && !activeTree && (
-          <p className="text-sm text-muted-foreground" data-testid="board-empty">
-            {t("boardEmpty")}
-          </p>
-        )}
-        {activeTree && (
-          // `key` is load-bearing: the board OWNS its tree once mounted (draft polls
-          // write into it), so switching curricula must give it a fresh one rather
-          // than syncing a prop into state inside an effect.
-          <TreeBoard
-            key={activeTree.id}
-            root={activeTree}
-            locale={locale}
-            onRootDeleted={handleRootDeleted}
-          />
         )}
       </div>
     </div>
