@@ -262,3 +262,86 @@ def plan_revision(db, root_id: uuid.UUID, *, instruction: str) -> dict:
     )
     raw = get_provider().guided_json(messages, REVISION_PLAN_SCHEMA, role="plan")
     return validate_ops(db, root_id, raw)
+
+
+# ---------------------------------------------------------------------------
+# APPLY — the one writer. ONE transaction, one commit (Global Constraint #3).
+# ---------------------------------------------------------------------------
+#
+# `edit` and the outline helpers are imported HERE, inside apply_revision, rather
+# than at module top: it keeps the read-only planner above import-light (it needs
+# neither), avoids re-shuffling the prompt registry's call-site/source-ref line
+# numbers, and is the same lazy-import move outline.py uses for blueprint_store.
+
+
+def _queue(block: Block) -> None:
+    """Send a block back into the draft queue via a WHOLE-DICT meta reassignment —
+    `Block.meta` is plain `sa.JSON` with no `MutableDict`, so `block.meta["k"] = v`
+    silently does nothing in production (Global Constraint #4)."""
+    block.meta = {**(block.meta or {}), "draft_status": "queued", "error": None}
+
+
+def apply_revision(db, root_id: uuid.UUID, plan: dict) -> dict:
+    """Execute an APPROVED plan in ONE transaction (Global Constraint #3). Re-validates
+    every id (defence in depth — the chat path round-trips the plan through the
+    model, so a garbled id must be dropped, not misapplied). New/changed lessons are
+    queued; the caller chains the draft fan-out. Returns {applied, root_id}."""
+    from app.curriculum import edit
+    from app.curriculum.outline import POLICY_GENERAL, TIER_GAP, clamp_tier, gap_body
+
+    course = db.get(Block, root_id)
+    if course is None or course.kind != "course":
+        raise ReviseError(f"not a curriculum root: {root_id}")
+    validated = validate_ops(db, root_id, plan)           # re-resolve against the live tree
+    gap_policy = (course.meta or {}).get("gap_policy") or POLICY_GENERAL
+    applied = 0
+    try:
+        for op in validated["ops"]:
+            name = op["op"]
+            if name == "insert_lesson":
+                lesson = edit._add_lesson(
+                    db, uuid.UUID(op["module_id"]), title=op["title"], objective=op["objective"],
+                    after=uuid.UUID(op["after_lesson_id"]) if op.get("after_lesson_id") else None)
+                _queue(lesson)                            # _add_lesson already queues; explicit for clarity
+            elif name == "insert_module":
+                tier = clamp_tier(op["tier"], gap_policy)
+                module = edit._add_module(
+                    db, root_id, title=op["title"], objective=op["objective"], tier=tier,
+                    after=uuid.UUID(op["after_module_id"]) if op.get("after_module_id") else None)
+                if tier == TIER_GAP:
+                    # The tutor's policy leaves this topic outside his library — an
+                    # honest, empty gap, never invented content (mirrors outline.py).
+                    module.body = gap_body(course.language)
+                else:
+                    for li, spec in enumerate(op["lessons"]):
+                        db.add(Block(
+                            kind="lesson", title=spec["title"], body=spec["objective"] or None,
+                            order=li, parent_id=module.id, language=course.language,
+                            meta={"draft_status": "queued", "objective": spec["objective"] or ""}))
+            elif name == "move_lesson":
+                lesson = edit._move_block(
+                    db, uuid.UUID(op["lesson_id"]), uuid.UUID(op["to_module_id"]),
+                    after=uuid.UUID(op["after_lesson_id"]) if op.get("after_lesson_id") else None)
+                _queue(lesson)                            # re-draft in its new position/context
+            elif name == "modify_lesson":
+                lesson = db.get(Block, uuid.UUID(op["lesson_id"]))
+                lesson.meta = {**(lesson.meta or {}), "draft_status": "queued", "error": None,
+                               "revise_instruction": op["instruction"], "prev_body": lesson.body}
+            elif name == "remove_lesson":
+                lesson = db.get(Block, uuid.UUID(op["lesson_id"]))
+                parent_id = lesson.parent_id
+                db.delete(lesson)
+                db.flush()
+                if parent_id is not None:
+                    edit._renormalise(db, parent_id)
+            elif name == "update_blueprint":
+                # WHOLE-DICT reassignment (Constraint #4). Re-validated here to store
+                # the NORMALISED blueprint. NEVER re-drafts existing lessons — that is
+                # the opt-in `POST /curricula/{root}/redraft` route (Unit C), not this.
+                course.meta = {**(course.meta or {}), "blueprint": validate_blueprint(op["blueprint"])}
+            applied += 1
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return {"applied": applied, "root_id": str(root_id)}

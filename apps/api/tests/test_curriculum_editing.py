@@ -27,6 +27,7 @@ from app.curriculum.edit import (
     add_lesson,
     add_module,
     delete_block,
+    move_block,
     reorder_block,
     requeue_lesson,
 )
@@ -96,6 +97,13 @@ def _orders(db, parent_id) -> list[int]:
             select(Block).where(Block.parent_id == parent_id).order_by(Block.order)
         ).all()
     ]
+
+
+def _children_lessons(db, module_id) -> list[Block]:
+    return db.scalars(
+        select(Block).where(Block.parent_id == module_id, Block.kind == "lesson")
+        .order_by(Block.order)
+    ).all()
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +200,56 @@ def test_adding_a_lesson_to_something_that_is_not_a_module_is_rejected(db):
     root_id = _course(db)
     with pytest.raises(EditError):
         add_lesson(db, root_id, title="nope")   # root is a course, not a module
+
+
+# ---------------------------------------------------------------------------
+# move_block — the cross-parent move edit.py never had (renormalises BOTH parents)
+# ---------------------------------------------------------------------------
+
+def test_move_block_re_homes_a_lesson_and_renormalises_both_parents(db):
+    root_id = _course(db)
+    m1, m2 = _modules(db, root_id)
+    l0, l1, l2, l3 = _children_lessons(db, m1.id)   # the outline seeds 4 lessons/module
+
+    move_block(db, l1.id, m2.id)                     # append L0.1 into m2
+
+    m1_lessons = _children_lessons(db, m1.id)
+    assert [x.title for x in m1_lessons] == ["L0.0", "L0.2", "L0.3"]
+    assert [x.order for x in m1_lessons] == [0, 1, 2]        # old parent's hole closed
+    m2_lessons = _children_lessons(db, m2.id)
+    assert m2_lessons[-1].title == "L0.1"
+    assert [x.order for x in m2_lessons] == [0, 1, 2, 3, 4]  # new parent contiguous
+    assert m2_lessons[-1].parent_id == m2.id
+
+
+def test_move_block_after_positions_within_the_destination(db):
+    root_id = _course(db)
+    m1, m2 = _modules(db, root_id)
+    moving = _children_lessons(db, m1.id)[0]
+    dest_first = _children_lessons(db, m2.id)[0]
+
+    move_block(db, moving.id, m2.id, after=dest_first.id)
+
+    titles = [x.title for x in _children_lessons(db, m2.id)]
+    assert titles[1] == moving.title            # landed right after dest_first
+
+
+def test_move_block_rejects_a_lesson_from_another_course(db):
+    root_a = _course(db)
+    root_b = _course(db)
+    lesson_a = _children_lessons(db, _modules(db, root_a)[0].id)[0]
+    dest_module_b = _modules(db, root_b)[0]
+    with pytest.raises(EditError):
+        move_block(db, lesson_a.id, dest_module_b.id)
+
+
+def test_move_block_rejects_an_after_in_the_wrong_module(db):
+    root_id = _course(db)
+    m1, m2 = _modules(db, root_id)
+    moving = _children_lessons(db, m1.id)[0]
+    wrong_after = _children_lessons(db, m1.id)[1]   # a lesson NOT under the destination m2
+    with pytest.raises(EditError):
+        move_block(db, moving.id, m2.id, after=wrong_after.id)
 
 
 # ---------------------------------------------------------------------------
@@ -476,8 +534,9 @@ def test_the_deepen_flag_is_CONSUMED_at_claim_and_raises_that_lessons_target(db)
     }
     claimed = _claim(db, lesson.id)
     assert claimed is not None
-    claimed_lesson, deepen = claimed
+    claimed_lesson, deepen, revise_instruction = claimed
     assert deepen is True
+    assert revise_instruction is None
 
     size = _lesson_size(claimed_lesson, plan, deepen=deepen)
     assert size["target_words"] > SHAPE.target_words_per_lesson

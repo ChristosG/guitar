@@ -49,9 +49,13 @@ def _renormalise(db, parent_id: uuid.UUID) -> None:
         sib.order = i
 
 
-def add_module(db, root_id: uuid.UUID, *, title: str, objective: str = "",
-               tier: str = "general_knowledge", after: uuid.UUID | None = None) -> Block:
-    """A new, empty module under a course. Appended, or inserted after `after`."""
+def _add_module(db, root_id: uuid.UUID, *, title: str, objective: str = "",
+                tier: str = "general_knowledge", after: uuid.UUID | None = None) -> Block:
+    """Commit-free core of `add_module`. Flushes and renormalises siblings IN
+    MEMORY, but does NOT commit — so `revise.apply_revision` can batch many ops
+    onto one transaction and commit them once (Global Constraint #3). The public
+    wrapper below adds the commit + refresh, so every existing caller is unchanged.
+    """
     course = _get(db, root_id, kind="course")
     siblings = db.scalars(
         select(Block)
@@ -76,19 +80,24 @@ def add_module(db, root_id: uuid.UUID, *, title: str, objective: str = "",
     db.flush()
     for i, sib in enumerate(siblings):
         sib.order = i
+    return module
+
+
+def add_module(db, root_id: uuid.UUID, *, title: str, objective: str = "",
+               tier: str = "general_knowledge", after: uuid.UUID | None = None) -> Block:
+    """A new, empty module under a course. Appended, or inserted after `after`."""
+    module = _add_module(db, root_id, title=title, objective=objective, tier=tier, after=after)
     db.commit()
     db.refresh(module)
     return module
 
 
-def add_lesson(db, module_id: uuid.UUID, *, title: str, objective: str = "",
-               after: uuid.UUID | None = None) -> Block:
-    """A new lesson under a module, `queued` — so the very next Resume drafts it.
-
-    That is the whole reason this is worth having: the tutor reads module 3, sees a
-    lesson missing, adds it, presses Resume, and it gets written with the same
-    cached library prefix as the other nineteen. `draft_status="queued"` is not
-    bookkeeping, it is the enqueue.
+def _add_lesson(db, module_id: uuid.UUID, *, title: str, objective: str = "",
+                after: uuid.UUID | None = None) -> Block:
+    """Commit-free core of `add_lesson` — flush + in-memory renormalise, no commit
+    (Global Constraint #3). Keeps the `minutes` derivation from the course shape
+    inside the core, so a lesson batched in by apply_revision is sized identically
+    to one added through the public wrapper.
     """
     module = _get(db, module_id, kind="module")
     siblings = db.scalars(
@@ -117,9 +126,81 @@ def add_lesson(db, module_id: uuid.UUID, *, title: str, objective: str = "",
     db.flush()
     for i, sib in enumerate(siblings):
         sib.order = i
+    return lesson
+
+
+def add_lesson(db, module_id: uuid.UUID, *, title: str, objective: str = "",
+               after: uuid.UUID | None = None) -> Block:
+    """A new lesson under a module, `queued` — so the very next Resume drafts it.
+
+    That is the whole reason this is worth having: the tutor reads module 3, sees a
+    lesson missing, adds it, presses Resume, and it gets written with the same
+    cached library prefix as the other nineteen. `draft_status="queued"` is not
+    bookkeeping, it is the enqueue.
+    """
+    lesson = _add_lesson(db, module_id, title=title, objective=objective, after=after)
     db.commit()
     db.refresh(lesson)
     return lesson
+
+
+def _move_block(db, block_id: uuid.UUID, new_parent_id: uuid.UUID, *,
+                after: uuid.UUID | None = None) -> Block:
+    """Commit-free core: move a lesson to another module, renormalising BOTH the
+    old parent (the hole it leaves) AND the new parent (where it lands).
+
+    THIS IS THE CROSS-PARENT CAPABILITY edit.py NEVER HAD. `reorder_block` only
+    ever moved a block AMONG ITS OWN siblings, and `_renormalise` only ever touched
+    ONE parent — so a lesson could be reordered but never re-homed. A revision that
+    says "this lesson belongs in module 3, not module 1" needs both parents closed
+    up contiguously, or the board shows a hole in one and a collision in the other.
+    """
+    block = _get(db, block_id, kind="lesson")
+    old_parent_id = block.parent_id
+    new_parent = _get(db, new_parent_id, kind="module")
+
+    # Both modules must live under the SAME course — a lesson cannot hop curricula.
+    if old_parent_id is not None:
+        old_module = db.get(Block, old_parent_id)
+        if old_module is None or old_module.parent_id != new_parent.parent_id:
+            raise EditError("cannot move a lesson across curricula")
+
+    # Exclude the block itself: for a SAME-MODULE move (a reorder — the validator
+    # permits `to_module_id` == the lesson's current module) it is already in this
+    # list, and inserting it a second time would give it two `order` values. For a
+    # cross-parent move it is not in `dest` at all, so the filter is a no-op.
+    dest = [
+        s for s in db.scalars(
+            select(Block)
+            .where(Block.parent_id == new_parent.id, Block.kind == "lesson")
+            .order_by(Block.order)
+        ).all()
+        if s.id != block.id
+    ]
+    at = len(dest)
+    if after is not None:
+        target = _get(db, after, kind="lesson")
+        if target.parent_id != new_parent.id:
+            raise EditError(f"lesson {after} is not part of the destination module")
+        at = next(i for i, s in enumerate(dest) if s.id == target.id) + 1
+
+    block.parent_id = new_parent.id
+    dest.insert(at, block)
+    db.flush()
+    for i, sib in enumerate(dest):
+        sib.order = i                                    # new parent contiguous
+    if old_parent_id is not None and old_parent_id != new_parent.id:
+        _renormalise(db, old_parent_id)                  # old parent's hole closed
+    return block
+
+
+def move_block(db, block_id: uuid.UUID, new_parent_id: uuid.UUID, *,
+               after: uuid.UUID | None = None) -> Block:
+    """Public wrapper: move a lesson to another module and commit."""
+    block = _move_block(db, block_id, new_parent_id, after=after)
+    db.commit()
+    db.refresh(block)
+    return block
 
 
 def reorder_block(db, block_id: uuid.UUID, *, direction: str) -> Block:

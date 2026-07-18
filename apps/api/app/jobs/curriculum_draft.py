@@ -94,9 +94,9 @@ def _queued_lesson_ids(db, root_id: uuid.UUID) -> list[uuid.UUID]:
     ]
 
 
-def _claim(db, lesson_id: uuid.UUID) -> tuple[Block, bool] | None:
-    """Transaction 1: `queued` -> `drafting`. Returns `(lesson, deepen)`, or None if
-    somebody else already has it.
+def _claim(db, lesson_id: uuid.UUID) -> tuple[Block, bool, str | None] | None:
+    """Transaction 1: `queued` -> `drafting`. Returns `(lesson, deepen,
+    revise_instruction)`, or None if somebody else already has it.
 
     THE ROW IS LOCKED FOR THE CHECK. This used to be a plain read-check-write,
     which held between two overlapping fan-outs (a double-clicked Resume, or
@@ -110,6 +110,13 @@ def _claim(db, lesson_id: uuid.UUID) -> tuple[Block, bool] | None:
     The `deepen` flag (set by `POST /blocks/{id}/deepen`) is CONSUMED here rather
     than read later: it is an instruction for exactly this draft, and a flag left
     on the row would silently make every future Resume redraft this lesson long.
+
+    `revise_instruction` (set by `revise.apply_revision` on a `modify_lesson` op)
+    rides the SAME discipline: it is a one-shot instruction for exactly this
+    re-draft, consumed here so a later unrelated Resume never re-applies it. Scrubbed
+    from `meta` alongside `deepen` and returned to the worker, which folds it into
+    this lesson's volatile objective (outside the cached library prefix — no cache
+    impact).
     """
     lesson = db.execute(
         select(Block).where(Block.id == lesson_id).with_for_update()
@@ -122,13 +129,14 @@ def _claim(db, lesson_id: uuid.UUID) -> tuple[Block, bool] | None:
         db.rollback()
         return None
     deepen = bool(meta.get("deepen"))
+    revise_instruction = meta.get("revise_instruction")
     lesson.meta = {
-        **{k: v for k, v in meta.items() if k != "deepen"},
+        **{k: v for k, v in meta.items() if k not in ("deepen", "revise_instruction")},
         "draft_status": "drafting",
         "error": None,
     }
     db.commit()
-    return lesson, deepen
+    return lesson, deepen, revise_instruction
 
 
 def _release(db, lesson_id: uuid.UUID, status: str, error: str | None = None) -> None:
@@ -187,13 +195,19 @@ def _draft_one(lesson_id: uuid.UUID, plan: dict) -> None:
         claimed = _claim(db, lesson_id)
         if claimed is None:
             return
-        lesson, deepen = claimed
+        lesson, deepen, revise_instruction = claimed
         module = db.get(Block, lesson.parent_id)
         course = db.get(Block, module.parent_id)
         size = _lesson_size(lesson, plan, deepen=deepen)
+        # A `modify_lesson` revision rides the per-lesson VOLATILE objective — after
+        # the cached library prefix, so it costs no cache — and is consumed at claim
+        # time above, so a later unrelated Resume never re-applies it.
+        objective = (lesson.meta or {}).get("objective") or (lesson.body or "")
+        if revise_instruction:
+            objective = f"{objective}\n\nΑναθεώρηση από τον καθηγητή: {revise_instruction}"
         ctx = LessonContext(
             lesson_title=lesson.title,
-            lesson_objective=(lesson.meta or {}).get("objective") or (lesson.body or ""),
+            lesson_objective=objective,
             module_title=module.title,
             module_objective=(module.meta or {}).get("objective") or "",
             course_title=course.title,
