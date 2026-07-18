@@ -256,7 +256,7 @@ async function mockCurriculaApi(
   let courseTitle = "";
   const courseLanguage = "en";
   let currentTree: FixtureBlock | null = null;
-  const calls = { list: 0, interviewStart: 0, answer: 0, progress: 0, get: 0, patch: 0 };
+  const calls = { list: 0, interviewStart: 0, getInterview: 0, answer: 0, progress: 0, get: 0, patch: 0 };
   const answerBodies: unknown[] = [];
   const lastBody: { patch?: unknown } = {};
   const unexpected: string[] = [];
@@ -297,6 +297,28 @@ async function mockCurriculaApi(
           // and hands over the levels it will accept — the student is OPTIONAL.
           options: [{ value: "none", label: "No particular student", kind: "none" }],
           findings: { levels: ["all_levels", "beginner", "intermediate", "advanced"] },
+          error: null,
+        }),
+      });
+      return;
+    }
+    // `answerInterview`'s own error path re-syncs with a bare `GET .../interview/
+    // {id}` (`interview-dialog.tsx`'s "best-effort re-sync" after a failed
+    // answer) — mocked here so `confirmFails` exercises that path instead of
+    // tripping the unexpected-request catch-all below.
+    const getInterviewMatch = pathname.match(/^\/curricula\/interview\/([^/]+)$/);
+    if (getInterviewMatch && method === "GET") {
+      calls.getInterview++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        headers: CORS_HEADERS,
+        body: JSON.stringify({
+          interview_id: interviewId,
+          step: interviewStep,
+          question: "",
+          options: null,
+          findings: null,
           error: null,
         }),
       });
@@ -491,7 +513,7 @@ test.describe("students (mocked API)", () => {
 });
 
 test.describe("curricula (mocked API)", () => {
-  test("the interview materializes the tree, the board opens on it at once, and title edits PATCH", async ({
+  test("the interview materializes the tree; the board opens on it at once on its own route, title edits PATCH, and the index navigates back into it", async ({
     page,
   }) => {
     const mock = await mockCurriculaApi(page, { templates: [] });
@@ -500,7 +522,6 @@ test.describe("curricula (mocked API)", () => {
     await page.getByTestId("nav-curricula").click();
     await expect(page).toHaveURL(/\/en\/curricula$/);
     await expect(page.getByTestId("templates-empty")).toBeVisible();
-    await expect(page.getByTestId("board-empty")).toBeVisible();
 
     await page.getByTestId("curricula-generate-button").click();
     await expect(page.getByTestId("interview-dialog")).toBeVisible();
@@ -536,10 +557,16 @@ test.describe("curricula (mocked API)", () => {
     // "confirm" — and this is where the money goes.
     await page.getByTestId("interview-confirm-submit").click();
 
-    // NO WAITING ROOM. The tree already exists; the dialog closes and the board is
-    // on it, with the draft progress bar running.
+    // NO WAITING ROOM. The tree already exists; the dialog closes and this
+    // NAVIGATES to the curriculum's own detail route (Unit A) — the board is on
+    // it immediately, with the draft progress bar running.
     await expect(page.getByTestId("interview-dialog")).toBeHidden();
+    await expect(page).toHaveURL(/\/en\/curricula\/[0-9a-f-]{36}$/);
     await expect(page.getByTestId("tree-board")).toBeVisible();
+
+    // Only the root opens expanded by default ("everything is expanded and a
+    // chaos" — block-card.tsx) — expand the module to reach its lessons.
+    await page.locator('[data-testid="block-card"][data-kind="module"]').getByTestId("block-card-toggle").click();
 
     // course + module + 2 lessons. Nested BlockCards render INSIDE their parent's
     // DOM subtree (that is what makes the indentation work), so a descendant lookup
@@ -560,9 +587,16 @@ test.describe("curricula (mocked API)", () => {
     expect(mock.answerBodies[1]).toEqual({ weeks: 6, sessions_per_week: 1, minutes_per_session: 60 });
     expect(mock.answerBodies[5]).toEqual({ approved: true });
 
-    // Inline-edit the course (root) card's title -> PATCH /blocks/{id}.
-    const courseTitle = page.getByTestId("block-card-title").filter({ hasText: "Tone Shaping Fundamentals" });
-    await courseTitle.click();
+    // Rename the course (root) card via its ⋯ menu -> PATCH /blocks/{id}.
+    // ("RENAME IS AN ACTION, NOT A TITLE CLICK" — block-card.tsx's own
+    // tutor-friendly-rewrite docstring: the title text itself isn't
+    // clickable any more.)
+    const courseCard = page.locator('[data-testid="block-card"][data-kind="course"]');
+    // Descendant BlockCards nest inside the course card's own DOM subtree, so a
+    // scoped lookup also matches every child row's menu button — `.first()` is
+    // the course's own (it renders before any of its children in DOM order).
+    await courseCard.getByTestId("block-card-menu").first().click();
+    await page.getByTestId("menu-rename").click();
     const titleInput = page.getByTestId("block-card-title-input");
     await titleInput.fill("Tone Shaping Fundamentals (Revised)");
     await titleInput.press("Enter");
@@ -573,10 +607,33 @@ test.describe("curricula (mocked API)", () => {
     expect(mock.calls.patch).toBe(1);
     expect(mock.lastBody.patch).toEqual({ title: "Tone Shaping Fundamentals (Revised)" });
 
+    // --- Unit A: `curricula-back` returns to the now-navigable index, which
+    // lists the curriculum just created, supports a title search filter, and
+    // navigates back into the SAME curriculum from a card click.
+    await page.getByTestId("curricula-back").click();
+    await expect(page).toHaveURL(/\/en\/curricula$/);
+    await expect(page.getByTestId("template-item")).toHaveCount(1);
+
+    await page.getByTestId("curricula-search").fill("nonexistent curriculum");
+    await expect(page.getByTestId("template-item")).toHaveCount(0);
+    await expect(page.getByTestId("curricula-search-no-match")).toBeVisible();
+
+    await page.getByTestId("curricula-search").fill("Tone Shaping");
+    await expect(page.getByTestId("template-item")).toHaveCount(1);
+    await expect(page.getByTestId("curricula-search-no-match")).toHaveCount(0);
+
+    await page.getByTestId("template-item").click();
+    await expect(page).toHaveURL(/\/en\/curricula\/[0-9a-f-]{36}$/);
+    // The renamed title survived the round trip through the index and back —
+    // this refetches the SAME curriculum, not a fresh empty one.
+    await expect(
+      page.getByTestId("block-card-title").filter({ hasText: "Tone Shaping Fundamentals (Revised)" }),
+    ).toBeVisible();
+
     expect(mock.unexpected).toEqual([]);
   });
 
-  test("a failed confirm keeps the dialog open and leaves the board untouched", async ({ page }) => {
+  test("a failed confirm keeps the dialog open and leaves the index untouched", async ({ page }) => {
     const mock = await mockCurriculaApi(page, { templates: [], confirmFails: true });
 
     await page.goto("/en/curricula");
@@ -600,8 +657,8 @@ test.describe("curricula (mocked API)", () => {
     await expect(page.getByTestId("interview-dialog")).toBeVisible();
     await expect(page.getByTestId("interview-confirm-submit")).toBeEnabled();
 
-    // Nothing was created: the board and the template list are untouched.
-    await expect(page.getByTestId("board-empty")).toBeVisible();
+    // Nothing was created: no navigation happened, and the index is untouched.
+    await expect(page).toHaveURL(/\/en\/curricula$/);
     await expect(page.getByTestId("templates-empty")).toBeVisible();
     expect(mock.unexpected).toEqual([]);
   });
