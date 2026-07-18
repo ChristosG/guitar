@@ -19,10 +19,18 @@ A blueprint is plain JSON (see the plan's canonical shape):
          "description": "...", "weight": 0.07, "kind": "prose",
          "audience": "teacher", "enabled": true}, ...]}
 
-`kind` is one of `prose | exercises | qa`. Only `prose` sections may be added,
-removed, or renamed. The two STRUCTURED sections (`exercises`, `qa`) keep their fixed
-`items[]` schema and their keys forever — they may be reweighted, re-audienced,
-reordered, or disabled, never renamed or kind-changed (spec invariant #4).
+`kind` is one of `prose | exercises | qa`. Only `prose` sections may be renamed.
+The two STRUCTURED sections (`exercises`, `qa`) keep their fixed `items[]` schema
+built by `depth._KIND_BUILDERS` — they may be reweighted, re-audienced, reordered,
+disabled, or REMOVED ENTIRELY (2026-07-19 follow-up: full tutor control, not just
+enable/disable). What is still forbidden: two sections of the same structured kind
+(`validate_blueprint`'s `structured_section_duplicate`), and a structured section
+present under any key but its canonical one (`structured_section_renamed`) — the
+model-facing schema and every downstream consumer (`_section_minutes`,
+`persist_lesson`'s labels) key structured sections by kind, dispatching through a
+fixed key, not a free-form one. A blueprint must always keep at least one ENABLED
+section (`no_enabled_sections`). `structured_section_template(kind)` returns the
+canonical section dict a re-add restores.
 """
 from __future__ import annotations
 
@@ -38,8 +46,10 @@ _KIND_STRUCTURED = ("exercises", "qa")
 _ALL_KINDS = (_KIND_PROSE, *_KIND_STRUCTURED)
 _AUDIENCES = ("teacher", "student", "both")
 
-# The two structured sections that MUST exist, keyed by kind -> the one key they are
-# allowed to carry. Enforced by `validate_blueprint` (invariant #4).
+# The two structured kinds, keyed by kind -> the one key each is allowed to carry
+# WHEN PRESENT. Neither is required to exist any more (2026-07-19: full delete is
+# legal); `validate_blueprint` only rejects a DUPLICATE of a kind or a present
+# section under the wrong key.
 _STRUCTURED_KEYS = {"exercises": "exercises", "qa": "qa_prompts"}
 
 import re as _re
@@ -188,7 +198,8 @@ def validate_blueprint(raw: object) -> dict:
     Raises `BlueprintInvalid(code, **detail)` on the first violation. Codes:
     `bad_version`, `no_sections`, `bad_key`, `dup_key`, `bad_label`,
     `bad_description`, `bad_weight`, `bad_kind`, `bad_audience`, `bad_enabled`,
-    `structured_section_missing`, `structured_section_renamed`.
+    `structured_section_duplicate`, `structured_section_renamed`,
+    `no_enabled_sections`.
     """
     if not isinstance(raw, dict):
         raise BlueprintInvalid("no_sections")
@@ -253,17 +264,43 @@ def validate_blueprint(raw: object) -> dict:
             "enabled": enabled,
         })
 
-    # Invariant #4: both structured sections must survive, under their fixed keys.
+    # Revised structural rule (2026-07-19: full delete + re-add is now legal).
+    # A structured kind may be ABSENT entirely, but never DUPLICATED, and a section
+    # of that kind — if present — must carry the canonical key `_KIND_BUILDERS`
+    # dispatches on (renaming would silently desync it from every by-name consumer:
+    # `_section_minutes`, `persist_lesson`'s labels).
     for kind, expected_key in _STRUCTURED_KEYS.items():
         matches = [s for s in normalized if s["kind"] == kind]
-        if len(matches) != 1:
+        if len(matches) > 1:
             raise BlueprintInvalid(
-                "structured_section_missing", kind=kind, count=len(matches),
+                "structured_section_duplicate", kind=kind, count=len(matches),
             )
-        if matches[0]["key"] != expected_key:
+        if matches and matches[0]["key"] != expected_key:
             raise BlueprintInvalid(
                 "structured_section_renamed",
                 kind=kind, key=matches[0]["key"], expected=expected_key,
             )
 
+    # A blueprint that drafts NOTHING is not a blueprint — at least one section
+    # must remain enabled (an all-disabled or fully-emptied-of-enabled-rows edit
+    # is rejected outright, same posture as `no_sections`).
+    if not any(s["enabled"] for s in normalized):
+        raise BlueprintInvalid("no_enabled_sections", count=len(normalized))
+
     return {"version": BLUEPRINT_VERSION, "sections": normalized}
+
+
+def structured_section_template(kind: str) -> dict:
+    """The canonical default section dict for a STRUCTURED `kind` (`"exercises"` or
+    `"qa"`) — what the frontend's "Add Exercises" / "Add Q&A" re-add restores after
+    a delete. DEEP-COPIED from `_DEFAULT_SECTIONS`, the SAME source
+    `default_blueprint()` reads, so its label/description/weight/audience can never
+    drift from the code default — source, don't retype (the rule this whole module
+    is built around).
+    """
+    if kind not in _KIND_STRUCTURED:
+        raise ValueError(f"not a structured kind: {kind!r}")
+    for s in _DEFAULT_SECTIONS:
+        if s["kind"] == kind:
+            return copy.deepcopy(s)
+    raise AssertionError(f"no default section of kind {kind!r}")  # unreachable
