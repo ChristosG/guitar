@@ -133,90 +133,128 @@ def _prose_section(description: str) -> dict:
     }
 
 
-# THE lesson shape. One draft, two documents (see the module docstring).
+# The two ALWAYS-PRESENT, non-section properties, as named constants so that this
+# module's `LESSON_DRAFT_SCHEMA` and `blueprint.build_lesson_schema` share ONE
+# source for them (title/summary are not blueprint sections — they are fixed).
+_TITLE_PROP: dict = {"type": "string"}
+_SUMMARY_PROP: dict = {
+    "type": "string",
+    "description": "Two sentences the tutor can read at a glance before the lesson.",
+}
+
+# The eight section body/prose `description` strings, extracted VERBATIM from the
+# schema so they have exactly one home. `app.curriculum.blueprint._DEFAULT_SECTIONS`
+# imports and references these — which is what makes `default_blueprint()` produce a
+# byte-identical schema by CONSTRUCTION rather than by careful re-typing (see the
+# plan's resolved design call #5). A reworded string here is a changed model prompt,
+# and `tests/test_blueprint_schema_golden.py` is the backstop that catches it.
+_DESC_WARM_UP = (
+    "5 minutes of playing to open the session. Concrete: what to play, at "
+    "what tempo, why it prepares this lesson's material."
+)
+_DESC_THEORY = (
+    "The concept, taught. Full prose the tutor can read aloud or teach "
+    "from — not bullet points, not a summary of a lesson."
+)
+_DESC_DEMONSTRATION = (
+    "What the tutor plays, step by step, and what the student should be "
+    "listening for. Name the fret positions, the chords, the tempo."
+)
+_DESC_EXERCISES_BODY = "Prose introducing and sequencing the exercises."
+_DESC_COMMON_MISTAKES = (
+    "What students actually get wrong here, how it sounds when they do, "
+    "and the correction the tutor gives."
+)
+_DESC_RECAP = "What was covered, in the words the student will remember."
+_DESC_HOMEWORK = (
+    "What to practise before the next session, for how long, and how the "
+    "student knows they have it right."
+)
+_DESC_QA_BODY = "How to open the 10-minute discussion block."
+
+
+def _exercises_section(body_description: str) -> dict:
+    """The `exercises` section shape: a body plus the exercises the student plays.
+    Extracted from the inline schema literal so the blueprint can assemble it
+    per-kind; `body_description` is the one field a blueprint can vary."""
+    return {
+        "type": "object",
+        "properties": {
+            "body": {"type": "string", "description": body_description},
+            "items": {
+                "type": "array",
+                "description": "Each exercise the student actually plays.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "instructions": {"type": "string"},
+                        "est_minutes": {"type": "integer"},
+                    },
+                    "required": ["title", "instructions", "est_minutes"],
+                    "additionalProperties": False,
+                },
+            },
+            "citations": _CITATIONS,
+        },
+        "required": ["body", "items", "citations"],
+        "additionalProperties": False,
+    }
+
+
+def _qa_section(body_description: str) -> dict:
+    """The `qa_prompts` section shape: a body plus question/answer-key pairs the
+    tutor holds while the student answers. Extracted for the same reason."""
+    return {
+        "type": "object",
+        "properties": {
+            "body": {"type": "string", "description": body_description},
+            "items": {
+                "type": "array",
+                "description": (
+                    "Questions to put to the student, EACH WITH AN ANSWER KEY — "
+                    "the tutor is holding this page while the student answers."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "question": {"type": "string"},
+                        "answer_key": {"type": "string"},
+                    },
+                    "required": ["question", "answer_key"],
+                    "additionalProperties": False,
+                },
+            },
+            "citations": _CITATIONS,
+        },
+        "required": ["body", "items", "citations"],
+        "additionalProperties": False,
+    }
+
+
+# Which builder assembles each STRUCTURED (non-prose) section, keyed by `kind`.
+# `blueprint.build_lesson_schema` dispatches on this; `prose` sections use
+# `_prose_section`. These two structured kinds keep a fixed `items[]` schema and
+# can never be renamed or kind-changed (spec invariant #4).
+_KIND_BUILDERS = {"exercises": _exercises_section, "qa": _qa_section}
+
+
+# THE lesson shape. One draft, two documents (see the module docstring). Assembled
+# from the same constants/builders the blueprint uses, so the schema this module
+# exposes and `build_lesson_schema(default_blueprint())` cannot drift apart.
 LESSON_DRAFT_SCHEMA: dict = {
     "type": "object",
     "properties": {
-        "title": {"type": "string"},
-        "summary": {
-            "type": "string",
-            "description": "Two sentences the tutor can read at a glance before the lesson.",
-        },
-        "warm_up": _prose_section(
-            "5 minutes of playing to open the session. Concrete: what to play, at "
-            "what tempo, why it prepares this lesson's material."
-        ),
-        "theory": _prose_section(
-            "The concept, taught. Full prose the tutor can read aloud or teach "
-            "from — not bullet points, not a summary of a lesson."
-        ),
-        "demonstration": _prose_section(
-            "What the tutor plays, step by step, and what the student should be "
-            "listening for. Name the fret positions, the chords, the tempo."
-        ),
-        "exercises": {
-            "type": "object",
-            "properties": {
-                "body": {
-                    "type": "string",
-                    "description": "Prose introducing and sequencing the exercises.",
-                },
-                "items": {
-                    "type": "array",
-                    "description": "Each exercise the student actually plays.",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "title": {"type": "string"},
-                            "instructions": {"type": "string"},
-                            "est_minutes": {"type": "integer"},
-                        },
-                        "required": ["title", "instructions", "est_minutes"],
-                        "additionalProperties": False,
-                    },
-                },
-                "citations": _CITATIONS,
-            },
-            "required": ["body", "items", "citations"],
-            "additionalProperties": False,
-        },
-        "common_mistakes": _prose_section(
-            "What students actually get wrong here, how it sounds when they do, "
-            "and the correction the tutor gives."
-        ),
-        "recap": _prose_section("What was covered, in the words the student will remember."),
-        "homework": _prose_section(
-            "What to practise before the next session, for how long, and how the "
-            "student knows they have it right."
-        ),
-        "qa_prompts": {
-            "type": "object",
-            "properties": {
-                "body": {
-                    "type": "string",
-                    "description": "How to open the 10-minute discussion block.",
-                },
-                "items": {
-                    "type": "array",
-                    "description": (
-                        "Questions to put to the student, EACH WITH AN ANSWER KEY — "
-                        "the tutor is holding this page while the student answers."
-                    ),
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "question": {"type": "string"},
-                            "answer_key": {"type": "string"},
-                        },
-                        "required": ["question", "answer_key"],
-                        "additionalProperties": False,
-                    },
-                },
-                "citations": _CITATIONS,
-            },
-            "required": ["body", "items", "citations"],
-            "additionalProperties": False,
-        },
+        "title": _TITLE_PROP,
+        "summary": _SUMMARY_PROP,
+        "warm_up": _prose_section(_DESC_WARM_UP),
+        "theory": _prose_section(_DESC_THEORY),
+        "demonstration": _prose_section(_DESC_DEMONSTRATION),
+        "exercises": _exercises_section(_DESC_EXERCISES_BODY),
+        "common_mistakes": _prose_section(_DESC_COMMON_MISTAKES),
+        "recap": _prose_section(_DESC_RECAP),
+        "homework": _prose_section(_DESC_HOMEWORK),
+        "qa_prompts": _qa_section(_DESC_QA_BODY),
     },
     "required": ["title", "summary", *SECTIONS],
     "additionalProperties": False,

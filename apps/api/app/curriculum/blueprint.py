@@ -1,0 +1,252 @@
+"""The lesson BLUEPRINT: the 8-section lesson skeleton, lifted out of code and into
+DATA so a tutor can reshape it per curriculum without touching the engine.
+
+`default_blueprint()` is the code default — the single source for every course that
+carries no blueprint of its own (i.e. every course that exists today). It is built
+from the SAME constants `app.curriculum.depth` and `app.curriculum.draft` already
+own — the section `description` strings (`depth._DESC_*`), the weights
+(`depth.SECTION_WEIGHTS`) and the el/en labels (`draft.SECTION_LABELS`) — so that
+`build_lesson_schema(default_blueprint())` reproduces `depth.LESSON_DRAFT_SCHEMA`
+byte-for-byte BY CONSTRUCTION, not by careful re-typing. That invariant is the whole
+point of this unit, and `tests/test_blueprint_schema_golden.py` guards it.
+
+A blueprint is plain JSON (see the plan's canonical shape):
+
+    {"version": 1, "sections": [
+        {"key": "warm_up", "label": {"el": "...", "en": "..."},
+         "description": "...", "weight": 0.07, "kind": "prose",
+         "audience": "teacher", "enabled": true}, ...]}
+
+`kind` is one of `prose | exercises | qa`. Only `prose` sections may be added,
+removed, or renamed. The two STRUCTURED sections (`exercises`, `qa`) keep their fixed
+`items[]` schema and their keys forever — they may be reweighted, re-audienced,
+reordered, or disabled, never renamed or kind-changed (spec invariant #4).
+"""
+from __future__ import annotations
+
+import copy
+
+from app.curriculum import depth
+from app.curriculum.draft import SECTION_LABELS as _LABELS
+
+BLUEPRINT_VERSION = 1
+
+_KIND_PROSE = "prose"
+_KIND_STRUCTURED = ("exercises", "qa")
+_ALL_KINDS = (_KIND_PROSE, *_KIND_STRUCTURED)
+_AUDIENCES = ("teacher", "student", "both")
+
+# The two structured sections that MUST exist, keyed by kind -> the one key they are
+# allowed to carry. Enforced by `validate_blueprint` (invariant #4).
+_STRUCTURED_KEYS = {"exercises": "exercises", "qa": "qa_prompts"}
+
+import re as _re
+
+_KEY_RE = _re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+class BlueprintInvalid(Exception):
+    """A blueprint failed validation. `code` is a stable machine string the API
+    surfaces as `422 {"detail": {"code": ...}}` and the UI maps to one message."""
+
+    def __init__(self, code: str, **detail):
+        super().__init__(code)
+        self.code = code
+        self.detail = {"code": code, **detail}
+
+
+def _label(key: str) -> dict:
+    """This section's el/en label, sourced from `draft.SECTION_LABELS` — the same
+    strings that land on `Block.title` — so the two can never disagree."""
+    return {"el": _LABELS["el"][key], "en": _LABELS["en"][key]}
+
+
+# THE code default. Every string/weight/label here REFERENCES the constant that is
+# its single source of truth — nothing is transcribed. Order, kind, weight, audience
+# and label are exactly `depth.py` today; see the module docstring.
+_DEFAULT_SECTIONS: list[dict] = [
+    {"key": "warm_up", "label": _label("warm_up"),
+     "description": depth._DESC_WARM_UP,
+     "weight": depth.SECTION_WEIGHTS["warm_up"], "kind": "prose",
+     "audience": "teacher", "enabled": True},
+    {"key": "theory", "label": _label("theory"),
+     "description": depth._DESC_THEORY,
+     "weight": depth.SECTION_WEIGHTS["theory"], "kind": "prose",
+     "audience": "teacher", "enabled": True},
+    {"key": "demonstration", "label": _label("demonstration"),
+     "description": depth._DESC_DEMONSTRATION,
+     "weight": depth.SECTION_WEIGHTS["demonstration"], "kind": "prose",
+     "audience": "teacher", "enabled": True},
+    {"key": "exercises", "label": _label("exercises"),
+     "description": depth._DESC_EXERCISES_BODY,
+     "weight": depth.SECTION_WEIGHTS["exercises"], "kind": "exercises",
+     "audience": "student", "enabled": True},
+    {"key": "common_mistakes", "label": _label("common_mistakes"),
+     "description": depth._DESC_COMMON_MISTAKES,
+     "weight": depth.SECTION_WEIGHTS["common_mistakes"], "kind": "prose",
+     "audience": "teacher", "enabled": True},
+    {"key": "recap", "label": _label("recap"),
+     "description": depth._DESC_RECAP,
+     "weight": depth.SECTION_WEIGHTS["recap"], "kind": "prose",
+     "audience": "student", "enabled": True},
+    {"key": "homework", "label": _label("homework"),
+     "description": depth._DESC_HOMEWORK,
+     "weight": depth.SECTION_WEIGHTS["homework"], "kind": "prose",
+     "audience": "student", "enabled": True},
+    {"key": "qa_prompts", "label": _label("qa_prompts"),
+     "description": depth._DESC_QA_BODY,
+     "weight": depth.SECTION_WEIGHTS["qa_prompts"], "kind": "qa",
+     "audience": "teacher", "enabled": True},
+]
+
+
+def default_blueprint() -> dict:
+    """The canonical code default, DEEP-COPIED on every call so callers never share a
+    mutable — a course that freezes this into its `meta` must own its own object."""
+    return {"version": BLUEPRINT_VERSION, "sections": copy.deepcopy(_DEFAULT_SECTIONS)}
+
+
+# ---------------------------------------------------------------------------
+# Reading a blueprint
+# ---------------------------------------------------------------------------
+
+def enabled_sections(bp: dict) -> list[dict]:
+    """The sections that actually make it into a lesson, in order. A disabled
+    section is kept in the blueprint (so it can be re-enabled) but drafted nowhere."""
+    return [s for s in bp["sections"] if s.get("enabled", True)]
+
+
+def section_keys(bp: dict) -> tuple[str, ...]:
+    """Enabled section keys, in order — the replacement for `depth.SECTIONS`."""
+    return tuple(s["key"] for s in enabled_sections(bp))
+
+
+def section_weights(bp: dict) -> dict[str, float]:
+    """`{key: weight}` for the enabled sections — the replacement for
+    `depth.SECTION_WEIGHTS` in `measure` and `_section_minutes`."""
+    return {s["key"]: float(s["weight"]) for s in enabled_sections(bp)}
+
+
+def section_labels(bp: dict, lang: str) -> dict[str, str]:
+    """`{key: label}` in `lang`, for ALL sections. i18n rule: never default to
+    English — fall back to `el`, then to the key, but never silently to `en`."""
+    fb = "el"
+    return {
+        s["key"]: (s["label"].get(lang) or s["label"].get(fb) or s["key"])
+        for s in bp["sections"]
+    }
+
+
+def build_lesson_schema(bp: dict) -> dict:
+    """The guided-json schema for `bp` — the replacement for the module-level
+    `depth.LESSON_DRAFT_SCHEMA`. For the default blueprint it reproduces that schema
+    byte-for-byte (the golden test)."""
+    props: dict = {
+        "title": copy.deepcopy(depth._TITLE_PROP),
+        "summary": copy.deepcopy(depth._SUMMARY_PROP),
+    }
+    keys: list[str] = []
+    for s in enabled_sections(bp):
+        key = s["key"]
+        keys.append(key)
+        if s["kind"] == _KIND_PROSE:
+            props[key] = depth._prose_section(s["description"])
+        else:
+            props[key] = depth._KIND_BUILDERS[s["kind"]](s["description"])
+    return {
+        "type": "object",
+        "properties": props,
+        "required": ["title", "summary", *keys],
+        "additionalProperties": False,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+
+def validate_blueprint(raw: object) -> dict:
+    """Validate and NORMALIZE an incoming blueprint; return a fresh deep-copied dict.
+
+    Raises `BlueprintInvalid(code, **detail)` on the first violation. Codes:
+    `bad_version`, `no_sections`, `bad_key`, `dup_key`, `bad_label`,
+    `bad_description`, `bad_weight`, `bad_kind`, `bad_audience`, `bad_enabled`,
+    `structured_section_missing`, `structured_section_renamed`.
+    """
+    if not isinstance(raw, dict):
+        raise BlueprintInvalid("no_sections")
+    if raw.get("version") != BLUEPRINT_VERSION:
+        raise BlueprintInvalid("bad_version", version=raw.get("version"))
+
+    sections = raw.get("sections")
+    if not isinstance(sections, list) or not sections:
+        raise BlueprintInvalid("no_sections")
+
+    normalized: list[dict] = []
+    seen: set[str] = set()
+    for s in sections:
+        if not isinstance(s, dict):
+            raise BlueprintInvalid("bad_key", key=None)
+
+        key = s.get("key")
+        if not isinstance(key, str) or not _KEY_RE.match(key):
+            raise BlueprintInvalid("bad_key", key=key)
+        if key in seen:
+            raise BlueprintInvalid("dup_key", key=key)
+        seen.add(key)
+
+        label = s.get("label")
+        if (
+            not isinstance(label, dict)
+            or not isinstance(label.get("el"), str) or not label["el"].strip()
+            or not isinstance(label.get("en"), str) or not label["en"].strip()
+        ):
+            raise BlueprintInvalid("bad_label", key=key)
+
+        description = s.get("description")
+        if not isinstance(description, str) or not description.strip():
+            raise BlueprintInvalid("bad_description", key=key)
+
+        weight = s.get("weight")
+        if isinstance(weight, bool) or not isinstance(weight, (int, float)):
+            raise BlueprintInvalid("bad_weight", key=key, weight=weight)
+        weight = float(weight)
+        if not (0.0 <= weight <= 1.0):
+            raise BlueprintInvalid("bad_weight", key=key, weight=weight)
+
+        kind = s.get("kind")
+        if kind not in _ALL_KINDS:
+            raise BlueprintInvalid("bad_kind", key=key, kind=kind)
+
+        audience = s.get("audience")
+        if audience not in _AUDIENCES:
+            raise BlueprintInvalid("bad_audience", key=key, audience=audience)
+
+        enabled = s.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise BlueprintInvalid("bad_enabled", key=key, enabled=enabled)
+
+        normalized.append({
+            "key": key,
+            "label": {"el": label["el"], "en": label["en"]},
+            "description": description,
+            "weight": weight,
+            "kind": kind,
+            "audience": audience,
+            "enabled": enabled,
+        })
+
+    # Invariant #4: both structured sections must survive, under their fixed keys.
+    for kind, expected_key in _STRUCTURED_KEYS.items():
+        matches = [s for s in normalized if s["kind"] == kind]
+        if len(matches) != 1:
+            raise BlueprintInvalid(
+                "structured_section_missing", kind=kind, count=len(matches),
+            )
+        if matches[0]["key"] != expected_key:
+            raise BlueprintInvalid(
+                "structured_section_renamed",
+                kind=kind, key=matches[0]["key"], expected=expected_key,
+            )
+
+    return {"version": BLUEPRINT_VERSION, "sections": normalized}
