@@ -34,10 +34,13 @@ from sqlalchemy.orm import Session
 from app.agent.loop import AgentResult, run_agent_turn, stream_plain_turn
 from app.agent.tools import TOOLS, with_locale
 from app.agent.transcript import messages_to_wire, persist_new_messages, window_wire
+from app.curriculum.revise import compact_tree_text, validate_ops
 from app.db import get_db
 from app.i18n import normalize_locale
+from app.jobs.curriculum_revise import run_curriculum_revise_job
 from app.jobs.runner import run_curriculum_job, run_lesson_job
 from app.llm.errors import LLMError
+from app.models.block import Block
 from app.models.chat import ApprovalRequest, ChatSession, Message
 from app.models.generation_job import GenerationJob
 from app.schemas.chat import (
@@ -65,6 +68,7 @@ router = APIRouter(tags=["chat"])
 _ASYNC_JOB_LABELS: dict[str, str] = {
     "curriculum": "Curriculum generation",
     "lesson": "Lesson drafting",
+    "curriculum_revise": "Curriculum revision",
 }
 
 
@@ -219,6 +223,73 @@ def _default_description(tool_name: str, tool_args: dict) -> str:
     return f"Proposed action: {tool_name} with arguments {tool_args}"
 
 
+def _inject_curriculum_context(db: Session, session: ChatSession, wire: list[dict]) -> list[dict]:
+    """Bind the turn to the session's curriculum WITHOUT touching the cached
+    system+tools prefix or the persisted transcript: append a compact tree +
+    brief to the LAST user message of the transient `wire` (the same tail
+    position the forced-retrieval grounding block already uses — never the
+    cached prefix). Re-injected EVERY turn so the model always sees the CURRENT
+    tree (e.g. right after an apply), and only when the session is bound to a
+    curriculum (`root_id` set) — the ordinary global chat gets nothing.
+
+    Returns a NEW list with a NEW dict for the one message it edits; it never
+    mutates `wire`'s dicts in place (they alias the persisted transcript's wire
+    shape), so the context is transient by construction — it is never written to
+    the `message` table and never re-cached."""
+    if not session.root_id:
+        return wire
+    course = db.get(Block, session.root_id)
+    if course is None or course.kind != "course":
+        return wire
+    brief = (course.meta or {}).get("brief") or ""
+    ctx = (
+        f"\n\n[CURRICULUM CONTEXT — this conversation is about curriculum "
+        f"{course.id} titled \"{course.title}\". Use this root_id with "
+        f"propose_curriculum_revision / apply_curriculum_revision."
+        + (f" Brief: {brief}." if brief else "")
+        + f"\nCurrent structure:\n{compact_tree_text(db, course)}]"
+    )
+    wire = list(wire)
+    for i in range(len(wire) - 1, -1, -1):
+        if wire[i].get("role") == "user":
+            wire[i] = {**wire[i], "content": (wire[i].get("content") or "") + ctx}
+            break
+    return wire
+
+
+def _validate_pending_revision(db: Session, pending: dict) -> None:
+    """APPROVED == APPLIED, EXACT (controller, 2026-07-18). `apply_curriculum_
+    revision` is `async_job=True`, so the loop SUSPENDS without calling its fn —
+    the plan the model re-emitted would otherwise reach the approval card (and
+    then apply) UN-validated. Validate it HERE, in place on `pending`, before the
+    `ApprovalRequest` is stored: replace the plan with the validated one so an op
+    an id-validation would drop never renders on the card or reaches apply.
+    Apply-time re-validation (`apply_revision`) stays as defence-in-depth, a
+    no-op now that the stored plan is already clean.
+
+    Best-effort: a malformed/absent root_id or plan is left untouched (the runner
+    and `apply_revision` re-validate regardless) rather than raised — a garbled
+    proposal must degrade to a harmless card, not a 500 on the turn."""
+    if pending.get("name") != "apply_curriculum_revision":
+        return
+    args = pending.get("arguments") or {}
+    plan = args.get("plan")
+    raw_root = args.get("root_id")
+    if not raw_root or not isinstance(plan, dict):
+        return
+    try:
+        root_id = UUID(str(raw_root))
+    except (ValueError, TypeError):
+        return
+    try:
+        validated = validate_ops(db, root_id, plan)
+    except Exception:
+        log.warning("revise: could not pre-validate a proposed plan for the "
+                    "approval card (root_id=%s)", raw_root, exc_info=True)
+        return
+    pending["arguments"] = {**args, "plan": validated}
+
+
 def _respond_to_turn(db: Session, session_id: UUID, prior_wire: list[dict], result: AgentResult) -> ChatTurnOut:
     """Shared response-shaping for every call site that runs (or resumes)
     `run_agent_turn` and must react to its outcome: the very first turn
@@ -240,6 +311,10 @@ def _respond_to_turn(db: Session, session_id: UUID, prior_wire: list[dict], resu
 
     if result.status == "awaiting_approval":
         pending = result.pending_tool
+        # Approved == applied, EXACT: validate an apply_curriculum_revision plan
+        # (in place on `pending`) BEFORE it is stored/rendered — a dropped op must
+        # never reach the card. No-op for every other tool.
+        _validate_pending_revision(db, pending)
         approval = ApprovalRequest(
             session_id=session_id,
             tool_name=pending["name"],
@@ -271,7 +346,11 @@ def create_chat_session(payload: ChatSessionCreate, db: Session = Depends(get_db
     read from four places. Normalizing once, at the boundary, means none of
     them can disagree.
     """
-    session = ChatSession(student_id=payload.student_id, locale=normalize_locale(payload.locale))
+    session = ChatSession(
+        student_id=payload.student_id,
+        locale=normalize_locale(payload.locale),
+        root_id=payload.root_id,
+    )
     db.add(session)
     db.commit()
     return ChatSessionCreated(session_id=session.id)
@@ -433,6 +512,7 @@ def post_message(session_id: UUID, payload: ChatMessageIn, db: Session = Depends
     persist_new_messages(db, session_id, [{"role": "user", "content": payload.content}])
 
     wire = window_wire(messages_to_wire(_ordered_messages(db, session_id)))
+    wire = _inject_curriculum_context(db, session, wire)
     try:
         result = run_agent_turn(db, wire, locale=session.locale)
     except LLMError as e:
@@ -493,7 +573,7 @@ def post_message_stream(session_id: UUID, payload: ChatMessageIn, db: Session = 
 
     prior_wire = window_wire(messages_to_wire(_ordered_messages(db, session_id)))
     user_wire = {"role": "user", "content": payload.content}
-    wire = prior_wire + [user_wire]
+    wire = _inject_curriculum_context(db, session, prior_wire + [user_wire])
 
     def event_stream():
         try:
@@ -547,6 +627,7 @@ def resolve_approval(
         raise HTTPException(status_code=409, detail=f"approval already {approval.status}")
 
     wire = window_wire(messages_to_wire(_ordered_messages(db, session_id)))
+    wire = _inject_curriculum_context(db, session, wire)
     tool_call_id = approval.tool_call_id
 
     if payload.decision == "reject":
@@ -609,7 +690,11 @@ def resolve_approval(
         # module-level dict built once at import time would freeze in the
         # ORIGINAL function objects and silently ignore that monkeypatch.
         job_kind = entry.job_kind
-        runner = {"curriculum": run_curriculum_job, "lesson": run_lesson_job}[job_kind]
+        runner = {
+            "curriculum": run_curriculum_job,
+            "lesson": run_lesson_job,
+            "curriculum_revise": run_curriculum_revise_job,
+        }[job_kind]
         label = _ASYNC_JOB_LABELS[job_kind]
 
         # Exact Plan 8 enqueue pattern (`routers/curriculum.py:117-131`):

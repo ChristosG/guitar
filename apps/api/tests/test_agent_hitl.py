@@ -63,13 +63,14 @@ def _stub_tool(monkeypatch, name: str, fn):
 # Registry shape: the 7 mutation tools this task registers
 # ---------------------------------------------------------------------------
 
-def test_registry_has_exactly_the_fourteen_mutation_tools_registered_so_far():
+def test_registry_has_exactly_the_fifteen_mutation_tools_registered_so_far():
     """Task 3 (Plan 5) registered the first seven; Plan 6 Task 6 wired in
     three more (`add_note`, `promote_note_to_knowledge`, `log_progress`);
     Plan 10 Task 3 wires in the four Lesson Authoring tools
     (`draft_lesson_from_selection`, `split_session`, `merge_sessions`,
-    `add_session`) — same registry, same "kind" convention, so this test's
-    set grows rather than a new one replacing it.
+    `add_session`); Unit D adds `apply_curriculum_revision` (the async,
+    approval-gated apply of a revision plan) — same registry, same "kind"
+    convention, so this test's set grows rather than a new one replacing it.
     """
     mutation_names = {name for name, entry in TOOLS.items() if entry.kind == "mutation"}
     assert mutation_names == {
@@ -77,6 +78,7 @@ def test_registry_has_exactly_the_fourteen_mutation_tools_registered_so_far():
         "assign_curriculum", "generate_artifact", "generate_curriculum",
         "add_note", "promote_note_to_knowledge", "log_progress",
         "draft_lesson_from_selection", "split_session", "merge_sessions", "add_session",
+        "apply_curriculum_revision",
     }
     for name in mutation_names:
         entry = TOOLS[name]
@@ -87,13 +89,18 @@ def test_registry_has_exactly_the_fourteen_mutation_tools_registered_so_far():
         assert fn_schema["parameters"]["type"] == "object"
 
 
-def test_exactly_generate_curriculum_and_draft_lesson_are_marked_async_job():
-    """`generate_curriculum` (Plan 5 Task 3) and `draft_lesson_from_selection`
-    (Plan 10 Task 3) are both blocking guided-JSON LLM calls too slow for a
-    synchronous resolve-time dispatch — every other mutation defaults False.
+def test_exactly_generate_curriculum_draft_lesson_and_apply_revision_are_marked_async_job():
+    """`generate_curriculum` (Plan 5 Task 3), `draft_lesson_from_selection`
+    (Plan 10 Task 3) and `apply_curriculum_revision` (Unit D) are the tools too
+    slow / heavy for a synchronous resolve-time dispatch — apply runs its one
+    transaction and chains a background draft fan-out, so `resolve_approval`
+    enqueues a `curriculum_revise` job for it rather than calling the fn inline.
+    Every other mutation defaults False.
     """
     async_job_names = {name for name, entry in TOOLS.items() if entry.async_job}
-    assert async_job_names == {"generate_curriculum", "draft_lesson_from_selection"}
+    assert async_job_names == {
+        "generate_curriculum", "draft_lesson_from_selection", "apply_curriculum_revision",
+    }
 
 
 def test_tool_schemas_now_exposes_both_read_and_mutation_tools_to_the_model():
@@ -105,9 +112,10 @@ def test_tool_schemas_now_exposes_both_read_and_mutation_tools_to_the_model():
     schemas = agent_loop._tool_schemas()
     names = {s["function"]["name"] for s in schemas}
     assert names == set(TOOLS.keys())
-    # 8 read (6 Plan 5 T2 + find_lesson, Plan 11 T2/C5 + search_concepts, C8) +
-    # 14 mutation (7 Plan 5 T3 + 3 Plan 6 T6 + 4 Plan 10 T3)
-    assert len(schemas) == 22
+    # 9 read (6 Plan 5 T2 + find_lesson, Plan 11 T2/C5 + search_concepts, C8 +
+    # propose_curriculum_revision, Unit D) + 15 mutation (7 Plan 5 T3 + 3 Plan 6
+    # T6 + 4 Plan 10 T3 + apply_curriculum_revision, Unit D)
+    assert len(schemas) == 24
 
 
 # ---------------------------------------------------------------------------

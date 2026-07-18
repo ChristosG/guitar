@@ -47,15 +47,16 @@ def test_registry_has_exactly_the_read_tools_registered_so_far():
     """`TOOLS` is a SHARED registry dict (Plan 5 Task 3 adds "mutation" entries
     into this same dict — see `test_agent_hitl.py`'s own registry test for
     those), so this only asserts the READ subset: the original six (Plan 5 Task
-    2), `find_lesson` (Plan 11 Task 2, C5), and `search_concepts` (C8) — same
-    registry, same "kind" convention, so this set grows rather than a new one
-    replacing it.
+    2), `find_lesson` (Plan 11 Task 2, C5), `search_concepts` (C8), and
+    `propose_curriculum_revision` (Unit D — the read-only revision planner) —
+    same registry, same "kind" convention, so this set grows rather than a new
+    one replacing it.
     """
     read_names = {name for name, entry in TOOLS.items() if entry.kind == "read"}
     assert read_names == {
         "search_knowledge", "explain_concept", "search_concepts",
         "list_students", "list_curricula", "list_artifacts", "get_curriculum",
-        "find_lesson",
+        "find_lesson", "propose_curriculum_revision",
     }
     for name in read_names:
         entry = TOOLS[name]

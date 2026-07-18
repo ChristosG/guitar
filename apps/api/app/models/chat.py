@@ -67,6 +67,18 @@ class ChatSession(Base, PkMixin, TimestampMixin):
 
     __tablename__ = "chat_session"
     student_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    # `root_id` (Unit D) BINDS this conversation to one curriculum: the revise
+    # drawer opens a session with it set, and `routers/chat.py` transiently
+    # injects that curriculum's compact tree + brief onto each turn so the model
+    # reasons about THIS course and passes the right root_id to the
+    # propose/apply_curriculum_revision tools. Deliberately NOT a `ForeignKey`,
+    # exactly like `student_id` above: a chat transcript is a standalone record
+    # that must stay intact and readable even if the curriculum it references is
+    # later edited or deleted — an FK CASCADE would wipe a conversation as a side
+    # effect of a board edit, SET NULL would erase the very context a historical
+    # record needs. A stale/dangling id is the accepted tradeoff (the injection
+    # simply skips a root that no longer resolves to a course).
+    root_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     title: Mapped[str | None] = mapped_column(String(200), nullable=True)
     locale: Mapped[str] = mapped_column(String(5), nullable=False, server_default="el", default="el")
 

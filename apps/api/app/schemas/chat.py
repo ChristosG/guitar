@@ -19,6 +19,10 @@ class ChatSessionCreate(BaseModel):
     # pre-existing caller (and every test written before Stage 5.6) still
     # compiles — the column's own default, "el", is the app's default locale.
     locale: str | None = Field(default=None, max_length=5)
+    # Unit D: bind this conversation to one curriculum (the revise drawer sets
+    # it; None for the ordinary global chat). Optional so every pre-existing
+    # caller still compiles.
+    root_id: UUID | None = None
 
 
 class ChatSessionUpdate(BaseModel):

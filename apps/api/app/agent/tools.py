@@ -108,6 +108,8 @@ from app.canon.search import search_concepts as _search_concepts_service
 from app.curriculum.assign import clone_content_subtree
 from app.curriculum.generate import generate_curriculum as _generate_curriculum_service
 from app.curriculum.progress import upsert_progress as _upsert_progress_service
+from app.curriculum.revise import apply_revision as _apply_revision_service
+from app.curriculum.revise import plan_revision as _plan_revision_service
 from app.curriculum.segment import segment_block as _segment_block_service
 from app.i18n import DEFAULT_LOCALE
 from app.lessons.draft import draft_lesson_from_selection as _draft_lesson_service
@@ -704,6 +706,45 @@ def _generate_curriculum(
     return {"root_id": root_id}
 
 
+def _propose_curriculum_revision(db, *, root_id: str, instruction: str) -> dict:
+    """READ-ONLY: read the whole curriculum + the tutor's library and return a
+    PLAN of structural revisions, each with a `reason`. This answers "should I
+    add X?" WITHOUT changing anything — `apply_curriculum_revision` is the gated
+    step that actually applies an approved plan. Runs the planner inline
+    (`plan_revision`, 20-60s over the library); the chat turn shows a spinner
+    meanwhile (the ship target is a local CPU app with no proxy timeout cap).
+
+    Returns the VALIDATED plan (`{summary, ops}`) verbatim — every op's ids are
+    already resolved against the live tree, so the plan the model then hands to
+    `apply_curriculum_revision` is clean by construction. A bad root_id or a
+    missing/non-course block becomes a graceful `{"error": ...}` dict, never a
+    loop crash (same discipline as every other read tool here)."""
+    parsed = _parse_uuid(root_id)
+    if parsed is None:
+        return {"error": f"invalid root_id: {root_id!r}"}
+    try:
+        return _plan_revision_service(db, parsed, instruction=instruction)
+    except Exception as e:   # ReviseError, or anything the planner surfaces
+        return {"error": str(e)}
+
+
+def _apply_curriculum_revision(db, *, root_id: str, plan: dict) -> dict:
+    """Registered for COMPLETENESS ONLY — the loop never calls this inline. It is
+    `async_job=True`, so `resolve_approval` enqueues a `curriculum_revise` job
+    (which applies the plan in one transaction and chains the draft fan-out)
+    instead of dispatching this fn on the request path. Kept a genuinely working
+    function, like `_generate_curriculum`, so the registry entry isn't a dead end
+    (a direct caller, or a future non-async path, gets real behaviour).
+
+    `apply_revision` re-validates every id on its own (defence in depth — the
+    chat path round-trips the plan through the model), so a garbled op is dropped,
+    not misapplied."""
+    parsed = _parse_uuid(root_id)
+    if parsed is None:
+        return {"error": f"invalid root_id: {root_id!r}"}
+    return _apply_revision_service(db, parsed, plan)
+
+
 # ---------------------------------------------------------------------------
 # Mutations (Plan 6 Task 6) — wired the same way once their backing services
 # existed: `add_note`/`promote_note_to_knowledge` wrap Plan 6 Task 1's Note
@@ -1186,6 +1227,38 @@ TOOLS: dict[str, ToolEntry] = {
         fn=_get_curriculum,
         kind="read",
     ),
+    "propose_curriculum_revision": ToolEntry(
+        schema={
+            "type": "function",
+            "function": {
+                "name": "propose_curriculum_revision",
+                "description": (
+                    "Propose structural changes to an EXISTING curriculum (add/"
+                    "move/modify/remove lessons and modules) by reading the whole "
+                    "course and the tutor's library. Returns a PLAN of operations, "
+                    "each with a reason — it CHANGES NOTHING. Use it to answer "
+                    "'should I add X?' and to draft a revision the tutor can then "
+                    "approve with apply_curriculum_revision."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "root_id": {
+                            "type": "string",
+                            "description": "the curriculum root id (from the conversation context)",
+                        },
+                        "instruction": {
+                            "type": "string",
+                            "description": "what the tutor wants changed, in his own words",
+                        },
+                    },
+                    "required": ["root_id", "instruction"],
+                },
+            },
+        },
+        fn=_propose_curriculum_revision,
+        kind="read",
+    ),
     "find_lesson": ToolEntry(
         schema={
             "type": "function",
@@ -1494,6 +1567,39 @@ TOOLS: dict[str, ToolEntry] = {
         kind="mutation",
         async_job=True,
         job_kind="curriculum",
+    ),
+    "apply_curriculum_revision": ToolEntry(
+        schema={
+            "type": "function",
+            "function": {
+                "name": "apply_curriculum_revision",
+                "description": (
+                    "Apply a revision plan produced by propose_curriculum_revision "
+                    "to the curriculum. This is a MUTATION — it requires the tutor's "
+                    "explicit approval before anything changes. Pass the EXACT plan "
+                    "object propose returned; on approval the new/changed lessons "
+                    "are drafted in the background and the tutor watches them arrive."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "root_id": {
+                            "type": "string",
+                            "description": "the curriculum root id (from the conversation context)",
+                        },
+                        "plan": {
+                            "type": "object",
+                            "description": "the plan object from propose_curriculum_revision",
+                        },
+                    },
+                    "required": ["root_id", "plan"],
+                },
+            },
+        },
+        fn=_apply_curriculum_revision,
+        kind="mutation",
+        async_job=True,
+        job_kind="curriculum_revise",
     ),
     "add_note": ToolEntry(
         schema={
