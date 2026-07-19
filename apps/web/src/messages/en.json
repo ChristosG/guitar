@@ -320,7 +320,10 @@
         },
         "sources": {
           "heading": "Which of your library sources should this be built from?",
-          "hint": "I read them WHOLE — not a search over them. What you pick here is literally what the model reads.",
+          "hint": "What you pick here is what the model draws on — nothing else, and never a keyword search.",
+          "regimeWhole": "≈ {tokens, number} tokens — small enough that the model reads these books WHOLE.",
+          "regimeCanon": "≈ {tokens, number} tokens — too large to read whole, so the model builds from your concept canon: a compiled, cited distillation of exactly these books.",
+          "regimeSearch": "≈ {tokens, number} tokens — very large, so the model drafts from a per-module search over these books rather than the full text.",
           "empty": "Your library is empty — this will draw on general knowledge only.",
           "charCount": "{count, number} chars",
           "shape": "{lessons} lessons -> {modules} modules ({perModule}) -> ~{words} words each ({taught} min taught + {qa} min Q&A)"

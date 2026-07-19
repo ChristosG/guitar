@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useMemo, useState, type FormEvent } from "react";
 import { useTranslations } from "next-intl";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -50,12 +50,37 @@ export function InterviewSourcesStep({ options, shape, submitting, error, onSubm
     onSubmit({ source_ids: Array.from(selected) });
   }
 
+  // Live "what will the model actually do with this selection" hint. The rough
+  // chars/4 estimate is client-side only; the API re-counts server-side
+  // (corpus._count_tokens) and routes on canon_threshold (300K) /
+  // full_context_budget (600K) in app/config.py. This keeps the sources-step
+  // promise honest instead of claiming "read whole" unconditionally.
+  const estTokens = useMemo(
+    () =>
+      Math.round(
+        options.reduce((sum, o) => (selected.has(o.value) ? sum + (o.char_count ?? 0) : sum), 0) / 4,
+      ),
+    [options, selected],
+  );
+  const regime = estTokens <= 300_000 ? "whole" : estTokens <= 600_000 ? "canon" : "search";
+
   return (
     <form onSubmit={handleSubmit} className="flex flex-col gap-3">
       <div>
         <p className="text-sm font-medium">{t("steps.sources.heading")}</p>
         <p className="text-xs text-muted-foreground">{t("steps.sources.hint")}</p>
       </div>
+
+      {selected.size > 0 && (
+        <p
+          data-testid="sources-regime"
+          className="rounded-xl border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
+        >
+          {regime === "whole" && t("steps.sources.regimeWhole", { tokens: estTokens })}
+          {regime === "canon" && t("steps.sources.regimeCanon", { tokens: estTokens })}
+          {regime === "search" && t("steps.sources.regimeSearch", { tokens: estTokens })}
+        </p>
+      )}
 
       {shape && (
         <p
