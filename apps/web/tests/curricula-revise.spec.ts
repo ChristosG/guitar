@@ -940,6 +940,57 @@ test.describe("curriculum revise drawer — full-screen toggle (mocked API)", ()
     await page.getByTestId("revise-open").click();
     await expect(page.getByTestId("revise-drawer")).toHaveAttribute("data-fullscreen", "true");
   });
+
+  // Chat overhaul, Piece B review follow-up: in full-screen mode the backdrop
+  // button is entirely covered by the drawer itself (`max-w-full` leaves
+  // nothing to click), so the X in the corner used to be the ONLY way out.
+  // Escape must close it regardless of where focus sits — including inside
+  // the chat composer input, which is the realistic case (the tutor was just
+  // typing).
+  test("Escape closes the drawer in full-screen mode, even while the composer has focus", async ({ page }) => {
+    const rootId = randomUUID();
+    const moduleId = randomUUID();
+    const lesson1Id = randomUUID();
+    const lesson2Id = randomUUID();
+    const newLessonId = randomUUID();
+
+    const fixture = mockCurriculumTree(rootId, moduleId, lesson1Id, lesson2Id, newLessonId);
+    const chatSessionStore = createChatSessionStore();
+    await mockCurriculaApi(page, fixture, chatSessionStore);
+    await mockChatApi(page, undefined, chatSessionStore);
+
+    await page.goto(`/en/curricula/${rootId}`);
+    await page.getByTestId("revise-open").click();
+    await expect(page.getByTestId("chat-input")).toBeEnabled();
+
+    const drawer = page.getByTestId("revise-drawer");
+    await page.getByTestId("revise-fullscreen-toggle").click();
+    await expect(drawer).toHaveAttribute("data-fullscreen", "true");
+
+    await page.getByTestId("chat-input").click();
+    await page.keyboard.press("Escape");
+    await expect(drawer).toHaveCount(0);
+  });
+
+  test("Escape also closes the drawer in the ordinary side-panel mode", async ({ page }) => {
+    const rootId = randomUUID();
+    const moduleId = randomUUID();
+    const lesson1Id = randomUUID();
+    const lesson2Id = randomUUID();
+    const newLessonId = randomUUID();
+
+    const fixture = mockCurriculumTree(rootId, moduleId, lesson1Id, lesson2Id, newLessonId);
+    const chatSessionStore = createChatSessionStore();
+    await mockCurriculaApi(page, fixture, chatSessionStore);
+    await mockChatApi(page, undefined, chatSessionStore);
+
+    await page.goto(`/en/curricula/${rootId}`);
+    await page.getByTestId("revise-open").click();
+    await expect(page.getByTestId("revise-drawer")).toBeVisible();
+
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("revise-drawer")).toHaveCount(0);
+  });
 });
 
 // Chat overhaul Task 5 (review fix) — accurate "applied" status. Before this,

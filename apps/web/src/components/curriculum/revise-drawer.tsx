@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useLocale, useTranslations } from "next-intl";
 import { Loader2, Maximize2, MessagesSquare, Minimize2, RotateCcw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -90,6 +90,25 @@ export function ReviseDrawer({ rootId, tree, onApplied }: ReviseDrawerProps) {
   const [clearError, setClearError] = useState<string | null>(null);
 
   const blockTitles = useMemo(() => collectTitles(tree, {}), [tree]);
+
+  // Escape-to-close (chat overhaul, Piece B review follow-up): in full-
+  // screen mode the backdrop button is covered by the drawer itself
+  // (`fullScreen ? "max-w-full" : ...` below leaves no backdrop showing to
+  // click), so without this the only way out was the small X in the corner.
+  // A plain `window` listener, not an `onKeyDown` on the aside — focus can be
+  // anywhere inside the chat panel (the composer input, a button) when the
+  // tutor reaches for Escape, and a listener scoped to one element would miss
+  // every one of those. Skips a keystroke `defaultPrevented` by something
+  // else (e.g. the "Clear chat" confirm dialog also closing on Escape) so the
+  // two don't both react to the same press.
+  useEffect(() => {
+    if (!open) return;
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape" && !e.defaultPrevented) setOpen(false);
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [open]);
 
   async function handleOpen() {
     setOpen(true);
