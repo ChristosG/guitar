@@ -30,6 +30,7 @@ from app.curriculum.refine import refine_block, undo_refine
 from app.curriculum.revise import validate_ops
 from app.curriculum.segment import segment_block
 from app.db import get_db
+from app.i18n import locale_dep
 from app.jobs.curriculum_draft import run_curriculum_draft_job
 from app.jobs.curriculum_revise import run_curriculum_revise_job
 from app.jobs.module_generate import run_module_generate_job
@@ -37,10 +38,12 @@ from app.jobs.runner import run_curriculum_job, run_outline_job
 from app.llm.factory import require_llm_configured
 from app.models.artifact import Artifact
 from app.models.block import Block
+from app.models.chat import ChatSession
 from app.models.curriculum import Assignment
 from app.models.generation_job import GenerationJob
 from app.models.interview import CurriculumInterview
 from app.models.student import Student
+from app.schemas.chat import ChatSessionCreated
 from app.schemas.curriculum import (
     AssignRequest,
     BlockTreeOut,
@@ -389,6 +392,47 @@ def _latest_draft_error(db: Session, root_id: UUID) -> str | None:
         .order_by(GenerationJob.created_at.desc())
     ).first()
     return latest.error if latest is not None and latest.status == "failed" else None
+
+
+@router.get("/curricula/{root_id}/chat-session", response_model=ChatSessionCreated)
+def get_or_create_curriculum_chat_session(
+    root_id: UUID, locale: str = Depends(locale_dep), db: Session = Depends(get_db)
+) -> ChatSessionCreated:
+    """GET-or-create the ONE chat session bound to this curriculum — the
+    "Revise with AI" drawer's own conversation (chat overhaul persistence
+    fix). The drawer used to call `POST /chat` on every open: fine for the
+    first open, but a page reload resets the drawer's own React state, so it
+    span a BRAND-NEW session every time — orphaning whatever conversation was
+    already under way (still sitting, intact, in the database — just
+    unreachable from the drawer again). Keying off `ChatSession.root_id`
+    (Unit D, Task D2a's nullable column, unchanged by this endpoint) instead
+    of a client-held id fixes that: the drawer calls this once per open, and
+    a reload finds the SAME row.
+
+    Most-recently-created wins when more than one session is bound to this
+    root: the tutor's own "Clear chat" affordance starts a NEW session for
+    the same `root_id` (plain `POST /chat`, unchanged) rather than deleting
+    the old one — an intentional new conversation, not a bug — so the next
+    open of this endpoint must resume THAT one, not an earlier orphan.
+    `locale` comes from `X-App-Locale` like every other route with no body
+    to carry it (`app.i18n.locale_dep`) — only used for a session this call
+    itself creates; an existing session keeps whatever locale it was
+    actually started in (`routers/chat.py`'s own documented rationale).
+    """
+    course = _get_block_or_404(db, root_id)
+    if course.kind != "course":
+        raise HTTPException(status_code=404, detail="not a curriculum root")
+
+    session = db.scalars(
+        select(ChatSession)
+        .where(ChatSession.root_id == root_id)
+        .order_by(ChatSession.created_at.desc())
+    ).first()
+    if session is None:
+        session = ChatSession(root_id=root_id, locale=locale)
+        db.add(session)
+        db.commit()
+    return ChatSessionCreated(session_id=session.id)
 
 
 @router.post("/curricula/{root_id}/draft", response_model=JobAccepted, status_code=202,

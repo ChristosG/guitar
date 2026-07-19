@@ -14,13 +14,14 @@ import uuid
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 
 import app.jobs.curriculum_revise as revise_job
 from app.db import Base, SessionLocal, engine
 from app.jobs.curriculum_revise import run_curriculum_revise_job
 from app.main import app
 from app.models.block import Block
+from app.models.chat import ChatSession
 from app.models.generation_job import GenerationJob
 
 try:
@@ -218,3 +219,91 @@ def test_runner_apply_mode_applies_then_chains_the_draft(monkeypatch):
 def test_runner_missing_job_is_a_noop():
     # No row, no crash — mirrors module_generate's own guard.
     run_curriculum_revise_job(uuid.uuid4())
+
+
+# ---------------------------------------------------------------------------
+# GET /curricula/{root_id}/chat-session — the revise drawer's own GET-or-create
+# (chat overhaul persistence fix: the drawer used to POST /chat on every open,
+# orphaning the conversation on a reload).
+# ---------------------------------------------------------------------------
+
+def test_chat_session_creates_one_on_first_call_bound_to_the_root():
+    db = SessionLocal()
+    course, m, lesson = _seed_tree(db)
+    try:
+        r = client.get(f"/curricula/{course.id}/chat-session")
+        assert r.status_code == 200, r.text
+        session_id = uuid.UUID(r.json()["session_id"])
+
+        session = db.get(ChatSession, session_id)
+        assert session is not None
+        assert session.root_id == course.id
+    finally:
+        db.close()
+
+
+def test_chat_session_reuses_the_same_session_on_a_later_call_no_new_row():
+    db = SessionLocal()
+    course, m, lesson = _seed_tree(db)
+    try:
+        first = client.get(f"/curricula/{course.id}/chat-session")
+        second = client.get(f"/curricula/{course.id}/chat-session")
+        assert first.json()["session_id"] == second.json()["session_id"]
+
+        count = db.scalar(
+            select(func.count(ChatSession.id)).where(ChatSession.root_id == course.id)
+        )
+        assert count == 1
+    finally:
+        db.close()
+
+
+def test_chat_session_resumes_the_most_recently_created_when_several_exist():
+    """Simulates the "Clear chat" flow: a fresh `ChatSession` bound to the same
+    root_id (plain `POST /chat`, unchanged) is a deliberate NEW conversation, not
+    a bug — the next GET must resume THAT one, not an earlier orphan."""
+    db = SessionLocal()
+    course, m, lesson = _seed_tree(db)
+    try:
+        older = ChatSession(root_id=course.id, locale="el")
+        db.add(older)
+        db.commit()
+
+        newer = ChatSession(root_id=course.id, locale="el")
+        db.add(newer)
+        db.commit()
+        newer_id = newer.id
+    finally:
+        db.close()
+
+    r = client.get(f"/curricula/{course.id}/chat-session")
+    assert r.status_code == 200, r.text
+    assert r.json()["session_id"] == str(newer_id)
+
+
+def test_chat_session_on_a_non_course_block_is_404():
+    db = SessionLocal()
+    course, m, lesson = _seed_tree(db)
+    try:
+        r = client.get(f"/curricula/{m.id}/chat-session")
+        assert r.status_code == 404, r.text
+    finally:
+        db.close()
+
+
+def test_chat_session_on_a_missing_root_is_404():
+    r = client.get(f"/curricula/{uuid.uuid4()}/chat-session")
+    assert r.status_code == 404, r.text
+
+
+def test_chat_session_locale_comes_from_the_header_on_creation():
+    db = SessionLocal()
+    course, m, lesson = _seed_tree(db)
+    try:
+        r = client.get(f"/curricula/{course.id}/chat-session", headers={"X-App-Locale": "en"})
+        assert r.status_code == 200, r.text
+        session_id = uuid.UUID(r.json()["session_id"])
+        session = db.get(ChatSession, session_id)
+        assert session.locale == "en"
+    finally:
+        db.close()
