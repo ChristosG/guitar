@@ -346,3 +346,28 @@ NAMED_SONG_DECLINE_MESSAGE = (
     "pattern — just ask for one of those and I'll generate it as a real "
     "artifact."
 )
+
+# `app/routers/chat.py`'s `_inject_curriculum_context` appends a transient
+# "[CURRICULUM CONTEXT — ...]" block (this exact prefix) onto the LAST user
+# message so the model can reason about the bound curriculum. The G5 guard
+# above must NEVER scan that block: a guitar course tree reliably contains
+# trigger words ("Intro to Tone", "Solo riffs"), so scanning it declines
+# EVERY revise-drawer turn with NAMED_SONG_DECLINE_MESSAGE, deterministically,
+# no matter what the tutor typed — the 2026-07-19 "remove the inline
+# citations" bug. The loop passes the raw tutor text explicitly
+# (`raw_user_text`); this strip is the defense-in-depth fallback for any
+# caller that doesn't.
+CURRICULUM_CONTEXT_SENTINEL = "[CURRICULUM CONTEXT"
+
+
+def strip_curriculum_context(text: str) -> str:
+    """Return `text` without the trailing injected curriculum-context block.
+
+    The block is always APPENDED (never prepended/interleaved — see
+    `_inject_curriculum_context`), so everything from the first sentinel
+    occurrence onward is injection, not tutor words.
+    """
+    idx = text.find(CURRICULUM_CONTEXT_SENTINEL)
+    if idx == -1:
+        return text
+    return text[:idx].rstrip()

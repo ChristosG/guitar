@@ -507,3 +507,38 @@ def test_the_decline_no_longer_cites_copyright():
     copyright is noise. Accuracy is the real and sufficient reason."""
     assert "copyright" not in NAMED_SONG_DECLINE_MESSAGE.lower()
     assert "memorized" in NAMED_SONG_DECLINE_MESSAGE
+
+
+# ---------------------------------------------------------------------------
+# Task 1: strip_curriculum_context helper + sentinel constant
+# ---------------------------------------------------------------------------
+
+from app.agent.guards import (  # extend the module's existing import if present
+    CURRICULUM_CONTEXT_SENTINEL,
+    strip_curriculum_context,
+)
+
+_CTX_TAIL = (
+    "\n\n" + CURRICULUM_CONTEXT_SENTINEL + " — this conversation is about "
+    'curriculum abc titled "Guitar Tone & Amps".\nCurrent structure:\n'
+    "[uuid-1] Intro to Tone — what makes an amp sing\n"
+    "[uuid-2] Solo riffs and sustain — Gilmour-style bends]"
+)
+
+
+def test_strip_curriculum_context_removes_injected_tail():
+    raw = "μπορείς να αφαιρέσεις όλα τα inline citations από αυτό το curricula;"
+    assert strip_curriculum_context(raw + _CTX_TAIL) == raw
+
+
+def test_strip_curriculum_context_is_identity_without_tail():
+    assert strip_curriculum_context("plain question") == "plain question"
+    assert strip_curriculum_context("") == ""
+
+
+def test_enriched_text_trips_guard_but_stripped_text_does_not():
+    # Pins the EXACT production bug: the raw Greek request is innocent, the
+    # injected course tree (full of "Intro"/"Solo" titles) is what triggers.
+    raw = "μπορείς να αφαιρέσεις όλα τα inline citations από αυτό το curricula;"
+    assert looks_like_named_song_request(raw + _CTX_TAIL) is True   # the bug
+    assert looks_like_named_song_request(strip_curriculum_context(raw + _CTX_TAIL)) is False

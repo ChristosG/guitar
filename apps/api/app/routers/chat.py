@@ -31,6 +31,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.agent.guards import CURRICULUM_CONTEXT_SENTINEL
 from app.agent.loop import AgentResult, run_agent_turn, stream_plain_turn
 from app.agent.tools import TOOLS, with_locale
 from app.agent.transcript import messages_to_wire, persist_new_messages, window_wire
@@ -270,7 +271,7 @@ def _inject_curriculum_context(db: Session, session: ChatSession, wire: list[dic
         return wire
     brief = (course.meta or {}).get("brief") or ""
     ctx = (
-        f"\n\n[CURRICULUM CONTEXT — this conversation is about curriculum "
+        f"\n\n{CURRICULUM_CONTEXT_SENTINEL} — this conversation is about curriculum "
         f"{course.id} titled \"{course.title}\". ANSWER QUESTIONS ABOUT IT (what a "
         f"lesson covers, how it is structured, whether a topic is included) "
         f"DIRECTLY from the structure below — use find_lesson or search_knowledge "
