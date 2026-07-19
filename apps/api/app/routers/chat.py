@@ -244,8 +244,13 @@ def _inject_curriculum_context(db: Session, session: ChatSession, wire: list[dic
     brief = (course.meta or {}).get("brief") or ""
     ctx = (
         f"\n\n[CURRICULUM CONTEXT — this conversation is about curriculum "
-        f"{course.id} titled \"{course.title}\". Use this root_id with "
-        f"propose_curriculum_revision / apply_curriculum_revision."
+        f"{course.id} titled \"{course.title}\". ANSWER QUESTIONS ABOUT IT (what a "
+        f"lesson covers, how it is structured, whether a topic is included) "
+        f"DIRECTLY from the structure below — use find_lesson or search_knowledge "
+        f"for detail, but do NOT run propose_curriculum_revision just to answer a "
+        f"question. Call propose_curriculum_revision ONLY when the tutor explicitly "
+        f"asks to ADD, CHANGE, REMOVE, or RESTRUCTURE the course, then "
+        f"apply_curriculum_revision (with this root_id) to apply an approved plan."
         + (f" Brief: {brief}." if brief else "")
         + f"\nCurrent structure:\n{compact_tree_text(db, course)}]"
     )

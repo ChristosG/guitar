@@ -719,6 +719,9 @@ def _course_language(locale: str, override: str | None = None) -> str:
     """
     return override or _SAMPLE_COURSE_LANGUAGE
 _LIBRARY = ("library", "Η βιβλιοθήκη σου (ολόκληρη)")
+# The revise chat grounds ONE instruction with retrieved passages, not the whole
+# library — so its span is labelled as the relevant slice, not "ολόκληρη".
+_RETRIEVED = ("retrieved", "Σχετικά αποσπάσματα από τη βιβλιοθήκη σου")
 _STUDENT = ("student_brief", "Το προφίλ του μαθητή")
 
 
@@ -862,13 +865,16 @@ def _build_curriculum_refine(locale: str, db, course_language=None) -> _Built:
 
 def _build_curriculum_revise(locale: str, db, course_language=None) -> _Built:
     lang = _course_language(locale, course_language)
+    # The revise chat no longer sends the whole library — it grounds ONE
+    # instruction with `ground_topic` passages. The preview mirrors that: a couple
+    # of retrieved passages, not the full-context library block.
     built = build_revise_messages(
         course_title=_SAMPLE_COURSE_TITLE, brief=_SAMPLE_COURSE_BRIEF, language=lang,
         tree_text=_SAMPLE_REVISE_TREE, instruction=_SAMPLE_REVISE_INSTRUCTION,
-        library=_SAMPLE_LIBRARY, source=db,
+        retrieved=_SAMPLE_LIBRARY_TEXT, source=db,
     )
     return _msgs(built), [
-        (*_LIBRARY, _SAMPLE_LIBRARY_TEXT),
+        (*_RETRIEVED, _SAMPLE_LIBRARY_TEXT),
         ("course_title", "Ο τίτλος του προγράμματος", _SAMPLE_COURSE_TITLE),
         ("course_brief", "Τι ζήτησες, με τα δικά σου λόγια", _SAMPLE_COURSE_BRIEF),
         ("tree", "Το πρόγραμμα όπως είναι σήμερα", _SAMPLE_REVISE_TREE),
@@ -1199,7 +1205,7 @@ _ENTRIES = [
         id="tools.system_claude_cli",
         flow="tools",
         kind="prompt",
-        source_ref="app/llm/claude_cli.py:567",
+        source_ref="app/llm/claude_cli.py:576",
         title_el="Τα εργαλεία, γραμμένα σαν οδηγίες (τρέχουσα σύνδεση)",
         what_it_does_el=(
             "Με τη σύνδεση που χρησιμοποιείς αυτή τη στιγμή, τα εργαλεία δεν "
@@ -1425,7 +1431,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/revise.py:161",
+        source_ref="app/curriculum/revise.py:189",
         title_el="Η αναθεώρηση ενός τελειωμένου προγράμματος",
         what_it_does_el=(
             "Δείχνει στον βοηθό ΟΛΟΚΛΗΡΟ το πρόγραμμα όπως είναι σήμερα — μόνο "
@@ -1443,7 +1449,7 @@ _ENTRIES = [
         # NOTE: this pins an exact line in revise.py (test_registered_call_sites_
         # still_point_at_provider_calls enforces it byte-for-byte) — bump it if a
         # future edit adds/removes lines in revise.py ABOVE the guided_json() call.
-        call_sites=("curriculum/revise.py:272",),
+        call_sites=("curriculum/revise.py:326",),
         slices=(
             Slice(
                 id=REVISE_SLICE_ID,
@@ -1857,7 +1863,7 @@ _ENTRIES = [
         # The line the three messages are assembled on — system, the whole book,
         # the task — which is a strictly more useful thing to show him than the
         # `def` above it. See `test_source_refs_point_inside_the_real_definition`.
-        source_ref="app/canon/compile.py:490",
+        source_ref="app/canon/compile.py:508",
         title_el="Η καταγραφή ενός βιβλίου σε έννοιες",
         what_it_does_el=(
             "Διαβάζει ΕΝΑ βιβλίο ολόκληρο, μία φορά, και γράφει τι λέει: κάθε "
@@ -1879,7 +1885,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: build_compile_messages,
         build=_build_canon_compile,
-        call_sites=("canon/compile.py:827",),
+        call_sites=("canon/compile.py:881",),
         slices=(
             Slice(
                 id=COMPILE_SYSTEM_SLICE_ID,

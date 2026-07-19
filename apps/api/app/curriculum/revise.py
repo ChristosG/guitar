@@ -1,13 +1,23 @@
-"""REVISE — read a whole curriculum + the tutor's library, PLAN structural
-changes, mutate nothing. Apply is a separate, approval-gated step (apply_revision).
+"""REVISE — read a curriculum + the passages relevant to ONE instruction, PLAN
+structural changes, mutate nothing. Apply is a separate, approval-gated step
+(apply_revision).
 
-The planner mirrors extend.generate_module_json: same warm prefix
-(prefix_messages over build_curriculum_context), same role="plan" guided_json,
-same None-vs-[] source_ids rule (extend.py:322-324). The one difference is the
-task in the volatile tail: not "design one module" but "propose a list of ops on
-THIS tree". The tree is serialised COMPACTLY — ids + titles + objectives +
-one-line summaries, never lesson bodies — because the model needs to locate an
-insertion point, not re-read 45,000 words it already wrote.
+GROUNDED BY TARGETED RETRIEVAL, NOT THE WHOLE LIBRARY. A revise is one focused
+ask ("add a lesson on the DS-1"), and running the whole-library/canon full-context
+planner for every message was slow, expensive, and the thing that made `claude -p`
+exit 1 on a large corpus — for a request that touches one topic. So `plan_revision`
+grounds via `ground_topic` (the SAME BM25 + e5 retrieval the oversized-library
+draft path and per-block `refine` already use), scoped to the course's own
+`source_ids`, and feeds the model the retrieved passages plus the compact tree.
+The passages ground CITATIONS ONLY — they never cap what the model may suggest;
+see `build_revise_messages`. NOTE: curriculum GENERATION (wizard/outline/draft)
+still runs full-context/canon — this retrieval path is the revise chat alone.
+
+The tree is serialised COMPACTLY — ids + titles + objectives + one-line summaries,
+never lesson bodies — because the model needs to locate an insertion point, not
+re-read 45,000 words it already wrote. `role="plan"` guided_json, same None-vs-[]
+source_ids rule as the rest of the curriculum path. The task in the tail is not
+"design one module" but "propose a list of ops on THIS tree".
 
 NOTHING IN THE PLANNER WRITES. plan_revision is a pure read. validate_ops resolves
 every id against the live tree and DROPS what does not resolve, so a hallucinated
@@ -22,7 +32,8 @@ import uuid
 from sqlalchemy import select
 
 from app.curriculum.blueprint import BlueprintInvalid, validate_blueprint
-from app.curriculum.corpus import build_curriculum_context, prefix_messages
+from app.curriculum.corpus import CURRICULUM_SYSTEM, CURRICULUM_SYSTEM_SLICE_ID
+from app.curriculum.ground import ground_topic
 from app.curriculum.outline import TIER_ORDER
 from app.i18n import answer_in, language_directive
 from app.llm.factory import get_provider
@@ -145,34 +156,61 @@ REVISE_SLICE_ID = "curriculum.revise"
 REVISE_TAIL = (
     "YOUR TASK: propose STRUCTURAL revisions to an existing course, as a list of "
     "operations. Do NOT rewrite lessons here — insert, move, modify (by "
-    "instruction), or remove them, and explain WHY each change belongs. Ground "
-    "every judgement in the course as it stands and in the tutor's library above; "
-    "never invent a topic his books do not support without saying so.\n"
+    "instruction), or remove them, and explain WHY each change belongs.\n"
+    "\nUSE YOUR FULL KNOWLEDGE, FREELY. Propose and teach whatever genuinely "
+    "serves the course and answers what the tutor asked — do NOT narrow, hedge, or "
+    "refuse a good revision just because the passages below do not cover it. Those "
+    "passages are retrieved from his library for ONE purpose: grounding CITATIONS. "
+    "They are a slice of his shelf, never the limit of the subject or of what you "
+    "may suggest. The ONLY discipline is citation honesty — point a new module at "
+    "the 'library' tier ONLY where a retrieved passage genuinely supports it (never "
+    "misattribute a claim to a book), and where his library is thin, say so plainly "
+    "and tier it 'general_knowledge', teaching it well from what you know. A missing "
+    "or incomplete passage is never a reason to leave a gap in his course.\n"
     "\nCOURSE: {course_title}{course_brief_block}\n"
     "\nTHE COURSE AS IT STANDS (teaching order; [id] is what you reference):\n{tree}\n"
+    "{retrieved_block}"
     "\nTHE TUTOR ASKS:\n{instruction}\n"
     "\nReference modules and lessons ONLY by an [id] shown above. Every op needs a "
     "one-sentence `reason`. Tier any new module honestly.\n"
     "\n{language_directive}\n\n{answer_in}"
 )
 REVISE_BRIEF_BLOCK = "\n\nWHAT THE TUTOR WANTS FROM THIS COURSE, IN HIS OWN WORDS:\n{brief}"
+# The passages `ground_topic` retrieved for THIS instruction — for grounding
+# citations, NOT a cap on what the model may propose (see the freedom directive in
+# REVISE_TAIL). Empty when retrieval found nothing, which is fine: the model then
+# suggests from general knowledge, exactly as the directive tells it to.
+REVISE_RETRIEVED_BLOCK = (
+    "\nRELEVANT PASSAGES FROM HIS LIBRARY (retrieved for THIS request — for "
+    "grounding citations only, not a limit on what you may propose):\n{retrieved}\n"
+)
 
 
 def build_revise_messages(*, course_title, brief, language, tree_text, instruction,
-                          library, source=None) -> list[dict]:
-    """Pure — same contract as extend.build_module_messages: the shared cached
-    prefix, then every request-specific fact strictly after it."""
-    messages = prefix_messages(library, source)
+                          retrieved=None, source=None) -> list[dict]:
+    """Pure. The curriculum SYSTEM message (shared, so overrides re-mint one cache,
+    not one-per-variant), then every request-specific fact after it — the compact
+    tree, the targeted retrieval passages, and the tutor's instruction last.
+
+    `retrieved` is the pre-formatted grounding block (`ground_topic` passages), or
+    None when retrieval found nothing. It grounds CITATIONS only; the tail's freedom
+    directive tells the model an empty/thin block must not narrow what it suggests.
+    No whole-library prefix here — that is curriculum GENERATION's path, not the
+    revise chat's (see the module docstring)."""
+    system = resolve(source, CURRICULUM_SYSTEM_SLICE_ID, CURRICULUM_SYSTEM)
     content = resolve(source, REVISE_SLICE_ID, REVISE_TAIL).format(
         course_title=course_title,
         course_brief_block=(REVISE_BRIEF_BLOCK.format(brief=brief) if brief else ""),
         tree=tree_text,
+        retrieved_block=(REVISE_RETRIEVED_BLOCK.format(retrieved=retrieved) if retrieved else ""),
         instruction=instruction.strip(),
         language_directive=language_directive(language, source),
         answer_in=answer_in(language, source),
     )
-    messages.append({"role": "user", "content": content})
-    return messages
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": content},
+    ]
 
 
 def _tree_ids(db, root_id: uuid.UUID) -> tuple[dict[str, uuid.UUID], dict[str, uuid.UUID]]:
@@ -251,8 +289,17 @@ def validate_ops(db, root_id: uuid.UUID, raw: dict) -> dict:
     return {"summary": raw.get("summary") or "", "ops": kept}
 
 
+REVISE_RETRIEVAL_K = 8
+
+
 def plan_revision(db, root_id: uuid.UUID, *, instruction: str) -> dict:
-    """The whole read-only planner. Mutates nothing."""
+    """The whole read-only planner. Mutates nothing.
+
+    Grounds via TARGETED RETRIEVAL for the instruction topic (`ground_topic`),
+    scoped to the course's own `source_ids` — NOT `build_curriculum_context`'s whole
+    library/canon (which was slow and made `claude -p` exit 1 for a one-topic ask).
+    The retrieved passages ground citations only; `build_revise_messages`' directive
+    keeps the model free to suggest beyond them."""
     course = db.get(Block, root_id)
     if course is None:
         raise ReviseError(f"curriculum not found: {root_id}")
@@ -262,12 +309,19 @@ def plan_revision(db, root_id: uuid.UUID, *, instruction: str) -> dict:
     meta = course.meta or {}
     raw_sources = meta.get("source_ids")
     source_ids = None if raw_sources is None else [uuid.UUID(s) for s in raw_sources]
-    library = build_curriculum_context(db, source_ids)
+
+    # Retrieve the passages relevant to THIS instruction, the same BM25 + e5 way
+    # `refine` and the oversized-library draft path do. An empty list is fine — the
+    # planner then works from general knowledge (its citation-honesty directive).
+    passages = ground_topic(db, instruction, source_ids=source_ids, k=REVISE_RETRIEVAL_K)
+    retrieved = "\n\n".join(
+        f"[{p.source_title}, p.{p.page_no}] {p.text}" for p in passages
+    ) or None
 
     messages = build_revise_messages(
         course_title=course.title, brief=meta.get("brief"), language=course.language,
         tree_text=compact_tree_text(db, course), instruction=instruction,
-        library=library, source=db,
+        retrieved=retrieved, source=db,
     )
     raw = get_provider().guided_json(messages, REVISION_PLAN_SCHEMA, role="plan")
     return validate_ops(db, root_id, raw)

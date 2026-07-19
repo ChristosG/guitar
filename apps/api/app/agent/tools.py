@@ -1233,12 +1233,19 @@ TOOLS: dict[str, ToolEntry] = {
             "function": {
                 "name": "propose_curriculum_revision",
                 "description": (
-                    "Propose structural changes to an EXISTING curriculum (add/"
-                    "move/modify/remove lessons and modules) by reading the whole "
-                    "course and the tutor's library. Returns a PLAN of operations, "
-                    "each with a reason — it CHANGES NOTHING. Use it to answer "
-                    "'should I add X?' and to draft a revision the tutor can then "
-                    "approve with apply_curriculum_revision."
+                    "Draft STRUCTURAL changes to an EXISTING curriculum (add/move/"
+                    "modify/remove lessons and modules) — call this ONLY when the "
+                    "tutor EXPLICITLY asks to ADD, CHANGE, REMOVE, or RESTRUCTURE "
+                    "the course (e.g. 'add a lesson on the DS-1', 'split module 2', "
+                    "'drop the theory lesson', 'reorder these'). It runs a slow "
+                    "retrieval-grounded planner, so do NOT call it to ANSWER a "
+                    "question ABOUT the course ('what is this lesson about?', 'how "
+                    "many modules are there?', 'is distortion covered?'): answer "
+                    "those DIRECTLY from the curriculum tree already in your context, "
+                    "reaching for find_lesson or search_knowledge only if you need "
+                    "more detail. Returns a PLAN of operations, each with a reason — "
+                    "it CHANGES NOTHING; apply_curriculum_revision is the gated step "
+                    "that applies an approved plan."
                 ),
                 "parameters": {
                     "type": "object",

@@ -106,6 +106,100 @@ def test_propose_fn_bad_root_id_returns_graceful_error():
 
 
 # ---------------------------------------------------------------------------
+# Feature 2 — the revise overhaul: TARGETED RETRIEVAL grounding + LLM freedom
+# ---------------------------------------------------------------------------
+
+def test_plan_revision_grounds_via_ground_topic_not_the_whole_library(monkeypatch):
+    """The planner retrieves passages for the INSTRUCTION topic (`ground_topic`) —
+    the same BM25 + e5 path refine/draft use — and no longer reads the whole
+    library/canon. `build_curriculum_context` is gone from the revise module, and
+    the retrieved passages reach the planner prompt."""
+    import app.curriculum.revise as revise
+    from app.curriculum.ground import Passage
+
+    # The whole-library context helper is no longer reachable from revise at all.
+    assert not hasattr(revise, "build_curriculum_context")
+
+    grounded = {}
+
+    def _fake_ground(db, topic, *, source_ids=None, k=5):
+        grounded.update(topic=topic, source_ids=source_ids, k=k)
+        return [Passage(text="A retrieved passage about the DS-1 distortion pedal.",
+                        source_id=uuid.uuid4(), source_title="Distortion Book",
+                        page_no=7, page_id=uuid.uuid4(), score=0.9)]
+
+    monkeypatch.setattr(revise, "ground_topic", _fake_ground)
+
+    captured = {}
+
+    class _P:
+        def guided_json(self, messages, schema, **kw):
+            captured["messages"] = messages
+            return {"summary": "", "ops": []}
+
+    monkeypatch.setattr(revise, "get_provider", lambda: _P())
+
+    db = SessionLocal()
+    try:
+        course, m, lesson = _seed_tree(db)     # meta.source_ids is None
+        revise.plan_revision(db, course.id, instruction="add a lesson on the DS-1")
+    finally:
+        db.close()
+
+    # grounded on the INSTRUCTION topic, scoped to the course's own source_ids
+    assert grounded["topic"] == "add a lesson on the DS-1"
+    assert grounded["source_ids"] is None
+    # the retrieved passage reached the planner prompt (grounding block in the tail)
+    joined = "\n".join(msg["content"] for msg in captured["messages"])
+    assert "A retrieved passage about the DS-1 distortion pedal." in joined
+    assert "Distortion Book" in joined
+
+
+def test_the_revise_planner_prompt_frees_the_llm_and_demands_citation_honesty():
+    """The load-bearing directive (item c): the passages ground citations only; the
+    model must use its full knowledge freely and NOT hedge/refuse when the library
+    is thin — the one discipline being citation honesty (cite only where supported,
+    never misattribute)."""
+    from app.curriculum.revise import build_revise_messages
+
+    msgs = build_revise_messages(
+        course_title="Tone 101", brief=None, language="el",
+        tree_text="M1 [x] Overdrive — od pedals", instruction="add distortion",
+        retrieved="[Distortion Book, p.7] passage",
+    )
+    assert any(msg["role"] == "system" for msg in msgs)      # shared system, no whole-library prefix
+    user = next(msg["content"] for msg in msgs if msg["role"] == "user")
+    low = user.lower()
+    assert "use your full knowledge" in low                  # freedom
+    assert "do not narrow, hedge, or refuse" in low          # no refusal for thin library
+    assert "grounding citations" in low                      # passages are for citations only
+    assert "citation honesty" in low and "misattribute" in low
+    # the retrieved block is present when passages were found
+    assert "[Distortion Book, p.7] passage" in user
+
+    # and absent (no dangling f-string placeholder) when retrieval found nothing
+    empty = build_revise_messages(
+        course_title="Tone 101", brief=None, language="el",
+        tree_text="M1 [x] Overdrive — od pedals", instruction="add distortion",
+        retrieved=None,
+    )
+    empty_user = next(msg["content"] for msg in empty if msg["role"] == "user")
+    assert "{retrieved_block}" not in empty_user and "{retrieved}" not in empty_user
+
+
+def test_propose_tool_description_is_scoped_to_change_requests_only():
+    """Item a: the tool description tells the model to call the planner ONLY for
+    add/change/remove/restructure requests, and to answer questions ABOUT the
+    course directly instead."""
+    desc = TOOLS["propose_curriculum_revision"].schema["function"]["description"].lower()
+    assert "only when" in desc
+    for verb in ("add", "change", "remove", "restructure"):
+        assert verb in desc
+    assert "do not call it to answer a question" in desc
+    assert "directly from the curriculum tree" in desc
+
+
+# ---------------------------------------------------------------------------
 # (d) _inject_curriculum_context — tree onto the last user turn, only when bound
 # ---------------------------------------------------------------------------
 
