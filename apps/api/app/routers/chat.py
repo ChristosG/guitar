@@ -907,9 +907,13 @@ def get_chat_suggestions(session_id: UUID, db: Session = Depends(get_db)) -> Sug
     if not visible:
         return SuggestionsOut(suggestions=[])
 
-    system = _suggestions_system_prompt(db, session)
-    transcript = _suggestions_transcript(visible)
     try:
+        # Prompt/transcript build INSIDE the guard too: `_suggestions_system_prompt`
+        # does a `db.get(Block, root_id)` + `.format(...)`, so a transient DB hiccup
+        # there must also degrade to no chips, not 500 (this endpoint's contract is
+        # graceful on EVERY failure mode).
+        system = _suggestions_system_prompt(db, session)
+        transcript = _suggestions_transcript(visible)
         # `role="chat"` (medium effort, no thinking) — cheap and fast is the
         # whole point of a call that only ever produces up to 3 short
         # strings; this is not the ReAct loop and touches no tool.
