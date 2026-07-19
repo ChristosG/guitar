@@ -51,6 +51,12 @@ class CurriculumListItem(BaseModel):
     created_at: datetime
 
 
+class CurriculumRenameRequest(BaseModel):
+    """`PATCH /curricula/{root_id}` body — rename only, nothing else about a
+    course root is editable through this door."""
+    title: str = Field(min_length=1, max_length=300)
+
+
 class BlockUpdate(BaseModel):
     """All fields optional — PATCH semantics. An omitted field leaves the
     stored value untouched; an explicit `null` is ALSO a no-op (review fix —

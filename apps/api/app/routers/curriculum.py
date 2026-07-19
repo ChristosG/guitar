@@ -50,6 +50,7 @@ from app.schemas.curriculum import (
     BlockUpdate,
     CurriculumGenerateRequest,
     CurriculumListItem,
+    CurriculumRenameRequest,
     DraftProgressOut,
     LessonCreate,
     LessonFromChat,
@@ -351,6 +352,80 @@ def generate_curriculum_endpoint(
 def get_curriculum(root_id: UUID, db: Session = Depends(get_db)) -> dict:
     block = _get_block_or_404(db, root_id)
     return block_to_tree(block, _artifacts_for(db, block))
+
+
+def _get_course_root_or_404(db: Session, root_id: UUID) -> Block:
+    """The management routes below act on CURRICULUM ROOTS only — a module or
+    lesson id must 404 here (the generic /blocks routes handle those), so a
+    frontend bug can never cascade-delete a whole course through this door
+    while claiming to remove one lesson."""
+    block = db.get(Block, root_id)
+    if block is None or block.kind != "course" or block.parent_id is not None:
+        raise HTTPException(status_code=404, detail="curriculum not found")
+    return block
+
+
+@router.patch("/curricula/{root_id}", response_model=CurriculumListItem)
+def rename_curriculum(
+    root_id: UUID, payload: CurriculumRenameRequest, db: Session = Depends(get_db)
+) -> CurriculumListItem:
+    course = _get_course_root_or_404(db, root_id)
+    course.title = payload.title.strip()
+    if not course.title:
+        raise HTTPException(status_code=422, detail="title cannot be empty")
+    db.commit()
+    return CurriculumListItem.model_validate(course, from_attributes=True)
+
+
+@router.delete("/curricula/{root_id}", status_code=204, response_model=None)
+def delete_curriculum(root_id: UUID, db: Session = Depends(get_db)) -> None:
+    course = _get_course_root_or_404(db, root_id)
+
+    # Refuse while lessons are actively being written: deleting the tree from
+    # under the draft worker strands the job mid-write (it re-reads its lesson
+    # block between sections). "queued" alone doesn't block — a freshly
+    # materialized-but-never-drafted course must be deletable.
+    drafting = db.scalars(
+        select(Block).where(
+            Block.parent_id.in_(select(Block.id).where(Block.parent_id == course.id)),
+            Block.kind == "lesson",
+        )
+    ).all()
+    if any((b.meta or {}).get("draft_status") == "drafting" for b in drafting):
+        raise HTTPException(
+            status_code=409,
+            detail="lessons are still being drafted — wait for the draft to finish before deleting",
+        )
+
+    # The FK-less pointers (deliberate — see models/chat.py's root_id comment):
+    # an EXPLICIT curriculum delete takes its bound revise-chat sessions and
+    # interviews with it. That comment's concern is board edits wiping
+    # conversations as a SIDE effect; this is the tutor saying "delete this
+    # course", and a revise chat about a course that no longer exists is
+    # noise in his sidebar, not a record worth keeping.
+    #
+    # Only `ChatSession` itself needs an explicit delete here. `Message.
+    # session_id` and `ApprovalRequest.session_id` ARE real ForeignKeys with
+    # `ondelete="CASCADE"` (models/chat.py) — unlike `ChatSession.root_id`,
+    # which is deliberately FK-less — so the database drops both tables' rows
+    # for us the moment their owning `ChatSession` row is deleted. Deleting
+    # them here too would just be redundant round trips to a table the DB is
+    # already about to empty.
+    session_ids = db.scalars(
+        select(ChatSession.id).where(ChatSession.root_id == course.id)
+    ).all()
+    if session_ids:
+        db.query(ChatSession).filter(ChatSession.id.in_(session_ids)).delete(synchronize_session=False)
+    db.query(CurriculumInterview).filter(CurriculumInterview.root_id == course.id).delete(
+        synchronize_session=False
+    )
+    # `edit_service.delete_block` commits internally (the existing `DELETE
+    # /blocks` route calls it bare) — this commit runs BEFORE it so a failure
+    # in that call never leaves a half-deleted state with the bound rows gone
+    # but the course itself still on the board.
+    db.commit()
+
+    edit_service.delete_block(db, course.id)
 
 
 @router.get("/curricula/{root_id}/progress", response_model=DraftProgressOut)
