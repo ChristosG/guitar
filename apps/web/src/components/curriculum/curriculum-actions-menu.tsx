@@ -33,7 +33,7 @@ interface CurriculumActionsMenuProps {
  * follows (refresh the list / navigate away).
  *
  * Delete's 409 ("lessons are still drafting") is a codebase-convention
- * ENGLISH string from the API (`routers/curricula.py`) — this is the one
+ * ENGLISH string from the API (`routers/curriculum.py`) — this is the one
  * error the tutor is guaranteed to hit in the ordinary course of using the
  * app (materialize a curriculum, immediately try to delete it while it's
  * still writing), so it gets a real Greek/English sentence via `code`-free

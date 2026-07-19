@@ -876,13 +876,15 @@ export function deleteCurriculum(rootId: string): Promise<void> {
  * Not routed through `request()`: that helper always parses the body as JSON
  * (or 204s), and this response is a binary stream with its filename living in
  * `Content-Disposition`, not the JSON envelope `parseError` expects. So this
- * builds the same `${API_BASE}${path}` URL and `credentials: "include"` (the
- * cross-origin cookie requirement documented at this file's top) by hand,
- * matching `request()`'s convention without going through it. A plain `<a
- * href>` would drop that cookie behavior entirely, so this goes through
- * `fetch` + an object URL like any other authenticated call. */
+ * builds the same `${API_BASE}${path}` URL, `X-App-Locale` header, and
+ * `credentials: "include"` (the cross-origin cookie requirement documented at
+ * this file's top) by hand, matching `request()`'s convention without going
+ * through it. A plain `<a href>` would drop that cookie behavior entirely, so
+ * this goes through `fetch` + an object URL like any other authenticated
+ * call. */
 export async function downloadCurriculumDocx(rootId: string): Promise<void> {
   const res = await fetch(`${API_BASE}/curricula/${rootId}/export.docx`, {
+    headers: { [LOCALE_HEADER]: uiLocale() },
     credentials: "include",
   });
   if (!res.ok) {
@@ -899,7 +901,12 @@ export async function downloadCurriculumDocx(rootId: string): Promise<void> {
   a.href = url;
   a.download = filename;
   a.click();
-  URL.revokeObjectURL(url);
+  // Deferred, not synchronous: revoking the object URL right after `.click()`
+  // races the browser's own handling of that click on some engines (the
+  // download can start reading the blob URL after it's already been
+  // revoked) — a `setTimeout(0)` push lets the click's own navigation/save
+  // step happen first.
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 /**
@@ -2200,11 +2207,14 @@ export function getAuthState(): Promise<AuthState> {
 }
 
 export async function login(password: string): Promise<AuthState> {
-  // The third and last fetch that bypasses `request()` (it has to: a 401 here is
-  // a WRONG PASSWORD, not an expired session, so it must not reach the
-  // redirect-to-login interceptor). It still carries the locale — "every request
-  // to the API carries X-App-Locale" is only a checkable invariant if it has no
-  // exceptions.
+  // One of three fetches in this file that bypass `request()` entirely — the
+  // other two are `downloadCurriculumDocx` (a binary response `request()`'s
+  // JSON-only parsing can't handle) and `streamChatMessage` (a streamed body
+  // it never awaits `.json()` on). This one bypasses it for a different
+  // reason: a 401 here is a WRONG PASSWORD, not an expired session, so it
+  // must not reach the redirect-to-login interceptor `request()` wires up on
+  // 401. It still carries the locale — "every request to the API carries
+  // X-App-Locale" is only a checkable invariant if it has no exceptions.
   const res = await fetch(`${API_BASE}/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json", [LOCALE_HEADER]: uiLocale() },

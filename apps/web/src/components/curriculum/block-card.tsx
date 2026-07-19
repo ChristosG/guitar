@@ -37,6 +37,7 @@ import {
   addLesson,
   deepenLesson,
   deleteBlock,
+  deleteCurriculum,
   reorderBlock,
   updateBlock,
   type ArtifactOut,
@@ -143,6 +144,11 @@ export function BlockCard({
   onRefresh,
 }: BlockCardProps) {
   const t = useTranslations("curricula.tree");
+  // Root-only: reused for the SAME 409 ("still drafting") copy
+  // `CurriculumActionsMenu` shows for the header's ⋯ menu — one Greek/English
+  // sentence for the one 409 the tutor is guaranteed to hit, whichever door
+  // he deletes through.
+  const tActions = useTranslations("curricula.actions");
   const confirm = useConfirm();
 
   const [editing, setEditing] = useState(false);
@@ -239,6 +245,35 @@ export function BlockCard({
       destructive: true,
     });
     if (!ok) return;
+
+    // ROOT CARD, NOT A GENERIC BLOCK (review fix — closes the "two-door"
+    // seam): a course root deleted from HERE used to go straight through
+    // `deleteBlock` -> `DELETE /blocks/{id}`, which has no drafting guard
+    // and skips `delete_curriculum`'s cleanup of bound chat sessions,
+    // interviews, and `GenerationJob.result_root_id` pointers
+    // (`routers/curriculum.py`). The header's ⋯ menu
+    // (`CurriculumActionsMenu`) already deletes roots the right way; this
+    // card must go through the exact same `deleteCurriculum()` call, not a
+    // second, incomplete implementation of the same action. Not routed
+    // through the generic `run()` helper below because the 409 needs its
+    // own localized copy, same as `CurriculumActionsMenu.handleDelete`.
+    if (isRoot) {
+      setBusy(true);
+      setError(null);
+      try {
+        await deleteCurriculum(node.id);
+        onRemoved(node.id);
+      } catch (err) {
+        setError(
+          err instanceof ApiError
+            ? (err.status === 409 ? tActions("deleteDrafting") : err.detail)
+            : t("deleteError"),
+        );
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
 
     await run(async () => {
       await deleteBlock(node.id);
@@ -410,16 +445,32 @@ export function BlockCard({
             {busy ? <Loader2 className="animate-spin" /> : <MoreVertical />}
           </DropdownMenuTrigger>
           <DropdownMenuContent>
-            <DropdownMenuItem
-              data-testid="menu-rename"
-              onClick={() => {
-                setDraftTitle(node.title);
-                setEditing(true);
-              }}
-            >
-              <Pencil />
-              {t("rename")}
-            </DropdownMenuItem>
+            {/* ROOT CARD HAS NO INLINE RENAME (review fix — closes the other
+             * half of the "two-door" seam). `commitTitle` below calls
+             * `updateBlock` -> `PATCH /blocks/{id}` directly, which never
+             * reaches the detail page's own `title` state (the page owns a
+             * SEPARATE copy for the header, synced only through
+             * `CurriculumActionsMenu`'s `onRenamed` — see that page's own
+             * docstring on why `TreeBoard` never syncs a prop into its
+             * state). A rename here would silently save while the header
+             * beside it kept showing the old name until the next full
+             * navigation. No clean callback channel exists from this card up
+             * to the page today, and adding one is a bigger change than this
+             * fix warrants — so the smaller, cleaner fix is: the header's ⋯
+             * menu (`CurriculumActionsMenu`) is the one rename door for a
+             * course root, full stop. Every other kind keeps this item. */}
+            {!isRoot && (
+              <DropdownMenuItem
+                data-testid="menu-rename"
+                onClick={() => {
+                  setDraftTitle(node.title);
+                  setEditing(true);
+                }}
+              >
+                <Pencil />
+                {t("rename")}
+              </DropdownMenuItem>
+            )}
             {reorderable && (
               <>
                 <DropdownMenuItem

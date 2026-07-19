@@ -256,9 +256,12 @@ async function mockCurriculaApi(
   let courseTitle = "";
   const courseLanguage = "en";
   let currentTree: FixtureBlock | null = null;
-  const calls = { list: 0, interviewStart: 0, getInterview: 0, answer: 0, progress: 0, get: 0, patch: 0 };
+  const calls = {
+    list: 0, interviewStart: 0, getInterview: 0, answer: 0, progress: 0, get: 0, patch: 0,
+    curriculumPatch: 0,
+  };
   const answerBodies: unknown[] = [];
-  const lastBody: { patch?: unknown } = {};
+  const lastBody: { patch?: unknown; curriculumPatch?: unknown } = {};
   const unexpected: string[] = [];
 
   async function handler(route: Route) {
@@ -405,6 +408,33 @@ async function mockCurriculaApi(
         contentType: "application/json",
         headers: CORS_HEADERS,
         body: JSON.stringify(found ?? { detail: "not found" }),
+      });
+      return;
+    }
+    // `PATCH /curricula/{id}` — the dedicated curriculum-root rename route
+    // `CurriculumActionsMenu` (the detail page header's ⋯ menu) calls, as
+    // opposed to the generic `PATCH /blocks/{id}` below. The board's own root
+    // card has NO inline rename any more (review fix, block-card.tsx) — the
+    // header menu is the one rename door for a course root — so this is the
+    // route the "title edits PATCH" half of this test now exercises.
+    if (getMatch && method === "PATCH") {
+      calls.curriculumPatch++;
+      const payload = req.postDataJSON();
+      lastBody.curriculumPatch = payload;
+      if (currentTree && currentTree.id === getMatch[1] && typeof payload.title === "string") {
+        currentTree.title = payload.title;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        headers: CORS_HEADERS,
+        body: JSON.stringify({
+          id: getMatch[1],
+          title: payload.title,
+          language: currentTree?.language ?? "en",
+          target_profile: null,
+          created_at: new Date().toISOString(),
+        }),
       });
       return;
     }
@@ -587,25 +617,37 @@ test.describe("curricula (mocked API)", () => {
     expect(mock.answerBodies[1]).toEqual({ weeks: 6, sessions_per_week: 1, minutes_per_session: 60 });
     expect(mock.answerBodies[5]).toEqual({ approved: true });
 
-    // Rename the course (root) card via its ⋯ menu -> PATCH /blocks/{id}.
-    // ("RENAME IS AN ACTION, NOT A TITLE CLICK" — block-card.tsx's own
-    // tutor-friendly-rewrite docstring: the title text itself isn't
-    // clickable any more.)
-    const courseCard = page.locator('[data-testid="block-card"][data-kind="course"]');
-    // Descendant BlockCards nest inside the course card's own DOM subtree, so a
-    // scoped lookup also matches every child row's menu button — `.first()` is
-    // the course's own (it renders before any of its children in DOM order).
-    await courseCard.getByTestId("block-card-menu").first().click();
-    await page.getByTestId("menu-rename").click();
-    const titleInput = page.getByTestId("block-card-title-input");
+    // Rename the course (root) via the detail page HEADER's ⋯ menu
+    // (`CurriculumActionsMenu`) -> `PATCH /curricula/{id}`, NOT the board's
+    // own root card. The root card has no inline rename any more (review
+    // fix, block-card.tsx): `updateBlock`/`PATCH /blocks/{id}` never reached
+    // this page's own `title` state (a SEPARATE copy from the board's tree —
+    // see the page's own docstring), so a card-level rename used to save
+    // silently while the header beside it kept showing the stale name. The
+    // header menu is the one rename door for a course root now.
+    await page.getByTestId("curriculum-actions-trigger").click();
+    await page.getByTestId("curriculum-rename").click();
+    await expect(page.getByTestId("curriculum-rename-dialog")).toBeVisible();
+    const titleInput = page.getByTestId("curriculum-rename-input");
     await titleInput.fill("Tone Shaping Fundamentals (Revised)");
-    await titleInput.press("Enter");
+    await page.getByTestId("curriculum-rename-save").click();
 
+    // Fans out to BOTH the header AND the board's root card (`handleRenamed`
+    // -> `setTitle` + a `refreshNonce`-driven `TreeBoard` remount — the page's
+    // own docstring on why a plain `setTree` there isn't enough).
+    await expect(page.getByTestId("curriculum-detail-title")).toHaveText("Tone Shaping Fundamentals (Revised)");
     await expect(
       page.getByTestId("block-card-title").filter({ hasText: "Tone Shaping Fundamentals (Revised)" }),
     ).toBeVisible();
-    expect(mock.calls.patch).toBe(1);
-    expect(mock.lastBody.patch).toEqual({ title: "Tone Shaping Fundamentals (Revised)" });
+    expect(mock.calls.curriculumPatch).toBe(1);
+    expect(mock.lastBody.curriculumPatch).toEqual({ title: "Tone Shaping Fundamentals (Revised)" });
+    // The root card's ⋯ menu keeps every OTHER action, it just lost rename —
+    // confirm the affordance is really gone, not merely unused by this test.
+    const courseCard = page.locator('[data-testid="block-card"][data-kind="course"]');
+    await courseCard.getByTestId("block-card-menu").first().click();
+    await expect(page.getByTestId("menu-rename")).toHaveCount(0);
+    await expect(page.getByTestId("menu-delete")).toBeVisible();
+    await page.keyboard.press("Escape");
 
     // --- Unit A: `curricula-back` returns to the now-navigable index, which
     // lists the curriculum just created, supports a title search filter, and
