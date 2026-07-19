@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { useLocale, useTranslations } from "next-intl";
 import { ArrowLeft } from "lucide-react";
+import { CurriculumActionsMenu } from "@/components/curriculum/curriculum-actions-menu";
 import { ReviseDrawer } from "@/components/curriculum/revise-drawer";
 import { TreeBoard } from "@/components/curriculum/tree-board";
 import { ApiError, getCurriculum, type BlockNode } from "@/lib/api";
@@ -36,6 +37,13 @@ export default function CurriculumDetailPage() {
   const rootId = params.rootId;
 
   const [tree, setTree] = useState<BlockNode | null>(null);
+  // Held separately from `tree.title`: `TreeBoard` owns its OWN copy of the tree
+  // once mounted (see its own docstring — draft polling writes into that copy,
+  // not this page's), so a rename here can't just mutate `tree` and expect the
+  // header inside `BlockCard` to notice. This state is what the header beside
+  // the ⋯ menu actually reads; `handleRenamed` below also folds the new title
+  // into `tree` and bumps `refreshNonce` so `TreeBoard` remounts with it.
+  const [title, setTitle] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshNonce, setRefreshNonce] = useState(0);
@@ -46,7 +54,10 @@ export default function CurriculumDetailPage() {
     setError(null);
     getCurriculum(rootId)
       .then((data) => {
-        if (!cancelled) setTree(data);
+        if (!cancelled) {
+          setTree(data);
+          setTitle(data.title);
+        }
       })
       .catch((err) => {
         if (!cancelled) setError(err instanceof ApiError ? err.detail : t("boardError"));
@@ -62,6 +73,18 @@ export default function CurriculumDetailPage() {
   const handleRootDeleted = useCallback(() => {
     router.push(`/${locale}/curricula`);
   }, [router, locale]);
+
+  /** `renameCurriculum` already returned the saved title — this just fans it
+   * out to the two things that display it: this page's own header, and
+   * `TreeBoard`'s tree (via a `refreshNonce` bump, the same remount trick
+   * `refreshTree` below uses for a revision — `TreeBoard` never syncs a prop
+   * into its state, so a plain `setTree` here would leave its course-card
+   * header showing the stale name). */
+  const handleRenamed = useCallback((next: string) => {
+    setTitle(next);
+    setTree((prev) => (prev ? { ...prev, title: next } : prev));
+    setRefreshNonce((n) => n + 1);
+  }, []);
 
   const refreshTree = useCallback(() => {
     getCurriculum(rootId)
@@ -91,6 +114,20 @@ export default function CurriculumDetailPage() {
 
         {tree && <ReviseDrawer rootId={rootId} tree={tree} onApplied={refreshTree} />}
       </div>
+
+      {tree && title && (
+        <div className="flex flex-wrap items-center gap-2">
+          <h1 className="min-w-0 truncate text-xl font-semibold" data-testid="curriculum-detail-title">
+            {title}
+          </h1>
+          <CurriculumActionsMenu
+            rootId={rootId}
+            title={title}
+            onRenamed={handleRenamed}
+            onDeleted={handleRootDeleted}
+          />
+        </div>
+      )}
 
       {loading && (
         <p className="text-sm text-muted-foreground" data-testid="board-loading">

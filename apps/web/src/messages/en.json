@@ -251,6 +251,20 @@
       "libraryDegraded": "Your library ({tokens, number} tokens) was too large to read whole — the lessons were drafted from per-module search instead of the full text.",
       "shapeWords": "~{words, number} words per lesson"
     },
+    "actions": {
+      "menuLabel": "Curriculum actions",
+      "rename": "Rename",
+      "renameTitle": "Rename curriculum",
+      "renameSave": "Save",
+      "renameError": "Rename failed — try again.",
+      "delete": "Delete",
+      "deleteTitle": "Delete curriculum?",
+      "deleteDescription": "“{title}” and all of its lessons will be permanently deleted. This cannot be undone.",
+      "deleteConfirm": "Delete permanently",
+      "deleteError": "Delete failed — try again.",
+      "deleteDrafting": "Lessons are still being drafted — wait for drafting to finish before deleting.",
+      "cancel": "Cancel"
+    },
     "segmentDialog": {
       "heading": "Segment into sessions",
       "description": "Split \"{title}\" into fixed-length delivery sessions.",

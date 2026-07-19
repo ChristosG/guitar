@@ -861,6 +861,17 @@ export function listCurricula(): Promise<CurriculumListItem[]> {
   return request<CurriculumListItem[]>("/curricula");
 }
 
+export function renameCurriculum(rootId: string, title: string): Promise<CurriculumListItem> {
+  return request<CurriculumListItem>(`/curricula/${rootId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ title }),
+  });
+}
+
+export function deleteCurriculum(rootId: string): Promise<void> {
+  return request<void>(`/curricula/${rootId}`, { method: "DELETE" });
+}
+
 /**
  * Typed fetch helpers for the guided curriculum-authoring interview
  * (`routers/curriculum.py`'s `/curricula/interview...` routes, Plan 12 Task

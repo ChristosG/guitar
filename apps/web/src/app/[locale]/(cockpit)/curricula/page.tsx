@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
+import { CurriculumActionsMenu } from "@/components/curriculum/curriculum-actions-menu";
 import { InterviewDialog } from "@/components/curriculum/interview-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -100,20 +101,28 @@ export default function CurriculaPage() {
         {shown.length > 0 && (
           <div className="flex flex-wrap gap-3" data-testid="templates-list">
             {shown.map((item) => (
-              <Link
-                key={item.id}
-                href={`/${locale}/curricula/${item.id}`}
-                data-testid="template-item"
-                className="flex w-56 flex-col gap-1 rounded-xl border border-border bg-card p-3 text-left text-sm ring-1 ring-foreground/10 transition-colors hover:bg-muted/50"
-              >
-                <span className="truncate font-medium" data-testid="template-title">
-                  {item.title}
-                </span>
-                <span className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <Badge variant="outline">{item.language}</Badge>
-                  {typeof item.target_profile?.level === "string" && <span>{item.target_profile.level}</span>}
-                </span>
-              </Link>
+              <div key={item.id} className="relative" data-testid="template-item">
+                <Link
+                  href={`/${locale}/curricula/${item.id}`}
+                  className="flex w-56 flex-col gap-1 rounded-xl border border-border bg-card p-3 pr-10 text-left text-sm ring-1 ring-foreground/10 transition-colors hover:bg-muted/50"
+                >
+                  <span className="truncate font-medium" data-testid="template-title">
+                    {item.title}
+                  </span>
+                  <span className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <Badge variant="outline">{item.language}</Badge>
+                    {typeof item.target_profile?.level === "string" && <span>{item.target_profile.level}</span>}
+                  </span>
+                </Link>
+                <div className="absolute right-1 top-1">
+                  <CurriculumActionsMenu
+                    rootId={item.id}
+                    title={item.title}
+                    onRenamed={() => fetchTemplates()}
+                    onDeleted={() => fetchTemplates()}
+                  />
+                </div>
+              </div>
             ))}
           </div>
         )}
