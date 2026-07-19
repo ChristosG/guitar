@@ -1155,7 +1155,7 @@ _ENTRIES = [
         when_it_runs_el="Σε κάθε μήνυμα που γράφεις στη συνομιλία.",
         source_of_truth=lambda: SYSTEM_PROMPT,
         build=_build_chat_system,
-        call_sites=("agent/loop.py:687", "agent/loop.py:921"),
+        call_sites=("agent/loop.py:696", "agent/loop.py:935"),
         slices=(
             Slice(
                 id=SYSTEM_SLICE_ID,
@@ -1169,7 +1169,7 @@ _ENTRIES = [
         id="chat.grounding",
         flow="chat",
         kind="prompt",
-        source_ref="app/agent/loop.py:397",
+        source_ref="app/agent/loop.py:398",
         title_el="Τα αποσπάσματα από τη βιβλιοθήκη σου",
         what_it_does_el=(
             "Πριν απαντήσει, η εφαρμογή ψάχνει μόνη της στα βιβλία σου και "
@@ -1245,7 +1245,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: SUGGESTIONS_SYSTEM,
         build=_build_chat_suggestions,
-        call_sites=("routers/chat.py:920",),
+        call_sites=("routers/chat.py:921",),
         slices=(
             Slice(
                 id=SUGGESTIONS_SLICE_ID,
@@ -1275,7 +1275,7 @@ _ENTRIES = [
         when_it_runs_el="Σε κάθε μήνυμα που γράφεις στη συνομιλία.",
         source_of_truth=lambda: TOOLS,
         build=_build_tools_descriptions,
-        call_sites=("agent/loop.py:687", "agent/loop.py:921"),
+        call_sites=("agent/loop.py:696", "agent/loop.py:935"),
     ),
     PromptEntry(
         id="tools.system_claude_cli",
@@ -1298,7 +1298,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: _tool_system_prompt,
         build=_build_tools_system_claude_cli,
-        call_sites=("agent/loop.py:687", "agent/loop.py:921"),
+        call_sites=("agent/loop.py:696", "agent/loop.py:935"),
         provider="claude_cli",
     ),
 
