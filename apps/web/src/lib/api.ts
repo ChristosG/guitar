@@ -1465,6 +1465,20 @@ export function createChatSession(
   });
 }
 
+/** `GET /curricula/{root}/chat-session` — GET-or-create the ONE chat session
+ * bound to this curriculum (chat overhaul persistence fix). The "Revise with
+ * AI" drawer used to call `createChatSession` on every open: fine within one
+ * page visit (it only creates once React holds the id), but a page RELOAD
+ * resets that state, so the drawer spent a brand-new session on every reload
+ * and orphaned whatever conversation was already under way. This calls the
+ * curriculum-scoped endpoint instead, which resumes the existing session for
+ * `rootId` (keyed on `ChatSession.root_id`) or creates the first one — no
+ * `locale`/`root_id` body needed, the locale rides the same `X-App-Locale`
+ * header every call already sends (`request()`'s own `uiLocale()`). */
+export function getOrCreateCurriculumChatSession(rootId: string): Promise<{ session_id: string }> {
+  return request<{ session_id: string }>(`/curricula/${rootId}/chat-session`);
+}
+
 /** Every session that has actually been spoken in, most-recently-active
  * first (`GET /chat`). */
 export function listChatSessions(): Promise<ChatSessionSummary[]> {

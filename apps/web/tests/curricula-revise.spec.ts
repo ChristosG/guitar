@@ -2,17 +2,20 @@ import { randomUUID } from "node:crypto";
 import { test, expect, type Page, type Route } from "@playwright/test";
 
 // Deterministic, offline coverage of the "Revise with AI" drawer on the
-// curriculum detail board (Unit D, Task D2b): opening the drawer lazily
-// creates a chat session BOUND to this curriculum (`root_id` in the POST
-// `/chat` body), a proposed revision renders as a `RevisionPlanCard` — never
-// the generic `ApprovalCard` — with each op labeled per the controller's own
-// resolved design calls (a `modify_lesson` op reads "Rewrite lesson «X»", an
+// curriculum detail board (Unit D, Task D2b; chat overhaul Tasks 3-4):
+// opening the drawer resumes (or creates) the ONE chat session bound to this
+// curriculum via `GET /curricula/{root}/chat-session` — the persistence fix —
+// a proposed revision renders as a `RevisionPlanCard` — never the generic
+// `ApprovalCard` — with each op labeled per the controller's own resolved
+// design calls (a `modify_lesson` op reads "Rewrite lesson «X»", an
 // `update_blueprint` op reads "Change lesson structure" plus its own note
 // that existing lessons keep their content until re-drafted), approving it
 // calls `POST /chat/{id}/approvals/{id}/resolve` with the plan applied
 // VERBATIM (no `edited_args`), and once the chained `curriculum_draft` job
 // succeeds the board refetches and shows the newly `queued` lesson — the
-// whole PLAN -> PREVIEW -> APPROVE -> APPLY loop, offline.
+// whole PLAN -> PREVIEW -> APPROVE -> APPLY loop, offline. Separate
+// `test.describe` blocks below cover the reload-survives persistence fix,
+// "Clear chat", and the full-screen toggle.
 //
 // Same route-interception convention every other cockpit spec in this
 // directory uses (`cockpit.spec.ts`, `chat.spec.ts`): anchored to
@@ -106,8 +109,34 @@ function mockCurriculumTree(rootId: string, moduleId: string, lesson1Id: string,
   };
 }
 
-async function mockCurriculaApi(page: Page, fixture: ReturnType<typeof mockCurriculumTree>) {
-  const calls = { get: 0, progress: 0 };
+/** Mocks the SERVER-SIDE state `GET /curricula/{root}/chat-session` keeps —
+ * "the most recently created session bound to this root" — so both mocks
+ * below (`mockCurriculaApi`'s GET handler and `mockChatApi`'s `POST /chat`
+ * handler, which is what "Clear chat" calls) agree on which session id is
+ * "current" without either one owning the other. Mirrors `routers/
+ * curriculum.py`'s own `get_or_create_curriculum_chat_session`: the first GET
+ * creates one; a later `POST /chat` (Clear chat, unchanged endpoint) starts a
+ * NEW one and becomes what the next GET resumes. */
+function createChatSessionStore() {
+  let current: string | null = null;
+  return {
+    getOrCreate(): string {
+      if (!current) current = randomUUID();
+      return current;
+    },
+    registerCreated(sessionId: string) {
+      current = sessionId;
+    },
+  };
+}
+
+async function mockCurriculaApi(
+  page: Page,
+  fixture: ReturnType<typeof mockCurriculumTree>,
+  chatSessionStore: ReturnType<typeof createChatSessionStore>,
+) {
+  const calls = { get: 0, progress: 0, chatSession: 0 };
+  const chatSessionRootIds: string[] = [];
   const unexpected: string[] = [];
 
   async function handler(route: Route) {
@@ -117,6 +146,17 @@ async function mockCurriculaApi(page: Page, fixture: ReturnType<typeof mockCurri
 
     if (method === "OPTIONS") {
       await route.fulfill({ status: 204, headers: CORS_HEADERS });
+      return;
+    }
+
+    const chatSessionMatch = pathname.match(/^\/curricula\/([^/]+)\/chat-session$/);
+    if (chatSessionMatch && method === "GET") {
+      calls.chatSession++;
+      chatSessionRootIds.push(chatSessionMatch[1]);
+      await route.fulfill({
+        status: 200, contentType: "application/json", headers: CORS_HEADERS,
+        body: JSON.stringify({ session_id: chatSessionStore.getOrCreate() }),
+      });
       return;
     }
 
@@ -148,7 +188,7 @@ async function mockCurriculaApi(page: Page, fixture: ReturnType<typeof mockCurri
   }
 
   await page.route(`${API_ORIGIN}/curricula/**`, handler);
-  return { calls, unexpected };
+  return { calls, chatSessionRootIds, unexpected };
 }
 
 function sseBody(events: Array<{ event: string; data: unknown }>): string {
@@ -163,15 +203,40 @@ function sseBody(events: Array<{ event: string; data: unknown }>): string {
  * never handles at all — see `routers/chat.py`'s own documented contract),
  * one scripted `.../messages` response (with an optional artificial delay,
  * so the "Planning the revision…" status can actually be caught mid-flight),
- * and resolve. */
-async function mockChatApi(page: Page, onResolve?: (approvalId: string) => void) {
+ * and resolve.
+ *
+ * `chatSessionStore`, when passed, is the SAME store `mockCurriculaApi`'s
+ * `GET .../chat-session` handler reads — the "Clear chat" flow calls this
+ * mock's `POST /chat` (unchanged endpoint), and registering the id it hands
+ * back here is what makes a LATER `GET .../chat-session` (a reopen, or a
+ * reopen after a reload) resume that new session instead of the original
+ * one, exactly like the real `get_or_create_curriculum_chat_session`
+ * ("most-recently-created wins") does.
+ *
+ * `history` is a light per-session transcript — just enough for the
+ * persistence tests to prove a reload resumes the SAME conversation (not
+ * just the same opaque id): every `.../messages` call records the user turn
+ * and, when the scripted response carries plain text, the assistant's
+ * answer too; `GET /chat/{id}` reads it back. */
+async function mockChatApi(
+  page: Page,
+  onResolve?: (approvalId: string) => void,
+  chatSessionStore?: ReturnType<typeof createChatSessionStore>,
+) {
   const calls = { create: 0, message: 0, resolve: 0, history: 0, pending: 0, stream: 0, list: 0 };
   const lastBody: { create?: unknown; resolve?: unknown } = {};
   const unexpected: string[] = [];
+  const history = new Map<string, Array<{ id: string; role: string; content: string | null; created_at: string }>>();
 
   let nextMessage: Record<string, unknown> = { status: "answer", content: "OK." };
   let nextMessageDelayMs = 0;
   let nextResolve: Record<string, unknown> = { status: "answer", content: "OK." };
+
+  function record(sessionId: string, role: "user" | "assistant", content: string | null) {
+    const rows = history.get(sessionId) ?? [];
+    rows.push({ id: randomUUID(), role, content, created_at: new Date().toISOString() });
+    history.set(sessionId, rows);
+  }
 
   async function handler(route: Route) {
     const req = route.request();
@@ -188,7 +253,9 @@ async function mockChatApi(page: Page, onResolve?: (approvalId: string) => void)
     if (pathname === "/chat" && method === "POST") {
       calls.create++;
       lastBody.create = req.postDataJSON();
-      await json({ session_id: randomUUID() });
+      const sessionId = randomUUID();
+      chatSessionStore?.registerCreated(sessionId);
+      await json({ session_id: sessionId });
       return;
     }
 
@@ -221,7 +288,10 @@ async function mockChatApi(page: Page, onResolve?: (approvalId: string) => void)
     const messagesMatch = pathname.match(/^\/chat\/([^/]+)\/messages$/);
     if (messagesMatch && method === "POST") {
       calls.message++;
+      const body = req.postDataJSON() as { content: string };
+      record(messagesMatch[1], "user", body.content);
       if (nextMessageDelayMs > 0) await new Promise((r) => setTimeout(r, nextMessageDelayMs));
+      if (typeof nextMessage.content === "string") record(messagesMatch[1], "assistant", nextMessage.content);
       await json(nextMessage);
       return;
     }
@@ -245,7 +315,7 @@ async function mockChatApi(page: Page, onResolve?: (approvalId: string) => void)
     const sessionMatch = pathname.match(/^\/chat\/([^/]+)$/);
     if (sessionMatch && method === "GET") {
       calls.history++;
-      await json([]);
+      await json(history.get(sessionMatch[1]) ?? []);
       return;
     }
 
@@ -368,8 +438,9 @@ test.describe("curriculum revise drawer (mocked API)", () => {
     const newLessonId = randomUUID();
 
     const fixture = mockCurriculumTree(rootId, moduleId, lesson1Id, lesson2Id, newLessonId);
-    const curricula = await mockCurriculaApi(page, fixture);
-    const chat = await mockChatApi(page, () => fixture.markApplied());
+    const chatSessionStore = createChatSessionStore();
+    const curricula = await mockCurriculaApi(page, fixture, chatSessionStore);
+    const chat = await mockChatApi(page, () => fixture.markApplied(), chatSessionStore);
     const jobs = await mockJobsApi(page, { pendingPolls: 1 });
 
     await page.goto(`/en/curricula/${rootId}`);
@@ -377,22 +448,24 @@ test.describe("curriculum revise drawer (mocked API)", () => {
 
     // The drawer is closed by default and no session exists yet.
     await expect(page.getByTestId("revise-drawer")).toHaveCount(0);
-    expect(chat.calls.create).toBe(0);
+    expect(curricula.calls.chatSession).toBe(0);
 
     await page.getByTestId("revise-open").click();
     await expect(page.getByTestId("revise-drawer")).toBeVisible();
 
-    // Lazily creates ONE session, bound to THIS curriculum.
+    // Resumes (or creates) the ONE session bound to THIS curriculum via the
+    // curriculum-scoped GET-or-create endpoint — never a bare `POST /chat`.
     await expect(page.getByTestId("chat-input")).toBeEnabled();
-    expect(chat.calls.create).toBe(1);
-    expect((chat.lastBody.create as { root_id?: string }).root_id).toBe(rootId);
+    expect(curricula.calls.chatSession).toBe(1);
+    expect(curricula.chatSessionRootIds).toEqual([rootId]);
+    expect(chat.calls.create).toBe(0);
 
     // Re-opening (closing then re-opening) must not spend a second session.
     await page.getByTestId("revise-close").click();
     await expect(page.getByTestId("revise-drawer")).toHaveCount(0);
     await page.getByTestId("revise-open").click();
     await expect(page.getByTestId("chat-input")).toBeEnabled();
-    expect(chat.calls.create).toBe(1);
+    expect(curricula.calls.chatSession).toBe(1);
 
     // Script a DELAYED awaiting_approval turn so "Planning the revision…"
     // (resolved design call #2) is actually observable mid-flight, not just
@@ -523,12 +596,13 @@ test.describe("curriculum revise drawer (mocked API)", () => {
     const draftError = "No lesson could be drafted. Check Settings, then Resume.";
 
     const fixture = mockCurriculumTree(rootId, moduleId, lesson1Id, lesson2Id, newLessonId);
-    await mockCurriculaApi(page, fixture);
+    const chatSessionStore = createChatSessionStore();
+    await mockCurriculaApi(page, fixture, chatSessionStore);
     // The apply lands (tree gets the new queued lesson) but the chained draft dies.
     const chat = await mockChatApi(page, () => {
       fixture.markApplied();
       fixture.markDraftFailed(draftError);
-    });
+    }, chatSessionStore);
     await mockJobsRevisePlusFailedDraft(page, { reviseJobId, draftJobId, draftError });
 
     await page.goto(`/en/curricula/${rootId}`);
@@ -586,8 +660,9 @@ test.describe("curriculum revise drawer (mocked API)", () => {
     const newLessonId = randomUUID();
 
     const fixture = mockCurriculumTree(rootId, moduleId, lesson1Id, lesson2Id, newLessonId);
-    await mockCurriculaApi(page, fixture);
-    const chat = await mockChatApi(page);
+    const chatSessionStore = createChatSessionStore();
+    await mockCurriculaApi(page, fixture, chatSessionStore);
+    const chat = await mockChatApi(page, undefined, chatSessionStore);
 
     await page.goto(`/en/curricula/${rootId}`);
     await page.getByTestId("revise-open").click();
@@ -624,5 +699,178 @@ test.describe("curriculum revise drawer (mocked API)", () => {
     ).toBeVisible();
 
     expect(chat.unexpected).toEqual([]);
+  });
+});
+
+// Chat overhaul Task 4 — persistence. Before this, `handleOpen` called
+// `createChatSession` unconditionally: fine within one page visit (this
+// component's own `sessionId || creating` guard already kept it to one call
+// per mount, which the tests above pin), but a page RELOAD resets that React
+// state, so every reload spent a brand-new session and orphaned whatever
+// conversation was already under way. These tests prove the fix works where
+// it counts: ACROSS A RELOAD, and through the explicit "Clear chat" escape
+// hatch.
+test.describe("curriculum revise drawer — chat session persistence (mocked API)", () => {
+  test("a reload resumes the SAME curriculum chat session, not a new one", async ({ page }) => {
+    const rootId = randomUUID();
+    const moduleId = randomUUID();
+    const lesson1Id = randomUUID();
+    const lesson2Id = randomUUID();
+    const newLessonId = randomUUID();
+
+    const fixture = mockCurriculumTree(rootId, moduleId, lesson1Id, lesson2Id, newLessonId);
+    const chatSessionStore = createChatSessionStore();
+    const curricula = await mockCurriculaApi(page, fixture, chatSessionStore);
+    const chat = await mockChatApi(page, undefined, chatSessionStore);
+
+    await page.goto(`/en/curricula/${rootId}`);
+    await page.getByTestId("revise-open").click();
+    await expect(page.getByTestId("chat-input")).toBeEnabled();
+    expect(curricula.calls.chatSession).toBe(1);
+
+    chat.setNextMessage({ status: "answer", content: "A DS-1 sits well after the Tube Screamer." });
+    await page.getByTestId("chat-input").fill("Where should a DS-1 go?");
+    await page.getByTestId("chat-send").click();
+    await expect(
+      page.getByTestId("chat-message").filter({ hasText: "A DS-1 sits well after the Tube Screamer." }),
+    ).toBeVisible();
+
+    // A full page reload — the drawer's own React state (and the whole
+    // component tree) is gone. Re-opening must resume the SAME session, and
+    // its transcript, not spend a fresh one.
+    await page.reload();
+    await expect(page.getByTestId("tree-board")).toBeVisible();
+    await expect(page.getByTestId("revise-drawer")).toHaveCount(0);
+
+    await page.getByTestId("revise-open").click();
+    await expect(page.getByTestId("chat-input")).toBeEnabled();
+
+    // Called again (a genuinely new mount), but resolved to the SAME session
+    // — no `POST /chat` was ever needed for this, and the prior exchange is
+    // still there.
+    expect(curricula.calls.chatSession).toBe(2);
+    expect(chat.calls.create).toBe(0);
+    await expect(
+      page.getByTestId("chat-message").filter({ hasText: "Where should a DS-1 go?" }),
+    ).toBeVisible();
+    await expect(
+      page.getByTestId("chat-message").filter({ hasText: "A DS-1 sits well after the Tube Screamer." }),
+    ).toBeVisible();
+
+    expect(curricula.unexpected).toEqual([]);
+    expect(chat.unexpected).toEqual([]);
+  });
+
+  test("Clear chat starts a fresh conversation, and a later reload resumes THAT one", async ({ page }) => {
+    const rootId = randomUUID();
+    const moduleId = randomUUID();
+    const lesson1Id = randomUUID();
+    const lesson2Id = randomUUID();
+    const newLessonId = randomUUID();
+
+    const fixture = mockCurriculumTree(rootId, moduleId, lesson1Id, lesson2Id, newLessonId);
+    const chatSessionStore = createChatSessionStore();
+    const curricula = await mockCurriculaApi(page, fixture, chatSessionStore);
+    const chat = await mockChatApi(page, undefined, chatSessionStore);
+
+    await page.goto(`/en/curricula/${rootId}`);
+    await page.getByTestId("revise-open").click();
+    await expect(page.getByTestId("chat-input")).toBeEnabled();
+
+    chat.setNextMessage({ status: "answer", content: "Sure, here's the old answer." });
+    await page.getByTestId("chat-input").fill("A question for the old conversation");
+    await page.getByTestId("chat-send").click();
+    await expect(
+      page.getByTestId("chat-message").filter({ hasText: "Sure, here's the old answer." }),
+    ).toBeVisible();
+
+    // Clear chat is guarded by a NON-destructive confirm (nothing is
+    // deleted — the old session just stops being the one resumed here).
+    await page.getByTestId("revise-clear-chat").click();
+    await expect(page.getByTestId("confirm-dialog")).toBeVisible();
+    await page.getByTestId("confirm-cancel").click();
+    await expect(page.getByTestId("confirm-dialog")).toHaveCount(0);
+    // Cancelling changed nothing.
+    expect(chat.calls.create).toBe(0);
+    await expect(
+      page.getByTestId("chat-message").filter({ hasText: "Sure, here's the old answer." }),
+    ).toBeVisible();
+
+    await page.getByTestId("revise-clear-chat").click();
+    await expect(page.getByTestId("confirm-dialog")).toBeVisible();
+    await page.getByTestId("confirm-accept").click();
+
+    // A brand-new session, bound to the SAME curriculum — and the panel
+    // remounted onto it: the old exchange is gone from view (a different,
+    // empty conversation), not because it was deleted.
+    expect(chat.calls.create).toBe(1);
+    expect((chat.lastBody.create as { root_id?: string }).root_id).toBe(rootId);
+    await expect(
+      page.getByTestId("chat-message").filter({ hasText: "Sure, here's the old answer." }),
+    ).toHaveCount(0);
+    await expect(page.getByTestId("chat-input")).toBeEnabled();
+
+    // Close, reload, and reopen: the NEW session (not the original one) is
+    // what a fresh mount resumes from now on — "most recently created wins".
+    await page.getByTestId("revise-close").click();
+    await page.reload();
+    await expect(page.getByTestId("revise-drawer")).toHaveCount(0);
+    await page.getByTestId("revise-open").click();
+    await expect(page.getByTestId("chat-input")).toBeEnabled();
+
+    expect(curricula.calls.chatSession).toBe(2);
+    expect(chat.calls.create).toBe(1); // Clear chat is still the only POST /chat ever made.
+    await expect(
+      page.getByTestId("chat-message").filter({ hasText: "Sure, here's the old answer." }),
+    ).toHaveCount(0);
+
+    expect(curricula.unexpected).toEqual([]);
+    expect(chat.unexpected).toEqual([]);
+  });
+});
+
+// Chat overhaul Task 3 — full-screen toggle.
+test.describe("curriculum revise drawer — full-screen toggle (mocked API)", () => {
+  test("expands the drawer to full screen and back, and the choice survives a close/re-open", async ({ page }) => {
+    const rootId = randomUUID();
+    const moduleId = randomUUID();
+    const lesson1Id = randomUUID();
+    const lesson2Id = randomUUID();
+    const newLessonId = randomUUID();
+
+    const fixture = mockCurriculumTree(rootId, moduleId, lesson1Id, lesson2Id, newLessonId);
+    const chatSessionStore = createChatSessionStore();
+    await mockCurriculaApi(page, fixture, chatSessionStore);
+    await mockChatApi(page, undefined, chatSessionStore);
+
+    await page.goto(`/en/curricula/${rootId}`);
+    await page.getByTestId("revise-open").click();
+    await expect(page.getByTestId("chat-input")).toBeEnabled();
+
+    const drawer = page.getByTestId("revise-drawer");
+    const panel = drawer.locator("aside");
+    await expect(drawer).toHaveAttribute("data-fullscreen", "false");
+    await expect(panel).toHaveClass(/max-w-md/);
+
+    await page.getByTestId("revise-fullscreen-toggle").click();
+    await expect(drawer).toHaveAttribute("data-fullscreen", "true");
+    await expect(panel).toHaveClass(/max-w-full/);
+    // The transcript survives the toggle — it's a layout change, not a remount.
+    await expect(page.getByTestId("chat-input")).toBeEnabled();
+
+    // Back to the side panel.
+    await page.getByTestId("revise-fullscreen-toggle").click();
+    await expect(drawer).toHaveAttribute("data-fullscreen", "false");
+    await expect(panel).toHaveClass(/max-w-md/);
+
+    // Expand again, then close and re-open — plain component state, so the
+    // choice survives the close/re-open (the component itself never
+    // unmounts; only the `{open && ...}` block does).
+    await page.getByTestId("revise-fullscreen-toggle").click();
+    await expect(drawer).toHaveAttribute("data-fullscreen", "true");
+    await page.getByTestId("revise-close").click();
+    await expect(drawer).toHaveCount(0);
+    await page.getByTestId("revise-open").click();
+    await expect(page.getByTestId("revise-drawer")).toHaveAttribute("data-fullscreen", "true");
   });
 });

@@ -2,11 +2,13 @@
 
 import { useMemo, useState } from "react";
 import { useLocale, useTranslations } from "next-intl";
-import { Loader2, MessagesSquare, X } from "lucide-react";
+import { Loader2, Maximize2, MessagesSquare, Minimize2, RotateCcw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ui/confirm";
 import { ChatPanel } from "@/components/chat/chat-panel";
 import { ChatSessionsProvider } from "@/components/chat/chat-sessions";
-import { ApiError, createChatSession, type BlockNode } from "@/lib/api";
+import { ApiError, createChatSession, getOrCreateCurriculumChatSession, type BlockNode } from "@/lib/api";
+import { cn } from "@/lib/utils";
 
 interface ReviseDrawerProps {
   rootId: string;
@@ -44,11 +46,30 @@ function collectTitles(node: BlockNode, into: Record<string, string>): Record<st
  * this caller is swapping in `RevisionPlanCard` for the generic
  * `ApprovalCard` when the pending tool is `apply_curriculum_revision`.
  *
- * The session is created LAZILY, on first open — not on every board visit —
- * so browsing a curriculum never spends a chat-session row on a tutor who
- * never opens the drawer. It stays open for the rest of the page's life
- * (closing the drawer just hides it; re-opening reuses the same session id,
- * so a conversation already under way survives a close/re-open).
+ * PERSISTENCE (chat overhaul Task 4): the session is fetched LAZILY, on
+ * first open — not on every board visit, so browsing a curriculum never
+ * spends a chat-session row on a tutor who never opens the drawer — via
+ * `getOrCreateCurriculumChatSession`, which resumes the ONE session already
+ * bound to this `root_id` or creates the first one. This used to call
+ * `createChatSession` unconditionally: harmless within a single page visit
+ * (this component still only calls it once, guarded by `sessionId ||
+ * creating`, exactly as now), but a page RELOAD resets that React state, so
+ * every reload spent a brand-new session and orphaned whatever conversation
+ * was already under way. Keying off the curriculum itself, server-side,
+ * fixes that: re-opening (even across a reload) resumes the same thread.
+ *
+ * "Clear chat" is the deliberate escape hatch: it starts a genuinely NEW
+ * session bound to the same `root_id` (plain `createChatSession`, unchanged)
+ * and switches the drawer to it. The old session is not deleted — it simply
+ * stops being the one `getOrCreateCurriculumChatSession` resumes next time
+ * (that endpoint picks the MOST RECENTLY CREATED session for a root) — so
+ * this is a fresh start, not data loss, which is why it goes through a
+ * non-destructive confirm rather than the red delete-style one.
+ *
+ * FULL-SCREEN (chat overhaul Task 3): `fullScreen` is plain component state,
+ * which is all "persist for the session's lifetime" needs here — this
+ * component itself does not unmount on close (only the `{open && ...}` block
+ * does), so the choice survives a close/re-open without anything extra.
  *
  * No dedicated Sheet/Drawer primitive exists yet under `components/ui`
  * (checked: only `dialog.tsx`, which is a centered modal, not a side panel) —
@@ -58,11 +79,15 @@ function collectTitles(node: BlockNode, into: Record<string, string>): Record<st
 export function ReviseDrawer({ rootId, tree, onApplied }: ReviseDrawerProps) {
   const t = useTranslations("curricula.revise");
   const locale = useLocale();
+  const confirm = useConfirm();
 
   const [open, setOpen] = useState(false);
+  const [fullScreen, setFullScreen] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [clearing, setClearing] = useState(false);
+  const [clearError, setClearError] = useState<string | null>(null);
 
   const blockTitles = useMemo(() => collectTitles(tree, {}), [tree]);
 
@@ -72,12 +97,33 @@ export function ReviseDrawer({ rootId, tree, onApplied }: ReviseDrawerProps) {
     setCreating(true);
     setCreateError(null);
     try {
-      const created = await createChatSession(null, locale, rootId);
+      const created = await getOrCreateCurriculumChatSession(rootId);
       setSessionId(created.session_id);
     } catch (err) {
       setCreateError(err instanceof ApiError ? err.detail : t("createError"));
     } finally {
       setCreating(false);
+    }
+  }
+
+  async function handleClearChat() {
+    const ok = await confirm({
+      title: t("clearChatConfirmTitle"),
+      body: t("clearChatConfirmBody"),
+      confirmLabel: t("clearChat"),
+      destructive: false,
+    });
+    if (!ok) return;
+
+    setClearing(true);
+    setClearError(null);
+    try {
+      const created = await createChatSession(null, locale, rootId);
+      setSessionId(created.session_id);
+    } catch (err) {
+      setClearError(err instanceof ApiError ? err.detail : t("clearChatError"));
+    } finally {
+      setClearing(false);
     }
   }
 
@@ -89,30 +135,72 @@ export function ReviseDrawer({ rootId, tree, onApplied }: ReviseDrawerProps) {
       </Button>
 
       {open && (
-        <div className="fixed inset-0 z-40 flex justify-end" data-testid="revise-drawer">
+        <div
+          className={cn("fixed inset-0 z-40 flex", fullScreen ? "justify-center" : "justify-end")}
+          data-testid="revise-drawer"
+          data-fullscreen={fullScreen ? "true" : "false"}
+        >
           <button
             type="button"
             aria-label={t("close")}
             className="absolute inset-0 h-full w-full bg-black/10 backdrop-blur-xs"
             onClick={() => setOpen(false)}
           />
-          <aside className="relative flex h-full w-full max-w-md flex-col gap-4 overflow-hidden border-l border-border bg-background p-4 shadow-xl">
+          <aside
+            className={cn(
+              "relative flex h-full w-full flex-col gap-4 overflow-hidden border-border bg-background p-4 shadow-xl",
+              fullScreen ? "max-w-full border-l-0" : "max-w-md border-l",
+            )}
+          >
             <div className="flex items-start justify-between gap-2">
               <div>
                 <h2 className="font-heading text-base font-medium">{t("heading")}</h2>
                 <p className="text-sm text-muted-foreground">{t("description")}</p>
               </div>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                data-testid="revise-close"
-                onClick={() => setOpen(false)}
-              >
-                <X />
-                <span className="sr-only">{t("close")}</span>
-              </Button>
+              <div className="flex shrink-0 items-center gap-1">
+                {sessionId && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    data-testid="revise-clear-chat"
+                    disabled={clearing}
+                    onClick={handleClearChat}
+                    title={t("clearChat")}
+                  >
+                    {clearing ? <Loader2 className="animate-spin" /> : <RotateCcw />}
+                    <span className="sr-only">{t("clearChat")}</span>
+                  </Button>
+                )}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  data-testid="revise-fullscreen-toggle"
+                  onClick={() => setFullScreen((prev) => !prev)}
+                  title={fullScreen ? t("collapse") : t("expand")}
+                >
+                  {fullScreen ? <Minimize2 /> : <Maximize2 />}
+                  <span className="sr-only">{fullScreen ? t("collapse") : t("expand")}</span>
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  data-testid="revise-close"
+                  onClick={() => setOpen(false)}
+                >
+                  <X />
+                  <span className="sr-only">{t("close")}</span>
+                </Button>
+              </div>
             </div>
+
+            {clearError && (
+              <p role="alert" data-testid="revise-clear-error" className="text-sm text-destructive">
+                {clearError}
+              </p>
+            )}
 
             <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
               {creating && (
@@ -136,8 +224,14 @@ export function ReviseDrawer({ rootId, tree, onApplied }: ReviseDrawerProps) {
                 // sidebar here, but the hook still requires an ancestor, so
                 // this reuses the SAME provider rather than teaching
                 // `ChatPanel` a special case for "no sidebar to refresh".
+                //
+                // Keyed on `sessionId`: "Clear chat" swaps in a fresh id, and
+                // `ChatPanel` must fully remount (fresh hydration, empty
+                // transcript) rather than keep rendering the old
+                // conversation's state alongside the new session's requests.
                 <ChatSessionsProvider>
                   <ChatPanel
+                    key={sessionId}
                     sessionId={sessionId}
                     rootId={rootId}
                     blockTitles={blockTitles}
