@@ -238,6 +238,9 @@
       "redraftError": "Could not start the re-draft.",
       "wordCount": "{count, number} words",
       "citation": "{source}, p. {page}",
+      "sourcesButton": "Sources",
+      "sourcesTitle": "Sources: {lesson}",
+      "sourcesPage": "p. {page}",
       "draftStatus": {
         "queued": "Queued",
         "drafting": "Writing",

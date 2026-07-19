@@ -513,8 +513,9 @@ async function startToStep(
  * mount them at all. So every assertion below that reaches into a LESSON's own
  * badges (`lesson-status`, `lesson-word-count`, `lesson-deepen` — all rendered
  * in the card's header, unconditionally once the card itself exists) needs its
- * MODULE expanded first; reaching into a SEGMENT (`provenance-chip`, the
- * extend controls) needs the LESSON expanded too, one level further in. */
+ * MODULE expanded first; reaching into a SEGMENT (the extend controls) or the
+ * LESSON's own body (`lesson-sources-trigger`) needs the LESSON expanded too,
+ * one level further in. */
 async function expandModule(page: Page, index = 0) {
   const modules = page.locator('[data-testid="block-card"][data-kind="module"]');
   await modules.nth(index).getByTestId("block-card-toggle").click();
@@ -748,24 +749,27 @@ test.describe("the guided interview, v2 (mocked API)", () => {
     await expect(page.getByTestId("block-card").first()).toBeVisible();
     await expandModule(page, 0);
     await expandFirstLesson(page, 0);
-    await expect(page.getByTestId("provenance-chip").first()).toBeVisible(); // segments rendered
+    await expect(page.getByTestId("lesson-sources-trigger").first()).toBeVisible(); // segments rendered
     await page.waitForTimeout(300);
 
     expect(mock.calls.artifacts).toBe(0);
     await expect(page.getByTestId("segment-artifacts-error")).toHaveCount(0);
   });
 
-  test("a drafted segment's citation deep-links into the Reader AT THE CITED PAGE", async ({ page }) => {
+  test("a drafted lesson's citation deep-links into the Reader AT THE CITED PAGE", async ({ page }) => {
     const mock = await mockInterviewApi(page);
     await startToStep(page, "confirm");
     await page.getByTestId("interview-confirm-submit").click();
 
     await expandModule(page, 0);
     await expandFirstLesson(page, 0);
-    const chip = page.getByTestId("provenance-chip").first();
-    await expect(chip).toBeVisible();
-    await expect(chip).toHaveAttribute("href", "/en/library/book-1?page=56");
-    await expect(chip).toContainText("p. 56");
+    await expect(page.getByTestId("lesson-sources-trigger").first()).toBeVisible();
+    await page.getByTestId("lesson-sources-trigger").first().click();
+    await expect(page.getByTestId("lesson-sources-modal")).toBeVisible();
+    const pageLink = page.getByTestId("lesson-source-page").first();
+    await expect(pageLink).toBeVisible();
+    await expect(pageLink).toHaveAttribute("href", "/en/library/book-1?page=56");
+    await expect(pageLink).toContainText("p. 56");
     expect(mock.unexpected).toEqual([]);
   });
 

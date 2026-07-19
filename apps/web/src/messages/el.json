@@ -238,6 +238,9 @@
       "redraftError": "Δεν ήταν δυνατή η έναρξη του ξαναγραψίματος.",
       "wordCount": "{count, number} λέξεις",
       "citation": "{source}, σελ. {page}",
+      "sourcesButton": "Πηγές",
+      "sourcesTitle": "Πηγές: {lesson}",
+      "sourcesPage": "σελ. {page}",
       "draftStatus": {
         "queued": "Σε αναμονή",
         "drafting": "Γράφεται",

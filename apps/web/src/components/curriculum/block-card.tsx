@@ -30,7 +30,7 @@ import { useConfirm } from "@/components/ui/confirm";
 import { AttachArtifactDialog } from "@/components/curriculum/attach-artifact-dialog";
 import { SegmentDialog } from "@/components/curriculum/segment-dialog";
 import { ExtendWithChat } from "@/components/curriculum/extend-with-chat";
-import { ProvenanceChips } from "@/components/curriculum/provenance-chips";
+import { LessonSources } from "@/components/curriculum/lesson-sources";
 import { TierBadge } from "@/components/curriculum/tier-badge";
 import {
   ApiError,
@@ -503,7 +503,9 @@ export function BlockCard({
         )
       )}
 
-      {isSegment && !editingBody && <ProvenanceChips citations={meta.citations} locale={locale} />}
+      {isLesson && !editingBody && (
+        <LessonSources citations={meta.citations} locale={locale} lessonTitle={node.title} />
+      )}
 
       {isLesson && meta.error && (
         <p role="alert" data-testid="lesson-error" className="text-xs text-destructive">
