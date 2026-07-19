@@ -53,6 +53,7 @@ interface FixtureBlock {
  * would once it succeeds. */
 function mockCurriculumTree(rootId: string, moduleId: string, lesson1Id: string, lesson2Id: string, newLessonId: string) {
   let applied = false;
+  let draftError: string | null = null;
 
   function tree(): FixtureBlock {
     const lessons: FixtureBlock[] = [
@@ -91,10 +92,18 @@ function mockCurriculumTree(rootId: string, moduleId: string, lesson1Id: string,
   function progress() {
     const total = applied ? 3 : 2;
     const queued = applied ? 1 : 0;
-    return { root_id: rootId, total, queued, drafting: 0, ready: 2, failed: 0, done: !applied };
+    return {
+      root_id: rootId, total, queued, drafting: 0, ready: 2, failed: 0,
+      done: !applied, draft_error: draftError,
+    };
   }
 
-  return { tree, progress, markApplied: () => { applied = true; }, isApplied: () => applied };
+  return {
+    tree, progress,
+    markApplied: () => { applied = true; },
+    markDraftFailed: (reason: string) => { draftError = reason; },
+    isApplied: () => applied,
+  };
 }
 
 async function mockCurriculaApi(page: Page, fixture: ReturnType<typeof mockCurriculumTree>) {
@@ -302,6 +311,52 @@ async function mockJobsApi(page: Page, { pendingPolls = 1 } = {}) {
   return calls;
 }
 
+/** Two-stage `GET /jobs/{id}` mock for the chained-draft-failure test: the
+ * `curriculum_revise` row succeeds (the tree is right) carrying the chained
+ * `curriculum_draft` row's id on `progress.draft_job_id`, and that draft row is
+ * `failed` — the exact silent-"queued" shape the fix surfaces. */
+async function mockJobsRevisePlusFailedDraft(
+  page: Page,
+  { reviseJobId, draftJobId, draftError }: { reviseJobId: string; draftJobId: string; draftError: string },
+) {
+  const calls = { revise: 0, draft: 0 };
+  await page.route(`${API_ORIGIN}/jobs/**`, async (route) => {
+    const { pathname } = new URL(route.request().url());
+    const match = pathname.match(/^\/jobs\/([^/]+)$/);
+    const id = match?.[1];
+    const base = { created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+    const json = (body: unknown) =>
+      route.fulfill({ status: 200, contentType: "application/json", headers: CORS_HEADERS, body: JSON.stringify(body) });
+
+    if (id === reviseJobId) {
+      calls.revise++;
+      // Pending once, then succeeded WITH the chained draft id on progress.
+      if (calls.revise <= 1) {
+        await json({ id, ...base, kind: "curriculum_revise", status: "pending", result_root_id: null, error: null, error_kind: null });
+      } else {
+        await json({
+          id, ...base, kind: "curriculum_revise", status: "succeeded", result_root_id: null,
+          error: null, error_kind: null, progress: { phase: "drafting", draft_job_id: draftJobId },
+        });
+      }
+      return;
+    }
+    if (id === draftJobId) {
+      calls.draft++;
+      await json({
+        id, ...base, kind: "curriculum_draft", status: "failed", result_root_id: null,
+        error: draftError, error_kind: "upstream", progress: null,
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 500, contentType: "application/json", headers: CORS_HEADERS,
+      body: JSON.stringify({ detail: "unmocked request in test" }),
+    });
+  });
+  return calls;
+}
+
 test.describe("curriculum revise drawer (mocked API)", () => {
   test("propose -> labeled RevisionPlanCard -> approve applies verbatim -> board refreshes with the new lesson", async ({
     page,
@@ -453,6 +508,74 @@ test.describe("curriculum revise drawer (mocked API)", () => {
 
     expect(curricula.unexpected).toEqual([]);
     expect(chat.unexpected).toEqual([]);
+  });
+
+  test("a chained-draft failure surfaces in the chat AND on the board — never a silent queued", async ({
+    page,
+  }) => {
+    const rootId = randomUUID();
+    const moduleId = randomUUID();
+    const lesson1Id = randomUUID();
+    const lesson2Id = randomUUID();
+    const newLessonId = randomUUID();
+    const reviseJobId = randomUUID();
+    const draftJobId = randomUUID();
+    const draftError = "No lesson could be drafted. Check Settings, then Resume.";
+
+    const fixture = mockCurriculumTree(rootId, moduleId, lesson1Id, lesson2Id, newLessonId);
+    await mockCurriculaApi(page, fixture);
+    // The apply lands (tree gets the new queued lesson) but the chained draft dies.
+    const chat = await mockChatApi(page, () => {
+      fixture.markApplied();
+      fixture.markDraftFailed(draftError);
+    });
+    await mockJobsRevisePlusFailedDraft(page, { reviseJobId, draftJobId, draftError });
+
+    await page.goto(`/en/curricula/${rootId}`);
+    await page.getByTestId("revise-open").click();
+    await expect(page.getByTestId("chat-input")).toBeEnabled();
+
+    const approvalId = randomUUID();
+    chat.setNextMessage({
+      status: "awaiting_approval",
+      approval_id: approvalId,
+      tool_name: "apply_curriculum_revision",
+      tool_args: {
+        root_id: rootId,
+        plan: {
+          summary: "Add a DS-1 lesson.",
+          ops: [{
+            op: "insert_lesson", module_id: moduleId, title: "DS-1 Distortion",
+            objective: "distortion basics", reason: "Fills a gap.",
+          }],
+        },
+      },
+      description: "Here is a proposed revision.",
+    });
+    await page.getByTestId("chat-input").fill("Add a DS-1 lesson.");
+    await page.getByTestId("chat-send").click();
+    await expect(page.getByTestId("revision-plan-card")).toBeVisible();
+
+    chat.setNextResolve({ status: "job_pending", job_id: reviseJobId });
+    await page.getByTestId("revision-approve").click();
+
+    // The chat does NOT stop at a bare "applied": it waits on the chained draft
+    // and reports the failure with the job's own reason.
+    await expect(
+      page.getByTestId("chat-message").filter({ hasText: "writing the new lessons failed" }),
+    ).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByTestId("chat-message").filter({ hasText: draftError })).toBeVisible();
+    // ...and never the plain success narration.
+    await expect(
+      page.getByTestId("chat-message").filter({ hasText: "Done — the curriculum below now reflects this revision." }),
+    ).toHaveCount(0);
+    await expect(page.getByTestId("chat-input")).toBeEnabled();
+
+    // The board, underneath, shows the SAME reason on its progress bar rather
+    // than a silent "queued".
+    await page.getByTestId("revise-close").click();
+    await expect(page.getByTestId("draft-progress-draft-error")).toBeVisible();
+    await expect(page.getByTestId("draft-progress-draft-error")).toContainText(draftError);
   });
 
   test("reject leaves the plan unapplied and re-enables the composer", async ({ page }) => {
