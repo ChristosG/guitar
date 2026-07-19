@@ -43,6 +43,10 @@ dependencies = [
   # model adjudicates every surviving pair. What this buys is the ~1M pairwise
   # comparisons that shrink 1,000 names to a handful of clusters, in C, for free.
   "rapidfuzz>=3.9",
+  # DOCX export (spec 2026-07-20 §4) — pure Python, no native deps, works in
+  # the future bundled desktop app. Backend-side on purpose: one source of
+  # truth for the document, testable with pytest, identical output in Tauri.
+  "python-docx>=1.1",
 ]
 
 [project.optional-dependencies]

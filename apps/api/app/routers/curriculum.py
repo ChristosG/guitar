@@ -13,10 +13,11 @@ per-router dependency — so there is nothing to declare in this file. One tutor
 one password; there is still no authorization model, because there is nobody to
 authorize against anybody else.
 """
+from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -25,6 +26,7 @@ from app.curriculum import from_chat as from_chat_service
 from app.curriculum import interview as interview_service
 from app.curriculum.assign import clone_content_subtree
 from app.curriculum.draft import draft_progress
+from app.curriculum.export_docx import build_curriculum_docx, filename_for
 from app.curriculum.outline import TIER_GAP
 from app.curriculum.refine import refine_block, undo_refine
 from app.curriculum.revise import validate_ops
@@ -363,6 +365,22 @@ def _get_course_root_or_404(db: Session, root_id: UUID) -> Block:
     if block is None or block.kind != "course" or block.parent_id is not None:
         raise HTTPException(status_code=404, detail="curriculum not found")
     return block
+
+
+@router.get("/curricula/{root_id}/export.docx")
+def export_curriculum_docx(root_id: UUID, db: Session = Depends(get_db)) -> StreamingResponse:
+    course = _get_course_root_or_404(db, root_id)
+    buf = build_curriculum_docx(db, course)
+    fname = filename_for(course)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={
+            # ASCII fallback + RFC 5987 UTF-8 name, because the real name is Greek.
+            "Content-Disposition":
+                f"attachment; filename=\"curriculum.docx\"; filename*=UTF-8''{quote(fname)}",
+        },
+    )
 
 
 @router.patch("/curricula/{root_id}", response_model=CurriculumListItem)
