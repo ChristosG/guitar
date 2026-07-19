@@ -18,12 +18,15 @@ interface DraftProgressBarProps {
    * "4 of 4 ready", there is no previous count to be greater than, so no refetch
    * fires — and every row still reads "queued" under a full progress bar. */
   readyInTree: number;
-  /** How many lessons the rendered tree shows as `queued`. Its ONE job is to be an
-   * effect dependency: when it RISES (an AI-added module landed, a lesson was
-   * added, Deepen re-queued one), a poll loop that had parked itself on `done`
-   * re-arms — every enqueue path revives the bar through the same signal, the
-   * tree itself. */
+  /** How many lessons the rendered tree shows as `queued`/`drafting`/`failed`.
+   * Their ONE job is to be effect dependencies: when any of them CHANGES (an
+   * AI-added module landed, a lesson was added, Deepen re-queued one, Resume
+   * flipped `failed` back to `queued`), a poll loop that had parked itself on
+   * `done` re-arms — every enqueue path revives the bar through the same
+   * signal, the tree itself. */
   queuedInTree: number;
+  draftingInTree: number;
+  failedInTree: number;
   /** Called when a poll shows more lessons finished than the board is showing — it
    * refetches the tree. Returns whether the refetch actually landed: the poll only
    * advances its baseline on success, so a refetch that failed is retried on the
@@ -53,30 +56,59 @@ interface DraftProgressBarProps {
  * outline after the fact, and a lesson he wants deepened: all the same state, all
  * one button.
  */
-export function DraftProgressBar({ rootId, readyInTree, queuedInTree, onLessonReady }: DraftProgressBarProps) {
+export function DraftProgressBar({
+  rootId,
+  readyInTree,
+  queuedInTree,
+  draftingInTree,
+  failedInTree,
+  onLessonReady,
+}: DraftProgressBarProps) {
   const t = useTranslations("curricula.progress");
 
   const [progress, setProgress] = useState<DraftProgress | null>(null);
   const [resuming, setResuming] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // The last `ready` count we told the board about. A ref, not state: it must not
+  // The last counts we told the board about. A ref, not state: it must not
   // itself trigger a render, and it must survive the poll's closure without
   // re-arming the effect. It starts at what the BOARD is showing, not at zero.
-  const lastReady = useRef<number | null>(null);
+  const lastSeen = useRef<{ ready: number; queued: number; drafting: number; failed: number } | null>(
+    null,
+  );
 
   const poll = useCallback(async () => {
     try {
       const next = await getCurriculumProgress(rootId);
       setProgress(next);
       setError(null);
-      const shown = lastReady.current ?? readyInTree;
+      const shown = lastSeen.current ?? {
+        ready: readyInTree,
+        queued: queuedInTree,
+        drafting: draftingInTree,
+        failed: failedInTree,
+      };
+      // `ready` rising is the ordinary "a lesson finished" case. But it is not
+      // the ONLY thing that happens to a lesson while the board is open: Resume
+      // flips a `failed` lesson back to `queued`, a worker then picks it up
+      // into `drafting` — neither one moves `ready`, so a refetch gated on
+      // ONLY `ready > shown` left those two transitions invisible (and, worse,
+      // left the poll loop with nothing to notice at all once it had already
+      // parked on a prior `done`). Any change in any of the four counts is
+      // real news the board is not showing yet.
+      const changed =
+        next.ready > shown.ready ||
+        next.queued !== shown.queued ||
+        next.drafting !== shown.drafting ||
+        next.failed !== shown.failed;
       // The baseline only advances when the board ACTUALLY refetched. A failed
       // refetch keeps the old baseline, so the very next tick tries again — and
       // `synced=false` below refuses to park, so there IS a next tick even when
       // this poll also said `done`.
       let synced = true;
-      if (next.ready > shown) synced = (await onLessonReady()) !== false;
-      if (synced) lastReady.current = next.ready;
+      if (changed) synced = (await onLessonReady()) !== false;
+      if (synced) {
+        lastSeen.current = { ready: next.ready, queued: next.queued, drafting: next.drafting, failed: next.failed };
+      }
       return { next, synced };
     } catch (err) {
       // A failed poll is not a failed draft. Say nothing loud, keep polling — the
@@ -85,7 +117,7 @@ export function DraftProgressBar({ rootId, readyInTree, queuedInTree, onLessonRe
       setError(err instanceof ApiError ? err.detail : t("pollError"));
       return null;
     }
-  }, [rootId, readyInTree, onLessonReady, t]);
+  }, [rootId, readyInTree, queuedInTree, draftingInTree, failedInTree, onLessonReady, t]);
 
   useEffect(() => {
     let alive = true;
@@ -104,12 +136,13 @@ export function DraftProgressBar({ rootId, readyInTree, queuedInTree, onLessonRe
       alive = false;
       if (timer) clearTimeout(timer);
     };
-    // `resuming` and `queuedInTree` are in the deps ON PURPOSE: pressing Resume,
-    // an AI-generated module landing, a hand-added lesson, or a Deepen click all
-    // put lessons back in flight after this loop may have parked itself on
-    // `done` — each one changes a dep and re-arms the poll. Without them the bar
-    // would sit frozen while the lessons were actually being written.
-  }, [poll, resuming, queuedInTree]);
+    // `resuming` and the three in-flight counts are in the deps ON PURPOSE:
+    // pressing Resume, an AI-generated module landing, a hand-added lesson, or
+    // a Deepen click all put lessons back in flight after this loop may have
+    // parked itself on `done` — each one changes a dep and re-arms the poll.
+    // Without them the bar would sit frozen while the lessons were actually
+    // being written.
+  }, [poll, resuming, queuedInTree, draftingInTree, failedInTree]);
 
   if (!progress || progress.total === 0) return null;
 
@@ -122,6 +155,13 @@ export function DraftProgressBar({ rootId, readyInTree, queuedInTree, onLessonRe
     setError(null);
     try {
       await resumeCurriculumDraft(rootId);
+      // The requeue (failed/queued -> queued) is a DB write inside the request
+      // handler itself — by the time the 202 response lands, it has already
+      // happened server-side. Refetch right away rather than waiting for the
+      // next 2s poll tick: this is what makes the board show "queued" the
+      // moment Resume is clicked (no reload), and the fresh tree's rising
+      // `queued` count is what re-arms the poll loop above via its own deps.
+      await onLessonReady();
     } catch (err) {
       setError(err instanceof ApiError ? err.detail : t("resumeError"));
     } finally {

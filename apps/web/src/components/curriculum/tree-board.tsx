@@ -155,7 +155,11 @@ export function TreeBoard({ root, locale, onRootDeleted }: TreeBoardProps) {
   }
 
   // What the board is ALREADY showing — the progress bar's baseline (ready) and
-  // its wake-up signal (queued: a rise re-arms a parked poll loop).
+  // its wake-up signals (queued/drafting/failed: ANY of these changing re-arms
+  // a parked poll loop — see `draft-progress-bar.tsx`'s own docstring on why
+  // `ready` rising alone used to be the only trigger, and why that left a
+  // Resume click (failed -> queued, never touching `ready`) invisible until a
+  // reload).
   const readyInTree = tree.children.reduce(
     (n, module) =>
       n + module.children.filter((lesson) => lesson.meta?.draft_status === "ready").length,
@@ -164,6 +168,16 @@ export function TreeBoard({ root, locale, onRootDeleted }: TreeBoardProps) {
   const queuedInTree = tree.children.reduce(
     (n, module) =>
       n + module.children.filter((lesson) => lesson.meta?.draft_status === "queued").length,
+    0,
+  );
+  const draftingInTree = tree.children.reduce(
+    (n, module) =>
+      n + module.children.filter((lesson) => lesson.meta?.draft_status === "drafting").length,
+    0,
+  );
+  const failedInTree = tree.children.reduce(
+    (n, module) =>
+      n + module.children.filter((lesson) => lesson.meta?.draft_status === "failed").length,
     0,
   );
 
@@ -242,6 +256,8 @@ export function TreeBoard({ root, locale, onRootDeleted }: TreeBoardProps) {
           rootId={tree.id}
           readyInTree={readyInTree}
           queuedInTree={queuedInTree}
+          draftingInTree={draftingInTree}
+          failedInTree={failedInTree}
           onLessonReady={refresh}
         />
       </header>
