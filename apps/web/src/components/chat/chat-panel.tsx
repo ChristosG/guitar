@@ -472,25 +472,31 @@ export function ChatPanel({ sessionId, rootId, blockTitles, onJobDone }: ChatPan
         </div>
       )}
 
-      {composerError && (
-        <p role="alert" data-testid="chat-error" className="text-sm text-destructive">
-          {composerError}
-        </p>
-      )}
+      {/* The composer, visually separated from the transcript above it by its
+          own top border — a clean, deliberate seam rather than the input just
+          trailing off the last bubble. */}
+      <div className="flex flex-col gap-2 border-t border-border pt-3">
+        {composerError && (
+          <p role="alert" data-testid="chat-error" className="text-sm text-destructive">
+            {composerError}
+          </p>
+        )}
 
-      <form onSubmit={handleSend} className="flex gap-2">
-        <Input
-          data-testid="chat-input"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          placeholder={t("placeholder")}
-          disabled={composerDisabled}
-        />
-        <Button type="submit" disabled={composerDisabled || !draft.trim()} data-testid="chat-send">
-          {sending ? <Loader2 className="animate-spin" /> : <Send />}
-          {t("send")}
-        </Button>
-      </form>
+        <form onSubmit={handleSend} className="flex gap-2">
+          <Input
+            data-testid="chat-input"
+            className="h-9"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder={t("placeholder")}
+            disabled={composerDisabled}
+          />
+          <Button type="submit" size="lg" disabled={composerDisabled || !draft.trim()} data-testid="chat-send">
+            {sending ? <Loader2 className="animate-spin" /> : <Send />}
+            {t("send")}
+          </Button>
+        </form>
+      </div>
     </div>
   );
 }

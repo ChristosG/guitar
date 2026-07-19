@@ -737,6 +737,8 @@
     "sessionError": "Could not start a chat session.",
     "error": "Could not send that message.",
     "streamInterrupted": "The connection dropped mid-answer. If the answer isn't shown above, press Send to try again.",
+    "roleUser": "You",
+    "roleAssistant": "Copilot",
     "addToCurriculum": {
       "trigger": "Add to curriculum",
       "heading": "Add this answer to a curriculum",

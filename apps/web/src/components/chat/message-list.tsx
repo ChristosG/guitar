@@ -3,6 +3,7 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { BookOpen } from "lucide-react";
 import { useLocale, useTranslations } from "next-intl";
+import type { AnchorHTMLAttributes } from "react";
 import { AddToCurriculumDialog } from "@/components/chat/add-to-curriculum-dialog";
 import type { ChatCitation } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -38,6 +39,21 @@ interface MessageListProps {
   sessionId?: string;
 }
 
+/** `react-markdown`'s default `<a>` renderer carries neither `target` nor
+ * `rel` — harmless for same-origin navigation, but a model-authored link can
+ * point anywhere, and a plain same-tab `<a href>` with no `rel` hands the
+ * destination page a live `window.opener` back into this app (the classic
+ * `rel="noopener noreferrer"` gap). Every markdown-rendered link goes through
+ * this component instead of the library default so that never happens,
+ * regardless of what URL the model wrote. */
+function MarkdownLink({ href, children, ...rest }: AnchorHTMLAttributes<HTMLAnchorElement>) {
+  return (
+    <a href={href} target="_blank" rel="noopener noreferrer" {...rest}>
+      {children}
+    </a>
+  );
+}
+
 /** Markdown renderer for an assistant bubble (Plan 11 Task 3, C4 — Chris's
  * exact complaint: "no markdown viewer" was leaving a well-structured answer
  * as an unreadable wall of asterisks). `remark-gfm` adds tables/strikethrough/
@@ -61,8 +77,10 @@ function MarkdownContent({ text }: { text: string }) {
       className={cn(
         "flex flex-col gap-2 text-sm",
         "[&_h1]:text-base [&_h1]:font-semibold [&_h2]:text-base [&_h2]:font-semibold [&_h3]:font-semibold",
+        "[&_h1]:mt-1 [&_h2]:mt-1 [&_h3]:mt-1 first:[&_h1]:mt-0 first:[&_h2]:mt-0 first:[&_h3]:mt-0",
         "[&_ul]:list-disc [&_ol]:list-decimal [&_ul]:pl-5 [&_ol]:pl-5 [&_li]:leading-snug",
         "[&_p]:leading-relaxed [&_strong]:font-semibold",
+        "[&_a]:font-medium [&_a]:text-primary [&_a]:underline [&_a]:underline-offset-2 hover:[&_a]:opacity-80",
         "[&_code]:rounded [&_code]:bg-background/60 [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-xs",
         "[&_pre]:overflow-x-auto [&_pre]:rounded-lg [&_pre]:bg-background/60 [&_pre]:p-2 [&_pre]:text-xs",
         "[&_pre_code]:bg-transparent [&_pre_code]:p-0",
@@ -71,7 +89,9 @@ function MarkdownContent({ text }: { text: string }) {
         "[&_blockquote]:border-l-2 [&_blockquote]:border-border [&_blockquote]:pl-2 [&_blockquote]:text-muted-foreground",
       )}
     >
-      <Markdown remarkPlugins={[remarkGfm]}>{text}</Markdown>
+      <Markdown remarkPlugins={[remarkGfm]} components={{ a: MarkdownLink }}>
+        {text}
+      </Markdown>
     </div>
   );
 }
@@ -129,7 +149,7 @@ export function MessageList({ messages, sessionId }: MessageListProps) {
   }
 
   return (
-    <div className="flex flex-col gap-3" data-testid="message-list">
+    <div className="flex flex-col gap-4" data-testid="message-list">
       {messages.map((message, index) => (
         <div
           key={message.id}
@@ -137,10 +157,25 @@ export function MessageList({ messages, sessionId }: MessageListProps) {
           data-role={message.role}
           className={cn("flex", message.role === "user" ? "justify-end" : "justify-start")}
         >
-          <div className={cn("flex max-w-[80%] flex-col", message.role === "user" ? "items-end" : "items-start")}>
+          <div
+            className={cn(
+              "flex flex-col gap-1",
+              message.role === "user" ? "max-w-[75%] items-end" : "max-w-[88%] items-start",
+            )}
+          >
+            {/* A subtle role indicator (Task 2) — a small muted caption above
+                each bubble. Alignment + bubble color already say "who said
+                this" at a glance; this just names it explicitly for anyone
+                scanning quickly, without any avatar/icon weight. */}
+            <span
+              data-testid="chat-message-role"
+              className="px-1 text-[11px] font-medium tracking-wide text-muted-foreground/70 uppercase"
+            >
+              {message.role === "user" ? t("roleUser") : t("roleAssistant")}
+            </span>
             <div
               className={cn(
-                "rounded-2xl px-3.5 py-2 text-sm",
+                "rounded-2xl px-4 py-2.5 text-sm shadow-sm",
                 message.role === "user"
                   ? "whitespace-pre-wrap bg-primary text-primary-foreground"
                   : "bg-muted text-foreground",
