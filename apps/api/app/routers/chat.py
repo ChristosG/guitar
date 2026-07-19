@@ -40,6 +40,7 @@ from app.i18n import normalize_locale
 from app.jobs.curriculum_revise import run_curriculum_revise_job
 from app.jobs.runner import run_curriculum_job, run_lesson_job
 from app.llm.errors import LLMError
+from app.llm.factory import get_provider
 from app.models.block import Block
 from app.models.chat import ApprovalRequest, ChatSession, Message
 from app.models.generation_job import GenerationJob
@@ -54,6 +55,7 @@ from app.schemas.chat import (
     ChatTurnOut,
     MessageOut,
     PendingApprovalOut,
+    SuggestionsOut,
 )
 
 log = logging.getLogger(__name__)
@@ -84,6 +86,30 @@ _VISIBLE_ROLES = ("user", "assistant")
 # sidebar-width truncation; the column holds 200.
 _TITLE_MAX = 60
 _PREVIEW_MAX = 120
+
+# Suggestion chips (chat overhaul, Piece B): how many of the most-recent
+# VISIBLE turns feed the one guided_json call — a handful of exchanges is
+# enough context for "what's the tutor's next move", and keeping this small
+# keeps the call cheap (the whole point of a call that only ever produces up
+# to 3 short strings, fired non-blocking after the real answer already
+# rendered). `_SUGGESTIONS_CAP` mirrors the frontend contract ("2-3 chips");
+# both the prompt AND this post-hoc slice enforce it, because `guided_json`'s
+# structured output does NOT enforce `maxItems` (see `llm/schema.py`'s own
+# module docstring on why array-length constraints are stripped before the
+# call, not trusted after it).
+_SUGGESTIONS_HISTORY = 8
+_SUGGESTIONS_CAP = 3
+
+SUGGESTIONS_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "suggestions": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+    },
+    "required": ["suggestions"],
+}
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -260,6 +286,63 @@ def _inject_curriculum_context(db: Session, session: ChatSession, wire: list[dic
             wire[i] = {**wire[i], "content": (wire[i].get("content") or "") + ctx}
             break
     return wire
+
+
+def _suggestions_system_prompt(db: Session, session: ChatSession) -> str:
+    """SYSTEM PROMPT for the suggestion-chips call (chat overhaul, Piece B) —
+    constrained HARD, on purpose. `claude -p` cannot reliably emit inline
+    structured suggestions inside free-form prose (the solidity decision this
+    endpoint exists to satisfy), so this is a SEPARATE one-shot classification
+    call, and the one thing worse than no chip is a chip that reads like
+    filler or asks for something the app cannot do — "the composer is always
+    primary, chips are optional shortcuts, never a cage" only holds if every
+    chip is a REAL, DOABLE action.
+
+    Curriculum-aware when the session is bound to one (`ChatSession.root_id`,
+    same field `_inject_curriculum_context` reads): the revise drawer gets
+    suggestions scoped to THAT course, not generic guitar chat — mirrors that
+    function's own "only inject when bound" gate, though this is a much
+    lighter touch (a title, not the whole compact tree) since this call only
+    needs to steer wording, not ground an actual revision plan.
+    """
+    lang = "Greek" if session.locale == "el" else "English"
+    lines = [
+        f"You read a tutoring-copilot conversation and suggest the tutor's "
+        f"NEXT MOVE, in {lang}.",
+        "Propose UP TO 3 short, concrete, DOABLE next actions: a specific "
+        "question about this exact topic, or — only if a curriculum is bound "
+        "to this conversation (see below) — a specific revision this app can "
+        "actually carry out (add/remove/reorder a lesson or module, change "
+        "its focus, adjust its length or level).",
+        "Each suggestion is a short imperative sentence, at most 8 words, "
+        "written as if the TUTOR is about to type it himself.",
+        'NEVER vague filler ("tell me more", "explain further"). NEVER '
+        "propose an action the app cannot perform. If nothing concrete "
+        "applies, return an empty list — an empty list is a correct answer, "
+        "not a failure.",
+        "Return ONLY the JSON object the schema describes.",
+    ]
+    if session.root_id:
+        course = db.get(Block, session.root_id)
+        if course is not None and course.kind == "course":
+            lines.append(
+                f'This conversation is about revising the curriculum "'
+                f'{course.title}" — every suggestion must fit revising or '
+                f"asking about THIS curriculum specifically, not a generic "
+                f"guitar topic."
+            )
+    return "\n".join(lines)
+
+
+def _suggestions_transcript(messages: list[Message]) -> str:
+    """The last `_SUGGESTIONS_HISTORY` VISIBLE turns, as plain `ROLE:
+    content` lines — NOT the OpenAI wire shape `messages_to_wire` builds.
+    This is a single one-shot classification prompt the model never replies
+    to in character, so a flat transcript is honestly what it is, rather than
+    dressing it up as a conversation this call will continue.
+    """
+    recent = messages[-_SUGGESTIONS_HISTORY:]
+    return "\n".join(f"{m.role.upper()}: {m.content}" for m in recent)
 
 
 def _validate_pending_revision(db: Session, pending: dict) -> None:
@@ -771,3 +854,68 @@ def resolve_approval(
     wire_with_answer = wire + [tool_msg]
     result = run_agent_turn(db, wire_with_answer, locale=session.locale)
     return _respond_to_turn(db, session_id, wire_with_answer, result)
+
+
+@router.post("/chat/{session_id}/suggestions", response_model=SuggestionsOut)
+def get_chat_suggestions(session_id: UUID, db: Session = Depends(get_db)) -> SuggestionsOut:
+    """Suggestion CHIPS (chat overhaul, Piece B) — "next move" shortcuts the
+    tutor can click instead of typing. A SEPARATE, lightweight call from the
+    turn itself, fired by the frontend AFTER an assistant answer already
+    rendered — this endpoint is never on the critical path of a turn, and
+    nothing here may ever make the tutor wait longer for his answer.
+
+    WHY A SEPARATE ENDPOINT, NOT PARSED OUT OF THE ANSWER. `claude -p` cannot
+    reliably emit inline structured suggestions inside free-form prose — the
+    tutor was emphatic this must be SOLID, not perplexing, so rather than
+    regex/parse for a maybe-there sidecar block in the model's own answer,
+    this runs one independent `guided_json` call with a schema the provider
+    enforces server-side (`SUGGESTIONS_SCHEMA`).
+
+    GRACEFUL ON EVERY FAILURE MODE. A `guided_json` call can raise (rate
+    limit, timeout, malformed/truncated JSON — the whole `LLMError`/
+    `GuidedJSONError` taxonomy) or return something not usable (missing key,
+    wrong type). Either way this returns `{"suggestions": []}`, never a
+    4xx/5xx — the frontend's contract is "chips appear a moment later, or
+    they don't", and a suggestions failure must never surface as an error the
+    tutor has to react to.
+
+    NOTHING TO SUGGEST FROM YET (`visible` empty) short-circuits before ever
+    calling the provider — a session with no user/assistant turns has no
+    "next move" to suggest, and there is no reason to spend a call finding
+    that out.
+    """
+    session = _get_session_or_404(db, session_id)
+    visible = [m for m in _ordered_messages(db, session_id) if m.role in _VISIBLE_ROLES and m.content]
+    if not visible:
+        return SuggestionsOut(suggestions=[])
+
+    system = _suggestions_system_prompt(db, session)
+    transcript = _suggestions_transcript(visible)
+    try:
+        # `role="chat"` (medium effort, no thinking) — cheap and fast is the
+        # whole point of a call that only ever produces up to 3 short
+        # strings; this is not the ReAct loop and touches no tool.
+        data = get_provider().guided_json(
+            [
+                {"role": "system", "content": system},
+                {"role": "user", "content": transcript},
+            ],
+            SUGGESTIONS_SCHEMA,
+            role="chat",
+        )
+    except Exception:
+        log.warning(
+            "chat suggestions: guided_json call failed (session_id=%s) — "
+            "degrading to no chips", session_id, exc_info=True,
+        )
+        return SuggestionsOut(suggestions=[])
+
+    raw = data.get("suggestions") if isinstance(data, dict) else None
+    if not isinstance(raw, list):
+        return SuggestionsOut(suggestions=[])
+    # Post-hoc cleanup, not trust: structured output does not enforce
+    # `maxItems`/non-empty strings (see `SUGGESTIONS_SCHEMA`'s own comment),
+    # so a stray non-string entry or a blank/whitespace-only suggestion is
+    # dropped here rather than rendered as an empty chip.
+    cleaned = [s.strip() for s in raw if isinstance(s, str) and s.strip()]
+    return SuggestionsOut(suggestions=cleaned[:_SUGGESTIONS_CAP])

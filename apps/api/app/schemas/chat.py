@@ -136,3 +136,14 @@ class PendingApprovalOut(BaseModel):
     tool_args: dict
     status: str
     created_at: datetime
+
+
+class SuggestionsOut(BaseModel):
+    """`POST /chat/{session_id}/suggestions`'s response (chat overhaul, Piece
+    B "next move" chips). 0-3 short, concrete, DOABLE next actions — never a
+    failure surface: a provider error or an unusable reply both degrade to an
+    empty list here (see `routers/chat.py`'s `get_chat_suggestions`), so the
+    frontend's non-blocking fetch never needs to distinguish "nothing to
+    suggest" from "the call failed" — both just mean no chips render.
+    """
+    suggestions: list[str] = []
