@@ -82,6 +82,16 @@ def build_curriculum_docx(db: Session, course: Block) -> io.BytesIO:
                 for chunk in (segment.body or "").split("\n\n"):
                     if chunk.strip():
                         doc.add_paragraph(chunk.strip())
+            # A REDRAFT-IN-PROGRESS OR FAILED REDRAFT still has its OLD segments —
+            # `redraft_curriculum`/`deepen_lesson` requeue the lesson but never
+            # delete its prior content, and a worker mid-write hasn't replaced it
+            # yet either. Without this, the export above renders that stale prose
+            # with no marker at all, which reads as "this is the finished lesson"
+            # when it is really either not-yet-rewritten or a redraft the model
+            # never finished. Appended AFTER the segments (not instead of them) —
+            # the tutor still gets whatever prose exists, just honestly labelled.
+            if (lesson.meta or {}).get("draft_status") in ("failed", "drafting"):
+                doc.add_paragraph(_UNDRAFTED_NOTE)
 
     buf = io.BytesIO()
     doc.save(buf)

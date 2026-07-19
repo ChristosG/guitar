@@ -48,6 +48,22 @@ def test_rename_rejects_empty_title_and_non_roots():
         db.close()
 
 
+def test_rename_rejects_whitespace_only_title():
+    """The stripped title is validated BEFORE it is assigned to `course.title`
+    (review fix) — a whitespace-only title must 422 same as an empty one, and
+    must never land on the row even transiently."""
+    db = SessionLocal()
+    try:
+        course, _, _ = _mk_course(db)
+        original = course.title
+        r = client.patch(f"/curricula/{course.id}", json={"title": "   "})
+        assert r.status_code == 422
+        db.expire_all()
+        assert db.get(Block, course.id).title == original
+    finally:
+        db.close()
+
+
 def test_delete_curriculum_cascades_and_cleans_bound_rows():
     db = SessionLocal()
     try:
@@ -83,16 +99,66 @@ def test_delete_curriculum_cascades_and_cleans_bound_rows():
         db.close()
 
 
-def test_delete_refuses_while_drafting():
+def test_delete_refuses_while_a_job_is_active():
+    """409 when a `pending`/`running` `GenerationJob` actually references this
+    root — via `params["root_id"]`, which is how `curriculum_draft` (Resume/
+    redraft/deepen)/`curriculum_revise`/`module_generate` all carry it for
+    their entire active lifetime (`result_root_id` is only set at finalize,
+    i.e. once the job is no longer active — see the route's own comment)."""
+    db = SessionLocal()
+    try:
+        course, _, _ = _mk_course(db)
+        job = GenerationJob(
+            kind="curriculum_draft", status="running", params={"root_id": str(course.id)},
+        )
+        db.add(job); db.commit()
+        r = client.delete(f"/curricula/{course.id}")
+        assert r.status_code == 409
+        db.expire_all()
+        assert db.get(Block, course.id) is not None
+    finally:
+        db.close()
+
+
+def test_delete_allows_stuck_drafting_marker_with_no_active_job():
+    """A lesson stuck at `draft_status == 'drafting'` with NO active job behind
+    it (a stale marker from a past worker crash, e.g. a sweep that never ran)
+    must NOT make deletion permanently impossible — this is the behavior
+    change from the old lesson-only check."""
     db = SessionLocal()
     try:
         course, _, lesson = _mk_course(db)
         lesson.meta = {**(lesson.meta or {}), "draft_status": "drafting"}
         db.commit()
-        r = client.delete(f"/curricula/{course.id}")
-        assert r.status_code == 409
+        course_id = course.id  # captured pre-delete — see the cascade test's own
+        # comment on why touching a PK attribute post-delete raises ObjectDeletedError.
+        r = client.delete(f"/curricula/{course_id}")
+        assert r.status_code == 204
         db.expire_all()
-        assert db.get(Block, course.id) is not None
+        assert db.get(Block, course_id) is None
+    finally:
+        db.close()
+
+
+def test_delete_nulls_generation_job_result_root_id_pointers():
+    """Spec §3: a FINISHED job that points `result_root_id` at this root (e.g.
+    the chat job-card the tutor deep-links from) must not keep pointing at a
+    now-deleted curriculum after this route runs — 404 city for a click on a
+    card that looks perfectly fine."""
+    db = SessionLocal()
+    try:
+        course, _, _ = _mk_course(db)
+        job = GenerationJob(
+            kind="curriculum_draft", status="succeeded",
+            params={"root_id": str(course.id)}, result_root_id=course.id,
+        )
+        db.add(job); db.commit()
+        job_id = job.id
+
+        r = client.delete(f"/curricula/{course.id}")
+        assert r.status_code == 204
+        db.expire_all()
+        assert db.get(GenerationJob, job_id).result_root_id is None
     finally:
         db.close()
 

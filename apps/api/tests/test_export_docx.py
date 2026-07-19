@@ -69,6 +69,60 @@ def test_export_docx_structure_and_greek_content():
         db.close()
 
 
+def test_export_docx_marks_failed_and_drafting_lessons_with_stale_segments():
+    """A lesson that has OLD segments (from a prior successful draft) but is
+    now `failed` or `drafting` a redraft must still render the undrafted
+    note — after its stale content, not instead of it — so the export never
+    reads as a clean finished lesson when the board itself shows a spinner
+    or a retry button (review fix: this used to only fire for zero-segment
+    lessons)."""
+    db = SessionLocal()
+    try:
+        course = _mk_tree(db)
+        m1 = next(b for b in course.children if b.kind == "module")
+
+        failed = Block(kind="lesson", title="Παλιό μάθημα, απέτυχε το ξαναγράψιμο",
+                       parent_id=m1.id, order=2, plane="content",
+                       meta={"draft_status": "failed", "error": "boom"})
+        db.add(failed); db.flush()
+        db.add(Block(kind="segment", title="Θεωρία", parent_id=failed.id, order=0,
+                     plane="content", body="Παλιό, ίσως ξεπερασμένο κείμενο."))
+
+        drafting = Block(kind="lesson", title="Ξαναγράφεται τώρα",
+                         parent_id=m1.id, order=3, plane="content",
+                         meta={"draft_status": "drafting"})
+        db.add(drafting); db.flush()
+        db.add(Block(kind="segment", title="Θεωρία", parent_id=drafting.id, order=0,
+                     plane="content", body="Ακόμα παλιότερο κείμενο."))
+        db.commit()
+
+        r = client.get(f"/curricula/{course.id}/export.docx")
+        assert r.status_code == 200
+        doc = Document(io.BytesIO(r.content))
+        texts = [p.text for p in doc.paragraphs]
+        headings = [(p.style.name, p.text) for p in doc.paragraphs if p.style.name.startswith("Heading")]
+
+        # the stale prose is still there (not silently dropped)...
+        assert "Παλιό, ίσως ξεπερασμένο κείμενο." in texts
+        assert "Ακόμα παλιότερο κείμενο." in texts
+        # ...but the undrafted note follows it for BOTH lessons — plus the
+        # THIRD occurrence `_mk_tree`'s own zero-segment "queued" lesson (l2)
+        # already contributes (the pre-existing zero-segments case, untouched
+        # by this fix).
+        undrafted_note = "— Το μάθημα δεν έχει συνταχθεί ακόμα. —"
+        assert texts.count(undrafted_note) == 3
+
+        stale_idx = texts.index("Παλιό, ίσως ξεπερασμένο κείμενο.")
+        note_indices = [i for i, t in enumerate(texts) if t == undrafted_note]
+        assert any(i > stale_idx for i in note_indices)
+
+        # the queued lesson (zero segments, unrelated to this fix) still gets
+        # exactly the one note it always did.
+        assert any("Ακόμα γράφεται" in t for _, t in headings)
+    finally:
+        db.close()
+
+
 def test_export_docx_404_for_non_roots():
     db = SessionLocal()
     try:

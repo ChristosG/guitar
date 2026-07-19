@@ -18,7 +18,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.curriculum import edit as edit_service
@@ -360,7 +360,20 @@ def _get_course_root_or_404(db: Session, root_id: UUID) -> Block:
     """The management routes below act on CURRICULUM ROOTS only — a module or
     lesson id must 404 here (the generic /blocks routes handle those), so a
     frontend bug can never cascade-delete a whole course through this door
-    while claiming to remove one lesson."""
+    while claiming to remove one lesson.
+
+    `is_template` is deliberately NOT checked here: the spec says "template
+    course root", but `clone_content_subtree` (`POST /curricula/{root_id}
+    /assign`) stamps its per-student clone with `kind="course"`,
+    `parent_id=None` AND `is_template=False` — so a delivery clone's root
+    passes every check this function does make. That is accepted as
+    harmless rather than tightened: nothing in the UI today hands one of
+    THOSE root ids back to a `/curricula/...` management route (rename/
+    delete/export/draft/revise all start from the template board), so this
+    is a door that is technically open but never actually reachable.
+    Narrowing it (an explicit `is_template` check) is left for whenever a
+    delivery-side manage surface actually exists to need it.
+    """
     block = db.get(Block, root_id)
     if block is None or block.kind != "course" or block.parent_id is not None:
         raise HTTPException(status_code=404, detail="curriculum not found")
@@ -388,9 +401,10 @@ def rename_curriculum(
     root_id: UUID, payload: CurriculumRenameRequest, db: Session = Depends(get_db)
 ) -> CurriculumListItem:
     course = _get_course_root_or_404(db, root_id)
-    course.title = payload.title.strip()
-    if not course.title:
+    stripped = payload.title.strip()
+    if not stripped:
         raise HTTPException(status_code=422, detail="title cannot be empty")
+    course.title = stripped
     db.commit()
     return CurriculumListItem.model_validate(course, from_attributes=True)
 
@@ -399,17 +413,38 @@ def rename_curriculum(
 def delete_curriculum(root_id: UUID, db: Session = Depends(get_db)) -> None:
     course = _get_course_root_or_404(db, root_id)
 
-    # Refuse while lessons are actively being written: deleting the tree from
-    # under the draft worker strands the job mid-write (it re-reads its lesson
-    # block between sections). "queued" alone doesn't block — a freshly
-    # materialized-but-never-drafted course must be deletable.
-    drafting = db.scalars(
-        select(Block).where(
-            Block.parent_id.in_(select(Block.id).where(Block.parent_id == course.id)),
-            Block.kind == "lesson",
+    # Refuse while a job is ACTIVELY writing this curriculum: deleting the tree
+    # from under the draft worker strands the job mid-write (it re-reads its
+    # lesson block between sections). This used to check for a lesson stuck at
+    # `draft_status == "drafting"` instead — which looked equivalent but isn't:
+    # a worker crash (OOM, container restart) can leave a lesson at "drafting"
+    # forever with nothing left running to finish it (`jobs/sweep.py` is what's
+    # supposed to flip that back to "queued" at boot, but a crash-before-sweep
+    # window, or a sweep that itself never ran, leaves the marker stuck). A
+    # stale marker like that must never make deletion PERMANENTLY impossible —
+    # so the real check is "is a job actually in flight", not "does a lesson
+    # merely claim to be".
+    #
+    # `curriculum_draft`/`curriculum_revise`/`module_generate` all thread the
+    # root id through `params["root_id"]` (see `resume_curriculum_draft`,
+    # `redraft_curriculum`, `revise_curriculum`, `generate_curriculum_module`,
+    # and the interview's own confirm branch above) for their entire
+    # pending/running lifetime — `result_root_id` is only populated at
+    # finalize (`jobs/curriculum_draft.py`'s own comment: "set on every draft
+    # job that reaches its finalize step"), i.e. exactly when the job is no
+    # longer active. So `params["root_id"]` is the field that actually tells
+    # us a job is in flight; `result_root_id` is checked too, defensively, in
+    # case some future job kind ever sets it earlier.
+    active_job = db.scalars(
+        select(GenerationJob).where(
+            GenerationJob.status.in_(("pending", "running")),
+            or_(
+                GenerationJob.result_root_id == course.id,
+                GenerationJob.params["root_id"].as_string() == str(course.id),
+            ),
         )
-    ).all()
-    if any((b.meta or {}).get("draft_status") == "drafting" for b in drafting):
+    ).first()
+    if active_job is not None:
         raise HTTPException(
             status_code=409,
             detail="lessons are still being drafted — wait for the draft to finish before deleting",
@@ -437,10 +472,30 @@ def delete_curriculum(root_id: UUID, db: Session = Depends(get_db)) -> None:
     db.query(CurriculumInterview).filter(CurriculumInterview.root_id == course.id).delete(
         synchronize_session=False
     )
+    # Spec §3: null out any (necessarily now-finished, since the active-job
+    # check above already refused a delete otherwise) `GenerationJob.
+    # result_root_id` pointing at this root. Those rows are an audit/poll
+    # record, not a live reference (`models/generation_job.py`'s own
+    # docstring: "a dangling id here is expected"), but chat renders job cards
+    # that deep-link `result_root_id` -> `/curricula/{root_id}` — left
+    # pointing at a deleted course, that link 404s the moment the tutor
+    # clicks it. Clearing it here means the card still shows its own history
+    # (kind, status, error) without the dead link.
+    db.query(GenerationJob).filter(GenerationJob.result_root_id == course.id).update(
+        {"result_root_id": None}, synchronize_session=False
+    )
     # `edit_service.delete_block` commits internally (the existing `DELETE
-    # /blocks` route calls it bare) — this commit runs BEFORE it so a failure
-    # in that call never leaves a half-deleted state with the bound rows gone
-    # but the course itself still on the board.
+    # /blocks` route calls it bare) — this commit runs BEFORE it so that if
+    # `delete_block` itself fails, the bound rows above (chat sessions,
+    # interviews, job pointers) are already gone but the course block is
+    # still sitting on the board. That is the recoverable half of this
+    # failure: the tutor sees the same course, minus its now-orphaned chat
+    # history, and a plain RETRY of the delete finishes the job. The reverse
+    # order — deleting the course first, cleanup second — could never be
+    # retried if cleanup then failed: the course is already gone, so the next
+    # delete attempt 404s on `_get_course_root_or_404` before it ever reaches
+    # the cleanup it still needs to run, leaving orphaned sessions/interviews/
+    # job pointers with no route left that can clean them up.
     db.commit()
 
     edit_service.delete_block(db, course.id)
