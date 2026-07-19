@@ -256,7 +256,8 @@ def source_progress(source_id: uuid.UUID, db: Session = Depends(get_db)) -> Sour
     dependencies=[Depends(require_llm_configured)],
 )
 def compile_source(
-    source_id: uuid.UUID, background: BackgroundTasks, db: Session = Depends(get_db)
+    source_id: uuid.UUID, background: BackgroundTasks, force: bool = False,
+    db: Session = Depends(get_db)
 ) -> dict:
     """Read this book into the concept canon. Poll `GET /jobs/{job_id}` for the
     outcome, exactly like OCR.
@@ -268,11 +269,20 @@ def compile_source(
     the `SELECT ... FOR UPDATE` guard in `enqueue_canon_compile`) rather than a
     second reading racing the first through the ledger.
 
+    `?force=true` IS THE EXPLICIT OVERRIDE — the tutor deliberately recompiling a
+    book (its OCR improved, or a better model is configured). It bypasses the money
+    guard and re-reads the WHOLE book, REPLACING that book's canon concepts
+    (`compile_book(..., force=True)` clears its ledger first). It is a real,
+    tutor-initiated spend — never a silent one on app update — which is why it is
+    off by default and the UI puts it behind a confirm. The in-flight guard still
+    wins: forcing while a compile is running returns the running job, not a second.
+
     Not automatic here: OCR completion auto-compiles (`runner.run_ocr_job`), so
-    this endpoint is the explicit "compile it now / retry a failed compile" button.
+    this endpoint is the explicit "compile it now / retry a failed compile /
+    recompile on purpose" button.
     """
     _source_or_404(db, source_id)
-    job_id, status = enqueue_canon_compile(db, source_id)
+    job_id, status = enqueue_canon_compile(db, source_id, force=force)
     if status == "already_compiled":
         return {"already_compiled": True}
     if status == "enqueued":

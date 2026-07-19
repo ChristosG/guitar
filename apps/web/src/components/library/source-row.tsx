@@ -200,6 +200,31 @@ export function SourceRow({
     }
   }
 
+  /** Recompile a book ALREADY in the canon, on purpose (`?force=true`). Unlike the
+   * first compile, this bypasses the server's money guard: it re-reads the WHOLE
+   * book with Claude (real subscription/model time) and REPLACES this book's canon
+   * concepts. That is a deliberate spend the tutor initiates — never a silent one —
+   * so it asks first and the modal spells out both the cost and the replacement.
+   * Same quiet-failure handling as `requestCompile`. */
+  async function requestRecompile() {
+    const ok = await confirm({
+      title: t("compile.confirmRecompileTitle", { title: source.title }),
+      body: t("compile.confirmRecompileBody"),
+      confirmLabel: t("compile.recompile"),
+    });
+    if (!ok) return;
+    setCompiling(true);
+    try {
+      await compileSource(source.id, { force: true });
+      onChanged();
+    } catch {
+      // Quiet: see requestCompile — the one actionable failure is the shell's
+      // global banner, and a recompile that could not start has changed nothing.
+    } finally {
+      setCompiling(false);
+    }
+  }
+
   return (
     <div
       data-testid={`source-${source.id}`}
@@ -365,16 +390,31 @@ export function SourceRow({
             (compile runs after a book is readable). */}
         {!reading && source.compile !== undefined && (
           source.compile?.status === "ready" ? (
-            <Link
-              href={`/${locale}/canon`}
-              data-testid={`compile-ready-${source.id}`}
-              className="mt-0.5 flex w-fit items-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
-            >
-              <Combine className="size-3 shrink-0 text-primary" />
-              {source.compile.concept_count != null
-                ? t("compile.ready", { count: source.compile.concept_count })
-                : t("compile.readyNoCount")}
-            </Link>
+            <span className="mt-0.5 flex flex-wrap items-center gap-2">
+              <Link
+                href={`/${locale}/canon`}
+                data-testid={`compile-ready-${source.id}`}
+                className="flex w-fit items-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+              >
+                <Combine className="size-3 shrink-0 text-primary" />
+                {source.compile.concept_count != null
+                  ? t("compile.ready", { count: source.compile.concept_count })
+                  : t("compile.readyNoCount")}
+              </Link>
+              {/* Recompile ON PURPOSE (force). Distinct from the first Compile: it
+                  re-spends real model time and REPLACES this book's canon concepts,
+                  so it is a small outline button behind a confirm, not a bare link. */}
+              <Button
+                type="button"
+                size="xs"
+                variant="outline"
+                disabled={compiling}
+                data-testid={`recompile-${source.id}`}
+                onClick={requestRecompile}
+              >
+                {compiling ? t("compile.compiling") : t("compile.recompile")}
+              </Button>
+            </span>
           ) : source.compile?.status === "running" ? (
             <span
               data-testid={`compile-running-${source.id}`}

@@ -567,7 +567,10 @@
       "retry": "Try again",
       "none": "Not in the canon yet",
       "start": "Read into the canon",
-      "compiling": "Starting…"
+      "compiling": "Starting…",
+      "recompile": "Recompile",
+      "confirmRecompileTitle": "Recompile “{title}”?",
+      "confirmRecompileBody": "This re-reads the WHOLE book with Claude — real time against your subscription — and REPLACES this book's current concepts in the canon with what it finds this time. Do this when the book's text has improved or you've switched to a better model. Your other books in the canon are untouched."
     }
   },
   "canon": {

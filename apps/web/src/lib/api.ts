@@ -467,15 +467,21 @@ export function searchConcepts(query: string, k = 8): Promise<ConceptSearchRespo
  * book starts no job (`already_compiled: true`); pressing it twice on an
  * un-compiled one returns the SAME job. Reading a book costs real model time
  * against the tutor's subscription, so callers confirm first and say so. Returns
- * a 202 job envelope (poll `getJob`) or `{already_compiled: true}`. */
+ * a 202 job envelope (poll `getJob`) or `{already_compiled: true}`.
+ *
+ * `opts.force` is the explicit RECOMPILE override (`?force=true`): it bypasses the
+ * money guard and re-reads the whole book, REPLACING that book's canon concepts.
+ * It always starts a job on a `ready` book — never `already_compiled` — so the
+ * caller must confirm the real spend first. */
 export interface CompileResponse {
   job_id?: string;
   already_running?: boolean;
   already_compiled?: boolean;
 }
 
-export function compileSource(id: string): Promise<CompileResponse> {
-  return request<CompileResponse>(`/knowledge/sources/${id}/compile`, { method: "POST" });
+export function compileSource(id: string, opts?: { force?: boolean }): Promise<CompileResponse> {
+  const query = opts?.force ? "?force=true" : "";
+  return request<CompileResponse>(`/knowledge/sources/${id}/compile${query}`, { method: "POST" });
 }
 
 /**

@@ -249,3 +249,54 @@ def test_pressing_compile_on_a_ready_book_starts_no_job(db, client, monkeypatch)
 
     assert resp.get("already_compiled") is True
     assert db.query(GenerationJob).filter_by(kind="canon_compile").count() == 0
+
+
+# ---------------------------------------------------------------------------
+# Force-recompile — the explicit "recompile on purpose" override
+# ---------------------------------------------------------------------------
+
+def test_force_recompiles_an_already_compiled_book_via_the_endpoint(db, client, monkeypatch):
+    """`?force=true` is the tutor deliberately recompiling: pressing it on a book
+    already in the canon DOES start a job (bypassing the money guard), where a plain
+    press returns `already_compiled` and starts nothing. The `force` flag is carried
+    onto the job so the runner re-reads rather than no-opping in `compile_book`."""
+    ran = []
+    monkeypatch.setattr("app.routers.library.run_canon_compile_job",
+                        lambda job_id: ran.append(job_id))
+    source = _book(db)
+    db.add(BookCompile(source_id=source.id, status="ready", model="claude-sonnet-5"))
+    db.commit()
+
+    resp = client.post(f"/knowledge/sources/{source.id}/compile?force=true").json()
+
+    assert "already_compiled" not in resp, "force must bypass the money guard"
+    assert resp["already_running"] is False
+    job_id = uuid.UUID(resp["job_id"])
+    job = db.get(GenerationJob, job_id)
+    assert job.kind == "canon_compile"
+    assert job.params["force"] is True            # carried through to the runner
+    assert ran == [job_id]                          # the (monkeypatched) runner was scheduled
+
+
+def test_running_a_forced_job_re_reads_a_ready_book_and_reconciles(db, monkeypatch):
+    """force=True in the job params makes the runner call compile_book(force=True),
+    which re-reads an already-ready book and REPLACES its ledger — and, because its
+    concepts changed, reconciles it back into the canon (unlike an unforced no-op on
+    a ready book, which spends nothing and does not reconcile)."""
+    source = _book(db)
+    db.add(BookCompile(source_id=source.id, status="ready", model="claude-sonnet-5",
+                       concept_count=1))
+    db.commit()
+    fake = _use(monkeypatch, _FakeProvider({"concepts": [_concept()]}))
+    reconciled = _spy_reconcile(monkeypatch)
+
+    job = GenerationJob(kind="canon_compile", status="pending",
+                        params={"source_id": str(source.id), "force": True})
+    db.add(job)
+    db.commit()
+    run_canon_compile_job(job.id)
+
+    db.expire_all()   # the runner committed on its own session
+    assert fake.calls == 1, "force must actually re-read the book"
+    assert reconciled == [True], "a forced recompile changed the canon — it must reconcile"
+    assert db.get(GenerationJob, job.id).status == "succeeded"

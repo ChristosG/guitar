@@ -229,6 +229,32 @@ test("a compiled book shows its concept count and links into the canon", async (
   await expect(line).toHaveAttribute("href", "/en/canon");
 });
 
+test("a compiled book offers a Recompile button that force-recompiles via the API", async ({ page }) => {
+  await page.route("**/knowledge/sources", (r) =>
+    r.fulfill({
+      json: [
+        {
+          id: "s1", type: "pdf", title: "Modern Guitar Rigs (Kahn)",
+          status: "ready", char_count: 120000, collection_id: null,
+          pages_total: 200, pages_ready: 200, pages_failed: 0, ocr_active: false,
+          compile: { status: "ready", concept_count: 34, compiled_at: "2026-07-17T00:00:00Z", model: "claude-sonnet-5", error: null },
+        },
+      ],
+    }),
+  );
+  let forced = false;
+  await page.route("**/knowledge/sources/s1/compile**", (r) => {
+    if (r.request().url().includes("force=true")) forced = true;
+    return r.fulfill({ status: 202, json: { job_id: "j1", already_running: false } });
+  });
+  await page.goto("/en/library");
+  await page.getByTestId("recompile-s1").click();
+  // The confirm dialog spells out the real spend AND the replacement before it fires.
+  await expect(page.getByTestId("confirm-dialog")).toBeVisible();
+  await page.getByTestId("confirm-accept").click();
+  await expect.poll(() => forced).toBe(true);
+});
+
 test("a book being read into the canon shows an honest 'reading' status", async ({ page }) => {
   await page.route("**/knowledge/sources", (r) =>
     r.fulfill({

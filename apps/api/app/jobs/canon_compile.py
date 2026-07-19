@@ -88,6 +88,14 @@ def enqueue_canon_compile(db, source_id, *, force=False) -> tuple[uuid.UUID | No
                               `compile_book`'s own, so a done book does not even
                               cost a job row and a reconcile.
 
+    `force=True` is the EXPLICIT "recompile this on purpose" press: it bypasses the
+    money guard here (a done book IS enqueued) AND is stamped onto the job's params
+    so `run_canon_compile_job` hands it to `compile_book(..., force=True)`, which
+    deletes this book's ledger and re-reads it. Without carrying it through, the
+    enqueue would start a job that `compile_book`'s OWN money guard then turns into
+    a no-op. The in-flight guard still wins over `force`: a second press while a
+    compile is running returns the running job, never a second reading.
+
     `SELECT ... FOR UPDATE` on the SOURCE row, not a bare read: FastAPI runs the
     sync handler in a threadpool, so two presses 30ms apart are genuinely
     concurrent and a check-then-insert without a lock is a race. The job row is
@@ -113,7 +121,7 @@ def enqueue_canon_compile(db, source_id, *, force=False) -> tuple[uuid.UUID | No
             return None, "already_compiled"
 
     job = GenerationJob(kind="canon_compile", status="pending",
-                        params={"source_id": str(source_id)})
+                        params={"source_id": str(source_id), "force": force})
     db.add(job)
     db.commit()
     return job.id, "enqueued"
@@ -165,12 +173,16 @@ def run_canon_compile_job(job_id: uuid.UUID) -> None:
         db.commit()
 
         source_id = uuid.UUID(job.params["source_id"])
+        force = bool(job.params.get("force", False))
         try:
             pre = db.get(BookCompile, source_id)
             already_ready = pre is not None and pre.status == "ready"
-            record = compile_book(db, source_id)     # money guard inside
-            if record.status == "ready" and not already_ready:
-                # A book was actually read this run — merge it into the canon.
+            record = compile_book(db, source_id, force=force)     # money guard inside
+            if record.status == "ready" and (force or not already_ready):
+                # A book was actually read this run — merge it into the canon. A
+                # forced recompile re-reads an already-ready book and REPLACES its
+                # claims, so it must reconcile too (its concepts changed); only an
+                # unforced no-op on a ready book skips it.
                 _reconcile_new_book(db)
         except LLMNotConfigured:
             db.rollback()
