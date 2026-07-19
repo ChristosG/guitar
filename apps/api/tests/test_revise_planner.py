@@ -8,9 +8,19 @@ Two properties are the whole point and are asserted here:
     kind, under THIS root, and an op that fails resolution is DROPPED, not
     applied (Global Constraint #2).
 
-The provider is stubbed so no live model is hit, and build_curriculum_context is
-stubbed to a tiny LibraryContext so the planner never reads the real library.
-Mirrors test_agent_tools.py's DB-reachable skip guard + create_all setup.
+The provider is stubbed so no live model is hit, and `ground_topic` — the
+targeted BM25/e5 retrieval `plan_revision` grounds through today (it replaced
+the whole-library `build_curriculum_context`; see revise.py's module
+docstring) — is stubbed to an empty list so the planner never touches the
+real search/embedder. Mirrors test_agent_tools.py's DB-reachable skip guard +
+create_all setup.
+
+Every test wraps its body in try/finally (`db.close()` in finally): the
+autouse `_truncate_all_tables` fixture in conftest.py TRUNCATEs every table
+after each test, which needs an ACCESS EXCLUSIVE lock. A session left open
+(e.g. by an assertion failure or a monkeypatch.setattr targeting an attribute
+that no longer exists) sits idle-in-transaction and holds that lock forever,
+hanging the truncate — and every test after it — rather than failing fast.
 """
 import copy
 import json
@@ -73,71 +83,84 @@ def _snapshot(db):
     }
 
 
-def _stub_library(monkeypatch):
-    from app.curriculum.corpus import LibraryContext
-    monkeypatch.setattr(revise, "build_curriculum_context",
-                        lambda db, sids: LibraryContext(text="", token_count=0, fits=True))
+def _stub_ground_topic(monkeypatch):
+    """plan_revision grounds via targeted retrieval (`ground_topic`, imported
+    into `revise`'s own namespace), scoped to the course's source_ids — NOT
+    `build_curriculum_context` (the whole-library path revise.py no longer
+    calls; see its module docstring). An empty passage list is a legitimate
+    "library is thin here" result the planner's citation-honesty directive
+    already handles, so it is enough to keep this test hermetic."""
+    monkeypatch.setattr(revise, "ground_topic",
+                        lambda db, topic, *, source_ids=None, k=5: [])
 
 
 def test_plan_revision_returns_validated_ops_and_mutates_nothing(monkeypatch):
     db = SessionLocal()
-    course, m, l = _seed(db)
-    before = _snapshot(db)
-    raw = {"summary": "add a DS-1 lesson",
-           "ops": [
-               {"op": "insert_lesson", "module_id": str(m.id), "after_lesson_id": str(l.id),
-                "title": "DS-1", "objective": "distortion", "reason": "gap after TS"},
-               {"op": "insert_lesson", "module_id": str(uuid.uuid4()),  # bogus module
-                "title": "ghost", "objective": "x", "reason": "should be dropped"},
-           ]}
-    monkeypatch.setattr(revise, "get_provider", lambda: _FakeProvider(raw))
-    _stub_library(monkeypatch)
+    try:
+        course, m, l = _seed(db)
+        before = _snapshot(db)
+        raw = {"summary": "add a DS-1 lesson",
+               "ops": [
+                   {"op": "insert_lesson", "module_id": str(m.id), "after_lesson_id": str(l.id),
+                    "title": "DS-1", "objective": "distortion", "reason": "gap after TS"},
+                   {"op": "insert_lesson", "module_id": str(uuid.uuid4()),  # bogus module
+                    "title": "ghost", "objective": "x", "reason": "should be dropped"},
+               ]}
+        monkeypatch.setattr(revise, "get_provider", lambda: _FakeProvider(raw))
+        _stub_ground_topic(monkeypatch)
 
-    plan = revise.plan_revision(db, course.id, instruction="add a DS-1 lesson")
+        plan = revise.plan_revision(db, course.id, instruction="add a DS-1 lesson")
 
-    assert plan["summary"]
-    assert len(plan["ops"]) == 1                      # bogus module op dropped
-    assert plan["ops"][0]["module_id"] == str(m.id)
-    assert _snapshot(db) == before                    # constraint #1: nothing written
-    db.close()
+        assert plan["summary"]
+        assert len(plan["ops"]) == 1                      # bogus module op dropped
+        assert plan["ops"][0]["module_id"] == str(m.id)
+        assert _snapshot(db) == before                    # constraint #1: nothing written
+    finally:
+        db.close()
 
 
 def test_compact_tree_has_ids_titles_objectives_no_bodies():
     db = SessionLocal()
-    course, m, l = _seed(db)
-    txt = revise.compact_tree_text(db, course)
-    assert str(m.id) in txt and str(l.id) in txt and "Tube Screamer" in txt
-    assert "the TS-808 mid hump" not in txt           # body excluded (token discipline)
-    db.close()
+    try:
+        course, m, l = _seed(db)
+        txt = revise.compact_tree_text(db, course)
+        assert str(m.id) in txt and str(l.id) in txt and "Tube Screamer" in txt
+        assert "the TS-808 mid hump" not in txt           # body excluded (token discipline)
+    finally:
+        db.close()
 
 
 def test_missing_root_and_wrong_kind_raise_reviseerror():
     db = SessionLocal()
-    course, m, l = _seed(db)
-    with pytest.raises(revise.ReviseError):
-        revise.plan_revision(db, uuid.uuid4(), instruction="x")
-    with pytest.raises(revise.ReviseError):
-        revise.plan_revision(db, m.id, instruction="x")   # a module, not a course
-    db.close()
+    try:
+        course, m, l = _seed(db)
+        with pytest.raises(revise.ReviseError):
+            revise.plan_revision(db, uuid.uuid4(), instruction="x")
+        with pytest.raises(revise.ReviseError):
+            revise.plan_revision(db, m.id, instruction="x")   # a module, not a course
+    finally:
+        db.close()
 
 
 def test_validate_ops_resolves_move_and_remove_against_the_live_tree():
     db = SessionLocal()
-    course, m, l = _seed(db)
-    m2 = Block(kind="module", title="Distortion", parent_id=course.id, order=1,
-               language="el", meta={"objective": "dist pedals"})
-    db.add(m2)
-    db.commit()
-    raw = {"summary": "s", "ops": [
-        {"op": "move_lesson", "lesson_id": str(l.id), "to_module_id": str(m2.id), "reason": "r"},
-        {"op": "move_lesson", "lesson_id": str(l.id), "to_module_id": str(uuid.uuid4()), "reason": "r"},
-        {"op": "remove_lesson", "lesson_id": str(uuid.uuid4()), "reason": "r"},   # bogus
-        {"op": "remove_lesson", "lesson_id": str(l.id), "reason": "r"},
-    ]}
-    out = revise.validate_ops(db, course.id, raw)
-    kept = [(o["op"], o.get("to_module_id")) for o in out["ops"]]
-    assert kept == [("move_lesson", str(m2.id)), ("remove_lesson", None)]
-    db.close()
+    try:
+        course, m, l = _seed(db)
+        m2 = Block(kind="module", title="Distortion", parent_id=course.id, order=1,
+                   language="el", meta={"objective": "dist pedals"})
+        db.add(m2)
+        db.commit()
+        raw = {"summary": "s", "ops": [
+            {"op": "move_lesson", "lesson_id": str(l.id), "to_module_id": str(m2.id), "reason": "r"},
+            {"op": "move_lesson", "lesson_id": str(l.id), "to_module_id": str(uuid.uuid4()), "reason": "r"},
+            {"op": "remove_lesson", "lesson_id": str(uuid.uuid4()), "reason": "r"},   # bogus
+            {"op": "remove_lesson", "lesson_id": str(l.id), "reason": "r"},
+        ]}
+        out = revise.validate_ops(db, course.id, raw)
+        kept = [(o["op"], o.get("to_module_id")) for o in out["ops"]]
+        assert kept == [("move_lesson", str(m2.id)), ("remove_lesson", None)]
+    finally:
+        db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -147,25 +170,29 @@ def test_validate_ops_resolves_move_and_remove_against_the_live_tree():
 def test_validate_ops_keeps_a_valid_update_blueprint():
     from app.curriculum.blueprint import default_blueprint
     db = SessionLocal()
-    course, m, l = _seed(db)
-    raw = {"summary": "restructure lessons", "ops": [
-        {"op": "update_blueprint", "blueprint": default_blueprint(),
-         "reason": "the tutor wants a warm-up first"},
-    ]}
-    out = revise.validate_ops(db, course.id, raw)
-    assert len(out["ops"]) == 1
-    assert out["ops"][0]["op"] == "update_blueprint"
-    db.close()
+    try:
+        course, m, l = _seed(db)
+        raw = {"summary": "restructure lessons", "ops": [
+            {"op": "update_blueprint", "blueprint": default_blueprint(),
+             "reason": "the tutor wants a warm-up first"},
+        ]}
+        out = revise.validate_ops(db, course.id, raw)
+        assert len(out["ops"]) == 1
+        assert out["ops"][0]["op"] == "update_blueprint"
+    finally:
+        db.close()
 
 
 def test_validate_ops_drops_an_invalid_update_blueprint():
     db = SessionLocal()
-    course, m, l = _seed(db)
-    raw = {"summary": "s", "ops": [
-        {"op": "update_blueprint", "blueprint": {"version": 999, "sections": []},
-         "reason": "bad"},                                  # bad_version + no_sections
-        {"op": "update_blueprint", "blueprint": {"not": "a blueprint"}, "reason": "bad"},
-    ]}
-    out = revise.validate_ops(db, course.id, raw)
-    assert out["ops"] == []                                 # both dropped, logged
-    db.close()
+    try:
+        course, m, l = _seed(db)
+        raw = {"summary": "s", "ops": [
+            {"op": "update_blueprint", "blueprint": {"version": 999, "sections": []},
+             "reason": "bad"},                                  # bad_version + no_sections
+            {"op": "update_blueprint", "blueprint": {"not": "a blueprint"}, "reason": "bad"},
+        ]}
+        out = revise.validate_ops(db, course.id, raw)
+        assert out["ops"] == []                                 # both dropped, logged
+    finally:
+        db.close()
