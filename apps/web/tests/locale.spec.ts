@@ -70,6 +70,12 @@ async function mockApi(page: Page) {
       return;
     }
     if (pathname.match(/^\/chat\/[^/]+\/pending$/)) return json(null);
+    // Suggestion chips (chat overhaul, Piece B): fired non-blocking after the
+    // streamed answer above renders. `{suggestions: []}`, NOT the catch-all's
+    // bare `[]` below — `getChatSuggestions` reads `.suggestions` off the
+    // body, and a bare array would hand the panel `undefined` instead of an
+    // empty list.
+    if (pathname.match(/^\/chat\/[^/]+\/suggestions$/) && method === "POST") return json({ suggestions: [] });
     if (pathname.match(/^\/chat\/[^/]+$/) && method === "GET") return json([]);
     await json([]);
   });

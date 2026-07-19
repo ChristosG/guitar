@@ -223,7 +223,7 @@ async function mockChatApi(
   onResolve?: (approvalId: string) => void,
   chatSessionStore?: ReturnType<typeof createChatSessionStore>,
 ) {
-  const calls = { create: 0, message: 0, resolve: 0, history: 0, pending: 0, stream: 0, list: 0 };
+  const calls = { create: 0, message: 0, resolve: 0, history: 0, pending: 0, stream: 0, list: 0, suggestions: 0 };
   const lastBody: { create?: unknown; resolve?: unknown } = {};
   const unexpected: string[] = [];
   const history = new Map<string, Array<{ id: string; role: string; content: string | null; created_at: string }>>();
@@ -231,6 +231,11 @@ async function mockChatApi(
   let nextMessage: Record<string, unknown> = { status: "answer", content: "OK." };
   let nextMessageDelayMs = 0;
   let nextResolve: Record<string, unknown> = { status: "answer", content: "OK." };
+  // Suggestion chips (chat overhaul, Piece B) — `[]` is the harmless default
+  // the real endpoint always answers with on any internal failure, so every
+  // EXISTING test in this file gets it without touching its own body (see
+  // `chat.spec.ts`'s own `mockChatApi` for the identical convention).
+  let nextSuggestions: Record<string, unknown> = { suggestions: [] };
 
   function record(sessionId: string, role: "user" | "assistant", content: string | null) {
     const rows = history.get(sessionId) ?? [];
@@ -282,6 +287,13 @@ async function mockChatApi(
         status: 200, contentType: "text/event-stream", headers: CORS_HEADERS,
         body: sseBody([{ event: "fallback", data: { reason: "tool_call" } }]),
       });
+      return;
+    }
+
+    const suggestionsMatch = pathname.match(/^\/chat\/([^/]+)\/suggestions$/);
+    if (suggestionsMatch && method === "POST") {
+      calls.suggestions++;
+      await json(nextSuggestions);
       return;
     }
 
@@ -339,6 +351,11 @@ async function mockChatApi(
     },
     setNextResolve(value: Record<string, unknown>) {
       nextResolve = value;
+    },
+    /** Queues the NEXT `.../suggestions` response — see `chat.spec.ts`'s
+     * identical helper for why `[]` is the default this doesn't need to touch. */
+    setNextSuggestions(value: string[]) {
+      nextSuggestions = { suggestions: value };
     },
   };
 }

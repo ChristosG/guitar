@@ -1697,6 +1697,28 @@ export function getPendingApproval(sessionId: string): Promise<PendingApprovalOu
   return request<PendingApprovalOut | null>(`/chat/${sessionId}/pending`);
 }
 
+/** Mirrors `schemas/chat.py`'s `SuggestionsOut` — `POST /chat/{id}/
+ * suggestions`'s response: 0-3 short, concrete "next move" chips. An empty
+ * list means either "nothing to suggest yet" or "the call failed" — this
+ * endpoint deliberately never distinguishes the two on the wire (see that
+ * schema's own docstring), so callers must not either. */
+export interface ChatSuggestionsOut {
+  suggestions: string[];
+}
+
+/** Suggestion CHIPS (chat overhaul, Piece B) — a SEPARATE, lightweight call
+ * from the turn itself, meant to be fired AFTER an assistant answer already
+ * rendered (`chat-panel.tsx`'s own `fetchSuggestions`) and never awaited
+ * before showing that answer. Never throws past a network-level failure in
+ * the ordinary sense that matters here: the API itself already degrades
+ * every internal failure to `{"suggestions": []}` rather than a 4xx/5xx, so
+ * the one thing a caller still needs to guard is the fetch itself failing
+ * (offline, CORS, ...) — which `request()`'s normal `ApiError` throw covers,
+ * same as every other call in this file. */
+export function getChatSuggestions(sessionId: string): Promise<ChatSuggestionsOut> {
+  return request<ChatSuggestionsOut>(`/chat/${sessionId}/suggestions`, { method: "POST" });
+}
+
 /**
  * Typed fetch helpers for the Notes API (`/notes/*`) — Plan 6's free-form
  * teaching notes with an optional promote-to-Brain action. Same direct-

@@ -766,6 +766,9 @@
     "citations": {
       "pageLabel": "σ. {page}"
     },
+    "suggestions": {
+      "heading": "Προτάσεις"
+    },
     "approval": {
       "heading": "Απαιτείται έγκριση",
       "approve": "Έγκριση",

@@ -82,12 +82,22 @@ interface MockPending {
 }
 
 async function mockChatApi(page: Page) {
-  const calls = { create: 0, message: 0, resolve: 0, history: 0, pending: 0, stream: 0, list: 0, rename: 0, remove: 0 };
+  const calls = {
+    create: 0, message: 0, resolve: 0, history: 0, pending: 0, stream: 0, list: 0, rename: 0,
+    remove: 0, suggestions: 0,
+  };
   const lastBody: { message?: unknown; resolve?: unknown; stream?: unknown; rename?: unknown } = {};
   const unexpected: string[] = [];
   let nextMessage: Record<string, unknown> = { status: "answer", content: "OK." };
   let nextResolve: Record<string, unknown> = { status: "answer", content: "OK." };
   let nextStream: string = sseBody([{ event: "fallback", data: { reason: "tool_call" } }]);
+  // Suggestion chips (chat overhaul, Piece B) — the real endpoint always
+  // answers 200 (see `routers/chat.py`'s `get_chat_suggestions`: every
+  // internal failure degrades to `{"suggestions": []}` rather than a
+  // 4xx/5xx), so `[]` is the harmless default every EXISTING test in this
+  // file gets without touching its own body — this fetch fires non-blocking
+  // after an assistant answer renders and none of those tests assert on it.
+  let nextSuggestions: Record<string, unknown> = { suggestions: [] };
 
   // The PERSISTED state — the whole point of Stage 5.6 and the reason this
   // mock got a memory. `history`/`pending` are what a reload reads back, and
@@ -206,6 +216,13 @@ async function mockChatApi(page: Page) {
       return;
     }
 
+    const suggestionsMatch = pathname.match(/^\/chat\/([^/]+)\/suggestions$/);
+    if (suggestionsMatch && method === "POST") {
+      calls.suggestions++;
+      await json(nextSuggestions);
+      return;
+    }
+
     const messagesMatch = pathname.match(/^\/chat\/([^/]+)\/messages$/);
     if (messagesMatch && method === "POST") {
       calls.message++;
@@ -292,6 +309,12 @@ async function mockChatApi(page: Page) {
      * fallback-by-default body documented on `mockChatApi` above. */
     setNextStream(value: string) {
       nextStream = value;
+    },
+    /** Queues the NEXT `.../suggestions` response — defaults to `{
+     * suggestions: [] }` (see the field's own comment above) so a test only
+     * needs this when it actually wants chips to appear. */
+    setNextSuggestions(value: string[]) {
+      nextSuggestions = { suggestions: value };
     },
   };
 }
@@ -668,6 +691,78 @@ test.describe("chat cockpit (mocked API)", () => {
 
     expect(mock.calls.stream).toBe(1);
     expect(mock.calls.message).toBe(1);
+    expect(mock.unexpected).toEqual([]);
+  });
+});
+
+// Chat overhaul, Piece B — suggestion chips: a SEPARATE, non-blocking
+// `POST /chat/{id}/suggestions` call fired after an assistant answer already
+// rendered. These prove the wiring end to end: the chips appear once that
+// call resolves, clicking one sends it through the SAME `.../messages` path
+// a typed message takes, and no chip ever appears while an approval gates
+// the composer (the composer is always primary; chips are an optional
+// shortcut, never a second way past its own gate).
+test.describe("suggestion chips (mocked API)", () => {
+  test("renders chips after an assistant answer, and clicking one sends it as the next turn", async ({ page }) => {
+    const mock = await mockChatApi(page);
+    await page.goto("/en/chat");
+    await expect(page.getByTestId("chat-input")).toBeEnabled();
+
+    mock.setNextMessage({ status: "answer", content: "A humbucker cancels hum." });
+    mock.setNextSuggestions(["Explain single-coil hum", "Compare humbucker brands"]);
+
+    await page.getByTestId("chat-input").fill("What cancels hum?");
+    await page.getByTestId("chat-send").click();
+
+    await expect(page.getByTestId("chat-message").last()).toContainText("A humbucker cancels hum.");
+    await expect(page.getByTestId("suggestion-chips")).toBeVisible();
+    const chips = page.getByTestId("suggestion-chip");
+    await expect(chips).toHaveCount(2);
+    await expect(chips.first()).toHaveText("Explain single-coil hum");
+
+    // Clicking a chip sends ITS TEXT as the next user turn, through the same
+    // `.../messages` REST call a typed message takes (the stream endpoint
+    // still attempts first and falls back — `mockChatApi`'s default).
+    mock.setNextMessage({ status: "answer", content: "Single-coils pick up hum from AC fields." });
+    mock.setNextSuggestions([]);
+    await chips.first().click();
+
+    await expect(page.getByTestId("chat-message")).toHaveCount(4);
+    await expect(page.getByTestId("chat-message").nth(2)).toContainText("Explain single-coil hum");
+    await expect(page.getByTestId("chat-message").last()).toContainText("Single-coils pick up hum");
+    // The chips from the FIRST answer are gone the instant the click sent a
+    // new turn (cleared, not just replaced once the new fetch resolves), and
+    // the second scripted response is an empty list, so none reappear.
+    await expect(page.getByTestId("suggestion-chips")).toHaveCount(0);
+
+    expect(mock.calls.message).toBe(2);
+    expect(mock.calls.suggestions).toBe(2);
+    expect(mock.lastBody.message).toEqual({ content: "Explain single-coil hum" });
+    expect(mock.unexpected).toEqual([]);
+  });
+
+  test("never shows chips while an approval is pending", async ({ page }) => {
+    const mock = await mockChatApi(page);
+    await page.goto("/en/chat");
+    await expect(page.getByTestId("chat-input")).toBeEnabled();
+
+    mock.setNextMessage({
+      status: "awaiting_approval",
+      approval_id: randomUUID(),
+      tool_name: "create_student",
+      tool_args: { name: "Maria Ioannou" },
+      description: "I'll add that student.",
+    });
+    // Scripted so the test would fail loudly if the panel ever called this
+    // endpoint on an awaiting_approval turn — it must not.
+    mock.setNextSuggestions(["should never render"]);
+
+    await page.getByTestId("chat-input").fill("add a student named Maria Ioannou");
+    await page.getByTestId("chat-send").click();
+
+    await expect(page.getByTestId("approval-card")).toBeVisible();
+    await expect(page.getByTestId("suggestion-chips")).toHaveCount(0);
+    expect(mock.calls.suggestions).toBe(0);
     expect(mock.unexpected).toEqual([]);
   });
 });

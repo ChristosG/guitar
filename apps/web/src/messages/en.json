@@ -766,6 +766,9 @@
     "citations": {
       "pageLabel": "p. {page}"
     },
+    "suggestions": {
+      "heading": "Suggestions"
+    },
     "approval": {
       "heading": "Approval needed",
       "approve": "Approve",

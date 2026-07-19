@@ -8,10 +8,12 @@ import { Input } from "@/components/ui/input";
 import { ApprovalCard } from "@/components/chat/approval-card";
 import { RevisionPlanCard } from "@/components/chat/revision-plan-card";
 import { MessageList, type ChatDisplayMessage } from "@/components/chat/message-list";
+import { SuggestionChips } from "@/components/chat/suggestion-chips";
 import { useChatSessions } from "@/components/chat/chat-sessions";
 import {
   ApiError,
   getChatHistory,
+  getChatSuggestions,
   getCurriculumProgress,
   getJob,
   getPendingApproval,
@@ -141,6 +143,33 @@ export function ChatPanel({ sessionId, rootId, blockTitles, onJobDone }: ChatPan
 
   const [jobPending, setJobPending] = useState(false);
 
+  // "Next move" suggestion chips (chat overhaul, Piece B). Fetched
+  // NON-BLOCKING, after a genuine assistant answer has already rendered —
+  // never awaited before showing that answer. `suggestionsRequestId` guards
+  // against the one race this invites: the tutor sends a new turn before an
+  // in-flight suggestions fetch from the PREVIOUS turn resolves, which would
+  // otherwise overwrite freshly-cleared chips with stale ones a moment later.
+  // Every clear bumps the id; a resolving fetch only applies its result if
+  // the id it captured is still current.
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const suggestionsRequestId = useRef(0);
+
+  function clearSuggestions() {
+    suggestionsRequestId.current += 1;
+    setSuggestions([]);
+  }
+
+  const fetchSuggestions = useCallback(() => {
+    const requestId = suggestionsRequestId.current;
+    getChatSuggestions(sessionId)
+      .then((result) => {
+        if (suggestionsRequestId.current === requestId) setSuggestions(result.suggestions);
+      })
+      .catch(() => {
+        if (suggestionsRequestId.current === requestId) setSuggestions([]);
+      });
+  }, [sessionId]);
+
   // Same .then/.catch/.finally shape as e.g. knowledge/page.tsx's
   // fetchSources, for the same reason: every setState call stays lexically
   // inside a callback rather than a bare statement in the function body
@@ -201,6 +230,11 @@ export function ChatPanel({ sessionId, rootId, blockTitles, onJobDone }: ChatPan
   // ANOTHER mutation, which lands right back in the `awaiting_approval`
   // branch below exactly like the first proposal would.
   function applyTurn(turn: ChatTurnOut) {
+    // Stale chips from whatever prompted THIS turn never belong to what
+    // comes next — cleared unconditionally, before branching on `status`, so
+    // an approval card or a job-pending row never renders alongside them.
+    clearSuggestions();
+
     if (turn.status === "awaiting_approval" && turn.approval_id && turn.tool_name) {
       setPendingApproval({
         approvalId: turn.approval_id,
@@ -216,6 +250,11 @@ export function ChatPanel({ sessionId, rootId, blockTitles, onJobDone }: ChatPan
     }
     // "answer" (or, defensively, anything else): narrate if there's content.
     if (turn.content) appendMessage("assistant", turn.content, undefined, turn.citations);
+    // Chips only ever follow a genuine plain answer — never an approval/plan
+    // turn (the HITL card IS the next move in that case) and never a bare
+    // job-pending hand-off. Fired here, non-blocking: the answer above has
+    // already rendered by the time this call resolves.
+    if (turn.status === "answer" && turn.content) fetchSuggestions();
   }
 
   // Poll one job to a terminal status (or the MAX_POLLS cap), returning it.
@@ -347,12 +386,16 @@ export function ChatPanel({ sessionId, rootId, blockTitles, onJobDone }: ChatPan
   // + `applyTurn` call the pre-streaming version of this function always
   // made — so the HITL approval-card flow is reached through an UNCHANGED
   // code path no matter which branch got it there.
-  async function handleSend(e: FormEvent) {
-    e.preventDefault();
-    const content = draft.trim();
+  //
+  // Factored out of `handleSend` (chat overhaul, Piece B) so a suggestion
+  // chip can send its own text the SAME way a typed message does — a chip is
+  // a shortcut INTO this exact path, never a second one beside it. `handleSend`
+  // below is now just the form's own `content` extraction + guard.
+  async function sendContent(content: string) {
     if (!content || composerDisabled) return;
 
     setDraft("");
+    clearSuggestions();
     appendMessage("user", content);
     setSending(true);
     setComposerError(null);
@@ -381,6 +424,9 @@ export function ChatPanel({ sessionId, rootId, blockTitles, onJobDone }: ChatPan
         setMessages((prev) =>
           prev.map((m) => (m.id === streamId ? { ...m, citations: outcome.citations } : m)),
         );
+        // A genuine streamed answer just rendered — the same "chips follow a
+        // real plain answer" moment `applyTurn` reacts to on the REST path.
+        fetchSuggestions();
         return;
       }
 
@@ -420,6 +466,19 @@ export function ChatPanel({ sessionId, rootId, blockTitles, onJobDone }: ChatPan
     }
   }
 
+  async function handleSend(e: FormEvent) {
+    e.preventDefault();
+    await sendContent(draft.trim());
+  }
+
+  /** A suggestion chip's click handler — sends its text as the next user
+   * turn through the exact same `sendContent` the composer's Send button
+   * uses (chat overhaul, Piece B: "clicking one sends it as the next user
+   * turn; reuse the existing send path"). */
+  function handleSuggestionClick(suggestion: string) {
+    void sendContent(suggestion);
+  }
+
   async function resolvePending(decision: "approve" | "reject", editedArgs?: Record<string, unknown>) {
     if (!pendingApproval) return;
     setResolving(true);
@@ -453,6 +512,20 @@ export function ChatPanel({ sessionId, rootId, blockTitles, onJobDone }: ChatPan
         </div>
       ) : (
         <MessageList messages={messages} sessionId={sessionId} />
+      )}
+
+      {/* Suggestion chips (chat overhaul, Piece B) — rendered right below the
+          transcript, i.e. below the latest assistant message. `disabled`
+          mirrors the composer's own gate; in practice `suggestions` is
+          already empty whenever an approval/job is pending (`applyTurn`
+          clears it before ever setting either), so this guard is defense in
+          depth, not the only thing keeping a chip from rendering stale. */}
+      {!hydrating && (
+        <SuggestionChips
+          suggestions={suggestions}
+          disabled={composerDisabled}
+          onSelect={handleSuggestionClick}
+        />
       )}
 
       {pendingApproval &&
