@@ -1232,7 +1232,7 @@ _ENTRIES = [
         curriculum_group=True,
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/corpus.py:349",
+        source_ref="app/curriculum/corpus.py:382",
         title_el="Η εισαγωγή για τη συγγραφή ύλης",
         what_it_does_el=(
             "Η πρώτη οδηγία σε κάθε δημιουργία ύλης: ότι γράφει για έναν "
@@ -1263,7 +1263,7 @@ _ENTRIES = [
         curriculum_group=True,
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/corpus.py:457",
+        source_ref="app/curriculum/corpus.py:490",
         title_el="Ολόκληρη η βιβλιοθήκη σου",
         what_it_does_el=(
             "Δίνει στον βοηθό όλα τα βιβλία που διάλεξες, ολόκληρα, με τον "
@@ -1292,7 +1292,7 @@ _ENTRIES = [
         id="curriculum.no_library",
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/corpus.py:439",
+        source_ref="app/curriculum/corpus.py:472",
         title_el="Όταν δεν διάλεξες κανένα βιβλίο",
         what_it_does_el=(
             "Αν δεν διαλέξεις καμία πηγή, μπαίνει αυτό στη θέση της "
@@ -1317,7 +1317,7 @@ _ENTRIES = [
         id="curriculum.library_too_large",
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/corpus.py:430",
+        source_ref="app/curriculum/corpus.py:463",
         title_el="Όταν η βιβλιοθήκη σου δεν χωράει",
         what_it_does_el=(
             "Αν τα βιβλία που διάλεξες είναι πάρα πολλά για να διαβαστούν "

@@ -186,7 +186,13 @@ class ReviseRequest(BaseModel):
 
 class DraftProgressOut(BaseModel):
     """What the board polls every 2 seconds. A GROUP BY over the lesson blocks —
-    never a counter on the job row (see `curriculum.draft.draft_progress`)."""
+    never a counter on the job row (see `curriculum.draft.draft_progress`).
+
+    `draft_error` is the ONE thing here read off a job row and not the blocks: the
+    reason the most recent draft run for this curriculum FAILED, so lessons that are
+    still `queued` because that run died stop looking like they are silently
+    "processing…". `None` once a later run (a Resume) succeeds — the latest draft
+    job is then the successful one."""
     root_id: UUID
     total: int
     queued: int
@@ -194,3 +200,4 @@ class DraftProgressOut(BaseModel):
     ready: int
     failed: int
     done: bool
+    draft_error: str | None = None

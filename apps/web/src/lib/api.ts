@@ -681,8 +681,10 @@ export interface JobOut {
   error_kind: string | null;
   /** Free-form runner progress — e.g. the draft fan-out's `{phase: "drafting"}`,
    * or add-module's `{phase: "drafting", module_id: "..."}` (the id of the module
-   * it just planted, so the board can highlight it). */
-  progress: { phase?: string; module_id?: string } | null;
+   * it just planted, so the board can highlight it). `draft_job_id` is the revise
+   * chain's chained `curriculum_draft` row: the revise job succeeds the moment the
+   * tree is right, and the chat polls this to surface a drafting failure. */
+  progress: { phase?: string; module_id?: string; draft_job_id?: string } | null;
   created_at: string;
   updated_at: string;
 }
@@ -713,6 +715,11 @@ export interface DraftProgress {
   ready: number;
   failed: number;
   done: boolean;
+  /** The reason the most recent draft RUN for this curriculum failed (the
+   * `curriculum_draft` job's own `error`), or null. Set when lessons are stuck
+   * `queued` because that run died — so the board shows why instead of a silent
+   * "processing…". Cleared once a later run (a Resume) succeeds. */
+  draft_error?: string | null;
 }
 
 export function getCurriculumProgress(rootId: string): Promise<DraftProgress> {

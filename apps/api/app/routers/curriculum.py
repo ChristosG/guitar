@@ -365,7 +365,30 @@ def get_curriculum_progress(root_id: UUID, db: Session = Depends(get_db)) -> dic
     workers hold no connection across the model call, and `config.db_pool_size`.)
     """
     _get_block_or_404(db, root_id)
-    return {"root_id": root_id, **draft_progress(db, root_id)}
+    return {"root_id": root_id, **draft_progress(db, root_id),
+            "draft_error": _latest_draft_error(db, root_id)}
+
+
+def _latest_draft_error(db: Session, root_id: UUID) -> str | None:
+    """The reason the most RECENT draft run for this curriculum failed, or None.
+
+    The revise chain (and generation) run the draft on their OWN `curriculum_draft`
+    job row; if that row `failed` — no API key, every lesson upstream-failed — its
+    lessons sit `queued` and, without this, the board shows a silent "processing…".
+    Surface the job's own `error` instead. Scoped to the LATEST such job so a Resume
+    that later succeeds clears it (the newest draft row is then the successful one).
+
+    `result_root_id` is set on every draft job that reaches its finalize step
+    (success and the all-failed case alike); a job that died in Phase A before that
+    is an internal error the board does not need to name, so this quietly finds
+    nothing for it — the block counts still tell the true story."""
+    latest = db.scalars(
+        select(GenerationJob)
+        .where(GenerationJob.kind == "curriculum_draft",
+               GenerationJob.result_root_id == root_id)
+        .order_by(GenerationJob.created_at.desc())
+    ).first()
+    return latest.error if latest is not None and latest.status == "failed" else None
 
 
 @router.post("/curricula/{root_id}/draft", response_model=JobAccepted, status_code=202,

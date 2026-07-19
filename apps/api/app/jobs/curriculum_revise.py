@@ -96,20 +96,32 @@ def run_curriculum_revise_job(job_id: uuid.UUID) -> None:
         db.close()
 
     # THE CHAIN. Same thread, immediately after apply — exactly like
-    # module_generate. The apply wrote nothing to the library cache, but the
-    # revised lessons ride the same warm 90K prefix the rest of the curriculum
-    # already primed. A failure here does not un-succeed the apply: the lessons
-    # sit `queued` for the ordinary Resume path.
+    # module_generate. A revise CHANGES lessons, so the chained draft is
+    # RETRIEVAL-GROUNDED (`grounding="retrieval"`): each new/changed lesson is
+    # drafted from per-lesson `ground_topic` plus the model's own knowledge, never
+    # the whole-library gate that refused here, and never a `CurriculumContextError`.
+    #
+    # The apply already committed (the tree is right), so this row stays `succeeded`
+    # regardless of the chain — but we record the chained draft's id on its progress
+    # so the revise chat can poll it and SURFACE a drafting failure, instead of
+    # leaving the new lessons silently "queued".
     if do_chain:
+        draft_id: uuid.UUID | None = None
         db = SessionLocal()
         try:
             draft = GenerationJob(
                 kind="curriculum_draft", status="pending",
-                params={"root_id": str(root_id)},
+                params={"root_id": str(root_id), "grounding": "retrieval"},
             )
             db.add(draft)
             db.commit()
             draft_id = draft.id
+            revise_job = db.get(GenerationJob, job_id)
+            if revise_job is not None:
+                # Whole-dict reassignment — `progress` is plain sa.JSON, no MutableDict.
+                revise_job.progress = {**(revise_job.progress or {}),
+                                       "draft_job_id": str(draft_id)}
+                db.commit()
         except Exception:
             log.exception("run_curriculum_revise_job: could not enqueue the draft "
                           "chain for %s — the revised lessons stay queued for Resume", root_id)

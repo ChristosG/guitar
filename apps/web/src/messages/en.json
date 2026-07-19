@@ -352,7 +352,8 @@
       "resume": "Resume",
       "resumeError": "Could not resume writing.",
       "pollError": "Lost contact with the server — the lessons are still being written.",
-      "failedHint": "{failed, plural, one {# lesson could not be written} other {# lessons could not be written}}. Press Resume to retry it — the rest are safe."
+      "failedHint": "{failed, plural, one {# lesson could not be written} other {# lessons could not be written}}. Press Resume to retry it — the rest are safe.",
+      "draftFailed": "Writing the lessons failed: {reason} Press Resume to try again."
     },
     "outline": {
       "heading": "Here is the course. Change anything you like.",
@@ -777,7 +778,8 @@
     },
     "revise": {
       "planning": "Looking at your curriculum and the relevant parts of your library…",
-      "applied": "Done — the curriculum below now reflects this revision."
+      "applied": "Done — the curriculum below now reflects this revision.",
+      "appliedDraftFailed": "The revision was applied, but writing the new lessons failed: {reason} Open the board and press Resume to try again."
     },
     "resuming": "Opening your conversation…",
     "history": {

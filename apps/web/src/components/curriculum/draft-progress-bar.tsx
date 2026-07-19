@@ -147,6 +147,7 @@ export function DraftProgressBar({
   if (!progress || progress.total === 0) return null;
 
   const { total, ready, drafting, queued, failed, done } = progress;
+  const draftError = progress.draft_error ?? null;
   const pct = Math.round((ready / total) * 100);
   const canResume = queued > 0 || failed > 0;
 
@@ -216,6 +217,18 @@ export function DraftProgressBar({
       {failed > 0 && (
         <p className="text-xs text-amber-600 dark:text-amber-400" data-testid="draft-progress-failed">
           {t("failedHint", { failed })}
+        </p>
+      )}
+      {draftError && (
+        // The last draft RUN failed (revise chain, or generation) — the lessons it
+        // left `queued` are not silently "processing…"; here is why, and Resume
+        // retries. Distinct from `error` below (a transient poll blip, not a draft
+        // failure).
+        <p
+          className="text-xs text-destructive"
+          data-testid="draft-progress-draft-error"
+        >
+          {t("draftFailed", { reason: draftError })}
         </p>
       )}
       {error && (

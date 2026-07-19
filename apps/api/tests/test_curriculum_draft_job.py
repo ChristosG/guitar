@@ -303,6 +303,39 @@ def test_progress_on_an_unknown_curriculum_is_a_404_not_a_zeroed_report(db, clie
     assert r.status_code == 404
 
 
+def test_progress_surfaces_the_latest_failed_draft_jobs_reason(db, client):
+    """No more silent "processing…". When the draft run for this curriculum FAILED,
+    its reason rides the progress poll so the board can show why the lessons that
+    are still queued never got written."""
+    root_id = _course(db)
+
+    # No draft run yet — nothing to surface.
+    r = client.get(f"/curricula/{root_id}/progress")
+    assert r.json()["draft_error"] is None
+
+    failed = GenerationJob(
+        kind="curriculum_draft", status="failed", error_kind="upstream",
+        error="No lesson could be drafted. Check Settings, then Resume.",
+        params={"root_id": str(root_id)}, result_root_id=root_id,
+    )
+    db.add(failed)
+    db.commit()
+
+    r = client.get(f"/curricula/{root_id}/progress")
+    assert r.json()["draft_error"] == "No lesson could be drafted. Check Settings, then Resume."
+
+    # A LATER draft run that succeeds clears it — the newest row is the successful one.
+    ok = GenerationJob(
+        kind="curriculum_draft", status="succeeded", error=None,
+        params={"root_id": str(root_id)}, result_root_id=root_id,
+    )
+    db.add(ok)
+    db.commit()
+
+    r = client.get(f"/curricula/{root_id}/progress")
+    assert r.json()["draft_error"] is None
+
+
 # ---------------------------------------------------------------------------
 # RESTART + RESUME — the flagship recovery story
 # ---------------------------------------------------------------------------

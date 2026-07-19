@@ -217,16 +217,25 @@ export function ChatPanel({ sessionId, rootId, blockTitles, onJobDone }: ChatPan
     if (turn.content) appendMessage("assistant", turn.content, undefined, turn.citations);
   }
 
+  // Poll one job to a terminal status (or the MAX_POLLS cap), returning it.
+  // Extracted so the revise flow can wait on TWO jobs in sequence: the
+  // curriculum_revise row (does the apply happen?) and then its chained
+  // curriculum_draft row (did the new lessons actually get written?).
+  async function waitForJob(jobId: string) {
+    let job = await getJob(jobId);
+    let polls = 1;
+    while (job.status !== "succeeded" && job.status !== "failed" && polls < MAX_POLLS) {
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+      job = await getJob(jobId);
+      polls++;
+    }
+    return job;
+  }
+
   async function pollJob(jobId: string) {
     setJobPending(true);
     try {
-      let job = await getJob(jobId);
-      let polls = 1;
-      while (job.status !== "succeeded" && job.status !== "failed" && polls < MAX_POLLS) {
-        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
-        job = await getJob(jobId);
-        polls++;
-      }
+      const job = await waitForJob(jobId);
 
       if (job.status === "succeeded") {
         if (rootId && onJobDone && job.kind === "curriculum_revise") {
@@ -236,8 +245,24 @@ export function ChatPanel({ sessionId, rootId, blockTitles, onJobDone }: ChatPan
           // job KIND, not just rootId: a different async tool called from the
           // drawer (e.g. generate_curriculum) must fall through to the deep-link
           // below rather than misreport a revision and refresh the wrong board.
-          appendMessage("assistant", t("revise.applied"));
+          //
+          // Refresh the board NOW (the new lessons appear and its own progress bar
+          // starts polling them live), THEN wait on the chained draft job the revise
+          // row hands us via `progress.draft_job_id`: a revise SUCCEEDS the moment
+          // the tree is right, so a drafting failure would otherwise be a silent
+          // "queued". If it failed, say so here too — not just on the board.
           onJobDone();
+          const draftJobId = job.progress?.draft_job_id;
+          if (draftJobId) {
+            const draft = await waitForJob(draftJobId);
+            if (draft.status === "failed") {
+              appendMessage("assistant", t("revise.appliedDraftFailed", {
+                reason: jobErrorText(draft, tJobErrors),
+              }));
+              return;
+            }
+          }
+          appendMessage("assistant", t("revise.applied"));
         } else {
           // Deep-link straight to the materialized curriculum's own board
           // (Unit A's `/curricula/[rootId]` route) when the job says which

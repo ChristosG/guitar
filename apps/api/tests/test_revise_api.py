@@ -198,12 +198,19 @@ def test_runner_apply_mode_applies_then_chains_the_draft(monkeypatch):
     try:
         job = db.get(GenerationJob, job_id)
         assert job.status == "succeeded"
-        assert job.progress == {"phase": "drafting", "applied": 2, "root_id": str(root_id)}
-        # A SEPARATE curriculum_draft row was enqueued and its runner invoked.
+        # The apply is acknowledged the moment the tree is right; the chained draft's
+        # id rides progress so the revise chat can poll it for a drafting failure.
+        assert job.progress["phase"] == "drafting"
+        assert job.progress["applied"] == 2
+        assert job.progress["root_id"] == str(root_id)
+        assert job.progress["draft_job_id"] == str(draft_calls[0])
+        # A SEPARATE curriculum_draft row was enqueued and its runner invoked. It is
+        # RETRIEVAL-GROUNDED: a revise changes lessons, so per-lesson ground_topic,
+        # never the whole-library gate.
         assert len(draft_calls) == 1
         draft = db.get(GenerationJob, draft_calls[0])
         assert draft.kind == "curriculum_draft"
-        assert draft.params == {"root_id": str(root_id)}
+        assert draft.params == {"root_id": str(root_id), "grounding": "retrieval"}
     finally:
         db.close()
 
