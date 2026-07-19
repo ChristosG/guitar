@@ -872,6 +872,36 @@ export function deleteCurriculum(rootId: string): Promise<void> {
   return request<void>(`/curricula/${rootId}`, { method: "DELETE" });
 }
 
+/** Fetches the clean DOCX export and hands it to the browser as a download.
+ * Not routed through `request()`: that helper always parses the body as JSON
+ * (or 204s), and this response is a binary stream with its filename living in
+ * `Content-Disposition`, not the JSON envelope `parseError` expects. So this
+ * builds the same `${API_BASE}${path}` URL and `credentials: "include"` (the
+ * cross-origin cookie requirement documented at this file's top) by hand,
+ * matching `request()`'s convention without going through it. A plain `<a
+ * href>` would drop that cookie behavior entirely, so this goes through
+ * `fetch` + an object URL like any other authenticated call. */
+export async function downloadCurriculumDocx(rootId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/curricula/${rootId}/export.docx`, {
+    credentials: "include",
+  });
+  if (!res.ok) {
+    if (res.status === 401) handleUnauthorized(`/curricula/${rootId}/export.docx`);
+    const { detail, code, body } = await parseError(res);
+    throw new ApiError(res.status, detail, code, body);
+  }
+  const blob = await res.blob();
+  const disposition = res.headers.get("content-disposition") ?? "";
+  const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/);
+  const filename = utf8Match ? decodeURIComponent(utf8Match[1]) : "curriculum.docx";
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 /**
  * Typed fetch helpers for the guided curriculum-authoring interview
  * (`routers/curriculum.py`'s `/curricula/interview...` routes, Plan 12 Task

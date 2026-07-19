@@ -4,11 +4,12 @@ import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { useLocale, useTranslations } from "next-intl";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, FileDown, Loader2 } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { CurriculumActionsMenu } from "@/components/curriculum/curriculum-actions-menu";
 import { ReviseDrawer } from "@/components/curriculum/revise-drawer";
 import { TreeBoard } from "@/components/curriculum/tree-board";
-import { ApiError, getCurriculum, type BlockNode } from "@/lib/api";
+import { ApiError, downloadCurriculumDocx, getCurriculum, type BlockNode } from "@/lib/api";
 
 /** The per-curriculum board, split out of the old `curricula/page.tsx` so the
  * list page can become a plain navigable index (Unit A). Same shape as
@@ -47,6 +48,8 @@ export default function CurriculumDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshNonce, setRefreshNonce] = useState(0);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -120,6 +123,27 @@ export default function CurriculumDetailPage() {
           <h1 className="min-w-0 truncate text-xl font-semibold" data-testid="curriculum-detail-title">
             {title}
           </h1>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            data-testid="curriculum-export-docx"
+            disabled={exporting}
+            onClick={async () => {
+              setExporting(true);
+              setExportError(null);
+              try {
+                await downloadCurriculumDocx(rootId);
+              } catch {
+                setExportError(t("exportError"));
+              } finally {
+                setExporting(false);
+              }
+            }}
+          >
+            {exporting ? <Loader2 className="animate-spin" /> : <FileDown />}
+            {t("exportDocx")}
+          </Button>
           <CurriculumActionsMenu
             rootId={rootId}
             title={title}
@@ -127,6 +151,11 @@ export default function CurriculumDetailPage() {
             onDeleted={handleRootDeleted}
           />
         </div>
+      )}
+      {exportError && (
+        <p role="alert" data-testid="curriculum-export-error" className="text-sm text-destructive">
+          {exportError}
+        </p>
       )}
 
       {loading && (

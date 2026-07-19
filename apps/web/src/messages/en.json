@@ -179,6 +179,8 @@
     "boardEmpty": "Generate a curriculum or select a template to see its tree.",
     "boardLoading": "Loading curriculum…",
     "boardError": "Could not load this curriculum.",
+    "exportDocx": "Download DOCX",
+    "exportError": "Export failed — try again.",
     "tree": {
       "estMinutes": "{count} min",
       "editTitlePlaceholder": "Block title",
