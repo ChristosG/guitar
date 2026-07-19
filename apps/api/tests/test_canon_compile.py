@@ -85,7 +85,11 @@ _PROSE = ("Alternate picking is the foundation of speed. Down, up, down, up — 
 
 
 def _concept(name="alternate picking", **kw):
+    # `anchor` is a verbatim slice of `_PROSE` (page 12), so the default author
+    # claim resolves to [12] under Unit B — pages now come from the anchor quote,
+    # not the model's number.
     claim = {"text": "The wrist does the work, not the arm.", "pages": [12],
+             "anchor": "the wrist does the work, not the arm",
              "stance": "wrist, not arm", "depth": "primary",
              "grounding": "author"}
     claim.update(kw.pop("claim", {}))
@@ -98,51 +102,57 @@ def _concept(name="alternate picking", **kw):
 # 1. Citations are validated, never trusted
 # ---------------------------------------------------------------------------
 
-def test_a_citation_to_a_page_that_does_not_exist_is_dropped_and_logged(
+def test_a_hallucinated_anchor_drops_its_citation_and_is_logged(
     db, monkeypatch, caplog
 ):
-    """THE BRIEF'S TEST. Two concepts, one citing a page the book does not have.
-    Only the valid claim is stored — and the drop is LOGGED, because a citation
+    """THE BRIEF'S TEST, under Unit B. A made-up quote matches nothing, so its
+    citation is dropped to pages=[] — and the drop is LOGGED, because a citation
     silently vanishing is how you find out months later that a book compiled to
-    half a ledger."""
+    half a ledger. Under invariant 3 the CLAIM is kept; only its page is gone,
+    while the claim with a real anchor resolves to the physical page."""
     source = _book(db, {12: _PROSE})
     fake = _use(monkeypatch, _FakeProvider({"concepts": [
         _concept("alternate picking"),
-        _concept("string skipping", claim={"pages": [999], "text": "Skip a string."}),
+        _concept("string skipping", claim={
+            "anchor": "sweep picking rakes across six strings in one motion",
+            "text": "Skip a string."}),
     ]}))
 
     with caplog.at_level("WARNING"):
         compile_book(db, source.id)
 
-    claims = db.query(ConceptClaim).all()
-    assert len(claims) == 1, "a page the book does not have entered the canon"
-    assert claims[0].pages == [12]
+    claims = {c.text: c for c in db.query(ConceptClaim).all()}
+    assert claims["The wrist does the work, not the arm."].pages == [12]
+    assert claims["Skip a string."].pages == [], "a made-up quote invented a page"
     assert fake.calls == 1
-    assert "999" in caplog.text, "an invalid citation was dropped without a word"
+    assert "no page" in caplog.text.lower(), "a dropped citation was not logged"
 
 
-def test_only_the_bad_page_is_dropped_when_a_claim_cites_good_and_bad_together(
-    db, monkeypatch
-):
-    """A claim citing pp.12 AND 999 keeps p.12. The prose is not the problem —
-    the fabricated page number is, and it is the only part worth destroying."""
-    source = _book(db, {12: _PROSE, 13: _PROSE})
+def test_a_figure_claim_keeps_only_the_pages_the_book_actually_has(db, monkeypatch):
+    """The figure path still validates the model's declared pages against the book
+    (invariant 8 keeps it on `_valid_pages`, unchanged): a figure claim citing p.31
+    AND a fabricated p.999 keeps 31 and drops 999. The author path no longer cites a
+    model number at all, so this multi-page validation only lives here now."""
+    source = _book(db, {12: _PROSE, 31: _TAB_PAGE})
     _use(monkeypatch, _FakeProvider({"concepts": [
-        _concept(claim={"pages": [12, 999, 13]}),
+        _concept("am tab", claim={"pages": [31, 999], "grounding": "figure",
+                                  "text": "The tab staff on this page."}),
     ]}))
 
     compile_book(db, source.id)
 
-    assert db.query(ConceptClaim).one().pages == [12, 13]
+    assert db.query(ConceptClaim).one().pages == [31]
 
 
-def test_a_claim_whose_every_citation_is_invalid_is_dropped_entirely(db, monkeypatch):
-    """An uncitable claim is not a claim. Keeping it with `pages=[]` would put a
-    sentence in the canon that no page supports — which is what the canon is FOR
-    stopping."""
+def test_a_concept_that_keeps_no_claim_at_all_is_still_pruned(db, monkeypatch):
+    """Invariant 9 keeps a claim that lost only its CITATION (pages=[]), but a
+    concept that kept NO claim at all is still not a concept — it is a name. A claim
+    with no `text` is not a claim, so this concept has nothing and is pruned."""
     source = _book(db, {12: _PROSE})
     _use(monkeypatch, _FakeProvider({"concepts": [
-        _concept(claim={"pages": [998, 999]}),
+        {"name": "empty concept", "name_el": "κενό", "claims": [
+            {"text": "", "anchor": "the wrist does the work, not the arm",
+             "pages": [12], "stance": "", "depth": "primary", "grounding": "author"}]},
     ]}))
 
     compile_book(db, source.id)
@@ -151,20 +161,24 @@ def test_a_claim_whose_every_citation_is_invalid_is_dropped_entirely(db, monkeyp
     assert db.query(Concept).count() == 0, "a concept with no surviving claim was kept"
 
 
-def test_a_page_below_the_char_floor_is_not_citable(db, monkeypatch):
-    """`page_index` is the set of pages the model was ACTUALLY SHOWN, not the set
-    of rows in the DB. A page whose OCR produced 12 characters is in the database
-    and is NOT in the prompt — so the model cannot have read it, so a cite to it is
-    a fabrication even though the row exists. Same contract as
-    `corpus.LibraryContext.page_index`."""
+def test_a_figure_claim_citing_a_below_floor_page_keeps_the_claim_with_no_page(
+    db, monkeypatch
+):
+    """`ctx.page_index` is the set of pages the model was ACTUALLY SHOWN, not the
+    set of rows in the DB. A bare running head ("p. 13") is below the char floor and
+    was never in the prompt, so the figure path drops that citation — but under
+    invariant 9 the claim is kept with pages=[], not deleted. Same char-floor
+    contract as `corpus.LibraryContext.page_index`, on the path that still validates
+    a model number."""
     source = _book(db, {12: _PROSE, 13: "p. 13"})   # 13 is a running head, nothing more
     _use(monkeypatch, _FakeProvider({"concepts": [
-        _concept(claim={"pages": [13]}),
+        _concept("phantom", claim={"pages": [13], "grounding": "figure",
+                                   "text": "Something on the running-head page."}),
     ]}))
 
     compile_book(db, source.id)
 
-    assert db.query(ConceptClaim).count() == 0
+    assert db.query(ConceptClaim).one().pages == []
 
 
 # ---------------------------------------------------------------------------
@@ -196,25 +210,30 @@ def test_a_claim_from_a_figure_region_is_marked_as_ours_not_the_books_words(
     assert db.query(ConceptClaim).one().grounding == "figure"
 
 
-def test_grounding_is_FORCED_to_figure_when_the_cited_page_has_no_prose_at_all(
+def test_an_author_claim_whose_quote_is_only_in_a_figure_gets_no_page(
     db, monkeypatch
 ):
-    """THE DECLARATION IS NOT TRUSTED EITHER. p.31 has no words of its own, so a
-    claim citing only p.31 CANNOT be the author's — whatever the model said. This
-    is the same discipline as the page check: verify where verification is
-    possible, and never take the model's word for the one thing that fabricates a
-    quotation."""
-    source = _book(db, {12: _PROSE, 31: _TAB_PAGE})
+    """INVARIANT 2, at the compile level, and the strongest form of the fabrication
+    guard. The resolution index is AUTHOR TEXT ONLY, so an author-declared claim
+    whose anchor appears ONLY inside our [FIGURE] description matches nothing and
+    resolves to no page — it can never cite our caption as the author's sentence
+    with a real page number on it, whatever the model declared. The claim is kept
+    with pages=[] (invariant 3)."""
+    raw = (f"Alternate picking basics are introduced on the following page.\n"
+           f"{FIGURE_MARKER}\nA wiring diagram: the tone capacitor bridges the "
+           f"volume pot's third lug to ground.\n{FIGURE_END}")
+    source = _book(db, {40: raw})
     _use(monkeypatch, _FakeProvider({"concepts": [
-        _concept("am arpeggio", claim={
-            "pages": [31], "grounding": "author",     # <- the model is wrong
-            "text": "Powers writes that the Am exercise runs 1/2/2.",
+        _concept("wiring", claim={
+            "anchor": "the tone capacitor bridges the volume pot's third lug to ground",
+            "grounding": "author",     # <- the model claims his words; the quote is ours
+            "text": "A wiring detail lifted from the diagram.",
         }),
     ]}))
 
     compile_book(db, source.id)
 
-    assert db.query(ConceptClaim).one().grounding == "figure"
+    assert db.query(ConceptClaim).one().pages == []
 
 
 def test_grounding_is_FORCED_to_author_when_the_cited_page_has_no_figure_at_all(
@@ -597,3 +616,64 @@ def test_schema_and_prompt_ask_for_an_anchor_quote():
     assert "anchor" in low
     assert "verbatim" in low or "word-for-word" in low or "exactly" in low
     assert "8" in COMPILE_TASK and "15" in COMPILE_TASK  # the 8-15 word window
+
+
+# ---------------------------------------------------------------------------
+# 8. Resolution wired into the compile — pages come from the anchor (Unit B)
+# ---------------------------------------------------------------------------
+
+def test_compile_resolves_pages_from_the_anchor_not_the_model_number(db, monkeypatch):
+    """THE FOLIO DRIFT, killed. The model reports pages=[62] (the printed folio),
+    but the page is physically 86; resolution must land on 86 from the verbatim
+    anchor quote, ignoring the number entirely."""
+    body = ("Wiring Options. The way the coils are wired together shapes the tone "
+            "you hear more than any single component in the guitar.")
+    src = _book(db, {86: body})
+    payload = {"concepts": [{
+        "name": "wiring", "name_el": "καλωδίωση", "claims": [{
+            "text": "Wiring shapes tone more than any single part.",
+            "anchor": "the way the coils are wired together shapes the tone you hear",
+            "pages": [62], "stance": "wiring over parts",
+            "depth": "primary", "grounding": "author"}]}]}
+    _use(monkeypatch, _FakeProvider(payload))
+    compile_book(db, src.id)
+    claim = db.query(ConceptClaim).filter_by(source_id=src.id).one()
+    assert claim.pages == [86]
+    assert claim.anchor.startswith("the way the coils are wired")
+
+
+def test_unresolvable_anchor_keeps_the_claim_with_empty_pages(db, monkeypatch):
+    """A made-up quote matches nothing, so its citation is dropped (pages=[]) — but
+    the CLAIM is KEPT (invariant 3/9). The concept still has a claim, so it stays."""
+    src = _book(db, {12: "Alternate picking keeps the wrist doing the work."})
+    payload = {"concepts": [{
+        "name": "myth", "name_el": "μύθος", "claims": [{
+            "text": "A claim whose quote is nowhere in the book.",
+            "anchor": "sweep arpeggios ascend cleanly when the palm floats free",
+            "pages": [999], "stance": "made up",
+            "depth": "mention", "grounding": "author"}]}]}
+    _use(monkeypatch, _FakeProvider(payload))
+    compile_book(db, src.id)
+    claim = db.query(ConceptClaim).filter_by(source_id=src.id).one()
+    assert claim.pages == []            # citation dropped, claim kept (invariant 3)
+    assert db.query(Concept).count() == 1, "the concept still has a claim — keep it"
+
+
+def test_figure_grounded_claim_keeps_its_declared_page_and_stores_no_anchor(db, monkeypatch):
+    """THE HYBRID (controller resolution #1). A figure claim keeps today's model-page
+    path and stores anchor=NULL, so `reresolve_source` skips it and never blanks the
+    page — preserving figure citations while keeping invariant 2 literally true."""
+    raw = (f"Setup chart.\n{FIGURE_MARKER}\nA table of common string gauges and the "
+           f"resulting tension each one produces on a 25.5 inch scale.\n{FIGURE_END}")
+    src = _book(db, {31: raw})
+    payload = {"concepts": [{
+        "name": "gauges", "name_el": "πάχη", "claims": [{
+            "text": "The gauge/tension table on this page.",
+            "anchor": "", "pages": [31], "stance": "see table",
+            "depth": "secondary", "grounding": "figure"}]}]}
+    _use(monkeypatch, _FakeProvider(payload))
+    compile_book(db, src.id)
+    claim = db.query(ConceptClaim).filter_by(source_id=src.id).one()
+    assert claim.pages == [31]          # UNCHANGED figure path
+    assert claim.grounding == "figure"
+    assert claim.anchor is None         # so reresolve_source skips it

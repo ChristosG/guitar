@@ -88,6 +88,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
 from app.brain.ocr import book_text, figure_text
+from app.canon.resolve import build_page_index, resolve_anchor
 from app.curriculum.corpus import MIN_PAGE_CHARS
 from app.llm.factory import get_provider
 from app.models.canon import (
@@ -406,7 +407,7 @@ COMPILE_TASK_SLICE_ID = "canon.task"
 # No `minItems`/`maxLength` anywhere: `llm/schema.py` strips them (structured
 # outputs do not enforce string or array constraints) and would do so AFTER the
 # tokens are paid for. The constraints they would have expressed live in
-# `COMPILE_TASK` above and in `_validate_claim` below — stated to the model, and
+# `COMPILE_TASK` above and in `_finalize_claim` below — stated to the model, and
 # enforced in Python.
 CONCEPT_SCHEMA = {
     "type": "object",
@@ -574,36 +575,72 @@ def _grounding(declared, pages: list[int], ctx: BookContext) -> str:
     return declared if declared in CLAIM_GROUNDINGS else "figure"
 
 
-def _validate_claim(raw: dict, ctx: BookContext, *, where: str) -> dict | None:
-    """One claim, checked into shape — or None, which means it does not enter the
-    canon at all."""
+@dataclass
+class _ResolveTally:
+    """Per-book resolution counts, so the drop rate is OBSERVABLE (invariant 3).
+    Only AUTHOR-path claims are counted — a figure claim keeps its declared page
+    and never enters resolution."""
+    total: int = 0
+    resolved: int = 0
+    dropped: int = 0
+
+
+def _finalize_claim(raw: dict, ctx: BookContext, index, tally: _ResolveTally, *,
+                    where: str) -> dict | None:
+    """One claim, checked into shape and given a resolved page — or None if it is
+    not a claim at all (no text). A no-match citation is DROPPED (empty pages) but
+    the claim is KEPT (invariant 3).
+
+    THE HYBRID (controller resolution #1). A `grounding == "figure"` claim keeps
+    today's model-page path (`_valid_pages`) and stores `anchor = NULL`, so
+    `reresolve_source` skips it and never blanks the model's declared `[p.N FIGURE]`
+    page — this preserves the figure feature (e.g. Powers' ~40 pages of tab cites)
+    and keeps invariant 2 literally true (figure claims are never anchor-resolved
+    against the author index). Every other claim (author/unknown) is resolved from
+    its verbatim `anchor` quote, not from any number the model reported.
+    """
     if not isinstance(raw, dict):
         return None
     text = (raw.get("text") or "").strip()
     if not text:
         return None
 
-    pages = _valid_pages(raw.get("pages"), ctx, where=where)
-    if not pages:
-        # An uncitable claim is not a claim. Storing it with `pages=[]` would put a
-        # sentence in the canon that no page supports, which is the exact thing the
-        # canon exists to make impossible.
-        log.warning("canon: dropping claim with no citable page for %s: %.80r",
-                    where, text)
-        return None
-
+    declared = raw.get("grounding")
     stance = (raw.get("stance") or "").strip() or None
     if stance and len(stance) > _STANCE_MAX:
         log.info("canon: truncating an over-long stance for %s: %.60r", where, stance)
         stance = stance[:_STANCE_MAX]
-
     depth = raw.get("depth")
+
+    if declared == "figure":
+        # UNCHANGED path (invariant 8): a figure claim's page is the injected
+        # [p.N FIGURE] marker the model reported, validated as today. No anchor is
+        # stored, so `reresolve_source` skips it and never blanks this page.
+        pages = _valid_pages(raw.get("pages"), ctx, where=where)
+        anchor = None
+    else:
+        # AUTHOR path: the page comes from the verbatim quote, not the number.
+        anchor = (raw.get("anchor") or "").strip() or None
+        page = resolve_anchor(anchor, index) if anchor else None
+        pages = [page] if page is not None else []
+        tally.total += 1
+        if page is None:
+            tally.dropped += 1
+            log.warning("canon.resolve: no page for %s — dropping citation; "
+                        "anchor=%.70r", where, anchor or "")
+        else:
+            tally.resolved += 1
+
     return {
         "text": text,
         "pages": pages,
         "stance": stance,
         "depth": depth if depth in CLAIM_DEPTHS else None,
-        "grounding": _grounding(raw.get("grounding"), pages, ctx),
+        # `_grounding` re-derives structurally from the FINAL pages: a resolved
+        # author page is an author page, a figure page is a figure page. With
+        # empty pages it returns "author" (harmless — there is no page to mis-cite).
+        "grounding": _grounding(declared, pages, ctx),
+        "anchor": anchor,
     }
 
 
@@ -851,7 +888,10 @@ def compile_book(db, source_id: UUID, *, force: bool = False) -> BookCompile:
         raise
 
     _clear_source_ledger(db, source_id)
-    concept_count = _persist(db, source, ctx, data)
+    # The resolution index is the page text the compile already stored, figure
+    # regions stripped (invariant 2). Built ONCE for the whole book, not per claim.
+    index = build_page_index(db, source_id)
+    concept_count, tally = _persist(db, source, ctx, data, index)
 
     record.status = "ready"
     record.concept_count = concept_count
@@ -859,16 +899,25 @@ def compile_book(db, source_id: UUID, *, force: bool = False) -> BookCompile:
     record.compiled_at = datetime.now(timezone.utc)
     record.error = None
     db.commit()
-    log.info("canon: compiled %r — %s concepts from %s pages, %s tokens (%s)",
+    log.info("canon: compiled %r — %s concepts from %s pages, %s tokens (%s); "
+             "resolution: %d anchors, %d resolved, %d dropped",
              source.title, concept_count, len(ctx.page_index), record.token_count,
-             model)
+             model, tally.total, tally.resolved, tally.dropped)
     return record
 
 
-def _persist(db, source: KnowledgeSource, ctx: BookContext, data: dict) -> int:
-    """The model's answer -> rows, with every citation checked on the way in.
-    Returns how many concepts actually survived validation."""
+def _persist(db, source: KnowledgeSource, ctx: BookContext, data: dict,
+             index) -> tuple[int, _ResolveTally]:
+    """The model's answer -> rows, with every citation resolved on the way in.
+    Returns (surviving concept count, the resolution tally).
+
+    A concept is dropped ONLY if it kept no claim at all (invariant 9) — NOT
+    because a claim lost its citation. A resolved-to-nothing author claim is kept
+    with `pages=[]` and logged; the concept it belongs to still has claims, so it
+    stays. `_prune_orphan_concepts` still only deletes concepts with ZERO claims.
+    """
     concepts = (data or {}).get("concepts") or []
+    tally = _ResolveTally()
     kept = 0
     for entry in concepts:
         if not isinstance(entry, dict):
@@ -879,10 +928,11 @@ def _persist(db, source: KnowledgeSource, ctx: BookContext, data: dict) -> int:
         where = f"{source.title!r}/{name!r}"
 
         claims = [c for c in (
-            _validate_claim(raw, ctx, where=where) for raw in entry.get("claims") or []
+            _finalize_claim(raw, ctx, index, tally, where=where)
+            for raw in entry.get("claims") or []
         ) if c]
         if not claims:
-            log.warning("canon: %s kept no citable claim — dropping the concept", where)
+            log.warning("canon: %s kept no claim — dropping the concept", where)
             continue
 
         concept = _get_or_create_concept(db, name, entry.get("name_el"))
@@ -893,4 +943,4 @@ def _persist(db, source: KnowledgeSource, ctx: BookContext, data: dict) -> int:
 
     db.flush()
     _prune_orphan_concepts(db)
-    return kept
+    return kept, tally
