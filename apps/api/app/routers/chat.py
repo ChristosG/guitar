@@ -44,6 +44,7 @@ from app.llm.factory import get_provider
 from app.models.block import Block
 from app.models.chat import ApprovalRequest, ChatSession, Message
 from app.models.generation_job import GenerationJob
+from app.prompts.overrides import resolve as resolve_text
 from app.schemas.chat import (
     ApprovalResolveRequest,
     ChatMessageIn,
@@ -288,50 +289,67 @@ def _inject_curriculum_context(db: Session, session: ChatSession, wire: list[dic
     return wire
 
 
-def _suggestions_system_prompt(db: Session, session: ChatSession) -> str:
-    """SYSTEM PROMPT for the suggestion-chips call (chat overhaul, Piece B) —
-    constrained HARD, on purpose. `claude -p` cannot reliably emit inline
-    structured suggestions inside free-form prose (the solidity decision this
-    endpoint exists to satisfy), so this is a SEPARATE one-shot classification
-    call, and the one thing worse than no chip is a chip that reads like
-    filler or asks for something the app cannot do — "the composer is always
-    primary, chips are optional shortcuts, never a cage" only holds if every
-    chip is a REAL, DOABLE action.
+# SYSTEM PROMPT for the suggestion-chips call (chat overhaul, Piece B) —
+# constrained HARD, on purpose. `claude -p` cannot reliably emit inline
+# structured suggestions inside free-form prose (the solidity decision this
+# endpoint exists to satisfy), so this is a SEPARATE one-shot classification
+# call, and the one thing worse than no chip is a chip that reads like
+# filler or asks for something the app cannot do — "the composer is always
+# primary, chips are optional shortcuts, never a cage" only holds if every
+# chip is a REAL, DOABLE action.
+#
+# EDITABLE, like every other prompt in this app (`app/prompts/registry.py`'s
+# `chat.suggestions` entry) — `{lang}`/`{course_context}` are filled in by
+# `_suggestions_system_prompt` below via `.format()`, exactly the way
+# `agent/loop.py`'s `GROUNDING_BLOCK`/`_grounding_block` fill in `{passages}`/
+# `{answer_in}`: the tutor's own edit is the TEMPLATE, not a full replacement
+# of the whole rendered string, so he cannot accidentally delete the
+# placeholders his own suggestions depend on.
+SUGGESTIONS_SYSTEM = (
+    "You read a tutoring-copilot conversation and suggest the tutor's NEXT "
+    "MOVE, in {lang}.\n"
+    "Propose UP TO 3 short, concrete, DOABLE next actions: a specific "
+    "question about this exact topic, or — only if a curriculum is bound "
+    "to this conversation (see below) — a specific revision this app can "
+    "actually carry out (add/remove/reorder a lesson or module, change "
+    "its focus, adjust its length or level).\n"
+    "Each suggestion is a short imperative sentence, at most 8 words, "
+    "written as if the TUTOR is about to type it himself.\n"
+    'NEVER vague filler ("tell me more", "explain further"). NEVER '
+    "propose an action the app cannot perform. If nothing concrete "
+    "applies, return an empty list — an empty list is a correct answer, "
+    "not a failure.\n"
+    "Return ONLY the JSON object the schema describes."
+    "{course_context}"
+)
+SUGGESTIONS_SLICE_ID = "chat.suggestions"
 
-    Curriculum-aware when the session is bound to one (`ChatSession.root_id`,
-    same field `_inject_curriculum_context` reads): the revise drawer gets
-    suggestions scoped to THAT course, not generic guitar chat — mirrors that
-    function's own "only inject when bound" gate, though this is a much
-    lighter touch (a title, not the whole compact tree) since this call only
-    needs to steer wording, not ground an actual revision plan.
+
+def _suggestions_system_prompt(db: Session, session: ChatSession) -> str:
+    """Fills `SUGGESTIONS_SYSTEM` (tutor-editable via `resolve_text`) with the
+    two things only this CALL knows: the language, and — curriculum-aware,
+    when the session is bound to one (`ChatSession.root_id`, same field
+    `_inject_curriculum_context` reads) — the bound course's own title, so the
+    revise drawer's suggestions are scoped to THAT course rather than generic
+    guitar chat. Mirrors `_inject_curriculum_context`'s own "only inject when
+    bound" gate, though this is a much lighter touch (a title, not the whole
+    compact tree) since this call only needs to steer wording, not ground an
+    actual revision plan.
     """
     lang = "Greek" if session.locale == "el" else "English"
-    lines = [
-        f"You read a tutoring-copilot conversation and suggest the tutor's "
-        f"NEXT MOVE, in {lang}.",
-        "Propose UP TO 3 short, concrete, DOABLE next actions: a specific "
-        "question about this exact topic, or — only if a curriculum is bound "
-        "to this conversation (see below) — a specific revision this app can "
-        "actually carry out (add/remove/reorder a lesson or module, change "
-        "its focus, adjust its length or level).",
-        "Each suggestion is a short imperative sentence, at most 8 words, "
-        "written as if the TUTOR is about to type it himself.",
-        'NEVER vague filler ("tell me more", "explain further"). NEVER '
-        "propose an action the app cannot perform. If nothing concrete "
-        "applies, return an empty list — an empty list is a correct answer, "
-        "not a failure.",
-        "Return ONLY the JSON object the schema describes.",
-    ]
+    course_context = ""
     if session.root_id:
         course = db.get(Block, session.root_id)
         if course is not None and course.kind == "course":
-            lines.append(
-                f'This conversation is about revising the curriculum "'
+            course_context = (
+                f'\nThis conversation is about revising the curriculum "'
                 f'{course.title}" — every suggestion must fit revising or '
                 f"asking about THIS curriculum specifically, not a generic "
                 f"guitar topic."
             )
-    return "\n".join(lines)
+    return resolve_text(db, SUGGESTIONS_SLICE_ID, SUGGESTIONS_SYSTEM).format(
+        lang=lang, course_context=course_context,
+    )
 
 
 def _suggestions_transcript(messages: list[Message]) -> str:

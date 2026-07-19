@@ -174,10 +174,17 @@ from app.lessons.draft import (
 )
 from app.lessons.draft import _build_messages as _selection_messages
 from app.llm.claude_cli import _tool_system_prompt
+from app.models.chat import ChatSession, Message
 from app.models.note import Note
 from app.models.student import Student
 from app.prompts import overrides
 from app.prompts.overrides import resolve as resolve_text
+from app.routers.chat import (
+    SUGGESTIONS_SLICE_ID,
+    SUGGESTIONS_SYSTEM,
+    _suggestions_system_prompt,
+    _suggestions_transcript,
+)
 from app.routers.settings import _PROBE_PROMPT, _PROBE_SLICE_ID
 from app.students.context import (
     STUDENT_PITCH,
@@ -761,6 +768,37 @@ def _build_chat_no_hits(locale: str, db, course_language=None) -> _Built:
     ]
 
 
+# Suggestion chips (chat overhaul, Piece B) — a plain, unpersisted sample
+# turn, exactly the same "his data, never his prompt" posture as every other
+# sample above. This is the ORDINARY (no curriculum bound) branch;
+# `_suggestions_system_prompt`'s curriculum-aware sentence is described in
+# the entry's own Greek copy rather than given a second live-rendered card —
+# unlike `chat.grounding`/`chat.no_hits`, it needs an EXISTING `Block` row to
+# render (the live function fetches it fresh via `db.get(Block, root_id)`,
+# not from a passed-in brief), which this preview's sample-only `db=None`
+# path cannot supply.
+_SAMPLE_SUGGESTIONS_REPLY = (
+    "Το σύστημα CAGED οργανώνει το μπράτσο σε πέντε αλληλένδετα σχήματα, το "
+    "καθένα μια μετακινούμενη μορφή μιας ανοιχτής συγχορδίας."
+)
+_SAMPLE_SUGGESTIONS_MESSAGES = [
+    Message(role="user", content=_SAMPLE_QUERY),
+    Message(role="assistant", content=_SAMPLE_SUGGESTIONS_REPLY),
+]
+
+
+def _build_chat_suggestions(locale: str, db, course_language=None) -> _Built:
+    session = ChatSession(locale=locale, root_id=None)
+    system = _suggestions_system_prompt(db, session)
+    transcript = _suggestions_transcript(_SAMPLE_SUGGESTIONS_MESSAGES)
+    return [
+        RenderedMessage(role="system", content=system),
+        RenderedMessage(role="user", content=transcript),
+    ], [
+        ("query", "Η ερώτησή σου", _SAMPLE_QUERY),
+    ]
+
+
 def _build_curriculum_system(locale: str, db, course_language=None) -> _Built:
     # Index 0 of the live prefix is `CURRICULUM_SYSTEM` in every branch.
     return _msgs(prefix_messages(_SAMPLE_LIBRARY, db)[:1]), []
@@ -1175,6 +1213,44 @@ _ENTRIES = [
                 id=CHAT_NO_HITS_SLICE_ID,
                 label_el="Το κείμενο της οδηγίας",
                 default=_NO_HITS_GROUNDING,
+                kind="replace",
+            ),
+        ),
+    ),
+    PromptEntry(
+        id="chat.suggestions",
+        flow="chat",
+        kind="prompt",
+        source_ref="app/routers/chat.py:308",
+        title_el="Οι προτάσεις «επόμενης κίνησης»",
+        what_it_does_el=(
+            "Αφού ο βοηθός απαντήσει, η εφαρμογή κάνει ΜΙΑ ξεχωριστή, γρήγορη "
+            "και φθηνή κλήση που ζητάει έως 3 σύντομες προτάσεις για το επόμενο "
+            "βήμα — κουμπάκια που μπορείς να πατήσεις αντί να πληκτρολογήσεις. "
+            "Η οδηγία είναι αυστηρή επίτηδες: κάθε πρόταση πρέπει να είναι μια "
+            "συγκεκριμένη, εφικτή ενέργεια (μια πραγματική ερώτηση, ή — μέσα "
+            "στην «Αναθεώρηση με AI» — μια αλλαγή που η εφαρμογή μπορεί όντως "
+            "να κάνει), ποτέ γενικόλογο κείμενο («πες μου περισσότερα») και "
+            "ποτέ κάτι που η εφαρμογή δεν μπορεί να εκτελέσει. Όταν έχεις "
+            "ανοιχτή την «Αναθεώρηση με AI» πάνω σε συγκεκριμένο πρόγραμμα, "
+            "προστίθεται μία ακόμη πρόταση που ονομάζει αυτό το πρόγραμμα, ώστε "
+            "οι προτάσεις να αφορούν εκείνο και όχι μια γενική ερώτηση κιθάρας. "
+            "Αν δεν βρεθεί τίποτα συγκεκριμένο, ή αν η κλήση αποτύχει, απλώς "
+            "δεν εμφανίζεται κανένα κουμπάκι — δεν είναι σφάλμα."
+        ),
+        when_it_runs_el=(
+            "Μετά από κάθε απάντηση του βοηθού στη συνομιλία (και στις δύο — "
+            "στη Συνομιλία και στην «Αναθεώρηση με AI») — ποτέ όσο εκκρεμεί μια "
+            "έγκριση ή τρέχει μια εργασία."
+        ),
+        source_of_truth=lambda: SUGGESTIONS_SYSTEM,
+        build=_build_chat_suggestions,
+        call_sites=("routers/chat.py:916",),
+        slices=(
+            Slice(
+                id=SUGGESTIONS_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=SUGGESTIONS_SYSTEM,
                 kind="replace",
             ),
         ),
