@@ -46,7 +46,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import aliased
 
 from app.config import settings
-from app.curriculum.corpus import CurriculumContextError, build_curriculum_context
+from app.curriculum.corpus import (
+    CurriculumContextError,
+    build_curriculum_context,
+    build_retrieval_context,
+)
 from app.curriculum.depth import floor_words, target_words
 from app.curriculum.blueprint import blueprint_from_course_meta
 from app.curriculum.draft import LessonContext, draft_lesson, draft_progress, persist_lesson
@@ -344,11 +348,38 @@ def run_curriculum_draft_job(job_id: uuid.UUID) -> None:
         source_ids = None if raw_sources is None else [uuid.UUID(s) for s in raw_sources]
         student_id = uuid.UUID(meta["student_id"]) if meta.get("student_id") else None
 
-        # SAME ROUTING as the outline call — same source_ids, same compile
-        # states, so the same representation (library or canon) and therefore the
-        # same byte-identical prefix the outline warmed. Routing here and at
-        # outline time must never disagree, or the fan-out is a cache miss.
-        library = build_curriculum_context(db, source_ids)
+        # `grounding="retrieval"` is set by the revise chain (`jobs/curriculum_revise`):
+        # a revise CHANGES lessons, so each is drafted from PER-LESSON retrieval plus
+        # the model's own knowledge — never the whole-library gate, and never a refusal.
+        # Any other value (the normal generation/Resume path) keeps the routing below.
+        grounding = job.params.get("grounding")
+
+        if grounding == "retrieval":
+            # Skip the canon router entirely: force the too-large-to-send flag so every
+            # worker grounds via `draft.draft_lesson`'s `ground_topic` fallback (all
+            # chunks, compiled or not). No whole library, no `CurriculumContextError`.
+            library = build_retrieval_context(db, source_ids)
+        else:
+            # SAME ROUTING as the outline call — same source_ids, same compile
+            # states, so the same representation (library or canon) and therefore the
+            # same byte-identical prefix the outline warmed. Routing here and at
+            # outline time must never disagree, or the fan-out is a cache miss.
+            #
+            # The former REFUSE case (too large to read whole AND a contributing book
+            # not yet compiled) no longer fails the run: it DEGRADES to the same
+            # per-lesson retrieval, which covers every chunk regardless of compile
+            # status — so nothing is silently left out, which was the refusal's whole
+            # concern. The happy paths are untouched: a fitting selection still reads
+            # whole, a large fully-compiled selection still uses the canon.
+            try:
+                library = build_curriculum_context(db, source_ids)
+            except CurriculumContextError as e:
+                log.warning(
+                    "run_curriculum_draft_job: job %s selection too large to read whole "
+                    "with an uncompiled book (%s) — grounding per-lesson via retrieval "
+                    "instead of refusing", job_id, e,
+                )
+                library = build_retrieval_context(db, source_ids)
         student_brief = build_student_brief(db, student_id)
         # THE TUTOR'S PROMPT OVERRIDES, resolved ONCE, here, where a session is
         # legitimately held — never inside a worker. `_draft_one` hands its
@@ -378,15 +409,6 @@ def run_curriculum_draft_job(job_id: uuid.UUID) -> None:
 
         job.progress = {"phase": "drafting"}
         db.commit()
-    except CurriculumContextError as e:
-        # The selection got too large to read whole while a selected book is still
-        # uncompiled — an honest, actionable refusal, NOT "our bug". Reachable
-        # here (not just at outline time) on a Resume where a book's compile state
-        # changed since the outline. Fail visibly rather than draft 20 lessons
-        # from a canon that would silently omit one of his books.
-        log.warning("run_curriculum_draft_job: refusing job %s — %s", job_id, e)
-        _fail_job(db, job_id, "upstream", str(e))
-        return
     except Exception:
         log.exception("run_curriculum_draft_job: setup failed for job %s", job_id)
         _fail_job(db, job_id, "internal", "The draft could not be started. Try again.")

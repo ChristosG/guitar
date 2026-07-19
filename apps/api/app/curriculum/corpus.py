@@ -54,7 +54,7 @@ being read in full, and who was never told, is back to the bug we started with.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from uuid import UUID
 
 from sqlalchemy import select
@@ -317,6 +317,39 @@ def build_curriculum_context(db, source_ids: list[UUID] | None):
         f"(or select fewer books) and try again.",
         uncompiled=uncompiled,
     )
+
+
+def build_retrieval_context(db, source_ids: list[UUID] | None) -> LibraryContext:
+    """The selected library as a RETRIEVAL-GROUNDED context — for the paths that
+    must never read the whole library and must never REFUSE.
+
+    A `LibraryContext` whose text is the same one `build_library_context` reads, but
+    flagged `fits=False` unconditionally, so every draft grounds PER-LESSON via
+    `draft.draft_lesson`'s existing `ground_topic` fallback (which searches ALL of
+    the sources' chunks regardless of canon-compile status) instead of sending the
+    whole book or raising `CurriculumContextError`.
+
+    This is what makes the whole-library REFUSAL's concern moot: retrieval covers
+    every chunk of every source — compiled or not — so nothing is silently left out.
+    Where retrieval finds little, `draft.py`'s tier framing lets the model teach from
+    its own knowledge. Two callers:
+
+      * the revise-chained draft (`jobs/curriculum_revise`) — a revise CHANGES a
+        lesson, the library is optional grounding, never the whole-library gate;
+      * the graceful fallback for `run_curriculum_draft_job`'s former REFUSE case
+        (too large + a contributing book uncompiled), which used to fail the run.
+
+    When the selection has no readable text at all the empty context is returned
+    unchanged (`is_empty` stays True): the draft then teaches honestly from general
+    knowledge (the NO_LIBRARY / gap-tier framing), never pretending to a library it
+    cannot read. Note `page_index`/`sources`/`ref_to_source_id` are the REAL ones
+    from `build_library_context`, so a citation the model does land is still
+    validated against the pages that actually exist.
+    """
+    library = build_library_context(db, source_ids)
+    if library.is_empty:
+        return library
+    return replace(library, fits=False)
 
 
 def _count_tokens(text: str) -> int:

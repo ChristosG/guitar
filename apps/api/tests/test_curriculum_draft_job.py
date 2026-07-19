@@ -470,3 +470,116 @@ def test_the_whole_fanout_writes_lessons_with_his_edited_prompt(db, _provider):
     for sent in provider.drafted:
         assert sentinel in sent, "a lesson was drafted with the code default"
     assert _status(db, root_id) == ["ready"] * 8
+
+
+# ---------------------------------------------------------------------------
+# RETRIEVAL GROUNDING — the revise chain, and the former REFUSE case
+#
+# To CHANGE a lesson the model may use its OWN knowledge: the library is optional
+# per-lesson grounding (`ground_topic`), never the whole-library gate that refused.
+# ---------------------------------------------------------------------------
+
+
+def _grounding_job(db, root_id) -> uuid.UUID:
+    job = GenerationJob(
+        kind="curriculum_draft", status="pending",
+        params={"root_id": str(root_id), "grounding": "retrieval"},
+    )
+    db.add(job)
+    db.commit()
+    return job.id
+
+
+def _spy_ground_topic(monkeypatch, counter):
+    from app.curriculum.ground import Passage
+
+    def _fake(db, topic, *, source_ids=None, k=5):
+        counter.append(topic)
+        return [Passage(text="A retrieved passage.", source_id=uuid.uuid4(),
+                        source_title="Book", page_no=19, page_id=uuid.uuid4(), score=0.9)]
+
+    monkeypatch.setattr(draft_mod, "ground_topic", _fake)
+
+
+def test_grounding_retrieval_drafts_via_ground_topic_never_the_whole_library(db, monkeypatch):
+    """The revise chain sets `grounding="retrieval"`: every lesson is grounded by
+    per-lesson `ground_topic` (all chunks, compiled or not) plus the model's own
+    knowledge — the whole-library router is NOT consulted, so it can never refuse."""
+    grounded: list[str] = []
+    _spy_ground_topic(monkeypatch, grounded)
+
+    def _must_not_run(db, source_ids):
+        raise AssertionError("build_curriculum_context must not be consulted for grounding=retrieval")
+
+    monkeypatch.setattr(fanout_mod, "build_curriculum_context", _must_not_run)
+
+    root_id = _course(db)
+    run_curriculum_draft_job(_grounding_job(db, root_id))
+
+    db.expire_all()
+    assert len(grounded) == 8, "each of the 8 lessons was grounded via retrieval"
+    assert _status(db, root_id) == ["ready"] * 8
+    job = db.scalars(
+        select(GenerationJob).where(GenerationJob.kind == "curriculum_draft")
+        .order_by(GenerationJob.created_at.desc())
+    ).first()
+    assert job.status == "succeeded"
+
+
+def test_a_too_large_uncompiled_selection_degrades_to_retrieval_not_a_refusal(db, monkeypatch):
+    """The former REFUSE case (too large to read whole AND a contributing book not
+    compiled) no longer fails the run — it degrades to the SAME per-lesson retrieval.
+    No `CurriculumContextError` escapes; the lessons reach `ready`."""
+    from app.curriculum.corpus import CurriculumContextError
+
+    grounded: list[str] = []
+    _spy_ground_topic(monkeypatch, grounded)
+
+    def _refuse(db, source_ids):
+        raise CurriculumContextError(
+            "too large + uncompiled", uncompiled=[{"id": "x", "title": "Uncompiled Book"}])
+
+    monkeypatch.setattr(fanout_mod, "build_curriculum_context", _refuse)
+
+    root_id = _course(db)
+    run_curriculum_draft_job(_job(db, root_id))       # NO grounding flag — the generation path
+
+    db.expire_all()
+    assert len(grounded) == 8, "the refuse case grounded every lesson via retrieval"
+    assert _status(db, root_id) == ["ready"] * 8
+    job = db.scalars(
+        select(GenerationJob).where(GenerationJob.kind == "curriculum_draft")
+        .order_by(GenerationJob.created_at.desc())
+    ).first()
+    assert job.status == "succeeded", "a degrade-to-retrieval run succeeds, it does not fail"
+    assert job.error is None
+
+
+def test_generation_happy_path_still_reads_the_whole_library_not_retrieval(db, monkeypatch):
+    """UNCHANGED: a fitting selection (no grounding flag) is read WHOLE — the
+    per-lesson retrieval fallback is not consulted at all."""
+    grounded: list[str] = []
+    _spy_ground_topic(monkeypatch, grounded)
+
+    root_id = _course(db)
+    run_curriculum_draft_job(_job(db, root_id))
+
+    db.expire_all()
+    assert grounded == [], "a fitting library is read whole; retrieval must not fire"
+    assert _status(db, root_id) == ["ready"] * 8
+
+
+def test_build_retrieval_context_flags_too_large_but_keeps_an_empty_selection_empty(db):
+    """`build_retrieval_context` forces `fits=False` on a real library (so the draft
+    grounds per-lesson) but returns an empty selection untouched (nothing to
+    retrieve — the draft teaches from general knowledge)."""
+    from app.curriculum.corpus import build_retrieval_context
+
+    source = _book(db)
+    ctx = build_retrieval_context(db, [source.id])
+    assert ctx.fits is False
+    assert ctx.is_empty is False
+    assert ctx.page_index, "the real page index is preserved for citation validation"
+
+    empty = build_retrieval_context(db, [])       # deliberately no sources
+    assert empty.is_empty is True
