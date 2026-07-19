@@ -34,6 +34,7 @@ from rapidfuzz import fuzz
 from sqlalchemy import select
 
 from app.brain.ocr import book_text
+from app.models.canon import ConceptClaim
 from app.models.knowledge import Page
 
 log = logging.getLogger(__name__)
@@ -135,3 +136,63 @@ def resolve_anchor(anchor: str, index: list[_PageText]) -> int | None:
         best_page = a.page_no if al.dest_start < boundary else b.page_no
 
     return best_page if best_score >= RESOLVE_THRESHOLD else None
+
+
+# ---------------------------------------------------------------------------
+# Re-resolve over stored anchors — the whole reason the anchor is persisted
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ResolveSummary:
+    source_id: UUID
+    total: int = 0
+    resolved: int = 0
+    dropped: int = 0
+
+
+def reresolve_source(db, source_id: UUID) -> ResolveSummary:
+    """Re-run resolution over a source's STORED anchors — NO LLM, NO recompile.
+
+    THE WHOLE REASON `concept_claim.anchor` IS PERSISTED. Re-tuning
+    `RESOLVE_THRESHOLD`, fixing a resolver bug, or rolling quote-based to another
+    book costs ZERO subscription spend: this reads the anchors already on disk and
+    rewrites `pages`. A claim with no anchor (pre-Unit-B, or a figure claim) is
+    LEFT ALONE — never blanked. A no-match empties `pages` and is counted
+    (invariant 3). Commits, and returns the observable summary.
+    """
+    index = build_page_index(db, source_id)
+    claims = db.scalars(
+        select(ConceptClaim).where(ConceptClaim.source_id == source_id)).all()
+    summary = ResolveSummary(source_id=source_id)
+    for claim in claims:
+        anchor = (claim.anchor or "").strip()
+        if not anchor:
+            continue                    # no anchor -> not a resolvable claim
+        summary.total += 1
+        page = resolve_anchor(anchor, index)
+        if page is None:
+            claim.pages = []
+            summary.dropped += 1
+            log.warning("canon.resolve: no page for stored anchor %.70r "
+                        "(source=%s) — dropping citation", anchor, source_id)
+        else:
+            claim.pages = [page]
+            summary.resolved += 1
+    db.commit()
+    log.info("canon.resolve: source=%s — %d anchors, %d resolved, %d dropped",
+             source_id, summary.total, summary.resolved, summary.dropped)
+    return summary
+
+
+def reresolve_all(db) -> list[ResolveSummary]:
+    """Re-resolve every source that has at least one stored anchor. The controller
+    calls this after re-tuning `RESOLVE_THRESHOLD`; a source with no anchors (the
+    four books compiled before Unit B) is a no-op."""
+    source_ids = [
+        r[0] for r in db.execute(
+            select(ConceptClaim.source_id)
+            .where(ConceptClaim.anchor.is_not(None))
+            .distinct()
+        ).all()
+    ]
+    return [reresolve_source(db, sid) for sid in source_ids]

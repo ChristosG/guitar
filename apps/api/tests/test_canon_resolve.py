@@ -71,3 +71,37 @@ def test_below_threshold_does_not_resolve():
     weak = resolve_anchor("wired shapes hear part single more than tone components", idx)
     assert weak is None
     assert RESOLVE_THRESHOLD == 88.0
+
+
+# ---------------------------------------------------------------------------
+# Re-resolve over STORED anchors — no LLM, no recompile (Task 5)
+# ---------------------------------------------------------------------------
+
+def test_reresolve_updates_pages_from_stored_anchors_without_any_model(db):
+    from app.canon.resolve import reresolve_source
+    from app.models.canon import Concept, ConceptClaim
+    from app.models.knowledge import KnowledgeSource, Page
+
+    src = KnowledgeSource(type="pdf", title="Reresolve Book", status="ready")
+    db.add(src); db.flush()
+    db.add(Page(source_id=src.id, page_no=52, status="ready",
+                text=("The Lacey Act makes it unlawful to trade in wood harvested "
+                      "in violation of another country's laws.")))
+    concept = Concept(key="legal-wood", label_en="Legal wood")
+    db.add(concept); db.flush()
+    # a claim whose stored `pages` is wrong (folio offset) but whose anchor is right
+    author = ConceptClaim(concept_id=concept.id, source_id=src.id,
+                          text="Illegally sourced wood is unlawful to trade.",
+                          pages=[28], grounding="author",
+                          anchor="unlawful to trade in wood harvested in violation")
+    # a figure claim with no anchor — must be LEFT ALONE
+    figure = ConceptClaim(concept_id=concept.id, source_id=src.id,
+                          text="See the map figure.", pages=[7],
+                          grounding="figure", anchor=None)
+    db.add_all([author, figure]); db.commit()
+
+    summary = reresolve_source(db, src.id)
+    db.refresh(author); db.refresh(figure)
+    assert author.pages == [52]         # corrected from the anchor, no model call
+    assert figure.pages == [7]          # untouched (no anchor)
+    assert (summary.total, summary.resolved, summary.dropped) == (1, 1, 0)
