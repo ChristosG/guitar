@@ -621,7 +621,7 @@ def post_message(session_id: UUID, payload: ChatMessageIn, db: Session = Depends
     wire = window_wire(messages_to_wire(_ordered_messages(db, session_id)))
     wire = _inject_curriculum_context(db, session, wire)
     try:
-        result = run_agent_turn(db, wire, locale=session.locale)
+        result = run_agent_turn(db, wire, locale=session.locale, raw_user_text=payload.content)
     except LLMError as e:
         # A provider failure mid-turn used to escape as a raw 500 — "Internal
         # Server Error" in a non-technical user's browser for a 429 he only
@@ -684,7 +684,7 @@ def post_message_stream(session_id: UUID, payload: ChatMessageIn, db: Session = 
 
     def event_stream():
         try:
-            for event in stream_plain_turn(db, wire, locale=session.locale):
+            for event in stream_plain_turn(db, wire, locale=session.locale, raw_user_text=payload.content):
                 if event["event"] == "delta":
                     yield f"event: delta\ndata: {json.dumps({'text': event['text']})}\n\n"
                 elif event["event"] == "fallback":

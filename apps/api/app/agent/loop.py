@@ -107,6 +107,7 @@ from app.agent.guards import (
     NAMED_SONG_DECLINE_MESSAGE,
     looks_like_named_song_request,
     looks_like_tablature,
+    strip_curriculum_context,
 )
 from app.agent.prompts import SYSTEM_PROMPT
 from app.agent.tools import TOOLS, with_locale
@@ -597,6 +598,7 @@ def _first_mutation_index(tool_calls: list[ToolCall]) -> int | None:
 
 def run_agent_turn(
     db, messages: list[dict], *, locale: str = DEFAULT_LOCALE, max_steps: int = 6,
+    raw_user_text: str | None = None,
 ) -> AgentResult:
     """`locale` is the SESSION's language (`ChatSession.locale`, set from the
     browser's `X-App-Locale` at session creation) — `app/routers/chat.py`
@@ -657,9 +659,16 @@ def run_agent_turn(
     hits: list = []
     is_user_turn = last.get("role") == "user"
     last_text = last.get("content") or ""
-    named_song = is_user_turn and looks_like_named_song_request(last_text)
-    if is_user_turn and (named_song or _is_content_bearing(last_text)):
-        hits = search(db, last_text, k=5)
+    # G5's invariant ("judge the tutor's own words" — see the comment above)
+    # now holds against the ROUTER's injection too, not just this loop's own
+    # grounding tail: `app/routers/chat.py` appends the whole curriculum tree
+    # to `last_text` before we ever run, and a guitar course tree contains
+    # trigger words in its lesson titles. The router passes the raw text
+    # explicitly; the strip is the fallback for callers that don't.
+    guard_text = raw_user_text if raw_user_text is not None else strip_curriculum_context(last_text)
+    named_song = is_user_turn and looks_like_named_song_request(guard_text)
+    if is_user_turn and (named_song or _is_content_bearing(guard_text)):
+        hits = search(db, guard_text, k=5)
         citations = [_to_citation(hit) for hit in hits]
         grounded_content = f"{last_text}\n\n{_grounding_block(hits, locale, db)}"
         messages[-1] = {**last, "content": grounded_content}
@@ -852,6 +861,7 @@ def run_agent_turn(
 # one; only the model-call transport differs.
 def stream_plain_turn(
     db, messages: list[dict], *, locale: str = DEFAULT_LOCALE,
+    raw_user_text: str | None = None,
 ) -> Iterator[dict]:
     """Yields, in order:
       - zero or more `{"event": "delta", "text": ...}` as content streams in.
@@ -893,9 +903,13 @@ def stream_plain_turn(
     hits: list = []
     is_user_turn = last.get("role") == "user"
     last_text = last.get("content") or ""
-    named_song = is_user_turn and looks_like_named_song_request(last_text)
-    if is_user_turn and (named_song or _is_content_bearing(last_text)):
-        hits = search(db, last_text, k=5)
+    # Same `guard_text` invariant as `run_agent_turn` (see that function's
+    # comment above its own identical block) — judge the tutor's own words,
+    # never the router's injected curriculum tree.
+    guard_text = raw_user_text if raw_user_text is not None else strip_curriculum_context(last_text)
+    named_song = is_user_turn and looks_like_named_song_request(guard_text)
+    if is_user_turn and (named_song or _is_content_bearing(guard_text)):
+        hits = search(db, guard_text, k=5)
         citations = [_to_citation(hit) for hit in hits]
         grounded_content = f"{last_text}\n\n{_grounding_block(hits, locale, db)}"
         messages[-1] = {**last, "content": grounded_content}

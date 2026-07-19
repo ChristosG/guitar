@@ -13,6 +13,7 @@ reconstruction, the unknown-tool guard, a tool-dispatch-exception guard, the
 import json
 
 import app.agent.loop as agent_loop
+from app.agent.guards import NAMED_SONG_DECLINE_MESSAGE
 from app.agent.loop import AgentResult, run_agent_turn
 from app.agent.prompts import SYSTEM_PROMPT
 from app.i18n import DEFAULT_LOCALE, language_directive
@@ -357,3 +358,115 @@ def test_run_agent_turn_repair_counter_resets_after_a_successful_call(monkeypatc
 
     assert result.status == "answer"
     assert len(fake_provider.calls) == 4  # not stopped after the first 2-failure count would suggest
+
+
+# ---------------------------------------------------------------------------
+# raw_user_text: G5 guard + content-bearing gate + retrieval query must judge
+# the tutor's OWN words, never `app/routers/chat.py`'s injected curriculum
+# tree (2026-07-19 regression — a guitar course tree's lesson titles, e.g.
+# "Intro to Tone", "Solo riffs and sustain", reliably trip the named-song
+# trigger words, so scanning it declined EVERY revise-drawer turn before the
+# model was ever called, no matter what the tutor typed).
+# ---------------------------------------------------------------------------
+
+_REVISE_CTX = (
+    "\n\n[CURRICULUM CONTEXT — this conversation is about curriculum abc "
+    'titled "Guitar Tone & Amps".\nCurrent structure:\n'
+    "[uuid-1] Intro to Tone — what makes an amp sing\n"
+    "[uuid-2] Solo riffs and sustain — Gilmour-style bends]"
+)
+_RAW_REVISE_REQUEST = "μπορείς να αφαιρέσεις όλα τα inline citations από αυτό το curricula;"
+
+
+def test_revise_turn_with_injected_curriculum_reaches_the_model(monkeypatch):
+    """2026-07-19 regression: the injected course tree ("Intro", "Solo" titles)
+    must NOT trip the named-song guard — the model must see the request."""
+    fake_provider = _FakeProvider([AssistantTurn(content="Έγινε.", tool_calls=[])])
+    monkeypatch.setattr(agent_loop, "get_provider", lambda: fake_provider)
+    monkeypatch.setattr(agent_loop, "search", lambda db, q, k=5: [])
+
+    messages = [{"role": "user", "content": _RAW_REVISE_REQUEST + _REVISE_CTX}]
+    result = run_agent_turn(None, messages, locale="el", raw_user_text=_RAW_REVISE_REQUEST)
+
+    assert result.content == "Έγινε."
+    assert len(fake_provider.calls) == 1  # the model WAS called
+
+
+def test_revise_turn_without_raw_text_still_reaches_model_via_strip_fallback(monkeypatch):
+    fake_provider = _FakeProvider([AssistantTurn(content="Έγινε.", tool_calls=[])])
+    monkeypatch.setattr(agent_loop, "get_provider", lambda: fake_provider)
+    monkeypatch.setattr(agent_loop, "search", lambda db, q, k=5: [])
+
+    messages = [{"role": "user", "content": _RAW_REVISE_REQUEST + _REVISE_CTX}]
+    result = run_agent_turn(None, messages, locale="el")  # no raw_user_text
+
+    assert result.content == "Έγινε."
+
+
+def test_genuine_named_song_request_still_declined_inside_revise_session(monkeypatch):
+    """The injection must not MASK a real fabrication request either."""
+    fake_provider = _FakeProvider([AssistantTurn(content="never reached", tool_calls=[])])
+    monkeypatch.setattr(agent_loop, "get_provider", lambda: fake_provider)
+    monkeypatch.setattr(agent_loop, "search", lambda db, q, k=5: [])  # library miss
+
+    raw = "γράψε μου το tab για το Nothing Else Matters"
+    messages = [{"role": "user", "content": raw + _REVISE_CTX}]
+    result = run_agent_turn(None, messages, locale="el", raw_user_text=raw)
+
+    assert result.content == NAMED_SONG_DECLINE_MESSAGE
+    assert len(fake_provider.calls) == 0  # pre-model short-circuit intact
+
+
+def test_search_query_is_the_raw_text_not_the_enriched_blob(monkeypatch):
+    """Retrieval pollution half of the bug: the BM25/dense query must be the
+    tutor's words, not words + the whole serialized course tree."""
+    fake_provider = _FakeProvider([AssistantTurn(content="ok", tool_calls=[])])
+    monkeypatch.setattr(agent_loop, "get_provider", lambda: fake_provider)
+    seen_queries = []
+    monkeypatch.setattr(
+        agent_loop, "search",
+        lambda db, q, k=5: (seen_queries.append(q), [])[1],
+    )
+
+    raw = "τι είναι το ρελέ του ενισχυτή;"  # content-bearing → triggers the pre-hop
+    messages = [{"role": "user", "content": raw + _REVISE_CTX}]
+    run_agent_turn(None, messages, locale="el", raw_user_text=raw)
+
+    assert seen_queries == [raw]
+
+
+class _FakeStreamingProvider:
+    """Copied from `tests/test_chat_stream_router.py`'s own fake (verbatim
+    contract — `chat_tools_stream` yields a scripted sequence of `{"type":
+    ...}` events, `chat_tools` intentionally NOT implemented) rather than
+    inventing a second one: this module already has `_FakeProvider` for the
+    non-streaming path, this is that module's streaming twin.
+    """
+
+    def __init__(self, events):
+        self._events = events
+        self.calls = 0
+
+    def chat_tools_stream(self, messages, tools, *, tool_choice="auto", temperature=0.3):
+        self.calls += 1
+        for event in self._events:
+            if isinstance(event, Exception):
+                raise event
+            yield event
+
+
+def test_stream_revise_turn_with_injected_curriculum_reaches_the_model(monkeypatch):
+    fake_provider = _FakeStreamingProvider([
+        {"type": "content", "text": "Έγινε."},
+        {"type": "done", "content": "Έγινε.", "tool_calls": []},
+    ])
+    monkeypatch.setattr(agent_loop, "get_provider", lambda: fake_provider)
+    monkeypatch.setattr(agent_loop, "search", lambda db, q, k=5: [])
+
+    messages = [{"role": "user", "content": _RAW_REVISE_REQUEST + _REVISE_CTX}]
+    events = list(agent_loop.stream_plain_turn(None, messages, locale="el",
+                                               raw_user_text=_RAW_REVISE_REQUEST))
+
+    done = [e for e in events if e["event"] == "done"]
+    assert done and done[0]["content"] == "Έγινε."
+    assert done[0]["content"] != NAMED_SONG_DECLINE_MESSAGE
