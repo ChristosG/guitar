@@ -427,6 +427,56 @@ async function mockJobsRevisePlusFailedDraft(
   return calls;
 }
 
+/** Same two-stage shape as `mockJobsRevisePlusFailedDraft` above, but for the
+ * chat overhaul Task 5 scenario: the chained `curriculum_draft` row reports
+ * `status="succeeded"` — the 429 RULE means a rate-limited lesson goes back
+ * to `queued`, NOT `failed`, so the job finishes "successfully" while a
+ * lesson still needs writing. Paired in the test with a curriculum fixture
+ * whose post-apply `progress()` reports `queued > 0` (`mockCurriculumTree`'s
+ * own default — the newly inserted lesson is genuinely still `queued` right
+ * after apply, which is exactly what a rate-limited requeue also looks
+ * like). */
+async function mockJobsReviseePlusSucceededDraft(
+  page: Page,
+  { reviseJobId, draftJobId }: { reviseJobId: string; draftJobId: string },
+) {
+  const calls = { revise: 0, draft: 0 };
+  await page.route(`${API_ORIGIN}/jobs/**`, async (route) => {
+    const { pathname } = new URL(route.request().url());
+    const match = pathname.match(/^\/jobs\/([^/]+)$/);
+    const id = match?.[1];
+    const base = { created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+    const json = (body: unknown) =>
+      route.fulfill({ status: 200, contentType: "application/json", headers: CORS_HEADERS, body: JSON.stringify(body) });
+
+    if (id === reviseJobId) {
+      calls.revise++;
+      if (calls.revise <= 1) {
+        await json({ id, ...base, kind: "curriculum_revise", status: "pending", result_root_id: null, error: null, error_kind: null });
+      } else {
+        await json({
+          id, ...base, kind: "curriculum_revise", status: "succeeded", result_root_id: null,
+          error: null, error_kind: null, progress: { phase: "drafting", draft_job_id: draftJobId },
+        });
+      }
+      return;
+    }
+    if (id === draftJobId) {
+      calls.draft++;
+      await json({
+        id, ...base, kind: "curriculum_draft", status: "succeeded", result_root_id: null,
+        error: null, error_kind: null, progress: null,
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 500, contentType: "application/json", headers: CORS_HEADERS,
+      body: JSON.stringify({ detail: "unmocked request in test" }),
+    });
+  });
+  return calls;
+}
+
 test.describe("curriculum revise drawer (mocked API)", () => {
   test("propose -> labeled RevisionPlanCard -> approve applies verbatim -> board refreshes with the new lesson", async ({
     page,
@@ -872,5 +922,73 @@ test.describe("curriculum revise drawer — full-screen toggle (mocked API)", ()
     await expect(drawer).toHaveCount(0);
     await page.getByTestId("revise-open").click();
     await expect(page.getByTestId("revise-drawer")).toHaveAttribute("data-fullscreen", "true");
+  });
+});
+
+// Chat overhaul Task 5 (review fix) — accurate "applied" status. Before this,
+// a chained draft job reporting `status="succeeded"` always meant a flat
+// "applied", even when the 429 rate-limit rule (`jobs/curriculum_draft.py`)
+// requeued a lesson back to `queued` instead of marking it `failed` — a
+// silent gap between what the chat said and what the board actually showed.
+test.describe("curriculum revise drawer — accurate applied status (mocked API)", () => {
+  test("a succeeded draft job that still leaves a lesson queued says so, not a flat 'applied'", async ({ page }) => {
+    const rootId = randomUUID();
+    const moduleId = randomUUID();
+    const lesson1Id = randomUUID();
+    const lesson2Id = randomUUID();
+    const newLessonId = randomUUID();
+    const reviseJobId = randomUUID();
+    const draftJobId = randomUUID();
+
+    // `mockCurriculumTree`'s own default: once applied, the new lesson is
+    // `queued` on `/progress` (`markApplied` -> `queued: 1`) — precisely the
+    // shape a rate-limited requeue leaves behind, whether or not any
+    // drafting actually ran.
+    const fixture = mockCurriculumTree(rootId, moduleId, lesson1Id, lesson2Id, newLessonId);
+    const chatSessionStore = createChatSessionStore();
+    await mockCurriculaApi(page, fixture, chatSessionStore);
+    const chat = await mockChatApi(page, () => fixture.markApplied(), chatSessionStore);
+    await mockJobsReviseePlusSucceededDraft(page, { reviseJobId, draftJobId });
+
+    await page.goto(`/en/curricula/${rootId}`);
+    await page.getByTestId("revise-open").click();
+    await expect(page.getByTestId("chat-input")).toBeEnabled();
+
+    const approvalId = randomUUID();
+    chat.setNextMessage({
+      status: "awaiting_approval",
+      approval_id: approvalId,
+      tool_name: "apply_curriculum_revision",
+      tool_args: {
+        root_id: rootId,
+        plan: {
+          summary: "Add a DS-1 lesson.",
+          ops: [{
+            op: "insert_lesson", module_id: moduleId, title: "DS-1 Distortion",
+            objective: "distortion basics", reason: "Fills a gap.",
+          }],
+        },
+      },
+      description: "Here is a proposed revision.",
+    });
+    await page.getByTestId("chat-input").fill("Add a DS-1 lesson.");
+    await page.getByTestId("chat-send").click();
+    await expect(page.getByTestId("revision-plan-card")).toBeVisible();
+
+    chat.setNextResolve({ status: "job_pending", job_id: reviseJobId });
+    await page.getByTestId("revision-approve").click();
+
+    // The chained draft job settles "succeeded" — but `/progress` still shows
+    // the new lesson `queued`, so the chat must say a resume is needed rather
+    // than the flat success narration.
+    await expect(
+      page.getByTestId("chat-message").filter({ hasText: "some lessons still need writing" }),
+    ).toBeVisible({ timeout: 10_000 });
+    await expect(
+      page.getByTestId("chat-message").filter({ hasText: "Done — the curriculum below now reflects this revision." }),
+    ).toHaveCount(0);
+    await expect(page.getByTestId("chat-input")).toBeEnabled();
+
+    expect(chat.unexpected).toEqual([]);
   });
 });

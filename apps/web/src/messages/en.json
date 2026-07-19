@@ -787,7 +787,8 @@
     "revise": {
       "planning": "Looking at your curriculum and the relevant parts of your library…",
       "applied": "Done — the curriculum below now reflects this revision.",
-      "appliedDraftFailed": "The revision was applied, but writing the new lessons failed: {reason} Open the board and press Resume to try again."
+      "appliedDraftFailed": "The revision was applied, but writing the new lessons failed: {reason} Open the board and press Resume to try again.",
+      "appliedNeedsResume": "Applied — but some lessons still need writing. Open the board and press Resume to finish them."
     },
     "resuming": "Opening your conversation…",
     "history": {

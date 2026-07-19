@@ -12,6 +12,7 @@ import { useChatSessions } from "@/components/chat/chat-sessions";
 import {
   ApiError,
   getChatHistory,
+  getCurriculumProgress,
   getJob,
   getPendingApproval,
   resolveApproval,
@@ -232,6 +233,31 @@ export function ChatPanel({ sessionId, rootId, blockTitles, onJobDone }: ChatPan
     return job;
   }
 
+  // Review-fix (chat overhaul Task 5): a chained `curriculum_draft` job can
+  // report `status="succeeded"` while still leaving lessons `queued` — the
+  // 429 RULE (`jobs/curriculum_draft.py`'s own module docstring): a
+  // rate-limited lesson goes back to `queued`, NOT `failed`, so the job as a
+  // whole finishes "successfully" the moment it runs out of lessons it CAN
+  // draft right now, not when every lesson is actually done. The `waitForJob`
+  // above only sees that job-level "succeeded" and would otherwise let a flat
+  // "applied" narration paper over lessons that still need writing. This asks
+  // the board's own `/progress` endpoint (the same one `TreeBoard`'s progress
+  // bar already polls) for the ACTUAL lesson counts, once, right after the
+  // draft job settles — cheap by that endpoint's own design (a live GROUP BY,
+  // meant to be polled every 2s), and best-effort: a failed check here must
+  // never block the "applied" narration, so it degrades to "false" rather
+  // than throwing — the board's own progress bar (already refreshed via
+  // `onJobDone()`) is the fallback source of truth regardless.
+  async function boardStillNeedsDrafting(): Promise<boolean> {
+    if (!rootId) return false;
+    try {
+      const progress = await getCurriculumProgress(rootId);
+      return progress.queued > 0 || progress.failed > 0;
+    } catch {
+      return false;
+    }
+  }
+
   async function pollJob(jobId: string) {
     setJobPending(true);
     try {
@@ -259,6 +285,19 @@ export function ChatPanel({ sessionId, rootId, blockTitles, onJobDone }: ChatPan
               appendMessage("assistant", t("revise.appliedDraftFailed", {
                 reason: jobErrorText(draft, tJobErrors),
               }));
+              return;
+            }
+            // The draft job itself reports "succeeded" the moment it runs out
+            // of lessons it CAN draft right now — the 429 RULE means a
+            // rate-limited lesson goes back to `queued`, NOT `failed`, so
+            // "succeeded" alone does not mean every lesson actually got
+            // written. Checked ONLY here, once the draft job is genuinely
+            // terminal-successful (never on a bare `MAX_POLLS` timeout, which
+            // leaves `draft.status` at whatever non-terminal value it last
+            // polled — that case falls through to `job.stillGenerating`-style
+            // silence being wrong for a DIFFERENT reason, not this one).
+            if (draft.status === "succeeded" && (await boardStillNeedsDrafting())) {
+              appendMessage("assistant", t("revise.appliedNeedsResume"));
               return;
             }
           }
