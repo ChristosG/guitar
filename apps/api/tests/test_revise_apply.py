@@ -119,7 +119,10 @@ def test_remove_lesson_deletes_and_renormalises(db_and_tree):
     assert [x.order for x in _children(db, m1.id, "lesson")] == [0]
 
 
-def test_modify_lesson_requeues_with_instruction_and_stashes_prev_body(db_and_tree):
+def test_modify_lesson_requeues_with_instruction_and_does_not_stash_prev_body(db_and_tree):
+    """`prev_body` used to be stashed here too — a dead write nothing ever read.
+    `_draft_one` now threads the lesson's live SEGMENTS into the re-draft prompt
+    instead (Spec D, `revise_current`), so this key must not reappear."""
     db, course, m1, m2, l1, l2, l3 = db_and_tree
     l1.body = "old body"
     db.commit()
@@ -128,7 +131,7 @@ def test_modify_lesson_requeues_with_instruction_and_stashes_prev_body(db_and_tr
     db.refresh(l1)
     assert (l1.meta or {})["draft_status"] == "queued"
     assert (l1.meta or {})["revise_instruction"] == "harder"
-    assert (l1.meta or {})["prev_body"] == "old body"
+    assert "prev_body" not in (l1.meta or {})
 
 
 def test_insert_module_queues_its_lessons_and_clamps_tier(db_and_tree):

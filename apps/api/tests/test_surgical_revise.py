@@ -22,14 +22,17 @@ from sqlalchemy import func, select, text
 from app.db import Base, SessionLocal, engine
 from app.models.block import Block
 from app.curriculum.blueprint import default_blueprint, section_keys
+from app.curriculum.corpus import LibraryContext
 from app.curriculum.ground import Passage
 from app.curriculum.refine import undo_refine
 from app.curriculum.segment_generate import generate_segment
 from app.jobs.curriculum_revise import run_curriculum_revise_job
 from app.llm.errors import LLMError
 from app.models.generation_job import GenerationJob
+import app.curriculum.draft as draft_mod
 import app.curriculum.revise as revise
 import app.curriculum.segment_generate as segment_mod
+import app.jobs.curriculum_draft as fanout_mod
 import app.jobs.curriculum_revise as revise_job
 
 try:
@@ -742,3 +745,159 @@ def test_compute_impact_empty_plan_is_all_zero_and_not_destructive():
         "rewrites": 0, "segment_additions": 0, "segment_edits": 0, "segment_removals": 0,
         "lesson_removals": 0, "lessons_added": 0, "blueprint_changed": False, "destructive": False,
     }
+
+
+# ---------------------------------------------------------------------------
+# Task 6 (Spec D): modify_lesson threads the lesson's LIVE content into the
+# re-draft prompt instead of redrafting from a blank page.
+#
+# `revise.py`'s `modify_lesson` branch already folds the tutor's instruction into
+# the lesson's volatile `objective` (`jobs/curriculum_draft.py:_draft_one`), and
+# used to stash the lesson's top-level `body` as `meta.prev_body` — a write
+# nothing ever read (that top-level `body` is only ever the draft's one-line
+# `summary`, per `persist_lesson`, never the lesson's real content). This threads
+# the lesson's actual SEGMENTS — what the tutor is really looking at — into the
+# prompt as `revise_current`, and drops the dead write.
+# ---------------------------------------------------------------------------
+
+def _revise_lesson_ctx():
+    from app.curriculum.draft import LessonContext
+
+    return LessonContext(
+        lesson_title="Το σχήμα C", lesson_objective="Βρες τη ρίζα.",
+        module_title="CAGED", module_objective="Βλέπε το μπράτσο σε σχήματα.",
+        course_title="Τόνος", tier="library", position="lesson 1 of 1, module 1 of 1",
+        minutes=50, teaching_minutes=40, target_words=2200, floor_words=1600,
+    )
+
+
+def test_build_lesson_messages_is_byte_identical_without_revise_current():
+    """Spec D regression pin: no `revise_current` -> the lesson prompt is EXACTLY
+    today's. Same discipline as test_planning_chat.py's
+    test_outline_prompt_byte_identical_without_planning_brief."""
+    kwargs = dict(
+        ctx=_revise_lesson_ctx(),
+        library=LibraryContext(text="", token_count=0, fits=True),
+        language="el", student_brief=None, course_brief=None,
+    )
+    baseline = draft_mod.build_lesson_messages(**kwargs)
+    with_default = draft_mod.build_lesson_messages(**kwargs, revise_current=None)
+    assert baseline == with_default
+
+
+def test_build_lesson_messages_renders_the_current_content_when_revising():
+    ctx = _revise_lesson_ctx()
+    msgs = draft_mod.build_lesson_messages(
+        ctx=ctx, library=LibraryContext(text="", token_count=0, fits=True),
+        language="el", student_brief=None, course_brief=None,
+        revise_current={"theory": "Το σχήμα C ξεκινάει στην πέμπτη χορδή, τρίτο τάστο."},
+    )
+    joined = " ".join(m["content"] for m in msgs)
+    assert "Το σχήμα C ξεκινάει στην πέμπτη χορδή, τρίτο τάστο." in joined
+
+
+def _draft_plan(lesson_id, *, blueprint=None) -> dict:
+    """The minimal `plan` dict `jobs/curriculum_draft.py:_draft_one` needs,
+    mirroring `test_curriculum_draft_job.py`'s own plan shape."""
+    return {
+        "library": LibraryContext(text="", token_count=0, fits=True),
+        "student_brief": None,
+        "prompts": None,
+        "blueprint": blueprint if blueprint is not None else default_blueprint(),
+        "course_brief": None,
+        "source_ids": None,
+        "positions": {str(lesson_id): "lesson 1 of 1, module 1 of 1"},
+        "minutes_per_lesson": 50,
+        "teaching_minutes": 40,
+        "qa_minutes": 10,
+        "target_words": 2200,
+        "floor_words": 10,
+    }
+
+
+class _RevisingFakeProvider:
+    """Captures the messages of the FIRST `guided_json` call and always returns a
+    schema-valid, well-over-floor lesson so no deepen pass fires and the captured
+    call stays the one under test."""
+
+    def __init__(self):
+        self.calls: list[list[dict]] = []
+
+    def guided_json(self, messages, schema, *, temperature=0.2, role="draft", max_tokens=None):
+        self.calls.append(messages)
+        return _drafted_lesson()
+
+
+def test_draft_one_threads_the_lessons_live_segments_into_the_revise_prompt(
+    db_and_tree, monkeypatch,
+):
+    """The failing-test-first case from the brief: a `modify_lesson` re-draft
+    (revise_instruction set, live segments with real bodies) must see the
+    lesson's CURRENT content, not just the instruction."""
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    seg1.body = "The blues scale starts on the root note E, third fret."
+    db.commit()
+
+    provider = _RevisingFakeProvider()
+    monkeypatch.setattr(draft_mod, "get_provider", lambda: provider)
+
+    lesson.meta = {**(lesson.meta or {}), "draft_status": "queued",
+                   "revise_instruction": "make it punchier"}
+    db.commit()
+
+    fanout_mod._draft_one(lesson.id, _draft_plan(lesson.id))
+
+    assert provider.calls, "the model was never called — the lesson could not be prepared"
+    sent = " ".join(m["content"] for m in provider.calls[0])
+    assert "The blues scale starts on the root note E, third fret." in sent
+    assert "make it punchier" in sent
+
+    db.expire_all()
+    lesson = db.get(Block, lesson.id)
+    assert lesson.meta["draft_status"] == "ready"
+
+
+def test_draft_one_includes_custom_segments_in_the_revise_content(db_and_tree, monkeypatch):
+    """Custom segments (meta.custom, added surgically by add_segment) are part of
+    the lesson the tutor knows — they must reach the re-draft prompt too, not
+    just the blueprint sections."""
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    custom = Block(kind="segment", title="Bonus: alt tunings", order=2, parent_id=lesson.id,
+                   language="el", meta={"custom": True, "section": "custom:bonus"},
+                   body="Drop D makes power chords a one-finger barre.")
+    db.add(custom)
+    db.commit()
+
+    provider = _RevisingFakeProvider()
+    monkeypatch.setattr(draft_mod, "get_provider", lambda: provider)
+
+    lesson.meta = {**(lesson.meta or {}), "draft_status": "queued",
+                   "revise_instruction": "tighten the theory section"}
+    db.commit()
+
+    fanout_mod._draft_one(lesson.id, _draft_plan(lesson.id))
+
+    assert provider.calls
+    sent = " ".join(m["content"] for m in provider.calls[0])
+    assert "Drop D makes power chords a one-finger barre." in sent
+
+
+def test_draft_one_without_a_revise_instruction_sends_no_current_content(db_and_tree, monkeypatch):
+    """An ordinary (non-revise) redraft — no `revise_instruction` — must not
+    render the revise block at all, even though the lesson already has
+    segments with real bodies. Byte-identical to today's plain redraft."""
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    seg1.body = "A sentence that must NOT reach the prompt without an instruction."
+    db.commit()
+
+    provider = _RevisingFakeProvider()
+    monkeypatch.setattr(draft_mod, "get_provider", lambda: provider)
+
+    lesson.meta = {**(lesson.meta or {}), "draft_status": "queued"}   # no revise_instruction
+    db.commit()
+
+    fanout_mod._draft_one(lesson.id, _draft_plan(lesson.id))
+
+    assert provider.calls
+    sent = " ".join(m["content"] for m in provider.calls[0])
+    assert "A sentence that must NOT reach the prompt without an instruction." not in sent

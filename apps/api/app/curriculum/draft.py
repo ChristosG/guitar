@@ -142,6 +142,7 @@ LESSON_TAIL = (
     "{course_brief_block}"
     "{student_brief_block}"
     "{retrieved_block}"
+    "{revise_block}"
     "{deepen_block}"
     "\n\n{answer_in}"
 )
@@ -159,6 +160,25 @@ LESSON_RETRIEVED_BLOCK = (
     "cite them:\n\n{retrieved}"
 )
 LESSON_RETRIEVED_SLICE_ID = "lesson.draft.retrieved"
+
+# THE "revise means revise, not regenerate" BLOCK (Spec D). A `modify_lesson`
+# re-draft used to see only the tutor's instruction folded into the volatile
+# objective (`jobs/curriculum_draft.py:_draft_one`) — never the lesson's own
+# existing content, so the model rewrote it from a blank page every time and the
+# tutor's surviving material was whatever it happened to reproduce. This shows it
+# the lesson AS IT STANDS, section by section, so "make the exercises harder"
+# changes the exercises rather than re-teaching the whole lesson from scratch.
+#
+# Populated by `jobs/curriculum_draft.py:_draft_one` ONLY when a `revise_instruction`
+# was consumed at claim time AND the lesson already has segments with real bodies —
+# a fresh lesson (no prior draft to preserve) or an instruction-less redraft renders
+# this block empty, byte-identical to before (`test_surgical_revise.py`'s
+# same-kwargs pin).
+LESSON_REVISE_BLOCK = (
+    "\n\nΤο τρέχον περιεχόμενο του μαθήματος ακολουθεί — εφάρμοσε την "
+    "αναθεώρηση και κράτησε όλα τα υπόλοιπα ουσιαστικά ανέπαφα.\n{current}"
+)
+LESSON_REVISE_SLICE_ID = "lesson.revise"
 
 LESSON_DEEPEN_BLOCK = (
     "\n\nYOUR PREVIOUS DRAFT CAME BACK AT {total_words} WORDS — "
@@ -183,6 +203,7 @@ def build_lesson_messages(
     retrieved: str | None = None,
     deepen: Measurement | None = None,
     previous: dict | None = None,
+    revise_current: dict | None = None,
     source=None,
 ) -> list[dict]:
     """The messages for one lesson draft. Pure.
@@ -196,6 +217,12 @@ def build_lesson_messages(
 
     `deepen`/`previous` turn this into the deepen prompt: same prefix (still a
     cache hit), plus the previous draft and the sections that came back thin.
+
+    `revise_current` turns this into the `modify_lesson` re-draft prompt (Spec D):
+    `{section_or_title: body}` for the lesson's LIVE segments, built by
+    `jobs/curriculum_draft.py:_draft_one` before the model call. `None`/falsy
+    (a fresh lesson, or an instruction-less redraft) renders `LESSON_REVISE_BLOCK`
+    empty — byte-identical to before this parameter existed.
     """
     messages = prefix_messages(library, source)
 
@@ -220,6 +247,14 @@ def build_lesson_messages(
             thin=", ".join(deepen.thin_sections) or "all of them",
             previous=json.dumps(previous, ensure_ascii=False),
         )
+
+    revise_block = ""
+    if revise_current:
+        import json
+
+        revise_block = resolve(
+            source, LESSON_REVISE_SLICE_ID, LESSON_REVISE_BLOCK,
+        ).format(current=json.dumps(revise_current, ensure_ascii=False))
 
     content = resolve(source, LESSON_SLICE_ID, LESSON_TAIL).format(
         course_title=ctx.course_title,
@@ -246,6 +281,7 @@ def build_lesson_messages(
                 source, LESSON_RETRIEVED_SLICE_ID, LESSON_RETRIEVED_BLOCK,
             ).format(retrieved=retrieved) if retrieved else ""
         ),
+        revise_block=revise_block,
         deepen_block=deepen_block,
         answer_in=answer_in(language, source),
     )
@@ -349,9 +385,16 @@ def draft_lesson(
     course_brief: str | None = None,
     source_ids: list[uuid.UUID] | None = None,
     prompts: dict[str, str] | None = None,
+    revise_current: dict | None = None,
 ) -> tuple[dict, Measurement]:
     """One lesson: draft -> validate citations (one repair) -> measure -> at most
     one deepen pass. Returns `(lesson, measurement)`.
+
+    `revise_current` (Spec D) is `_draft_one`'s snapshot of the lesson's LIVE
+    segments, threaded straight through to every `build_lesson_messages` call
+    below (the first draft AND any deepen pass) so a `modify_lesson` re-draft
+    keeps seeing what it is revising even if it also runs long/thin and needs
+    deepening. `None` on every other draft path — see that function's docstring.
 
     `db` IS ONLY TOUCHED FOR THE RETRIEVAL FALLBACK, and only when the library did
     not fit whole. In the normal (full-context) path this function performs NO
@@ -394,7 +437,7 @@ def draft_lesson(
     messages = build_lesson_messages(
         ctx=ctx, library=library, language=language, blueprint=bp,
         student_brief=student_brief, course_brief=course_brief, retrieved=retrieved,
-        source=prompts,
+        revise_current=revise_current, source=prompts,
     )
     lesson = provider.guided_json(messages, schema, role="draft")
 
@@ -422,7 +465,8 @@ def draft_lesson(
             build_lesson_messages(
                 ctx=ctx, library=library, language=language, blueprint=bp,
                 student_brief=student_brief, course_brief=course_brief,
-                retrieved=retrieved, deepen=m, previous=lesson, source=prompts,
+                retrieved=retrieved, deepen=m, previous=lesson,
+                revise_current=revise_current, source=prompts,
             ),
             schema, role="draft",
         )

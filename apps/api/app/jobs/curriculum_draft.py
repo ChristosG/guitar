@@ -207,8 +207,34 @@ def _draft_one(lesson_id: uuid.UUID, plan: dict) -> None:
         # the cached library prefix, so it costs no cache — and is consumed at claim
         # time above, so a later unrelated Resume never re-applies it.
         objective = (lesson.meta or {}).get("objective") or (lesson.body or "")
+        # `revise_current` (Spec D, "revise means revise, not regenerate"): the
+        # lesson's LIVE segments, shown to the model alongside the instruction above
+        # so the re-draft changes what the tutor asked and keeps the rest — instead
+        # of rewriting from a blank page, which is all the objective fold gave it
+        # before this. Built ONLY when there is something to preserve: a fresh
+        # lesson (no prior draft) or an instruction-less redraft leaves this `None`,
+        # and `build_lesson_messages` renders nothing for it (byte-identical to
+        # before). Read while the connection is still open — see `db.close()` below.
+        revise_current = None
         if revise_instruction:
             objective = f"{objective}\n\nΑναθεώρηση από τον καθηγητή: {revise_instruction}"
+            segments = db.scalars(
+                select(Block)
+                .where(Block.parent_id == lesson.id, Block.kind == "segment")
+                .order_by(Block.order)
+            ).all()
+            # `section_or_title`: every segment `persist_lesson` writes carries
+            # `meta.section` (a blueprint key, or `custom:<slug>` for a surgically
+            # added one — CUSTOM SEGMENTS ARE INCLUDED, they are part of the lesson
+            # the tutor knows); the title is the fallback for a segment with none.
+            # Truncated ~2000 chars each — enough to show the model what is there
+            # without re-sending 45,000 words of a lesson it is about to rewrite.
+            current = {
+                (seg.meta or {}).get("section") or seg.title: (seg.body or "").strip()[:2000]
+                for seg in segments if (seg.body or "").strip()
+            }
+            if current:
+                revise_current = current
         ctx = LessonContext(
             lesson_title=lesson.title,
             lesson_objective=objective,
@@ -248,6 +274,7 @@ def _draft_one(lesson_id: uuid.UUID, plan: dict) -> None:
             blueprint=plan["blueprint"],
             student_brief=student_brief, course_brief=course_brief,
             source_ids=source_ids, prompts=prompts,
+            revise_current=revise_current,
         )
     except LLMNotConfigured:
         # The key vanished mid-run (cleared in Settings, or ENCRYPTION_SECRET

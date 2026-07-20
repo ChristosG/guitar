@@ -610,8 +610,13 @@ def apply_revision(db, root_id: uuid.UUID, plan: dict) -> dict:
                 _queue(lesson)                            # re-draft in its new position/context
             elif name == "modify_lesson":
                 lesson = db.get(Block, uuid.UUID(op["lesson_id"]))
+                # `prev_body` used to be stashed here too, but nothing ever reads it —
+                # `_draft_one` now threads the lesson's LIVE SEGMENTS (not this stale
+                # top-level `body`, which `persist_lesson` only ever sets from the
+                # draft's one-line `summary`) into the re-draft prompt instead
+                # (`revise_current`, Spec D). Writing it was a dead write.
                 lesson.meta = {**(lesson.meta or {}), "draft_status": "queued", "error": None,
-                               "revise_instruction": op["instruction"], "prev_body": lesson.body}
+                               "revise_instruction": op["instruction"]}
             elif name == "remove_lesson":
                 lesson = db.get(Block, uuid.UUID(op["lesson_id"]))
                 parent_id = lesson.parent_id

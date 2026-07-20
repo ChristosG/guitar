@@ -124,6 +124,8 @@ from app.curriculum.draft import (
     LESSON_DEEPEN_SLICE_ID,
     LESSON_RETRIEVED_BLOCK,
     LESSON_RETRIEVED_SLICE_ID,
+    LESSON_REVISE_BLOCK,
+    LESSON_REVISE_SLICE_ID,
     LESSON_SLICE_ID,
     LESSON_TAIL,
     REPAIR_MESSAGE,
@@ -687,6 +689,14 @@ _SAMPLE_MEASUREMENT = Measurement(
 
 _SAMPLE_BAD_CITATIONS = [("theory", "S1", 512)]
 
+# Task 6 (Spec D): the lesson's LIVE segments, as `jobs/curriculum_draft.py:_draft_one`
+# builds them for a `modify_lesson` re-draft — `{section_or_title: body}`, the tutor's
+# DATA (what he already has), never a prompt this file authors.
+_SAMPLE_REVISE_CURRENT = {
+    "theory": "Το σχήμα C ξεκινάει από τη ρίζα στην πέμπτη χορδή, τρίτο τάστο.",
+    "exercises": "Παίξε το σχήμα C ανεβαίνοντας το μπράτσο ανά δύο τάστα.",
+}
+
 
 # ---------------------------------------------------------------------------
 # Builders — each one calls the SAME function the live call path calls
@@ -1042,6 +1052,24 @@ def _build_lesson_deepen(locale: str, db, course_language=None) -> _Built:
         # its serialization — still the sample's own data, not authored text.
         ("previous_draft", "Η προηγούμενη γραφή του μαθήματος",
          json.dumps(_SAMPLE_PREVIOUS_DRAFT, ensure_ascii=False)),
+        (*_ANSWER_IN_FROM_COURSE, answer_in(lang, db)),
+    ]
+
+
+def _build_lesson_revise(locale: str, db, course_language=None) -> _Built:
+    lang = _course_language(locale, course_language)
+    built = build_lesson_messages(
+        ctx=_SAMPLE_LESSON_CTX, library=_SAMPLE_LIBRARY, language=lang,
+        student_brief=_sample_student_brief(db), course_brief=_SAMPLE_COURSE_BRIEF,
+        revise_current=_SAMPLE_REVISE_CURRENT, source=db,
+    )
+    return _msgs(built), [
+        (*_LIBRARY, _SAMPLE_LIBRARY_TEXT),
+        (*_STUDENT, _sample_student_brief(db)),
+        # The live builder json-dumps the current content, same reasoning as
+        # `lesson.deepen`'s `previous_draft` span above.
+        ("revise_current", "Το τρέχον περιεχόμενο του μαθήματος",
+         json.dumps(_SAMPLE_REVISE_CURRENT, ensure_ascii=False)),
         (*_ANSWER_IN_FROM_COURSE, answer_in(lang, db)),
     ]
 
@@ -1703,7 +1731,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="lesson",
         kind="prompt",
-        source_ref="app/curriculum/draft.py:175",
+        source_ref="app/curriculum/draft.py:195",
         title_el="Η συγγραφή ενός μαθήματος",
         what_it_does_el=(
             "Ζητάει το ίδιο το μάθημα — τις σελίδες που θα διδάξεις, όχι ένα "
@@ -1719,7 +1747,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: build_lesson_messages,
         build=_build_lesson_draft,
-        call_sites=("curriculum/draft.py:399",),
+        call_sites=("curriculum/draft.py:442",),
         slices=(
             Slice(
                 id=LESSON_SLICE_ID,
@@ -1735,7 +1763,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="lesson",
         kind="prompt",
-        source_ref="app/curriculum/draft.py:175",
+        source_ref="app/curriculum/draft.py:195",
         title_el="Το ξαναγράψιμο ενός κοντού μαθήματος",
         what_it_does_el=(
             "Αν το μάθημα βγήκε πιο κοντό από το όριο, γυρίζει πίσω με την "
@@ -1749,12 +1777,43 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: build_lesson_messages,
         build=_build_lesson_deepen,
-        call_sites=("curriculum/draft.py:421",),
+        call_sites=("curriculum/draft.py:464",),
         slices=(
             Slice(
                 id=LESSON_DEEPEN_SLICE_ID,
                 label_el="Το κείμενο της οδηγίας",
                 default=LESSON_DEEPEN_BLOCK,
+                kind="replace",
+            ),
+        ),
+    ),
+    PromptEntry(
+        id="lesson.revise",
+        language_from_course=True,
+        flow="lesson",
+        kind="fragment",
+        source_ref="app/curriculum/draft.py:195",
+        title_el="Όταν αναθεωρείς ένα μάθημα: το τρέχον περιεχόμενό του",
+        what_it_does_el=(
+            "Μπαίνει στη συγγραφή του μαθήματος όταν ζητάς μια αναθεώρηση σε ένα "
+            "μάθημα που έχει ήδη γραφτεί (modify_lesson, από το πλαϊνό chat). "
+            "Δείχνει στον βοηθό το τρέχον περιεχόμενο του μαθήματος, ενότητα "
+            "προς ενότητα — ό,τι υπάρχει ήδη γραμμένο, ακόμα και μια χειρωνακτικά "
+            "προσθεμένη ενότητα — και του λέει να εφαρμόσει την οδηγία σου "
+            "κρατώντας τα υπόλοιπα ουσιαστικά ανέπαφα. Χωρίς αυτό, το ξαναγράψιμο "
+            "έβλεπε μόνο την οδηγία σου και ξεκινούσε το μάθημα από άδεια σελίδα."
+        ),
+        when_it_runs_el=(
+            "Κάθε φορά που ένα ήδη γραμμένο μάθημα ξαναγράφεται μετά από δική σου "
+            "οδηγία αναθεώρησης, ΚΑΙ το μάθημα έχει ήδη περιεχόμενο να δείξει."
+        ),
+        source_of_truth=lambda: build_lesson_messages,
+        build=_build_lesson_revise,
+        slices=(
+            Slice(
+                id=LESSON_REVISE_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=LESSON_REVISE_BLOCK,
                 kind="replace",
             ),
         ),
@@ -1794,7 +1853,7 @@ _ENTRIES = [
         curriculum_group=True,
         flow="lesson",
         kind="prompt",
-        source_ref="app/curriculum/draft.py:321",
+        source_ref="app/curriculum/draft.py:357",
         title_el="Όταν παραπέμπει σε σελίδα που δεν υπάρχει",
         what_it_does_el=(
             "Η εφαρμογή ελέγχει κάθε παραπομπή σε σελίδα που γράφει ο βοηθός. "
@@ -1807,7 +1866,7 @@ _ENTRIES = [
         when_it_runs_el="Μόνο όταν πιαστεί λάθος παραπομπή. Το πολύ μία φορά ανά μάθημα.",
         source_of_truth=lambda: _repair_message,
         build=_build_lesson_repair,
-        call_sites=("curriculum/draft.py:405",),
+        call_sites=("curriculum/draft.py:448",),
         slices=(
             Slice(
                 id=REPAIR_SLICE_ID,
