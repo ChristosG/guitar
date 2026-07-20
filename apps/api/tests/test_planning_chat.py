@@ -2,6 +2,8 @@
 interview_id (never root_id), so every root_id-gated revise behavior in
 routers/chat.py must NOT fire for these sessions — pinned here.
 """
+from uuid import uuid4
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
@@ -94,5 +96,20 @@ def test_interview_context_noop_for_ordinary_and_curriculum_sessions():
         db.add(plain); db.commit()
         wire = [{"role": "user", "content": "γεια"}]
         assert _inject_interview_context(db, plain, wire) == wire
+    finally:
+        db.close()
+
+
+def test_interview_context_yields_to_curriculum_when_both_ids_set():
+    """A session bound to BOTH root_id and interview_id must get only the
+    curriculum context — the interview steer is a no-op here."""
+    db = SessionLocal()
+    try:
+        interview = _mk_interview(db)
+        session = ChatSession(root_id=uuid4(), interview_id=interview.id, locale="el")
+        db.add(session); db.commit()
+
+        wire = [{"role": "user", "content": "γεια"}]
+        assert _inject_interview_context(db, session, wire) == wire
     finally:
         db.close()

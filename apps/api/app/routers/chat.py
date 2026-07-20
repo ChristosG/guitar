@@ -297,7 +297,11 @@ def _inject_interview_context(db: Session, session: ChatSession, wire: list[dict
     persisted, re-applied every turn), but deliberately MINIMAL: a title and a
     role, no tree (nothing is materialized yet) and no revise-tool steering
     (there is no root_id to revise)."""
-    if not getattr(session, "interview_id", None):
+    if session.root_id:
+        # a session bound to BOTH a curriculum and an interview must get only
+        # the curriculum context, never two contradictory steers
+        return wire
+    if not session.interview_id:
         return wire
     interview = db.get(CurriculumInterview, session.interview_id)
     if interview is None:
