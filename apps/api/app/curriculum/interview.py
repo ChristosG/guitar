@@ -708,4 +708,12 @@ def distill_planning_brief(db: Session, interview: CurriculumInterview) -> str:
     result = get_provider().guided_json(
         [{"role": "user", "content": prompt}], DISTILL_SCHEMA, role="chat",
     )
-    return (result.get("brief") or "").strip()
+    brief = (result.get("brief") or "").strip()
+    if not brief:
+        # An empty brief is not a "successful" distillation — it means the
+        # model produced nothing usable from a real transcript. Surface it
+        # the same way "nothing to distill" already is (409, retryable),
+        # rather than a silent 200 the tutor would carry into the editable
+        # brief field as blank text.
+        raise ValueError("distillation produced an empty brief — try again or write the brief yourself")
+    return brief

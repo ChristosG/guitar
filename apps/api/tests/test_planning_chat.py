@@ -170,6 +170,52 @@ def test_distill_409_when_no_chat_or_empty_transcript():
         db.close()
 
 
+def test_distill_maps_llm_error_to_status(monkeypatch):
+    """A provider failure (rate limit, timeout, ...) must not escape as a raw
+    500 — same taxonomy as routers/chat.py's post_message."""
+    db = SessionLocal()
+    try:
+        interview = _mk_interview(db)
+        _mk_bound_session_with_transcript(db, interview)
+
+        from app.curriculum import interview as interview_mod
+        from app.llm.errors import LLMError
+
+        class _FailingProvider:
+            def guided_json(self, messages, schema, *, role=None, **kw):
+                raise LLMError("rate_limit", "429")
+
+        monkeypatch.setattr(interview_mod, "get_provider", lambda: _FailingProvider())
+
+        r = client.post(f"/curricula/interview/{interview.id}/distill")
+        assert r.status_code == 429
+    finally:
+        db.close()
+
+
+def test_distill_409_when_brief_is_empty(monkeypatch):
+    """An all-whitespace brief is not a successful distillation — it must be
+    retryable (409), not a silent 200 the tutor carries forward as blank
+    text."""
+    db = SessionLocal()
+    try:
+        interview = _mk_interview(db)
+        _mk_bound_session_with_transcript(db, interview)
+
+        from app.curriculum import interview as interview_mod
+
+        class _BlankProvider:
+            def guided_json(self, messages, schema, *, role=None, **kw):
+                return {"brief": "  "}
+
+        monkeypatch.setattr(interview_mod, "get_provider", lambda: _BlankProvider())
+
+        r = client.post(f"/curricula/interview/{interview.id}/distill")
+        assert r.status_code == 409
+    finally:
+        db.close()
+
+
 def test_put_planning_brief_stores_and_clears():
     db = SessionLocal()
     try:

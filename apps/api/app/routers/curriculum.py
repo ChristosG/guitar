@@ -37,6 +37,7 @@ from app.jobs.curriculum_draft import run_curriculum_draft_job
 from app.jobs.curriculum_revise import run_curriculum_revise_job
 from app.jobs.module_generate import run_module_generate_job
 from app.jobs.runner import run_curriculum_job, run_outline_job
+from app.llm.errors import LLMError
 from app.llm.factory import require_llm_configured
 from app.models.artifact import Artifact
 from app.models.block import Block
@@ -638,6 +639,17 @@ def distill_interview_planning_brief(interview_id: UUID, db: Session = Depends(g
         brief = interview_service.distill_planning_brief(db, interview)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
+    except LLMError as e:
+        # Same taxonomy as routers/chat.py's post_message: a provider
+        # failure on this synchronous guided_json call used to escape as a
+        # raw 500. GuidedJSONError (malformed/truncated guided JSON)
+        # subclasses LLMError with kind="upstream", so it lands on the
+        # default 502 below without a separate except clause.
+        status = {"rate_limit": 429, "auth": 409, "timeout": 504}.get(e.kind, 502)
+        raise HTTPException(
+            status_code=status,
+            detail=str(e) or f"the model provider failed ({e.kind}) — try again",
+        ) from e
     return {"brief": brief}
 
 
