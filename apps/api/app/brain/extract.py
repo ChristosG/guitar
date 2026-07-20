@@ -5,6 +5,7 @@ the contract used by ingest.py: never raise, return [] when nothing usable was
 found (empty input, a corrupt PDF, an unreachable URL, ...).
 """
 import logging
+import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
 
@@ -14,6 +15,24 @@ import trafilatura
 from app.brain.urlsafe import safe_fetch_html
 
 log = logging.getLogger(__name__)
+
+# Bot-challenge interstitials. justinguitar.com served exactly this on
+# 2026-07-21: a Cloudflare "Just a moment..." shell whose 162 chars of
+# challenge copy then sat in the library as a green "ready" source — garbage
+# wearing a healthy badge. A page matching this is NOT content; extraction
+# returns [] and the source lands honestly on "empty" where the tutor can see
+# it needs another way in (paste the text, or a different page).
+_BOT_CHALLENGE_RE = re.compile(
+    r"Just a moment\.\.\.|challenges\.cloudflare\.com|"
+    r"Enable JavaScript and cookies to continue|cf-browser-verification|"
+    r"Checking if the site connection is secure",
+    re.I,
+)
+
+
+def looks_bot_blocked(html: str) -> bool:
+    """True when `html` is a bot-challenge interstitial, not the page itself."""
+    return bool(_BOT_CHALLENGE_RE.search(html[:6000]))
 
 # A line's font size must be at least this multiple of the page's typical body
 # size (see _page_sections) to be treated as a heading rather than body text.
@@ -198,6 +217,10 @@ def _extract_url(url: str | None) -> list[Section]:
         # redirects, a non-2xx response, or a transport error: all collapse
         # to "could not fetch", per this module's never-raises contract.
         log.warning("could not fetch url for extraction: %s", url, exc_info=True)
+        return []
+
+    if looks_bot_blocked(html):
+        log.warning("url served a bot-challenge interstitial, not content: %s", url)
         return []
 
     # Both extraction attempts run on the SAME in-memory `html` string: only

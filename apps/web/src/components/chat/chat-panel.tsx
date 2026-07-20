@@ -456,7 +456,33 @@ export function ChatPanel({ sessionId, rootId, blockTitles, onJobDone }: ChatPan
       applyTurn(turn);
     } catch (err) {
       if (!streamedAnything) setMessages((prev) => prev.filter((m) => m.id !== streamId));
-      setComposerError(err instanceof ApiError ? err.detail : t("error"));
+      if (err instanceof ApiError) {
+        setComposerError(err.detail || t("error"));
+      } else {
+        // TRANSPORT death on the REST resend — in practice the Cloudflare
+        // edge cutting a slow turn at ~100s while the server keeps working
+        // (verified live 2026-07-21: the reply persisted 8 minutes later,
+        // with a revision proposal attached). The turn is NOT lost — poll
+        // history until it lands instead of showing a dead error over an
+        // answer that is still being written.
+        setComposerError(t("slowTurn"));
+        const gaveUpAt = Date.now() + 10 * 60 * 1000;
+        while (Date.now() < gaveUpAt) {
+          await new Promise((r) => setTimeout(r, 10_000));
+          try {
+            const rows = await getChatHistory(sessionId);
+            const last = rows.at(-1);
+            const pending = await getPendingApproval(sessionId);
+            if (pending || (last && last.role !== "user")) {
+              await hydrate();
+              setComposerError(null);
+              break;
+            }
+          } catch {
+            // a poll that fails is just the next poll's problem
+          }
+        }
+      }
     } finally {
       setSending(false);
       // The sidebar's row for this session is SERVER-derived — the first user

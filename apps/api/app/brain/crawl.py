@@ -87,15 +87,23 @@ class _LinkParser(HTMLParser):
             self.title += data
 
 
+def _same_site(a: str, b: str) -> bool:
+    """Hosts match modulo a leading "www." — guitargearfinder.com links every
+    guide as bare `guitargearfinder.com` while its pages live under `www.`,
+    and a strict comparison silently crawled 1 page of a 200-link site."""
+    strip = lambda h: h.lower().removeprefix("www.")
+    return strip(a) == strip(b)
+
+
 def _normalize(base_url: str, href: str) -> str | None:
-    """Resolve `href` against `base_url` into a crawlable same-host URL, or
-    None when it is out of scope (other host, non-http, junk path, asset)."""
+    """Resolve `href` against `base_url` into a crawlable same-site URL, or
+    None when it is out of scope (other site, non-http, junk path, asset)."""
     absolute, _frag = urldefrag(urljoin(base_url, href))
     parsed = urlparse(absolute)
     if parsed.scheme not in ("http", "https"):
         return None
     base = urlparse(base_url)
-    if parsed.netloc != base.netloc:
+    if not _same_site(parsed.netloc, base.netloc):
         return None
     if _SKIP_PATH_RE.search(parsed.path) or _SKIP_EXT_RE.search(parsed.path):
         return None
@@ -115,7 +123,7 @@ def crawl_site(seed_url: str, *, max_pages: int) -> list[tuple[str, str, str]]:
     # Local import: extract.py imports are heavyweight (trafilatura), and
     # crawl.py must stay importable by the router without dragging them in
     # until a crawl actually runs.
-    from app.brain.extract import _strip_html, _trafilatura_extract
+    from app.brain.extract import _strip_html, _trafilatura_extract, looks_bot_blocked
 
     budget = max(1, min(max_pages, MAX_CRAWL_PAGES))
     seen: set[str] = set()
@@ -135,6 +143,14 @@ def crawl_site(seed_url: str, *, max_pages: int) -> list[tuple[str, str, str]]:
             log.info("crawl_site: skipping unfetchable page %s", url, exc_info=True)
             continue
         fetched += 1
+
+        if looks_bot_blocked(html):
+            # A challenge interstitial has no content AND no real links — and a
+            # site that challenges one page challenges them all, so stop rather
+            # than burn the whole budget collecting 30 copies of "Just a
+            # moment...". The empty/partial result lands honestly downstream.
+            log.warning("crawl_site: bot challenge at %s — site blocks robots, stopping", url)
+            break
 
         parser = _LinkParser()
         try:
