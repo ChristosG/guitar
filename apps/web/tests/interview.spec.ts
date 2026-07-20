@@ -233,7 +233,13 @@ async function mockInterviewApi(page: Page, { readyFromStart = false }: MockOpti
   // poll COUNT is not a clock.
   let finished = false;
 
-  const calls = { start: 0, answer: 0, get: 0, progress: 0, artifacts: 0 };
+  const calls = {
+    start: 0, answer: 0, get: 0, progress: 0, artifacts: 0,
+    // Part 5 — the planning phase's own three endpoints.
+    chatSession: 0, distill: 0, planningBrief: 0,
+  };
+  const planningSessionId = randomUUID();
+  let distillOutcome: "ok" | "empty" = "ok";
   const answerBodies: unknown[] = [];
   const deepened: string[] = [];
   const refinements: string[] = [];
@@ -289,6 +295,36 @@ async function mockInterviewApi(page: Page, { readyFromStart = false }: MockOpti
         }),
         201,
       );
+    }
+
+    // Part 5 — «Θέλεις να το συζητήσουμε πρώτα;»'s three endpoints. Distinct
+    // sub-paths under `/curricula/interview/{id}/`, so this must be checked
+    // BEFORE the `/answer` match below (which is exact-suffix but these are
+    // too, so order only matters for readability here).
+    if (pathname.match(/^\/curricula\/interview\/[^/]+\/chat-session$/) && method === "GET") {
+      calls.chatSession++;
+      return json({ session_id: planningSessionId });
+    }
+    if (pathname.match(/^\/curricula\/interview\/[^/]+\/distill$/) && method === "POST") {
+      calls.distill++;
+      if (distillOutcome === "empty") {
+        return json({ detail: "the transcript is empty" }, 409);
+      }
+      return json({ brief: "Wants a 3-week live-tone crash course, pedals-first." });
+    }
+    if (pathname.match(/^\/curricula\/interview\/[^/]+\/planning-brief$/) && method === "PUT") {
+      calls.planningBrief++;
+      return route.fulfill({ status: 204, headers: CORS_HEADERS });
+    }
+
+    // The planning chat mounts a real `ChatPanel` (Task 5 reuses it wholesale),
+    // which hydrates on mount via `GET /chat/{id}` (history) and `GET
+    // /chat/{id}/pending` (any HITL approval left open) — an empty transcript,
+    // no pending approval, matching a session nobody has spoken in yet.
+    if (pathname === `/chat/${planningSessionId}` && method === "GET") return json([]);
+    if (pathname === `/chat/${planningSessionId}/pending` && method === "GET") return json(null);
+    if (pathname === `/chat/${planningSessionId}/suggestions` && method === "POST") {
+      return json({ suggestions: [] });
     }
 
     if (pathname.match(/^\/curricula\/interview\/[^/]+\/answer$/) && method === "POST") {
@@ -459,12 +495,20 @@ async function mockInterviewApi(page: Page, { readyFromStart = false }: MockOpti
   await page.route(`${API_ORIGIN}/curricula/**`, handler);
   await page.route(`${API_ORIGIN}/blocks/**`, handler);
   await page.route(`${API_ORIGIN}/artifacts**`, handler);
+  // The planning phase's `ChatPanel` hydrates against `/chat/**` — unrouted
+  // in this file until Part 5, since nothing before it ever mounted a chat.
+  await page.route(`${API_ORIGIN}/chat/**`, handler);
 
   return {
     calls, answerBodies, unexpected, deepened, refinements,
     resumeCount: () => resumed, redraftCount: () => redrafted, rootId,
     finishDraft: () => {
       finished = true;
+    },
+    // Flips the next `distill` response to the empty-transcript 409, so a
+    // test can assert the localized `distillEmpty` message renders.
+    setDistillEmpty: () => {
+      distillOutcome = "empty";
     },
   };
 }
@@ -857,5 +901,102 @@ test.describe("the guided interview, v2 (mocked API)", () => {
     // it is still there after a reload, not just in this tab's memory.
     await expect(segment.getByTestId("extend-undo")).toBeVisible();
     expect(mock.refinements).toEqual(["give more detail about the Amp"]);
+  });
+
+  // Part 5 — «Θέλεις να το συζητήσουμε πρώτα;»: an optional planning-chat
+  // detour between the intro and the first server step. Skipping it (the
+  // primary Start button) must stay byte-for-byte today's flow.
+  test.describe("the planning detour (Part 5)", () => {
+    test("the intro offers it alongside the primary Start button", async ({ page }) => {
+      await mockInterviewApi(page);
+      await page.goto("/en/curricula");
+      await page.getByTestId("curricula-generate-button").click();
+      await expect(page.getByTestId("interview-dialog")).toBeVisible();
+
+      await expect(page.getByTestId("interview-start-submit")).toBeVisible();
+      await expect(page.getByTestId("interview-plan-first")).toBeVisible();
+    });
+
+    test("the primary Start button skips it — today's flow, unchanged", async ({ page }) => {
+      const mock = await mockInterviewApi(page);
+      await startToStep(page, "who");
+
+      await expect(page.getByTestId("interview-who-levels")).toBeVisible();
+      expect(mock.calls.start).toBe(1);
+      // Never touches ANY of the planning endpoints — a tutor who never sees
+      // the secondary button costs the server nothing extra.
+      expect(mock.calls.chatSession).toBe(0);
+      expect(mock.calls.distill).toBe(0);
+      expect(mock.calls.planningBrief).toBe(0);
+    });
+
+    test("plan-first opens the chat; Skip lands on the first interview step", async ({ page }) => {
+      const mock = await mockInterviewApi(page);
+      await page.goto("/en/curricula");
+      await page.getByTestId("curricula-generate-button").click();
+      await page.getByTestId("interview-title").fill("Getting a Great Guitar Tone");
+      await page.getByTestId("interview-plan-first").click();
+
+      // Same `startInterview` call as the primary button — just ONE, landing
+      // on the planning chat instead of the "who" step.
+      expect(mock.calls.start).toBe(1);
+      await expect(page.getByTestId("planning-chat")).toBeVisible();
+      await expect(page.getByTestId("chat-input")).toBeVisible();
+      // >= 1, not exactly 1: Next dev mode's StrictMode double-invokes mount
+      // effects (same caveat `chat-panel.tsx`'s own hydration effect guards
+      // against with a ref) — the GET is idempotent-resume either way, so
+      // this pins "it fired", not a call count.
+      await expect.poll(() => mock.calls.chatSession).toBeGreaterThanOrEqual(1);
+
+      await page.getByTestId("planning-skip").click();
+
+      await expect(page.getByTestId("interview-who-levels")).toBeVisible();
+      // Skip proceeds WITHOUT distilling or saving anything.
+      expect(mock.calls.distill).toBe(0);
+      expect(mock.calls.planningBrief).toBe(0);
+    });
+
+    test("Use this plan distills, the brief is editable, and Continue saves it", async ({ page }) => {
+      const mock = await mockInterviewApi(page);
+      await page.goto("/en/curricula");
+      await page.getByTestId("curricula-generate-button").click();
+      await page.getByTestId("interview-title").fill("Getting a Great Guitar Tone");
+      await page.getByTestId("interview-plan-first").click();
+      await expect(page.getByTestId("planning-chat")).toBeVisible();
+
+      await page.getByTestId("planning-distill").click();
+      const editor = page.getByTestId("planning-brief-editor");
+      await expect(editor).toHaveValue("Wants a 3-week live-tone crash course, pedals-first.");
+
+      // The tutor audits the machine's understanding before anything is
+      // generated — free-form editing, not just an accept button.
+      await editor.fill("Wants a 3-week live-tone crash course, pedals-first, no music theory.");
+      await page.getByTestId("planning-continue").click();
+
+      await expect(page.getByTestId("interview-who-levels")).toBeVisible();
+      expect(mock.calls.distill).toBe(1);
+      expect(mock.calls.planningBrief).toBe(1);
+    });
+
+    test("a 409 from distill (empty transcript) shows the localized retry message", async ({ page }) => {
+      const mock = await mockInterviewApi(page);
+      mock.setDistillEmpty();
+      await page.goto("/en/curricula");
+      await page.getByTestId("curricula-generate-button").click();
+      await page.getByTestId("interview-title").fill("Getting a Great Guitar Tone");
+      await page.getByTestId("interview-plan-first").click();
+      await expect(page.getByTestId("planning-chat")).toBeVisible();
+
+      await page.getByTestId("planning-distill").click();
+
+      // The backend's 409 detail is English/technical — this is the
+      // LOCALIZED message the component substitutes for it (`err.status ===
+      // 409` branches to `t("distillEmpty")` rather than showing `err.detail`).
+      await expect(page.getByTestId("planning-chat").getByRole("alert")).toHaveText(
+        "There's no conversation yet to distill — write what you want first.",
+      );
+      // Still on the chat phase — nothing was saved, and he can try again.
+      await expect(page.getByTestId("chat-input")).toBeVisible();
+    });
   });
 });

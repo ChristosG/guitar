@@ -301,6 +301,7 @@
       "answerError": "Could not save that answer.",
       "continue": "Continue",
       "cancel": "Cancel",
+      "planFirst": "Want to talk it through first?",
       "steps": {
         "who": {
           "heading": "Who is this curriculum for?",
@@ -358,6 +359,19 @@
           "approve": "Write the lessons"
         }
       }
+    },
+    "planning": {
+      "chatHint": "Talk through your idea — goals, topics, what to avoid. When you're ready, press \"Use this plan\".",
+      "usePlan": "Use this plan",
+      "skip": "Skip — straight to the wizard",
+      "editHint": "This is what I understood from the chat. Edit it freely — it will guide what gets generated.",
+      "backToChat": "Back to chat",
+      "continueToWizard": "Continue to the wizard",
+      "loading": "Loading...",
+      "sessionError": "The conversation didn't open — try again.",
+      "distillEmpty": "There's no conversation yet to distill — write what you want first.",
+      "distillError": "Distilling the plan failed — try again.",
+      "saveError": "Saving failed — try again."
     },
     "tier": {
       "library": "Your library",

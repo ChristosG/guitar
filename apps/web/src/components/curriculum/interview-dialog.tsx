@@ -36,6 +36,7 @@ import { InterviewStructureStep } from "./interview-structure-step";
 import { InterviewSourcesStep } from "./interview-sources-step";
 import { InterviewOutlineStep } from "./interview-outline-step";
 import { InterviewConfirmStep } from "./interview-confirm-step";
+import { PlanningChat } from "./planning-chat";
 
 /** `app.curriculum.interview.STEP_ORDER`, for the progress trail only — the state
  * machine itself is entirely server-side and this client never decides what comes
@@ -110,7 +111,7 @@ export function InterviewDialog({ onMaterialized }: InterviewDialogProps) {
   const tJobErrors = useTranslations("jobErrors");
 
   const [open, setOpen] = useState(false);
-  const [phase, setPhase] = useState<"intro" | "interview">("intro");
+  const [phase, setPhase] = useState<"intro" | "planning" | "interview">("intro");
   const [title, setTitle] = useState("");
   const [interviewId, setInterviewId] = useState<string | null>(null);
   const [state, setState] = useState<InterviewStateOut | null>(null);
@@ -133,15 +134,21 @@ export function InterviewDialog({ onMaterialized }: InterviewDialogProps) {
     setOutlineEpoch(0);
   }
 
-  async function handleStart(e: FormEvent) {
-    e.preventDefault();
+  // `target` is where a SUCCESSFUL start lands: the primary Start button
+  // leaves it at its default ("interview" — today's flow, unchanged), while
+  // the secondary «Θέλεις να το συζητήσουμε πρώτα;» button (Part 5) passes
+  // "planning" so the SAME `startInterview` call feeds the planning chat
+  // instead. `e` is optional because that second button is a plain
+  // `type="button"` click, not a form submit.
+  async function handleStart(e?: FormEvent, target: "interview" | "planning" = "interview") {
+    e?.preventDefault();
     setSubmitting(true);
     setError(null);
     try {
       const result = await startInterview({ title });
       setInterviewId(result.interview_id);
       setState(result);
-      setPhase("interview");
+      setPhase(target);
     } catch (err) {
       setError(err instanceof ApiError ? err.detail : t("startError"));
     } finally {
@@ -276,7 +283,28 @@ export function InterviewDialog({ onMaterialized }: InterviewDialogProps) {
                 {t("startSubmit")}
               </Button>
             </DialogFooter>
+
+            {/* Part 5 — an optional detour, not a fork in the road: same
+                `startInterview` call as the primary button above, just landing
+                on the planning chat instead of the first server step. Skipping
+                this (the primary button) is unchanged — today's flow. */}
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full"
+              disabled={!title.trim() || submitting}
+              data-testid="interview-plan-first"
+              onClick={() => handleStart(undefined, "planning")}
+            >
+              {t("planFirst")}
+            </Button>
           </form>
+        )}
+
+        {phase === "planning" && interviewId && (
+          <DialogBody data-testid="interview-body">
+            <PlanningChat interviewId={interviewId} onDone={() => setPhase("interview")} />
+          </DialogBody>
         )}
 
         {phase === "interview" && state && (

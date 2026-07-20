@@ -1527,6 +1527,34 @@ export function getOrCreateCurriculumChatSession(rootId: string): Promise<{ sess
   return request<{ session_id: string }>(`/curricula/${rootId}/chat-session`);
 }
 
+/** `GET /curricula/interview/{id}/chat-session` — the Part 5 planning phase's
+ * own get-or-create, mirroring `getOrCreateCurriculumChatSession` above
+ * exactly (same shape, same "resume-or-create" contract) but scoped to an
+ * IN-PROGRESS interview rather than a materialized curriculum. */
+export function getOrCreateInterviewChatSession(interviewId: string): Promise<{ session_id: string }> {
+  return request<{ session_id: string }>(`/curricula/interview/${interviewId}/chat-session`);
+}
+
+/** `POST /curricula/interview/{id}/distill` — turns the planning chat's
+ * transcript into an editable brief. 409 when the transcript is empty OR the
+ * model produced an empty brief — both retryable-with-a-message, which is
+ * why this stays a thrown `ApiError` rather than a special return shape:
+ * `PlanningChat`'s catch branches on `err.status === 409` for its localized
+ * `distillEmpty` message. */
+export function distillInterviewBrief(interviewId: string): Promise<{ brief: string }> {
+  return request<{ brief: string }>(`/curricula/interview/${interviewId}/distill`, { method: "POST" });
+}
+
+/** `PUT /curricula/interview/{id}/planning-brief` — persists the tutor's
+ * (possibly hand-edited) brief onto the interview; an empty string clears
+ * it. 204, no body. */
+export function putInterviewPlanningBrief(interviewId: string, brief: string): Promise<void> {
+  return request<void>(`/curricula/interview/${interviewId}/planning-brief`, {
+    method: "PUT",
+    body: JSON.stringify({ brief }),
+  });
+}
+
 /** Every session that has actually been spoken in, most-recently-active
  * first (`GET /chat`). */
 export function listChatSessions(): Promise<ChatSessionSummary[]> {
