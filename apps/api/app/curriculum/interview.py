@@ -75,7 +75,7 @@ from app.curriculum.outline import (
     materialize_outline,
 )
 from app.curriculum.shape import plan_shape
-from app.i18n import DEFAULT_LOCALE, normalize_locale
+from app.i18n import DEFAULT_LOCALE, language_directive, normalize_locale
 from app.llm.factory import get_provider
 from app.models.interview import CurriculumInterview
 from app.models.knowledge import KnowledgeSource
@@ -655,18 +655,21 @@ def answer_interview(db: Session, interview: CurriculumInterview, answer) -> dic
 # (role="chat": no thinking, non-streaming — same tier as chat.suggestions,
 # and for the same reason: a short synchronous summarization on the request
 # path, well inside the Cloudflare edge cap). Tutor-editable via the registry
-# (interview.planning_distill); {language} and {transcript} are filled by
-# distill_planning_brief — the tutor's edit is the TEMPLATE, same contract as
-# chat.suggestions.
+# (interview.planning_distill); {language_directive} and {transcript} are
+# filled by distill_planning_brief — the tutor's edit is the TEMPLATE, same
+# contract as chat.suggestions. `{language_directive}` is the SAME shared
+# fragment (`app.i18n.language_directive`) every other course-language prompt
+# injects, not a bare word — a `shared.language_directive` override reaches
+# this prompt exactly as it reaches `curriculum.outline`'s.
 DISTILL_SYSTEM = (
     "You read a planning conversation between a guitar TUTOR and an "
     "assistant about a course the tutor wants to create. Distill what the "
-    "TUTOR actually wants into a brief IN {language}, written as if the "
-    "tutor wrote it himself, structured as short lines under these headers: "
-    "goals, topics to cover, emphasis/priorities, teaching preferences, "
-    "things to avoid. Keep ONLY conclusions the tutor stated or clearly "
-    "agreed to — dead ends and rejected ideas stay out. No preamble, no "
-    "commentary; return ONLY the JSON the schema describes.\n\n"
+    "TUTOR actually wants into a brief, written as if the tutor wrote it "
+    "himself, structured as short lines under these headers: goals, topics "
+    "to cover, emphasis/priorities, teaching preferences, things to avoid. "
+    "Keep ONLY conclusions the tutor stated or clearly agreed to — dead "
+    "ends and rejected ideas stay out. No preamble, no commentary; return "
+    "ONLY the JSON the schema describes.\n\n{language_directive}\n\n"
     "THE CONVERSATION:\n{transcript}"
 )
 DISTILL_SLICE_ID = "interview.planning_distill"
@@ -701,10 +704,10 @@ def distill_planning_brief(db: Session, interview: CurriculumInterview) -> str:
 
     transcript = "\n".join(f"{m.role.upper()}: {m.content.strip()}" for m in visible)
     who = (interview.answers or {}).get("who") or {}
-    language = "Greek" if (who.get("language") or "el") == "el" else "English"
+    lang_code = normalize_locale(who.get("language") or DEFAULT_LOCALE)
 
     prompt = resolve(db, DISTILL_SLICE_ID, DISTILL_SYSTEM).format(
-        language=language, transcript=transcript,
+        language_directive=language_directive(lang_code, db), transcript=transcript,
     )
     result = get_provider().guided_json(
         [{"role": "user", "content": prompt}], DISTILL_SCHEMA, role="chat",

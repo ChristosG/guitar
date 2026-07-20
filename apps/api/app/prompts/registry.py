@@ -923,13 +923,21 @@ def _build_curriculum_revise(locale: str, db, course_language=None) -> _Built:
     ]
 
 
-# Part 5's planning-chat exit. `{language}` is a plain English word ("Greek"/
-# "English"), not the `language_directive`/`answer_in` fragments the other
-# COURSE_LANGUAGE_PROMPTS interpolate — but it is decided the same way theirs
-# is (`who.get("language")`, i.e. the student/course, never the cockpit), so
-# it carries the same `language_from_course` flag and reuses the same
-# "origin" span label `test_the_language_span_says_where_the_language_
-# actually_comes_from` checks for.
+# Part 5's planning-chat exit. `{language_directive}` is the SAME
+# `language_directive(lang, db)` fragment the other COURSE_LANGUAGE_PROMPTS
+# interpolate (see `_build_curriculum_outline` etc.) — not a bare word, as an
+# earlier version of this builder had it. That version passed
+# `test_the_language_span_says_where_the_language_actually_comes_from` (the
+# span's ORIGIN was still correct) but failed
+# `test_the_language_directive_override_reaches_every_prompt_it_is_injected_into`:
+# reusing the `language_directive` span NAME for a plain word made this entry
+# LOOK like a carrier of `shared.language_directive` without actually being
+# one — a `shared.language_directive` override never reached the rendered
+# text. Calling the real helper here, like every other carrier does, is what
+# makes that claim true rather than cosmetic. The language is still decided
+# the same way theirs is (`who.get("language")`, i.e. the student/course,
+# never the cockpit), so it still carries `language_from_course=True` and the
+# same "origin" span label honestly.
 _SAMPLE_DISTILL_TRANSCRIPT = (
     "USER: Θέλω 20 εβδομάδες για ήχο κιθάρας, έμφαση στην πράξη.\n"
     "ASSISTANT: Προτείνω 4 ενότητες: μαγνήτες, ενισχυτές, ηχεία, πετάλια."
@@ -938,12 +946,12 @@ _SAMPLE_DISTILL_TRANSCRIPT = (
 
 def _build_interview_distill(locale: str, db, course_language=None) -> _Built:
     lang_code = _course_language(locale, course_language)
-    language = "Greek" if lang_code == "el" else "English"
     prompt = resolve_text(db, DISTILL_SLICE_ID, DISTILL_SYSTEM).format(
-        language=language, transcript=_SAMPLE_DISTILL_TRANSCRIPT,
+        language_directive=language_directive(lang_code, db),
+        transcript=_SAMPLE_DISTILL_TRANSCRIPT,
     )
     return [RenderedMessage(role="user", content=prompt)], [
-        (*_LANG_FROM_COURSE, language),
+        (*_LANG_FROM_COURSE, language_directive(lang_code, db)),
         ("transcript", "Ένα δείγμα της συζήτησης σχεδιασμού", _SAMPLE_DISTILL_TRANSCRIPT),
     ]
 
@@ -1566,7 +1574,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/interview.py:661",
+        source_ref="app/curriculum/interview.py:664",
         title_el="Η απόσταξη της συζήτησης σχεδιασμού",
         what_it_does_el=(
             "Διαβάζει ολόκληρη τη συζήτηση σχεδιασμού ανάμεσα σε σένα και τον "
@@ -1584,7 +1592,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: DISTILL_SYSTEM,
         build=_build_interview_distill,
-        call_sites=("curriculum/interview.py:709",),
+        call_sites=("curriculum/interview.py:712",),
         slices=(
             Slice(
                 id=DISTILL_SLICE_ID,
