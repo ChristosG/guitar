@@ -1458,8 +1458,18 @@ export interface RevisionPlanOp {
   /** `add_segment` only: files the new segment under this ENABLED blueprint
    * section (`curriculum/revise.py`'s `_ENABLED_SECTION_KEYS` check drops the
    * op server-side if it names a disabled one). Omitted lets the backend
-   * place it wherever `apply_revision`'s default does. */
+   * place it wherever `apply_revision`'s default does.
+   *
+   * `set_section_enabled` (2026-07-20 hotfix) also carries this field: the
+   * section it flips — which must already exist in the blueprint, enabled or
+   * not (it never invents a section; that is a full `update_blueprint`). */
   section_key?: string;
+  /** `set_section_enabled` only: true to enable, false to disable. Omitted
+   * defaults to true server-side (the common case: enabling a section). */
+  enabled?: boolean;
+  /** `set_section_enabled` only: an optional new label for this section, in
+   * the course's own language — the other language's label is left as-is. */
+  label?: string;
   title?: string;
   objective?: string;
   instruction?: string;
@@ -1487,6 +1497,16 @@ export interface RevisionImpact {
   destructive: boolean;
 }
 
+/** One entry of `RevisionPlan.dropped` — an op `validate_ops` rejected before
+ * it ever reached this plan, and why (`curriculum/revise.py`, 2026-07-20
+ * hotfix). `op` is the RAW op the model proposed (not a `RevisionPlanOp`: it
+ * failed validation, so it may be missing required fields or carry a
+ * shorthand id — never assume its shape beyond `op.op`). */
+export interface RevisionPlanDroppedOp {
+  op: { op?: string; [key: string]: unknown };
+  reason: string;
+}
+
 /** `propose_curriculum_revision`'s return value / `apply_curriculum_
  * revision`'s `plan` argument — mirrors `curriculum/revise.py`'s
  * `{summary, ops}` shape, id-validated server-side before it ever reaches
@@ -1494,11 +1514,15 @@ export interface RevisionImpact {
  * revision`). `impact` is optional: an `ApprovalRequest` created before this
  * shipped has no `impact` key on its stored `tool_args.plan`, and
  * `RevisionPlanCard` renders no banner in that case rather than fabricate
- * one client-side. */
+ * one client-side. `dropped` is the same optionality story (2026-07-20
+ * hotfix): absent/empty means nothing was cut; non-empty means the tutor is
+ * approving a SMALLER plan than what was asked for, and `RevisionPlanCard`
+ * must say so before he approves it. */
 export interface RevisionPlan {
   summary: string;
   ops: RevisionPlanOp[];
   impact?: RevisionImpact;
+  dropped?: RevisionPlanDroppedOp[];
 }
 
 export interface ResolveApprovalInput {

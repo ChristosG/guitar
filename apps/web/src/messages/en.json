@@ -464,6 +464,8 @@
         "move_lesson": "Move lesson “{title}” to “{module}”",
         "remove_lesson": "Remove lesson “{title}”",
         "update_blueprint": "Change lesson structure",
+        "set_section_enabled_on": "Enable section “{section}”",
+        "set_section_enabled_off": "Disable section “{section}”",
         "add_segment": "Add segment “{title}” to lesson “{lesson}”",
         "edit_segment": "Edit segment “{title}”",
         "remove_segment": "Remove segment “{title}”"
@@ -476,6 +478,9 @@
         "surgicalPrefix": "Targeted change: ",
         "surgicalSuffix": " — everything else stays as is.",
         "surgicalNeutral": "Everything else stays as is."
+      },
+      "dropped": {
+        "warning": "{count, plural, one {# proposed change was rejected} other {# proposed changes were rejected}} by the safety check — see why before you approve."
       }
     }
   },

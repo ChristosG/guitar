@@ -890,6 +890,131 @@ test.describe("curriculum revise drawer (mocked API)", () => {
 
     expect(chat.unexpected).toEqual([]);
   });
+
+  // 2026-07-20 hotfix: `validate_ops` can silently drop a proposed op (a
+  // missing required field, a shorthand id that never resolves, a section_key
+  // the blueprint doesn't have). Before this, the plan the tutor saw on the
+  // approval card gave no sign that anything had been cut — he'd approve a
+  // SMALLER plan than what he asked for without knowing it. `plan.dropped`
+  // (server-computed, same story as `plan.impact`) must render as an amber
+  // warning naming what was rejected and why, BEFORE he approves.
+  test("a plan with dropped ops shows the amber warning with the rejection reasons", async ({ page }) => {
+    const rootId = randomUUID();
+    const moduleId = randomUUID();
+    const lesson1Id = randomUUID();
+    const lesson2Id = randomUUID();
+    const newLessonId = randomUUID();
+
+    const fixture = mockCurriculumTree(rootId, moduleId, lesson1Id, lesson2Id, newLessonId);
+    const chatSessionStore = createChatSessionStore();
+    await mockCurriculaApi(page, fixture, chatSessionStore);
+    const chat = await mockChatApi(page, undefined, chatSessionStore);
+
+    await page.goto(`/en/curricula/${rootId}`);
+    await page.getByTestId("revise-open").click();
+    await expect(page.getByTestId("chat-input")).toBeEnabled();
+
+    const approvalId = randomUUID();
+    chat.setNextMessage({
+      status: "awaiting_approval",
+      approval_id: approvalId,
+      tool_name: "apply_curriculum_revision",
+      tool_args: {
+        root_id: rootId,
+        plan: {
+          summary: "Enable homework and file it under the Pickups lesson.",
+          ops: [
+            {
+              op: "set_section_enabled",
+              section_key: "homework",
+              enabled: true,
+              reason: "The tutor asked for a homework section.",
+            },
+          ],
+          impact: {
+            rewrites: 0, segment_additions: 0, segment_edits: 0, segment_removals: 0,
+            lesson_removals: 0, lessons_added: 0, blueprint_changed: true, destructive: false,
+          },
+          // The repair pass survived ONE op but still lost this add_segment —
+          // mirrors the production incident's shape (`curriculum/revise.py`'s
+          // `validate_ops`), rendered verbatim by `RevisionPlanCard`.
+          dropped: [
+            {
+              op: { op: "add_segment", lesson_id: "L1", section_key: "homework" },
+              reason: "lesson_id='L1' does not resolve",
+            },
+          ],
+        },
+      },
+      description: "Here is a proposed revision.",
+    });
+    await page.getByTestId("chat-input").fill("Add a homework section to every lesson.");
+    await page.getByTestId("chat-send").click();
+    await expect(page.getByTestId("revision-plan-card")).toBeVisible();
+
+    // The new op label, enable variant.
+    const ops = page.getByTestId("revision-plan-op");
+    await expect(ops).toHaveCount(1);
+    await expect(ops.nth(0)).toContainText("Enable section “homework”");
+
+    const droppedWarning = page.getByTestId("plan-dropped");
+    await expect(droppedWarning).toBeVisible();
+    await expect(droppedWarning).toContainText("1 proposed change was rejected");
+    await expect(droppedWarning).toContainText("see why before you approve");
+    const reasons = page.getByTestId("plan-dropped-reason");
+    await expect(reasons).toHaveCount(1);
+    await expect(reasons.nth(0)).toContainText("add_segment");
+    await expect(reasons.nth(0)).toContainText("lesson_id='L1' does not resolve");
+
+    chat.setNextResolve({ status: "answer", content: "Understood, I left the curriculum as it was." });
+    await page.getByTestId("revision-reject").click();
+
+    expect(chat.unexpected).toEqual([]);
+  });
+
+  test("a plan with no dropped ops renders no warning", async ({ page }) => {
+    const rootId = randomUUID();
+    const moduleId = randomUUID();
+    const lesson1Id = randomUUID();
+    const lesson2Id = randomUUID();
+    const newLessonId = randomUUID();
+
+    const fixture = mockCurriculumTree(rootId, moduleId, lesson1Id, lesson2Id, newLessonId);
+    const chatSessionStore = createChatSessionStore();
+    await mockCurriculaApi(page, fixture, chatSessionStore);
+    const chat = await mockChatApi(page, undefined, chatSessionStore);
+
+    await page.goto(`/en/curricula/${rootId}`);
+    await page.getByTestId("revise-open").click();
+    await expect(page.getByTestId("chat-input")).toBeEnabled();
+
+    chat.setNextMessage({
+      status: "awaiting_approval",
+      approval_id: randomUUID(),
+      tool_name: "apply_curriculum_revision",
+      tool_args: {
+        root_id: rootId,
+        plan: {
+          summary: "Enable homework everywhere.",
+          ops: [
+            { op: "set_section_enabled", section_key: "homework", enabled: true, reason: "r" },
+          ],
+          dropped: [],
+        },
+      },
+      description: "Here is a proposed revision.",
+    });
+    await page.getByTestId("chat-input").fill("Add homework.");
+    await page.getByTestId("chat-send").click();
+    await expect(page.getByTestId("revision-plan-card")).toBeVisible();
+
+    await expect(page.getByTestId("plan-dropped")).toHaveCount(0);
+
+    chat.setNextResolve({ status: "answer", content: "Understood, I left the curriculum as it was." });
+    await page.getByTestId("revision-reject").click();
+
+    expect(chat.unexpected).toEqual([]);
+  });
 });
 
 // Chat overhaul Task 4 — persistence. Before this, `handleOpen` called

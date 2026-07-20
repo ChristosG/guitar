@@ -464,6 +464,8 @@
         "move_lesson": "Μετακίνηση του μαθήματος «{title}» στην ενότητα «{module}»",
         "remove_lesson": "Διαγραφή του μαθήματος «{title}»",
         "update_blueprint": "Αλλαγή δομής μαθήματος",
+        "set_section_enabled_on": "Ενεργοποίηση ενότητας «{section}»",
+        "set_section_enabled_off": "Απενεργοποίηση ενότητας «{section}»",
         "add_segment": "Νέα ενότητα «{title}» στο μάθημα «{lesson}»",
         "edit_segment": "Διόρθωση ενότητας «{title}»",
         "remove_segment": "Αφαίρεση ενότητας «{title}»"
@@ -476,6 +478,9 @@
         "surgicalPrefix": "Στοχευμένη αλλαγή: ",
         "surgicalSuffix": " — τα υπόλοιπα μένουν ως έχουν.",
         "surgicalNeutral": "Τα υπόλοιπα μένουν ως έχουν."
+      },
+      "dropped": {
+        "warning": "{count, plural, one {# προτεινόμενη αλλαγή απορρίφθηκε} other {# προτεινόμενες αλλαγές απορρίφθηκαν}} από τον έλεγχο ασφαλείας — δες τον λόγο πριν εγκρίνεις."
       }
     }
   },

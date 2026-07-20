@@ -4,7 +4,7 @@ import { useTranslations } from "next-intl";
 import { AlertTriangle, Info, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import type { RevisionImpact, RevisionPlan, RevisionPlanOp } from "@/lib/api";
+import type { RevisionImpact, RevisionPlan, RevisionPlanDroppedOp, RevisionPlanOp } from "@/lib/api";
 
 interface RevisionPlanCardProps {
   plan: RevisionPlan;
@@ -51,6 +51,15 @@ function opLabel(op: RevisionPlanOp, blockTitles: Record<string, string>, t: Tra
       return t("op.remove_lesson", { title: titleOf(op.lesson_id) });
     case "update_blueprint":
       return t("op.update_blueprint");
+    // 2026-07-20 hotfix: the common case for enabling/renaming ONE recurring
+    // section no longer goes through update_blueprint's full-object rewrite —
+    // it's this op instead, carrying just the section_key (+ optional label).
+    // `enabled` defaults true server-side, so an absent field still reads as
+    // "enable", not a blank label.
+    case "set_section_enabled":
+      return op.enabled === false
+        ? t("op.set_section_enabled_off", { section: op.section_key ?? "" })
+        : t("op.set_section_enabled_on", { section: op.section_key ?? "" });
     // The three surgical segment ops (2026-07-20, Spec A; named-per-op fix
     // 2026-07-20 review follow-up): `remove_segment` in particular is
     // destructive, so the tutor must see WHICH segment before approving —
@@ -106,6 +115,18 @@ function impactMessage(impact: RevisionImpact, t: Translator): string {
   return t("impact.surgicalPrefix") + parts.join(", ") + t("impact.surgicalSuffix");
 }
 
+/** One line of the dropped-ops warning (2026-07-20 hotfix): `op` is the RAW,
+ * FAILED op the model proposed — it may be missing required fields or carry a
+ * shorthand id, so this reads only `op.op` (never assumes the rest of its
+ * shape) and pairs it with the server's own `reason` string verbatim. The
+ * reason is a technical validation diagnostic, not tutor-facing prose the app
+ * authored — shown as-is (no i18n) the same way a stack trace would be,
+ * because paraphrasing it risks losing exactly the detail (an id, a section
+ * key) that explains what to fix. */
+function droppedOpLabel(entry: RevisionPlanDroppedOp): string {
+  return `${entry.op.op ?? "?"} — ${entry.reason}`;
+}
+
 /**
  * The `ApprovalCard` VARIANT for `apply_curriculum_revision` (Unit D, Task
  * D2b). `chat-panel.tsx` renders this instead of the generic `ApprovalCard`
@@ -159,6 +180,30 @@ export function RevisionPlanCard({
                 <Info className="mt-0.5 size-3.5 shrink-0" aria-hidden />
               )}
               <span>{impactMessage(plan.impact, t)}</span>
+            </div>
+          )}
+
+          {/* 2026-07-20 hotfix: `validate_ops` can silently drop a proposed op
+           * (a hallucinated id, a section the blueprint doesn't have) — the
+           * plan the tutor is about to approve is then SMALLER than what was
+           * asked for, and he must know that before he approves it, not
+           * discover it after. */}
+          {plan.dropped && plan.dropped.length > 0 && (
+            <div
+              data-testid="plan-dropped"
+              className="flex flex-col gap-1.5 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300"
+            >
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+                <span>{t("dropped.warning", { count: plan.dropped.length })}</span>
+              </div>
+              <ul className="ml-5 list-disc">
+                {plan.dropped.map((entry, i) => (
+                  <li key={i} data-testid="plan-dropped-reason">
+                    {droppedOpLabel(entry)}
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
 
