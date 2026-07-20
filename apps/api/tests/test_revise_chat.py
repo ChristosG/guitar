@@ -17,7 +17,7 @@ import uuid
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 
 import app.agent.tools as agent_tools
 import app.routers.chat as chat_router
@@ -419,3 +419,137 @@ def test_resolve_approval_enqueues_a_curriculum_revise_job_and_returns_job_pendi
         db.close()
 
     assert ran == [job_id]            # the (monkeypatched) runner was scheduled
+
+
+# ---------------------------------------------------------------------------
+# (d) whole-branch review finding #2 — edited_args bypasses the propose-time
+# gate entirely (it REPLACES tool_args wholesale), so resolve_approval must
+# re-run validate_ops on it before enqueueing, same discipline as
+# _validate_pending_revision.
+# ---------------------------------------------------------------------------
+
+def test_resolve_approval_with_edited_args_drops_a_cross_course_remove_segment(monkeypatch):
+    """A tutor-edited (or otherwise untrusted) `edited_args` plan carrying a
+    `remove_segment` targeting a segment OUTSIDE this course must never reach
+    apply — resolve_approval re-validates before enqueueing, same as the
+    normal propose path, and the op is dropped rather than applied."""
+    ran = []
+    monkeypatch.setattr(chat_router, "run_curriculum_revise_job", lambda job_id: ran.append(job_id))
+
+    db = SessionLocal()
+    try:
+        course, m, lesson = _seed_tree(db)
+        other_course, other_m, other_lesson = _seed_tree(db)
+        other_seg = Block(kind="segment", title="Other seg", body="x", order=0,
+                          parent_id=other_lesson.id, language="el", meta={})
+        db.add(other_seg)
+        db.commit()
+
+        session = ChatSession(locale="el", root_id=course.id)
+        db.add(session)
+        db.commit()
+        session_id = session.id
+
+        # The APPROVED (proposal-time) plan carries only the legitimate op.
+        approval = ApprovalRequest(
+            session_id=session_id, tool_name="apply_curriculum_revision",
+            tool_args={"root_id": str(course.id), "plan": {"summary": "s", "ops": [
+                {"op": "insert_lesson", "module_id": str(m.id), "title": "DS-1",
+                 "objective": "o", "reason": "r"}]}},
+            tool_call_id="call_1", status="pending",
+        )
+        db.add(approval)
+        db.commit()
+        approval_id = approval.id
+        other_seg_id = other_seg.id
+    finally:
+        db.close()
+
+    # The EDITED args a tutor submits on resolve smuggle in a cross-course
+    # remove_segment alongside the legitimate op.
+    r = client.post(
+        f"/chat/{session_id}/approvals/{approval_id}/resolve",
+        json={
+            "decision": "approve",
+            "edited_args": {"root_id": str(course.id), "plan": {"summary": "edited", "ops": [
+                {"op": "insert_lesson", "module_id": str(m.id), "title": "DS-1",
+                 "objective": "o", "reason": "r"},
+                {"op": "remove_segment", "segment_id": str(other_seg_id), "reason": "delete it"},
+            ]}},
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "job_pending"
+    job_id = uuid.UUID(body["job_id"])
+
+    db = SessionLocal()
+    try:
+        job = db.get(GenerationJob, job_id)
+        ops = job.params["plan"]["ops"]
+        assert [o["op"] for o in ops] == ["insert_lesson"]   # remove_segment dropped
+        # The cross-course segment is untouched.
+        assert db.get(Block, other_seg_id) is not None
+        approval = db.get(ApprovalRequest, approval_id)
+        assert approval.status == "approved"
+    finally:
+        db.close()
+
+
+def test_resolve_approval_with_edited_args_all_dropped_returns_422_and_never_enqueues(monkeypatch):
+    """If the edit hollows the plan out to nothing (every op fails
+    validate_ops), resolve_approval rejects with 422 rather than silently
+    enqueueing a no-op job — the approval stays pending, nothing is applied."""
+    ran = []
+    monkeypatch.setattr(chat_router, "run_curriculum_revise_job", lambda job_id: ran.append(job_id))
+
+    db = SessionLocal()
+    try:
+        course, m, lesson = _seed_tree(db)
+        other_course, other_m, other_lesson = _seed_tree(db)
+        other_seg = Block(kind="segment", title="Other seg", body="x", order=0,
+                          parent_id=other_lesson.id, language="el", meta={})
+        db.add(other_seg)
+        db.commit()
+
+        session = ChatSession(locale="el", root_id=course.id)
+        db.add(session)
+        db.commit()
+        session_id = session.id
+
+        approval = ApprovalRequest(
+            session_id=session_id, tool_name="apply_curriculum_revision",
+            tool_args={"root_id": str(course.id), "plan": {"summary": "s", "ops": [
+                {"op": "insert_lesson", "module_id": str(m.id), "title": "DS-1",
+                 "objective": "o", "reason": "r"}]}},
+            tool_call_id="call_1", status="pending",
+        )
+        db.add(approval)
+        db.commit()
+        approval_id = approval.id
+        other_seg_id = other_seg.id
+        jobs_before = db.scalar(select(func.count()).select_from(GenerationJob))
+    finally:
+        db.close()
+
+    r = client.post(
+        f"/chat/{session_id}/approvals/{approval_id}/resolve",
+        json={
+            "decision": "approve",
+            "edited_args": {"root_id": str(course.id), "plan": {"summary": "edited", "ops": [
+                {"op": "remove_segment", "segment_id": str(other_seg_id), "reason": "delete it"},
+            ]}},
+        },
+    )
+    assert r.status_code == 422, r.text
+    assert ran == []
+
+    db = SessionLocal()
+    try:
+        assert db.get(Block, other_seg_id) is not None       # untouched
+        approval = db.get(ApprovalRequest, approval_id)
+        assert approval.status == "pending"                  # never advanced
+        jobs_after = db.scalar(select(func.count()).select_from(GenerationJob))
+        assert jobs_after == jobs_before                     # no job enqueued
+    finally:
+        db.close()

@@ -438,6 +438,53 @@ def _validate_pending_revision(db: Session, pending: dict) -> None:
     pending["arguments"] = {**args, "plan": validated}
 
 
+def _revalidate_revision_args_for_resolve(db: Session, args: dict) -> dict:
+    """Defence-in-depth for `resolve_approval`'s `apply_curriculum_revision`
+    branch (whole-branch review finding #2). The normal propose -> approve
+    round trip is already clean by the time it gets here: `_validate_pending_
+    revision` validated the plan before the `ApprovalRequest` was even stored.
+    But `edited_args` (a tutor's edited JSON on the approval card, or any
+    direct caller of this endpoint) REPLACES `tool_args` WHOLESALE and skips
+    that gate entirely — and `apply_revision`'s segment branches trust
+    `segment_id`/`section_key` at face value, they don't re-check root
+    membership (a `remove_segment` could otherwise delete ANY block id, not
+    just one under this course). Mirrors `_validate_pending_revision`: run
+    `validate_ops`, then recompute `impact` on the validated result, so the
+    plan that actually gets enqueued is the one this call validated, not the
+    one the client sent.
+
+    Malformed/absent root_id or plan is left untouched (best-effort, same as
+    `_validate_pending_revision`) — `apply_revision` re-validates ids again
+    regardless, so that path is never a smuggling route. What IS enforced
+    here: if the incoming plan had ops and validation drops every one of
+    them, this raises 422 rather than silently enqueueing a no-op (or worse,
+    quietly waving through whatever DID resolve while masking that the
+    edit's real intent — e.g. that cross-course `remove_segment` — got
+    dropped without the caller ever finding out)."""
+    plan = args.get("plan")
+    raw_root = args.get("root_id")
+    if not raw_root or not isinstance(plan, dict):
+        return args
+    try:
+        root_id = UUID(str(raw_root))
+    except (ValueError, TypeError):
+        return args
+    original_ops = plan.get("ops") or []
+    try:
+        validated = validate_ops(db, root_id, plan)
+    except Exception:
+        log.warning("revise: could not re-validate a revision plan at resolve "
+                    "time (root_id=%s)", raw_root, exc_info=True)
+        return args
+    if original_ops and not validated["ops"]:
+        raise HTTPException(
+            status_code=422,
+            detail="revision plan failed validation: every op was dropped",
+        )
+    validated = {**validated, "impact": compute_impact(validated["ops"])}
+    return {**args, "plan": validated}
+
+
 def _respond_to_turn(db: Session, session_id: UUID, prior_wire: list[dict], result: AgentResult) -> ChatTurnOut:
     """Shared response-shaping for every call site that runs (or resumes)
     `run_agent_turn` and must react to its outcome: the very first turn
@@ -808,6 +855,14 @@ def resolve_approval(
     # just says "failed"), and one who *changes* it would be choosing a language
     # the rest of the app disagrees with. The session's locale wins, always.
     args = with_locale(approval.tool_name, args, session.locale)
+
+    # Re-validate an apply_curriculum_revision plan against the live tree
+    # BEFORE it is enqueued (finding #2, whole-branch review) — `edited_args`
+    # above bypasses `_validate_pending_revision`'s gate entirely, and the job
+    # this enqueues applies the plan in one untrusted-input-free transaction.
+    # Raises 422 if the edit hollowed the plan out to nothing.
+    if approval.tool_name == "apply_curriculum_revision":
+        args = _revalidate_revision_args_for_resolve(db, args)
 
     entry = TOOLS.get(approval.tool_name)
     if entry is None:
