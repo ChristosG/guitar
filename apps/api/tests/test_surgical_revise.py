@@ -17,13 +17,20 @@ Mirrors test_revise_apply.py's fixture/skip-guard/setup_module conventions.
 import uuid
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 
 from app.db import Base, SessionLocal, engine
 from app.models.block import Block
 from app.curriculum.blueprint import default_blueprint, section_keys
+from app.curriculum.ground import Passage
 from app.curriculum.refine import undo_refine
+from app.curriculum.segment_generate import generate_segment
+from app.jobs.curriculum_revise import run_curriculum_revise_job
+from app.llm.errors import LLMError
+from app.models.generation_job import GenerationJob
 import app.curriculum.revise as revise
+import app.curriculum.segment_generate as segment_mod
+import app.jobs.curriculum_revise as revise_job
 
 try:
     with engine.connect() as _c:
@@ -345,3 +352,226 @@ def test_persist_lesson_preserves_custom_segments_appended_after(db):
     assert segments[-1].title == "Bonus bit"
 
     assert [s.order for s in segments] == list(range(len(segments)))   # sequential order
+
+
+# ---------------------------------------------------------------------------
+# Task 2 (Spec A, generation side): generate_segment
+# ---------------------------------------------------------------------------
+
+class _FakeProvider:
+    """Mirrors `test_curriculum_editing.py`'s own `_FakeProvider` — a fixed
+    result, captured calls."""
+
+    def __init__(self, result=None):
+        self.result = result or {"title": "New bit", "body": "word word word word"}
+        self.calls: list[dict] = []
+
+    def guided_json(self, messages, schema, *, temperature=0.2, role="draft", max_tokens=None):
+        self.calls.append({"messages": messages, "role": role})
+        return self.result
+
+
+def _sample_passage(page: int = 12) -> Passage:
+    return Passage(
+        text="Practice the pedal chain in the same order every time.",
+        source_id=uuid.uuid4(), source_title="Pedalboard Handbook",
+        page_no=page, page_id=uuid.uuid4(), score=0.8,
+    )
+
+
+def test_generate_segment_fills_body_grounds_and_recomputes_word_count(db_and_tree, monkeypatch):
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    passage = _sample_passage()
+    monkeypatch.setattr(segment_mod, "ground_topic", lambda *a, **k: [passage])
+    provider = _FakeProvider(result={
+        "title": "Εργασίες για το σπίτι", "body": "word word word word",
+    })
+    monkeypatch.setattr(segment_mod, "get_provider", lambda: provider)
+
+    seg3 = Block(kind="segment", title="Bonus: Pedal chains", body="", order=2,
+                 parent_id=lesson.id, language="el",
+                 meta={"segment_status": "queued",
+                       "segment_instruction": "explain pedal chaining order"})
+    db.add(seg3)
+    db.commit()
+
+    generate_segment(db, seg3)
+    db.commit()
+
+    assert seg3.title == "Εργασίες για το σπίτι"
+    assert seg3.body == "word word word word"
+    assert seg3.meta["segment_status"] == "done"
+    assert "segment_instruction" not in seg3.meta
+    assert seg3.meta["citations"] == [
+        {"source_id": str(passage.source_id), "source_title": "Pedalboard Handbook", "page": 12},
+    ]
+
+    db.refresh(lesson)
+    assert lesson.meta["word_count"] == 5 + 3 + 4       # seg1 (5) + seg2 (3) + seg3 (4)
+    assert lesson.meta["meets_floor"] is True            # 12 >= floor_words=10
+
+    sent = " ".join(m["content"] for m in provider.calls[0]["messages"])
+    assert "L1" in sent, "the lesson's own title must reach the model"
+    assert "Theory" in sent and "word word word word word" in sent, (
+        "a sibling segment's title and body must reach the model, for consistency"
+    )
+    assert "explain pedal chaining order" in sent, "the tutor's instruction must reach the model"
+    assert "Pedalboard Handbook" in sent, "the grounded passage must reach the model"
+
+
+def test_generate_segment_propagates_the_providers_error_and_leaves_the_segment_untouched(
+    db_and_tree, monkeypatch,
+):
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    monkeypatch.setattr(segment_mod, "ground_topic", lambda *a, **k: [])
+
+    def _boom(*a, **k):
+        raise LLMError("upstream", "the model is down")
+
+    provider = _FakeProvider()
+    provider.guided_json = _boom
+    monkeypatch.setattr(segment_mod, "get_provider", lambda: provider)
+
+    seg3 = Block(kind="segment", title="Bonus", body="", order=2, parent_id=lesson.id,
+                 language="el", meta={"segment_status": "queued", "segment_instruction": "x"})
+    db.add(seg3)
+    db.commit()
+
+    with pytest.raises(LLMError):
+        generate_segment(db, seg3)
+
+    assert seg3.body == ""
+    assert seg3.meta["segment_status"] == "queued"
+    assert seg3.meta["segment_instruction"] == "x"
+
+
+# ---------------------------------------------------------------------------
+# Task 2, job-level: run_curriculum_revise_job's per-segment generation loop +
+# conditional draft chaining
+# ---------------------------------------------------------------------------
+
+def test_job_generates_queued_segments_and_does_not_chain_a_segment_only_plan(
+    db_and_tree, monkeypatch,
+):
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    monkeypatch.setattr(segment_mod, "ground_topic", lambda *a, **k: [])
+    monkeypatch.setattr(segment_mod, "get_provider", lambda: _FakeProvider())
+    draft_calls: list[uuid.UUID] = []
+    monkeypatch.setattr(revise_job, "run_curriculum_draft_job", lambda jid: draft_calls.append(jid))
+
+    plan = {"summary": "s", "ops": [
+        {"op": "add_segment", "lesson_id": str(lesson.id), "title": "Bonus",
+         "instruction": "explain pedal chaining order", "reason": "r"},
+    ]}
+    job = GenerationJob(kind="curriculum_revise", status="pending",
+                        params={"root_id": str(course.id), "instruction": "go", "plan": plan})
+    db.add(job)
+    db.commit()
+    job_id = job.id
+
+    run_curriculum_revise_job(job_id)
+
+    db.expire_all()
+    job = db.get(GenerationJob, job_id)
+    assert job.status == "succeeded"
+    assert job.progress["segments_total"] == 1
+    assert job.progress["segments_done"] == 1
+    assert job.progress["segments_failed"] == 0
+    assert "draft_job_id" not in job.progress          # nothing was chained
+
+    assert draft_calls == []
+    draft_rows = db.scalar(
+        select(func.count(GenerationJob.id)).where(GenerationJob.kind == "curriculum_draft")
+    )
+    assert draft_rows == 0
+
+    new_seg = _children(db, lesson.id, "segment")[-1]
+    assert new_seg.meta["segment_status"] == "done"
+    assert new_seg.body == "word word word word"
+
+
+def test_job_chains_the_draft_when_a_lesson_was_also_queued(db_and_tree, monkeypatch):
+    """(c)'s second half: a plan with a `modify_lesson` (queuing a LESSON, not
+    just a segment) still chains the ordinary draft fan-out — the conditional
+    only skips the chain when NO lesson ended up queued."""
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    monkeypatch.setattr(segment_mod, "ground_topic", lambda *a, **k: [])
+    monkeypatch.setattr(segment_mod, "get_provider", lambda: _FakeProvider())
+    draft_calls: list[uuid.UUID] = []
+    monkeypatch.setattr(revise_job, "run_curriculum_draft_job", lambda jid: draft_calls.append(jid))
+
+    plan = {"summary": "s", "ops": [
+        {"op": "add_segment", "lesson_id": str(lesson.id), "title": "Bonus",
+         "instruction": "explain pedal chaining order", "reason": "r"},
+        {"op": "modify_lesson", "lesson_id": str(lesson.id), "instruction": "make it punchier",
+         "reason": "r"},
+    ]}
+    job = GenerationJob(kind="curriculum_revise", status="pending",
+                        params={"root_id": str(course.id), "instruction": "go", "plan": plan})
+    db.add(job)
+    db.commit()
+    job_id = job.id
+
+    run_curriculum_revise_job(job_id)
+
+    db.expire_all()
+    job = db.get(GenerationJob, job_id)
+    assert job.status == "succeeded"
+    assert job.progress["segments_total"] == 1
+    assert job.progress["segments_done"] == 1
+    assert job.progress["draft_job_id"] == str(draft_calls[0])
+
+    assert len(draft_calls) == 1
+    draft_rows = db.scalar(
+        select(func.count(GenerationJob.id)).where(GenerationJob.kind == "curriculum_draft")
+    )
+    assert draft_rows == 1
+
+
+def test_job_marks_a_failing_segment_failed_and_still_generates_the_rest(db_and_tree, monkeypatch):
+    """Per-segment failure isolation: one bad segment must not fail the whole
+    row or stop the others (mirrors `curriculum_draft`'s per-lesson isolation)."""
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    monkeypatch.setattr(segment_mod, "ground_topic", lambda *a, **k: [])
+
+    class _SelectiveProvider:
+        def guided_json(self, messages, schema, *, temperature=0.2, role="draft", max_tokens=None):
+            sent = " ".join(m["content"] for m in messages)
+            if "make it fail" in sent:
+                raise LLMError("upstream", "the model is down")
+            return {"title": "Good bit", "body": "word word word word"}
+
+    monkeypatch.setattr(segment_mod, "get_provider", lambda: _SelectiveProvider())
+    monkeypatch.setattr(revise_job, "run_curriculum_draft_job", lambda jid: None)
+
+    plan = {"summary": "s", "ops": [
+        {"op": "add_segment", "lesson_id": str(lesson.id), "title": "Will fail",
+         "instruction": "make it fail", "reason": "r"},
+        {"op": "add_segment", "lesson_id": str(lesson.id), "title": "Will succeed",
+         "instruction": "make it good", "reason": "r"},
+    ]}
+    job = GenerationJob(kind="curriculum_revise", status="pending",
+                        params={"root_id": str(course.id), "instruction": "go", "plan": plan})
+    db.add(job)
+    db.commit()
+    job_id = job.id
+
+    run_curriculum_revise_job(job_id)
+
+    db.expire_all()
+    job = db.get(GenerationJob, job_id)
+    assert job.status == "succeeded"                    # a segment failure must not fail the row
+    assert job.progress["segments_total"] == 2
+    assert job.progress["segments_done"] == 1
+    assert job.progress["segments_failed"] == 1
+
+    # By ORDER, not title: a successful generation is allowed to rename the
+    # segment (`SEGMENT_SCHEMA` mirrors `REFINE_SCHEMA`'s "keep unless the
+    # instruction says otherwise"), so the original "Will succeed" title is not
+    # a stable handle once the fake provider has returned its own.
+    failed, succeeded = _children(db, lesson.id, "segment")[2:]
+    assert failed.meta["segment_status"] == "failed"
+    assert failed.meta["segment_error"]
+    assert failed.body == ""
+    assert succeeded.meta["segment_status"] == "done"
+    assert succeeded.body == "word word word word"

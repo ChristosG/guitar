@@ -157,6 +157,13 @@ from app.curriculum.refine import (
     REFINE_USER_SLICE_ID,
     build_refine_messages,
 )
+from app.curriculum.segment_generate import (
+    SEGMENT_SYSTEM,
+    SEGMENT_SYSTEM_SLICE_ID,
+    SEGMENT_TAIL,
+    SEGMENT_TAIL_SLICE_ID,
+    build_segment_messages,
+)
 from app.curriculum.shape import plan_shape
 from app.i18n import (
     ANSWER_IN,
@@ -902,6 +909,36 @@ def _build_curriculum_refine(locale: str, db, course_language=None) -> _Built:
     ]
 
 
+_SAMPLE_SEGMENT_TITLE = "Μπόνους: Η σειρά σύνδεσης πεταλιών"
+_SAMPLE_SEGMENT_INSTRUCTION = (
+    "Πρόσθεσε μια ενότητα που εξηγεί με ποια σειρά συνδέονται τα πετάλια."
+)
+_SAMPLE_SEGMENT_SIBLINGS = (
+    "Θεωρία:\nΤο σχήμα C είναι ένα από τα πέντε μετακινούμενα σχήματα του CAGED."
+)
+
+
+def _build_segment_generate(locale: str, db, course_language=None) -> _Built:
+    lang = _course_language(locale, course_language)
+    built = build_segment_messages(
+        instruction=_SAMPLE_SEGMENT_INSTRUCTION,
+        lesson_title=_SAMPLE_LESSON_CTX.lesson_title,
+        lesson_objective=_SAMPLE_LESSON_CTX.lesson_objective,
+        title=_SAMPLE_SEGMENT_TITLE, language=lang,
+        siblings=_SAMPLE_SEGMENT_SIBLINGS, context=_SAMPLE_HITS[0].text, source=db,
+    )
+    return _msgs(built), [
+        ("lesson_title", "Ο τίτλος του μαθήματος", _SAMPLE_LESSON_CTX.lesson_title),
+        ("lesson_objective", "Ο στόχος του μαθήματος", _SAMPLE_LESSON_CTX.lesson_objective),
+        ("siblings", "Οι άλλες ενότητες του μαθήματος, για συνέπεια", _SAMPLE_SEGMENT_SIBLINGS),
+        (*_RETRIEVED, _SAMPLE_HITS[0].text),
+        ("title", "Ο τίτλος της νέας ενότητας", _SAMPLE_SEGMENT_TITLE),
+        ("instruction", "Η οδηγία σου", _SAMPLE_SEGMENT_INSTRUCTION),
+        (*_LANG_FROM_COURSE, language_directive(lang, db)),
+        (*_ANSWER_IN_FROM_COURSE, answer_in(lang, db)),
+    ]
+
+
 def _build_curriculum_revise(locale: str, db, course_language=None) -> _Built:
     lang = _course_language(locale, course_language)
     # The revise chat no longer sends the whole library — it grounds ONE
@@ -1532,6 +1569,40 @@ _ENTRIES = [
                 id=REFINE_USER_SLICE_ID,
                 label_el="Πώς παρουσιάζεται το κείμενο που διορθώνεις",
                 default=REFINE_USER,
+                kind="replace",
+            ),
+        ),
+    ),
+    PromptEntry(
+        id="segment.generate",
+        language_from_course=True,
+        flow="curriculum",
+        kind="prompt",
+        source_ref="app/curriculum/segment_generate.py:117",
+        title_el="Η συγγραφή μεμονωμένης ενότητας μαθήματος",
+        what_it_does_el=(
+            "Του δίνει τον τίτλο και τον στόχο του μαθήματος, τις άλλες ενότητές "
+            "του — για να γράψει με το ίδιο ύφος και επίπεδο — ό,τι σχετικό "
+            "βρήκε στη βιβλιοθήκη σου, και στο τέλος — τελευταία, για να "
+            "βαραίνει πιο πολύ — την οδηγία σου για τη νέα ή διορθωμένη "
+            "ενότητα. Του λέει να γράψει ΜΟΝΟ αυτή την ενότητα, ολόκληρη, ποτέ "
+            "μια περίληψη, και ποτέ να μην επινοήσει παραπομπή σε σελίδα."
+        ),
+        when_it_runs_el="Όταν εγκρίνεται σχέδιο με προσθήκη/διόρθωση ενότητας.",
+        source_of_truth=lambda: build_segment_messages,
+        build=_build_segment_generate,
+        call_sites=("curriculum/segment_generate.py:203",),
+        slices=(
+            Slice(
+                id=SEGMENT_SYSTEM_SLICE_ID,
+                label_el="Η οδηγία προς το μοντέλο",
+                default=SEGMENT_SYSTEM,
+                kind="replace",
+            ),
+            Slice(
+                id=SEGMENT_TAIL_SLICE_ID,
+                label_el="Πώς παρουσιάζεται η ενότητα προς συγγραφή",
+                default=SEGMENT_TAIL,
                 kind="replace",
             ),
         ),

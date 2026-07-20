@@ -169,7 +169,6 @@ def test_runner_plan_mode_stores_the_plan_on_progress(monkeypatch):
 
 
 def test_runner_apply_mode_applies_then_chains_the_draft(monkeypatch):
-    root_id = uuid.uuid4()
     apply_calls = []
     draft_calls = []
 
@@ -182,6 +181,15 @@ def test_runner_apply_mode_applies_then_chains_the_draft(monkeypatch):
 
     db = SessionLocal()
     try:
+        # `apply_revision` is stubbed above (this test is the RUNNER's chaining
+        # logic, not `apply_revision` itself) — so the queued lesson the
+        # conditional chain looks for has to be seeded here, standing in for
+        # what a real apply would have left behind under this root.
+        course, m, lesson = _seed_tree(db)
+        lesson.meta = {**(lesson.meta or {}), "draft_status": "queued"}
+        db.commit()
+        root_id = course.id
+
         plan = {"summary": "s", "ops": []}
         job = GenerationJob(kind="curriculum_revise", status="pending",
                             params={"root_id": str(root_id), "instruction": "go", "plan": plan})

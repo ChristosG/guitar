@@ -26,14 +26,58 @@ from __future__ import annotations
 import logging
 import uuid
 
+from sqlalchemy import select
+from sqlalchemy.orm import aliased
+
 from app.curriculum.corpus import CurriculumContextError
 from app.curriculum.revise import ReviseError, apply_revision, plan_revision
+from app.curriculum.segment_generate import generate_segment
 from app.db import SessionLocal
 from app.jobs.curriculum_draft import run_curriculum_draft_job
 from app.llm.errors import LLMError, LLMNotConfigured
+from app.models.block import Block
 from app.models.generation_job import GenerationJob
 
 log = logging.getLogger(__name__)
+
+
+def _queued_segment_ids(db, root_id: uuid.UUID) -> list[uuid.UUID]:
+    """Every SEGMENT with `meta.segment_status == "queued"` under this course, in
+    teaching order (module, then lesson, then segment order) — the ones
+    `apply_revision`'s `add_segment`/`edit_segment` created or marked, and the
+    only ones this job's generation loop below has any business touching.
+    Mirrors `curriculum_draft._queued_lesson_ids`'s join shape, one level
+    deeper (module -> lesson -> segment instead of module -> lesson)."""
+    module = aliased(Block)
+    lesson = aliased(Block)
+    rows = db.execute(
+        select(Block.id, Block.meta)
+        .join(lesson, Block.parent_id == lesson.id)
+        .join(module, lesson.parent_id == module.id)
+        .where(
+            module.parent_id == root_id,
+            module.kind == "module",
+            lesson.kind == "lesson",
+            Block.kind == "segment",
+        )
+        .order_by(module.order, lesson.order, Block.order)
+    ).all()
+    return [seg_id for seg_id, meta in rows if (meta or {}).get("segment_status") == "queued"]
+
+
+def _has_queued_lessons(db, root_id: uuid.UUID) -> bool:
+    """True when at least one LESSON under this course is `draft_status ==
+    "queued"` after apply — the conditional-chaining gate. A segment-only or
+    blueprint-only revision plan must not spawn a no-op `curriculum_draft` job
+    (Spec A: "Blueprint-only/segment-only plans no longer spawn no-op draft
+    jobs")."""
+    module = aliased(Block)
+    rows = db.execute(
+        select(Block.meta)
+        .join(module, Block.parent_id == module.id)
+        .where(module.parent_id == root_id, module.kind == "module", Block.kind == "lesson")
+    ).all()
+    return any((meta or {}).get("draft_status") == "queued" for (meta,) in rows)
 
 
 def run_curriculum_revise_job(job_id: uuid.UUID) -> None:
@@ -61,13 +105,59 @@ def run_curriculum_revise_job(job_id: uuid.UUID) -> None:
             job.progress = {"phase": "done", "plan": result}
             db.commit()
         else:
-            # APPLY MODE — one transaction, then chain the draft fan-out.
+            # APPLY MODE — one transaction (inside apply_revision, already
+            # committed by the time we get here), then GENERATE any segments it
+            # queued, then chain the draft fan-out.
             out = apply_revision(db, root_id, plan)
+
+            # CONDITIONAL CHAINING (Spec A): only a plan that actually queued a
+            # LESSON needs the draft fan-out. A segment-only or blueprint-only
+            # plan has nothing for `curriculum_draft` to do, and used to chain
+            # one anyway — a job row that immediately finds zero queued lessons
+            # and succeeds having done nothing.
+            do_chain = _has_queued_lessons(db, root_id)
+
+            # GENERATE the segments apply_revision only created/marked queued —
+            # one grounded provider call each. FAILURE IS PER-SEGMENT: a bad
+            # segment must not fail this row or block the rest, same principle
+            # as curriculum_draft's per-lesson isolation. The apply already
+            # committed (the tree is right), so this row stays `succeeded`
+            # regardless of how many segments fail — same reasoning as the
+            # chain below staying non-fatal to this row.
+            segment_ids = _queued_segment_ids(db, root_id)
+            segments_done = segments_failed = 0
+            job.progress = {
+                "phase": "generating", **out,
+                "segments_total": len(segment_ids), "segments_done": 0, "segments_failed": 0,
+            }
+            db.commit()
+            for segment_id in segment_ids:
+                segment = db.get(Block, segment_id)
+                if segment is None:
+                    continue
+                try:
+                    generate_segment(db, segment)
+                    db.commit()
+                    segments_done += 1
+                except Exception as e:
+                    log.warning("run_curriculum_revise_job: segment %s failed to generate",
+                                segment_id, exc_info=True)
+                    db.rollback()
+                    segment = db.get(Block, segment_id)
+                    if segment is not None:
+                        # WHOLE-DICT reassignment (Constraint #4).
+                        segment.meta = {**(segment.meta or {}),
+                                        "segment_status": "failed", "segment_error": str(e)}
+                        db.commit()
+                    segments_failed += 1
+                job.progress = {**(job.progress or {}),
+                                "segments_done": segments_done, "segments_failed": segments_failed}
+                db.commit()
+
             job.status = "succeeded"
             job.result_root_id = root_id
-            job.progress = {"phase": "drafting", **out}
+            job.progress = {**(job.progress or {}), "phase": "drafting"}
             db.commit()
-            do_chain = True
     except ReviseError as e:
         _fail(db, job_id, "internal", str(e))
         return
