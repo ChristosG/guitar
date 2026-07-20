@@ -600,6 +600,16 @@ export interface Citation {
 
 export type DraftStatus = "queued" | "drafting" | "ready" | "failed";
 
+/** `Block.meta.segment_status` — a segment `apply_revision`'s `add_segment`/
+ * `edit_segment` created or marked goes `queued` -> `done` once
+ * `generate_segment` fills it in (the revise job's chain, or the resume
+ * endpoint's segment drain — either can pick up a `queued` one), or `failed`
+ * if that provider call raised. Never `drafting`: unlike a lesson, one
+ * segment's generation is a single call with no in-between state worth
+ * showing. A `done` segment (or a legacy one with no `segment_status` at
+ * all) renders no chip — its body speaks for itself. */
+export type SegmentStatus = "queued" | "done" | "failed";
+
 /** `Block.meta` — a different shape per `kind`, all of it optional, because
  * `meta` is one plain JSON column on one table and a course, a module, a lesson
  * and a segment each keep different things in it. Kept as one flat interface
@@ -623,6 +633,9 @@ export interface BlockMeta {
   // lesson + segment
   citations?: Citation[];
   section?: string;
+  // segment
+  segment_status?: SegmentStatus;
+  segment_error?: string | null;
   // any block that has been through Extend-with-chat
   prev_body?: string;
   refined?: boolean;

@@ -249,6 +249,10 @@
         "ready": "Έτοιμο",
         "failed": "Απέτυχε"
       },
+      "segmentStatus": {
+        "queued": "Σε αναμονή...",
+        "failed": "Απέτυχε"
+      },
       "libraryWhole": "Γράφτηκε από {sources, plural, one {# πηγή} other {# πηγές}} της βιβλιοθήκης σου — {tokens, number} tokens, διαβάστηκαν ολόκληρες.",
       "libraryDegraded": "Η βιβλιοθήκη σου ({tokens, number} tokens) ήταν πολύ μεγάλη για να διαβαστεί ολόκληρη — τα μαθήματα γράφτηκαν με αναζήτηση ανά ενότητα, όχι με πλήρες κείμενο.",
       "shapeWords": "στόχος ~{words, number} λέξεις ανά μάθημα"

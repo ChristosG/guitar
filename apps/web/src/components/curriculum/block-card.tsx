@@ -43,6 +43,7 @@ import {
   type ArtifactOut,
   type BlockNode,
   type DraftStatus,
+  type SegmentStatus,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -93,6 +94,14 @@ const DRAFT_STATUS_CLASS: Record<DraftStatus, string> = {
   queued: "border-border bg-muted text-muted-foreground",
   drafting: "border-primary/40 bg-primary/10 text-primary",
   ready: "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+  failed: "border-destructive/40 bg-destructive/10 text-destructive",
+};
+
+// `done` (or no `segment_status` at all — every segment older than this
+// chip) renders nothing; only the two states worth a tutor's attention get a
+// chip, same "chip per non-default state" idiom as `DRAFT_STATUS_CLASS`.
+const SEGMENT_STATUS_CLASS: Record<Exclude<SegmentStatus, "done">, string> = {
+  queued: "border-border bg-muted text-muted-foreground",
   failed: "border-destructive/40 bg-destructive/10 text-destructive",
 };
 
@@ -182,6 +191,7 @@ export function BlockCard({
   ];
   const draftStatus = meta.draft_status;
   const wordCount = meta.word_count;
+  const segmentStatus = meta.segment_status;
 
   const kindKey = `kinds.${node.kind}`;
   const kindLabel = t.has(kindKey) ? t(kindKey) : node.kind;
@@ -381,6 +391,20 @@ export function BlockCard({
         >
           {draftStatus === "drafting" && <Loader2 className="size-3 animate-spin" aria-hidden />}
           {t.has(`draftStatus.${draftStatus}`) ? t(`draftStatus.${draftStatus}`) : draftStatus}
+        </span>
+      )}
+
+      {isSegment && (segmentStatus === "queued" || segmentStatus === "failed") && (
+        <span
+          data-testid="segment-status"
+          data-status={segmentStatus}
+          title={segmentStatus === "failed" ? meta.segment_error ?? undefined : undefined}
+          className={cn(
+            "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium",
+            SEGMENT_STATUS_CLASS[segmentStatus],
+          )}
+        >
+          {t(`segmentStatus.${segmentStatus}`)}
         </span>
       )}
 

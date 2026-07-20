@@ -1183,3 +1183,60 @@ test.describe("curriculum revise drawer — accurate applied status (mocked API)
     expect(chat.unexpected).toEqual([]);
   });
 });
+
+// Whole-branch review, finding #4 — a segment's lifecycle (`queued` while it
+// waits for `generate_segment`, `failed` if that call raised) was invisible
+// anywhere in the UI: a tutor looking at the board had no way to tell a
+// stranded `queued` segment apart from a `done` one with a short body, and no
+// way to see WHY one had failed short of checking the API by hand. Reuses
+// `mockCurriculumTree`'s existing `segments` param (already exercised above
+// for the revise plan card's op-labeling) with `meta.segment_status` set —
+// this time to render the board itself, never opening the revise drawer.
+test.describe("curriculum board — segment status chip (mocked API)", () => {
+  test("a queued segment and a failed segment each render their own status chip", async ({ page }) => {
+    const rootId = randomUUID();
+    const moduleId = randomUUID();
+    const lesson1Id = randomUUID();
+    const lesson2Id = randomUUID();
+    const newLessonId = randomUUID();
+    const queuedSegmentId = randomUUID();
+    const failedSegmentId = randomUUID();
+
+    const fixture = mockCurriculumTree(rootId, moduleId, lesson1Id, lesson2Id, newLessonId, [
+      {
+        id: queuedSegmentId, kind: "segment", title: "Quick tuning check", body: "",
+        est_minutes: 5, order: 0, language: "en", plane: "content", student_id: null,
+        meta: { segment_status: "queued" }, children: [],
+      },
+      {
+        id: failedSegmentId, kind: "segment", title: "Bonus: Pedal chains", body: "",
+        est_minutes: 5, order: 1, language: "en", plane: "content", student_id: null,
+        meta: { segment_status: "failed", segment_error: "the model is down" }, children: [],
+      },
+    ]);
+    const chatSessionStore = createChatSessionStore();
+    await mockCurriculaApi(page, fixture, chatSessionStore);
+
+    await page.goto(`/en/curricula/${rootId}`);
+
+    // Expand module -> lesson1 to reach the segment cards underneath.
+    await page.locator('[data-testid="block-card"][data-kind="module"]')
+      .getByTestId("block-card-toggle").click();
+    await page.locator('[data-testid="block-card"][data-kind="lesson"]').first()
+      .getByTestId("block-card-toggle").click();
+
+    const segmentCards = page.locator('[data-testid="block-card"][data-kind="segment"]');
+    await expect(segmentCards).toHaveCount(2);
+
+    const queuedChip = segmentCards.nth(0).getByTestId("segment-status");
+    await expect(queuedChip).toBeVisible();
+    await expect(queuedChip).toHaveAttribute("data-status", "queued");
+    await expect(queuedChip).toHaveText("Waiting…");
+
+    const failedChip = segmentCards.nth(1).getByTestId("segment-status");
+    await expect(failedChip).toBeVisible();
+    await expect(failedChip).toHaveAttribute("data-status", "failed");
+    await expect(failedChip).toHaveText("Failed");
+    await expect(failedChip).toHaveAttribute("title", "the model is down");
+  });
+});
