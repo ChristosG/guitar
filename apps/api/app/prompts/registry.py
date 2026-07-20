@@ -1625,7 +1625,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/segment_generate.py:117",
+        source_ref="app/curriculum/segment_generate.py:122",
         title_el="Η συγγραφή μεμονωμένης ενότητας μαθήματος",
         what_it_does_el=(
             "Του δίνει τον τίτλο και τον στόχο του μαθήματος, τις άλλες ενότητές "
@@ -1638,7 +1638,7 @@ _ENTRIES = [
         when_it_runs_el="Όταν εγκρίνεται σχέδιο με προσθήκη/διόρθωση ενότητας.",
         source_of_truth=lambda: build_segment_messages,
         build=_build_segment_generate,
-        call_sites=("curriculum/segment_generate.py:203",),
+        call_sites=("curriculum/segment_generate.py:208",),
         slices=(
             Slice(
                 id=SEGMENT_SYSTEM_SLICE_ID,

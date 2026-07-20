@@ -18,7 +18,7 @@ THE FLAGSHIP PROOF, in unit form. What has to be true:
 import uuid
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 import app.curriculum.corpus as corpus_mod
 import app.curriculum.draft as draft_mod
@@ -398,6 +398,54 @@ def test_resume_is_a_request_that_schedules_a_background_task(db, client, monkey
     job = db.get(GenerationJob, job_id)
     assert job.kind == "curriculum_draft"
     assert job.params["root_id"] == str(root_id)
+
+
+class _SegmentProvider:
+    """Minimal fake for `segment_generate.get_provider()` — mirrors
+    `test_surgical_revise.py`'s own `_FakeProvider`, trimmed to what this test
+    needs."""
+
+    def guided_json(self, messages, schema, *, temperature=0.2, role="draft", max_tokens=None):
+        return {"title": "Bonus", "body": "generated body"}
+
+
+def test_resume_also_drains_a_queued_segment_without_a_second_job(db, client, monkeypatch):
+    """Finding #3 (whole-branch review): a segment `apply_revision`'s
+    `add_segment`/`edit_segment` queued has no recovery of its own if the
+    revise job's own apply-mode chain never generates it (interrupted, or a
+    segment-only plan that never chained a draft at all). Resume must drain
+    it too, alongside its existing lesson sweep — and without spinning up a
+    SECOND/pointless job just for that: only the one `curriculum_draft` job
+    row this endpoint always created is created here either way."""
+    import app.curriculum.segment_generate as segment_mod
+    import app.routers.curriculum as router_mod
+
+    scheduled = []
+    monkeypatch.setattr(router_mod, "run_curriculum_draft_job", scheduled.append)
+    monkeypatch.setattr(segment_mod, "ground_topic", lambda *a, **k: [])
+    monkeypatch.setattr(segment_mod, "get_provider", lambda: _SegmentProvider())
+
+    root_id = _course(db)
+    lesson = _lessons(db, root_id)[0]
+    seg = Block(kind="segment", title="Bonus", body="", order=99, parent_id=lesson.id,
+                language="en", meta={"segment_status": "queued", "segment_instruction": "x"})
+    db.add(seg)
+    db.commit()
+    seg_id = seg.id
+
+    jobs_before = db.scalar(select(func.count()).select_from(GenerationJob))
+    r = client.post(f"/curricula/{root_id}/draft")
+    assert r.status_code == 202, r.text
+    job_id = uuid.UUID(r.json()["job_id"])
+    assert scheduled == [job_id]           # the lesson job was still scheduled, unchanged
+
+    db.expire_all()
+    seg = db.get(Block, seg_id)
+    assert seg.meta["segment_status"] == "done"    # the queued segment was drained
+    assert seg.body == "generated body"
+
+    jobs_after = db.scalar(select(func.count()).select_from(GenerationJob))
+    assert jobs_after == jobs_before + 1   # exactly the one curriculum_draft row — no second job
 
 
 def test_resuming_a_finished_curriculum_drafts_nothing_and_costs_nothing(db, _provider):

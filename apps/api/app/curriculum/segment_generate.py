@@ -44,9 +44,12 @@ per-lesson isolation.
 """
 from __future__ import annotations
 
+import logging
 import uuid
+from typing import Callable
 
 from sqlalchemy import select
+from sqlalchemy.orm import aliased
 
 from app.curriculum.ground import ground_topic
 from app.curriculum.revise import _recompute_lesson_word_count
@@ -54,6 +57,8 @@ from app.i18n import answer_in, language_directive
 from app.llm.factory import get_provider
 from app.models.block import Block
 from app.prompts.overrides import resolve
+
+log = logging.getLogger(__name__)
 
 SEGMENT_SCHEMA: dict = {
     "type": "object",
@@ -233,3 +238,84 @@ def generate_segment(db, segment: Block) -> None:
     }
     if lesson is not None:
         _recompute_lesson_word_count(db, lesson)
+
+
+# ---------------------------------------------------------------------------
+# Draining every queued segment under a course — shared by the revise job's
+# apply-mode chain (jobs/curriculum_revise.py) and the resume endpoint
+# (routers/curriculum.py). Extracted (whole-branch review, finding #3) so a
+# segment stranded `queued` with no job of its own watching it — the revise
+# job's chain never ran or was interrupted, or `add_segment`/`edit_segment`
+# queued it outside that chain entirely — has a SECOND way back to `done`:
+# pressing Resume, exactly like a stranded lesson already does.
+# ---------------------------------------------------------------------------
+
+def _queued_segment_ids(db, root_id: uuid.UUID) -> list[uuid.UUID]:
+    """Every SEGMENT with `meta.segment_status == "queued"` under this course, in
+    teaching order (module, then lesson, then segment order) — the ones
+    `apply_revision`'s `add_segment`/`edit_segment` created or marked, and the
+    only ones `drain_queued_segments` below has any business touching.
+    Mirrors `curriculum_draft._queued_lesson_ids`'s join shape, one level
+    deeper (module -> lesson -> segment instead of module -> lesson)."""
+    module = aliased(Block)
+    lesson = aliased(Block)
+    rows = db.execute(
+        select(Block.id, Block.meta)
+        .join(lesson, Block.parent_id == lesson.id)
+        .join(module, lesson.parent_id == module.id)
+        .where(
+            module.parent_id == root_id,
+            module.kind == "module",
+            lesson.kind == "lesson",
+            Block.kind == "segment",
+        )
+        .order_by(module.order, lesson.order, Block.order)
+    ).all()
+    return [seg_id for seg_id, meta in rows if (meta or {}).get("segment_status") == "queued"]
+
+
+def drain_queued_segments(
+    db, root_id: uuid.UUID,
+    *, on_progress: Callable[[int, int, int], None] | None = None,
+) -> dict:
+    """Generate every SEGMENT still `segment_status == "queued"` under this
+    course — one grounded provider call each, via `generate_segment`.
+
+    FAILURE IS PER-SEGMENT, never raised out of here: an exception marks that
+    ONE segment `failed` (with `segment_error`) and the loop moves on to the
+    next — the same isolation `run_curriculum_revise_job`'s apply-mode chain
+    already had inline before this was lifted out, and the same principle
+    `jobs/curriculum_draft.py` uses per-lesson.
+
+    `on_progress(total, done, failed)`, called once up front and again after
+    every segment, is the caller's hook for a live progress row — the revise
+    job passes one so `job.progress["segments_*"]` keeps updating as it always
+    did; a plain resume-triggered drain has no job row for these segments and
+    passes none. Returns `{"total", "done", "failed"}` either way — purely
+    informational, the tree itself is the source of truth for what happened."""
+    segment_ids = _queued_segment_ids(db, root_id)
+    done = failed = 0
+    if on_progress is not None:
+        on_progress(len(segment_ids), done, failed)
+    for segment_id in segment_ids:
+        segment = db.get(Block, segment_id)
+        if segment is None:
+            continue
+        try:
+            generate_segment(db, segment)
+            db.commit()
+            done += 1
+        except Exception as e:
+            log.warning("drain_queued_segments: segment %s failed to generate",
+                        segment_id, exc_info=True)
+            db.rollback()
+            segment = db.get(Block, segment_id)
+            if segment is not None:
+                # WHOLE-DICT reassignment (Constraint #4).
+                segment.meta = {**(segment.meta or {}),
+                                "segment_status": "failed", "segment_error": str(e)}
+                db.commit()
+            failed += 1
+        if on_progress is not None:
+            on_progress(len(segment_ids), done, failed)
+    return {"total": len(segment_ids), "done": done, "failed": failed}

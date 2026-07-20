@@ -33,7 +33,7 @@ from app.curriculum.revise import validate_ops
 from app.curriculum.segment import segment_block
 from app.db import get_db
 from app.i18n import locale_dep
-from app.jobs.curriculum_draft import run_curriculum_draft_job
+from app.jobs.curriculum_draft import resume_queued_segments, run_curriculum_draft_job
 from app.jobs.curriculum_revise import run_curriculum_revise_job
 from app.jobs.module_generate import run_module_generate_job
 from app.jobs.runner import run_curriculum_job, run_outline_job
@@ -686,6 +686,14 @@ def resume_curriculum_draft(
     `queued`, not `failed`), a lesson he added to the outline after the fact, and a
     failed lesson he wants retried — all the same code path, because they are all
     the same state.
+
+    ALSO DRAINS ANY QUEUED SEGMENT (whole-branch review, finding #3) — a
+    segment `apply_revision` created/marked `queued` has no recovery of its
+    own otherwise (see `resume_queued_segments`'s own docstring). Scheduled
+    as a SEPARATE background task, not folded into the `curriculum_draft` job
+    above: that job's params/report are lesson-shaped, and a segment drain
+    finding nothing to do is not a reason to skip enqueueing it — the lesson
+    behavior here is unchanged either way.
     """
     _get_block_or_404(db, root_id)
     job = GenerationJob(
@@ -695,6 +703,7 @@ def resume_curriculum_draft(
     db.commit()
     db.refresh(job)
     background_tasks.add_task(run_curriculum_draft_job, job.id)
+    background_tasks.add_task(resume_queued_segments, root_id)
     return JobAccepted(job_id=job.id, status=job.status)
 
 

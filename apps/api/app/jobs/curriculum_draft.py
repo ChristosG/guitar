@@ -55,6 +55,7 @@ from app.curriculum.depth import floor_words, target_words
 from app.curriculum.blueprint import blueprint_from_course_meta
 from app.curriculum.draft import LessonContext, draft_lesson, draft_progress, persist_lesson
 from app.curriculum.outline import TIER_GENERAL
+from app.curriculum.segment_generate import drain_queued_segments
 from app.curriculum.shape import MIN_TEACHING_MINUTES, QA_MINUTES
 from app.db import SessionLocal
 from app.llm.errors import LLMError, LLMNotConfigured
@@ -504,6 +505,45 @@ def run_curriculum_draft_job(job_id: uuid.UUID) -> None:
         db.commit()
     except Exception:
         log.exception("run_curriculum_draft_job: could not finalize job %s", job_id)
+    finally:
+        db.close()
+
+
+def resume_queued_segments(root_id: uuid.UUID) -> None:
+    """Resume's OTHER half (whole-branch review, finding #3): a segment
+    `apply_revision`'s `add_segment`/`edit_segment` created or marked
+    `segment_status == "queued"` had, until now, exactly ONE way back to
+    `done` — the revise job's own apply-mode chain generating it right after
+    apply, in the same run. If that chain never ran (a segment-only/blueprint-
+    only plan does not even attempt one — see `_has_queued_lessons` in
+    `jobs/curriculum_revise.py`), or was interrupted before reaching it (the
+    process restarted mid-generation), the segment is stranded: `jobs/sweep.py`
+    resets an interrupted LESSON draft on boot, but nothing does the same for
+    a segment, because nothing was watching it.
+
+    Scheduled as its OWN `BackgroundTask` alongside the existing
+    `curriculum_draft` job (`resume_curriculum_draft`, `routers/curriculum.py`)
+    — not folded into that job's params/report, and not a second
+    `GenerationJob` row of its own. A queued segment is not a queued lesson;
+    `curriculum_draft`'s job (`draft_progress`, its own `report`) counts and
+    reports on LESSONS only, so wiring segments through it would mean either
+    silently misreporting them or growing that job's shape for a case its own
+    `report`/UI never expected. `Block.meta.segment_status` is already this
+    tree's honest record of what happened to a segment (`queued` -> `done`/
+    `failed`, same as `generate_segment`/`drain_queued_segments` write
+    everywhere else) — good enough for a plain background drain with no
+    poller of its own, same reasoning `apply_revision`'s segment ops already
+    lean on.
+
+    Opens its OWN short-lived session — same connection discipline as the
+    lesson fan-out above (see the module docstring) — and never raises: a
+    drain failure here must not take the request-triggered Resume down with
+    it (the lesson job it runs alongside is unaffected either way)."""
+    db = SessionLocal()
+    try:
+        drain_queued_segments(db, root_id)
+    except Exception:
+        log.exception("resume_queued_segments: drain failed for root %s", root_id)
     finally:
         db.close()
 
