@@ -111,6 +111,61 @@ def test_validate_ops_rejects_add_segment_with_a_disabled_section_key(db_and_tre
     assert out["ops"] == []
 
 
+def test_validate_ops_keeps_add_segment_coupled_with_update_blueprint_enabling_it(db_and_tree):
+    """The exact coupled shape REVISE_TAIL instructs: a plan that both enables a
+    disabled section via update_blueprint AND adds segments under that section_key
+    in the same plan. Before the fix, section_key was checked against the STORED
+    blueprint only (homework disabled there), so every add_segment was silently
+    dropped even though the plan's own update_blueprint would enable it."""
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    bp = default_blueprint()
+    for s in bp["sections"]:
+        if s["key"] == "homework":
+            s["enabled"] = False
+    course.meta = {**course.meta, "blueprint": bp}
+    db.add(course)
+    db.commit()
+
+    enabled_bp = default_blueprint()  # homework enabled (the default)
+    plan = {"summary": "s", "ops": [
+        {"op": "update_blueprint", "blueprint": enabled_bp, "reason": "r"},
+        {"op": "add_segment", "lesson_id": str(lesson.id), "title": "HW 1",
+         "instruction": "x", "section_key": "homework", "reason": "r"},
+        {"op": "add_segment", "lesson_id": str(lesson.id), "title": "HW 2",
+         "instruction": "y", "section_key": "homework", "reason": "r"},
+    ]}
+    out = revise.validate_ops(db, course.id, plan)
+    assert [o["op"] for o in out["ops"]] == [
+        "update_blueprint", "add_segment", "add_segment",
+    ]
+
+
+def test_validate_ops_still_drops_add_segment_for_a_key_enabled_nowhere(db_and_tree):
+    """Negative case: a section_key enabled in NEITHER the stored blueprint NOR the
+    plan's own update_blueprint op is still dropped — the union widening must not
+    become a free pass for an arbitrary/hallucinated section_key."""
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    bp = default_blueprint()
+    for s in bp["sections"]:
+        if s["key"] == "homework":
+            s["enabled"] = False
+    course.meta = {**course.meta, "blueprint": bp}
+    db.add(course)
+    db.commit()
+
+    still_disabled_bp = default_blueprint()
+    for s in still_disabled_bp["sections"]:
+        if s["key"] == "homework":
+            s["enabled"] = False
+    plan = {"summary": "s", "ops": [
+        {"op": "update_blueprint", "blueprint": still_disabled_bp, "reason": "r"},
+        {"op": "add_segment", "lesson_id": str(lesson.id), "title": "HW 1",
+         "instruction": "x", "section_key": "homework", "reason": "r"},
+    ]}
+    out = revise.validate_ops(db, course.id, plan)
+    assert [o["op"] for o in out["ops"]] == ["update_blueprint"]
+
+
 def test_validate_ops_rejects_edit_and_remove_segment_targeting_a_lesson_id(db_and_tree):
     db, course, module, lesson, seg1, seg2 = db_and_tree
     plan = {"summary": "s", "ops": [

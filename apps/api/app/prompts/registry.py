@@ -1363,7 +1363,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: SUGGESTIONS_SYSTEM,
         build=_build_chat_suggestions,
-        call_sites=("routers/chat.py:964",),
+        call_sites=("routers/chat.py:1019",),
         slices=(
             Slice(
                 id=SUGGESTIONS_SLICE_ID,
@@ -1680,7 +1680,7 @@ _ENTRIES = [
         # NOTE: this pins an exact line in revise.py (test_registered_call_sites_
         # still_point_at_provider_calls enforces it byte-for-byte) — bump it if a
         # future edit adds/removes lines in revise.py ABOVE the guided_json() call.
-        call_sites=("curriculum/revise.py:521",),
+        call_sites=("curriculum/revise.py:536",),
         slices=(
             Slice(
                 id=REVISE_SLICE_ID,

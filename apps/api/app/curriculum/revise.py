@@ -359,6 +359,21 @@ def validate_ops(db, root_id: uuid.UUID, raw: dict) -> dict:
     module_ids, lesson_ids = _tree_ids(db, root_id)
     course = db.get(Block, root_id)
     enabled_keys = set(section_keys(blueprint_from_course_meta(course.meta if course else None)))
+    # The coupled shape REVISE_TAIL instructs — `update_blueprint` enabling a
+    # section IN THE SAME PLAN as `add_segment` ops that target it — was landing
+    # with every add_segment dropped, because section_key was checked against the
+    # STORED blueprint only, which the plan's own update_blueprint hasn't touched
+    # yet (apply runs ops in order, but validate_ops runs before apply). Widen the
+    # accepted keys to the union of stored + plan-blueprint's enabled keys, but
+    # only for a plan-blueprint that itself passes validate_blueprint — an invalid
+    # update_blueprint op is dropped below same as ever, and grants nothing here.
+    for op in raw.get("ops") or []:
+        if op.get("op") == "update_blueprint":
+            try:
+                plan_bp = validate_blueprint(op.get("blueprint"))
+            except BlueprintInvalid:
+                continue
+            enabled_keys |= set(section_keys(plan_bp))
     kept: list[dict] = []
     for op in raw.get("ops") or []:
         name = op.get("op")
