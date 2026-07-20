@@ -37,6 +37,24 @@ NOTHING IN THE PLANNER WRITES. plan_revision is a pure read. validate_ops resolv
 every id against the live tree and DROPS what does not resolve, so a hallucinated
 module id can never reach apply. apply_revision (below) is the only writer, and it
 commits exactly once.
+
+THE "add a homework section" INCIDENT (2026-07-20) — WHY `set_section_enabled`
+EXISTS AND `plan_revision` REPAIRS ONCE. A tutor asked for a homework section on
+every lesson. The planner correctly saw the coupled shape (enable the section,
+`add_segment` per lesson) but had only `update_blueprint` to enable it with, and
+`update_blueprint` requires the FULL replacement blueprint object — sections,
+weights, kinds, audiences — which the model is never shown (`REVISE_BLUEPRINT_
+BLOCK` is a SUMMARY: keys and labels only). It could not reproduce that JSON, so
+`update_blueprint` was dropped ("missing ['blueprint']"), the stored+plan-
+blueprint union in `validate_ops` never fired, and every coupled `add_segment`
+died with it ("not an enabled blueprint section"). `set_section_enabled` fixes
+the ROOT CAUSE: flipping one section's `enabled` (+ optional label) needs no
+full blueprint at all — `apply_revision` rebuilds it from what is already
+stored. `validate_ops` now returns WHY each op was dropped (`dropped`), and
+`plan_revision` spends exactly one repair re-prompt (mirroring draft.py's
+citation-repair precedent) naming every drop before giving up — so a plan that
+used to come back `{"summary": <rosy>, "ops": []}` with no trace of what broke
+now either self-corrects or tells the tutor honestly what did not survive.
 """
 from __future__ import annotations
 
@@ -82,9 +100,23 @@ class ReviseError(ValueError):
 # lesson `modify_lesson` rewrites. Apply only creates/marks/deletes the segment
 # block here — GENERATING a queued segment's body is a later task (the job), same
 # division as every other queued op in this module.
+#
+# `set_section_enabled` (2026-07-20, hotfix for the "homework section" incident)
+# flips ONE existing blueprint section's `enabled` flag (and, optionally, its
+# label) without the model ever having to reproduce the FULL blueprint object —
+# which it cannot: `REVISE_BLUEPRINT_BLOCK` only shows the tutor-facing SUMMARY
+# (enabled/disabled keys + labels), never the full section dicts (description,
+# weight, kind, audience) `update_blueprint`'s `blueprint` field requires. A
+# planner asked to "add a homework section" had no way to satisfy
+# `update_blueprint`'s required field and dropped the whole op — silently
+# taking every coupled `add_segment(section_key="homework")` down with it (the
+# stored+plan-blueprint union in `validate_ops` never fired because the
+# update_blueprint op itself never survived). `update_blueprint` stays for a
+# FULL restructure (new sections, reordering, reweighting); enabling/disabling/
+# renaming ONE section that already exists is `set_section_enabled`, always.
 _OP_ENUM = [
     "insert_lesson", "insert_module", "modify_lesson", "move_lesson",
-    "remove_lesson", "update_blueprint",
+    "remove_lesson", "update_blueprint", "set_section_enabled",
     "add_segment", "edit_segment", "remove_segment",
 ]
 
@@ -114,7 +146,16 @@ REVISION_PLAN_SCHEMA: dict = {
                                    "description": "edit_segment/remove_segment: the target segment id"},
                     "section_key": {"type": "string",
                                     "description": "add_segment: file the new segment under this ENABLED "
-                                                   "blueprint section key; omit for a custom, unfiled segment"},
+                                                   "blueprint section key; omit for a custom, unfiled segment. "
+                                                   "set_section_enabled: the section to enable/disable/rename — "
+                                                   "must already exist in the blueprint, enabled or not"},
+                    "enabled": {"type": "boolean",
+                                "description": "set_section_enabled: true to enable, false to disable. "
+                                               "Omit for true (the common case: enabling a section)."},
+                    "label": {"type": "string",
+                              "description": "set_section_enabled: optional new label for this section, in "
+                                             "THIS COURSE'S OWN LANGUAGE only — the other language's label is "
+                                             "left untouched. Omit to keep the current label."},
                     "title": {"type": "string"},
                     "objective": {"type": "string"},
                     "instruction": {"type": "string",
@@ -157,6 +198,7 @@ _REQUIRED: dict[str, tuple[str, ...]] = {
     "move_lesson": ("lesson_id", "to_module_id"),
     "remove_lesson": ("lesson_id",),
     "update_blueprint": ("blueprint",),
+    "set_section_enabled": ("section_key",),
     "add_segment": ("lesson_id", "title", "instruction"),
     "edit_segment": ("segment_id", "instruction"),
     "remove_segment": ("segment_id",),
@@ -224,18 +266,29 @@ REVISE_TAIL = (
     "{blueprint_block}"
     "{retrieved_block}"
     "\nTHE TUTOR ASKS:\n{instruction}\n"
-    "\nReference modules, lessons and segments ONLY by an [id] shown above. Every "
-    "op needs a one-sentence `reason`. Tier any new module honestly.\n"
+    "\nReference modules, lessons and segments ONLY by the EXACT bracketed [id] "
+    "shown above — e.g. [3fae1c2b-...] — NEVER the M1/L1/M2-L3-style position "
+    "label printed before it. That label is for YOUR orientation only; an id you "
+    "build from it (like \"L1\" or \"M1-L1\") does not exist in the tree and the "
+    "whole op will be silently dropped. Every op needs a one-sentence `reason`. "
+    "Tier any new module honestly.\n"
     "\nPREFER SURGICAL OPS. Reach for add_segment, edit_segment or remove_segment "
     "before modify_lesson whenever the request targets one piece of a lesson — a "
     "new paragraph, a rewritten explanation, a section that no longer belongs. "
     "modify_lesson rewrites the WHOLE lesson; use it only when the request genuinely "
     "needs the whole thing re-taught, not as the default move.\n"
-    "\nA NEW SECTION THAT SHOULD RECUR ACROSS LESSONS is a BLUEPRINT change, not a "
-    "one-off segment: propose update_blueprint (enable or add the section) TOGETHER "
-    "WITH an add_segment per affected lesson carrying the matching section_key, in "
-    "the SAME plan — a section you enable but file no segments under teaches "
-    "nothing.\n"
+    "\nENABLING, DISABLING OR RENAMING A SECTION THAT SHOULD RECUR ACROSS LESSONS "
+    "is a set_section_enabled op, NOT update_blueprint — you are only ever shown "
+    "a SUMMARY of the blueprint above (its enabled/disabled keys and labels), "
+    "never the full section objects update_blueprint's `blueprint` field "
+    "requires, so you cannot reproduce that JSON and the op will be dropped if "
+    "you try. To enable a disabled section (e.g. \"homework\") and start filing "
+    "material under it, propose set_section_enabled (section_key, enabled: true, "
+    "and label if renaming) TOGETHER WITH an add_segment per affected lesson "
+    "carrying that same section_key, in the SAME plan — a section you enable but "
+    "file no segments under teaches nothing. Reach for update_blueprint only for "
+    "a genuine full restructure: a brand-new section the blueprint does not have "
+    "at all, reordering, or reweighting.\n"
     "\nIF THE CURRENT BLUEPRINT MAKES THE REQUEST IMPOSSIBLE AS ASKED, SAY SO "
     "PLAINLY in `summary` — never silently plan around it or quietly substitute "
     "something smaller.\n"
@@ -354,47 +407,79 @@ def _segment_course_id(db, segment_id_str: str) -> uuid.UUID | None:
 def validate_ops(db, root_id: uuid.UUID, raw: dict) -> dict:
     """Drop every op whose required fields are missing or whose ids do not resolve
     to a real block of the right kind UNDER THIS ROOT (constraint #2). Logs each
-    drop. Returns {summary, ops} — ops trimmed, ids kept as the model's strings
-    (apply re-resolves them)."""
+    drop WITH the offending value (2026-07-20 hotfix: a bare "an id/payload does
+    not resolve" told nobody whether the model sent a malformed uuid, an
+    M1/L1-style shorthand, or a real id from a different course — see this
+    function's `detail` variable). Returns {summary, ops, dropped} — `ops`
+    trimmed, ids kept as the model's strings (apply re-resolves them); `dropped`
+    is `[{"op": <the raw op>, "reason": <why>}]` for every op that did NOT make
+    it into `ops`, in the SAME order they were seen. `plan_revision` reads
+    `dropped` to decide whether to run its one-shot repair pass, and forwards it
+    to the tutor-facing plan so an approval never hides that something was
+    silently cut."""
     module_ids, lesson_ids = _tree_ids(db, root_id)
     course = db.get(Block, root_id)
-    enabled_keys = set(section_keys(blueprint_from_course_meta(course.meta if course else None)))
-    # The coupled shape REVISE_TAIL instructs — `update_blueprint` enabling a
-    # section IN THE SAME PLAN as `add_segment` ops that target it — was landing
-    # with every add_segment dropped, because section_key was checked against the
-    # STORED blueprint only, which the plan's own update_blueprint hasn't touched
-    # yet (apply runs ops in order, but validate_ops runs before apply). Widen the
-    # accepted keys to the union of stored + plan-blueprint's enabled keys, but
-    # only for a plan-blueprint that itself passes validate_blueprint — an invalid
-    # update_blueprint op is dropped below same as ever, and grants nothing here.
+    stored_bp = blueprint_from_course_meta(course.meta if course else None)
+    stored_keys = {s["key"] for s in stored_bp["sections"]}      # enabled OR disabled
+    enabled_keys = set(section_keys(stored_bp))
+    # The coupled shape REVISE_TAIL instructs — enabling a section IN THE SAME
+    # PLAN as `add_segment` ops that target it, via `set_section_enabled` (the
+    # common case) or a full `update_blueprint` restructure — was landing with
+    # every add_segment dropped, because section_key was checked against the
+    # STORED blueprint only, which neither op has touched yet (apply runs ops in
+    # order, but validate_ops runs before apply). Widen the accepted keys to the
+    # union of stored + whatever the plan's OWN blueprint-shaping ops would
+    # enable — but only for an op that itself resolves/validates; a
+    # hallucinated section_key or an invalid update_blueprint grants nothing
+    # here, same as before.
     for op in raw.get("ops") or []:
-        if op.get("op") == "update_blueprint":
+        op_name = op.get("op")
+        if op_name == "update_blueprint":
             try:
                 plan_bp = validate_blueprint(op.get("blueprint"))
             except BlueprintInvalid:
                 continue
             enabled_keys |= set(section_keys(plan_bp))
+        elif op_name == "set_section_enabled":
+            key = op.get("section_key")
+            if key in stored_keys and op.get("enabled", True):
+                enabled_keys.add(key)
     kept: list[dict] = []
+    dropped: list[dict] = []
     for op in raw.get("ops") or []:
         name = op.get("op")
         if name not in _REQUIRED:
+            detail = f"unknown op {name!r}"
             log.warning("revise: dropping op with unknown/absent 'op': %r", name)
+            dropped.append({"op": op, "reason": detail})
             continue
         missing = [f for f in _REQUIRED[name] if not op.get(f)]
         if missing:
+            detail = f"missing required field(s) {missing}"
             log.warning("revise: dropping %s op — missing %s", name, missing)
+            dropped.append({"op": op, "reason": detail})
             continue
-        # id resolution / payload validation, per op
+        # id resolution / payload validation, per op. `detail` names the exact
+        # offending value on failure — read by the shared log line + `dropped`
+        # entry below, never left as a bare "does not resolve".
         ok = True
+        detail = ""
         if name == "insert_lesson":
             ok = op["module_id"] in module_ids and (
                 op.get("after_lesson_id") in (None, "") or
                 (lesson_ids.get(op["after_lesson_id"]) is not None
                  and _lesson_module(db, lesson_ids[op["after_lesson_id"]]) == module_ids[op["module_id"]]))
+            if not ok:
+                detail = (f"module_id={op.get('module_id')!r} / "
+                          f"after_lesson_id={op.get('after_lesson_id')!r} does not resolve")
         elif name == "insert_module":
             ok = op.get("after_module_id") in (None, "") or op["after_module_id"] in module_ids
+            if not ok:
+                detail = f"after_module_id={op.get('after_module_id')!r} does not resolve"
         elif name in ("modify_lesson", "remove_lesson"):
             ok = op["lesson_id"] in lesson_ids
+            if not ok:
+                detail = f"lesson_id={op.get('lesson_id')!r} does not resolve"
         elif name == "move_lesson":
             # A lesson "moved after itself" (after_lesson_id == lesson_id) resolves
             # fine id-by-id — both are the SAME live lesson — but is a degenerate op:
@@ -409,30 +494,46 @@ def validate_ops(db, root_id: uuid.UUID, raw: dict) -> dict:
                   (op.get("after_lesson_id") in (None, "") or
                    (lesson_ids.get(op["after_lesson_id"]) is not None
                     and _lesson_module(db, lesson_ids[op["after_lesson_id"]]) == module_ids[op["to_module_id"]])))
+            if not ok:
+                detail = (f"lesson_id={op.get('lesson_id')!r} / to_module_id={op.get('to_module_id')!r} / "
+                          f"after_lesson_id={op.get('after_lesson_id')!r} does not resolve"
+                          + (" (a lesson cannot move after itself)" if self_move else ""))
         elif name == "update_blueprint":
             # Not an id to resolve but a payload to validate: a malformed blueprint
             # dropped here can never reach course.meta (constraint #2, generalised).
             try:
                 validate_blueprint(op["blueprint"])
             except BlueprintInvalid as e:
-                log.warning("revise: dropping update_blueprint op — invalid blueprint (%s)", e.code)
+                detail = f"invalid blueprint ({e.code})"
                 ok = False
+        elif name == "set_section_enabled":
+            # section_key must already exist in the STORED blueprint, enabled or
+            # not — set_section_enabled flips a section, it never invents one
+            # (that is what a full update_blueprint restructure is for).
+            ok = op["section_key"] in stored_keys
+            if not ok:
+                detail = (f"section_key={op.get('section_key')!r} is not a section of this "
+                          f"course's blueprint (has: {sorted(stored_keys)})")
         elif name == "add_segment":
             ok = op["lesson_id"] in lesson_ids
-            section_key = op.get("section_key")
-            if ok and section_key and section_key not in enabled_keys:
-                log.warning(
-                    "revise: dropping add_segment op — section_key %r is not an enabled "
-                    "blueprint section (enabled: %s)", section_key, sorted(enabled_keys))
-                ok = False
+            if not ok:
+                detail = f"lesson_id={op.get('lesson_id')!r} does not resolve"
+            else:
+                section_key = op.get("section_key")
+                if section_key and section_key not in enabled_keys:
+                    ok = False
+                    detail = (f"section_key={section_key!r} is not an enabled blueprint section "
+                              f"(enabled: {sorted(enabled_keys)})")
         elif name in ("edit_segment", "remove_segment"):
             ok = _segment_course_id(db, op["segment_id"]) == root_id
+            if not ok:
+                detail = f"segment_id={op.get('segment_id')!r} does not resolve under this course"
         if not ok:
-            log.warning("revise: dropping %s op — an id/payload does not resolve under root %s",
-                        name, root_id)
+            log.warning("revise: dropping %s op — %s (root %s)", name, detail, root_id)
+            dropped.append({"op": op, "reason": detail or "id/payload does not resolve"})
             continue
         kept.append(op)
-    return {"summary": raw.get("summary") or "", "ops": kept}
+    return {"summary": raw.get("summary") or "", "ops": kept, "dropped": dropped}
 
 
 def compute_impact(ops: list[dict]) -> dict:
@@ -457,11 +558,13 @@ def compute_impact(ops: list[dict]) -> dict:
         so counting them means reading that array, not counting `insert_module`
         occurrences; a module with no/empty `lessons` (e.g. a TIER_GAP module,
         which `apply_revision` fills with `gap_body` instead of lessons) adds 0.
-      - blueprint_changed: any `update_blueprint` op present.
+      - blueprint_changed: any `update_blueprint` OR `set_section_enabled` op
+        present — either one changes `course.meta["blueprint"]`.
       - destructive: True iff something above REMOVES or REWRITES existing
         material (`rewrites`, `lesson_removals`, `segment_removals`) — pure
         additions (`insert_lesson`, `insert_module`, `add_segment`) and a bare
-        blueprint reshape are not, by themselves, destructive."""
+        blueprint reshape (`update_blueprint`, `set_section_enabled`) are not,
+        by themselves, destructive."""
     rewrites = 0
     segment_additions = 0
     segment_edits = 0
@@ -485,7 +588,7 @@ def compute_impact(ops: list[dict]) -> dict:
             lessons_added += 1
         elif name == "insert_module":
             lessons_added += len(op.get("lessons") or [])
-        elif name == "update_blueprint":
+        elif name in ("update_blueprint", "set_section_enabled"):
             blueprint_changed = True
     return {
         "rewrites": rewrites,
@@ -501,6 +604,44 @@ def compute_impact(ops: list[dict]) -> dict:
 
 REVISE_RETRIEVAL_K = 8
 
+# ---------------------------------------------------------------------------
+# The ONE repair pass (2026-07-20 hotfix). Mirrors draft.py's citation-repair
+# precedent EXACTLY (`_repair_message`/`REPAIR_MESSAGE`/`REPAIR_SLICE_ID` there):
+# a single corrective re-prompt naming what went wrong, one retry, whatever
+# survives THAT is final. Before this, a plan that dropped ops (a missing
+# `blueprint`, an M1/L1-shorthand id) returned `{"summary": <rosy>, "ops": []}`
+# with nothing telling the tutor — or the model — that anything had been cut.
+# ---------------------------------------------------------------------------
+REVISE_REPAIR_MESSAGE = (
+    "STOP. {n} of the operations you proposed were REJECTED by validation and "
+    "never reached the tutor:\n{detail}\n"
+    "Two rules explain almost every rejection: (1) every id you reference — "
+    "module_id, lesson_id, segment_id, after_lesson_id, to_module_id — MUST be "
+    "the EXACT bracketed [id] shown in the tree above, never an M1/L1-style "
+    "position label; (2) to enable/disable/rename ONE existing blueprint "
+    "section, use set_section_enabled, not update_blueprint — update_blueprint "
+    "needs the FULL section objects, which you were never shown and cannot "
+    "reproduce. Produce the WHOLE plan again: fix every rejected operation (or "
+    "drop it yourself if it no longer makes sense), and keep everything that "
+    "was already correct."
+)
+REVISE_REPAIR_SLICE_ID = "curriculum.revise.repair"
+
+
+def _revise_repair_message(dropped: list[dict], source=None) -> dict:
+    """The one corrective re-prompt `plan_revision` sends back after a plan came
+    back with dropped ops — same shape as draft.py's `_repair_message`, applied
+    to `validate_ops`'s `dropped` diagnostics instead of citation misses."""
+    detail = "\n".join(
+        f"  - {d['op'].get('op', '?')}: {d['reason']}" for d in dropped
+    ) or "  - the plan came back with no operations at all"
+    return {
+        "role": "user",
+        "content": resolve(source, REVISE_REPAIR_SLICE_ID, REVISE_REPAIR_MESSAGE).format(
+            n=len(dropped) or "all", detail=detail,
+        ),
+    }
+
 
 def plan_revision(db, root_id: uuid.UUID, *, instruction: str) -> dict:
     """The whole read-only planner. Mutates nothing.
@@ -509,7 +650,15 @@ def plan_revision(db, root_id: uuid.UUID, *, instruction: str) -> dict:
     scoped to the course's own `source_ids` — NOT `build_curriculum_context`'s whole
     library/canon (which was slow and made `claude -p` exit 1 for a one-topic ask).
     The retrieved passages ground citations only; `build_revise_messages`' directive
-    keeps the model free to suggest beyond them."""
+    keeps the model free to suggest beyond them.
+
+    ONE REPAIR PASS (2026-07-20 hotfix). If `validate_ops` dropped anything, OR
+    the model returned a non-empty raw `ops` list that validated down to nothing,
+    this sends ONE corrective re-prompt (`_revise_repair_message`, mirroring
+    draft.py's citation-repair precedent) naming every dropped op and why, then
+    re-validates. Whatever survives THAT pass is final — `dropped` on the
+    returned plan reflects only the last attempt, so a tutor reading it sees
+    "what is still wrong", not a stale first-pass list."""
     course = db.get(Block, root_id)
     if course is None:
         raise ReviseError(f"curriculum not found: {root_id}")
@@ -533,8 +682,20 @@ def plan_revision(db, root_id: uuid.UUID, *, instruction: str) -> dict:
         tree_text=compact_tree_text(db, course), instruction=instruction,
         retrieved=retrieved, course_meta=meta, source=db,
     )
-    raw = get_provider().guided_json(messages, REVISION_PLAN_SCHEMA, role="plan")
-    return validate_ops(db, root_id, raw)
+    provider = get_provider()
+    raw = provider.guided_json(messages, REVISION_PLAN_SCHEMA, role="plan")
+    validated = validate_ops(db, root_id, raw)
+
+    raw_ops = raw.get("ops") or []
+    needs_repair = bool(validated["dropped"]) or (not validated["ops"] and bool(raw_ops))
+    if needs_repair:
+        log.warning("revise: plan for root %s dropped %d op(s) — running the one repair pass",
+                    root_id, len(validated["dropped"]))
+        repair_messages = [*messages, _revise_repair_message(validated["dropped"], source=db)]
+        raw = provider.guided_json(repair_messages, REVISION_PLAN_SCHEMA, role="plan")
+        validated = validate_ops(db, root_id, raw)
+
+    return validated
 
 
 # ---------------------------------------------------------------------------
@@ -644,6 +805,31 @@ def apply_revision(db, root_id: uuid.UUID, plan: dict) -> dict:
                 # the NORMALISED blueprint. NEVER re-drafts existing lessons — that is
                 # the opt-in `POST /curricula/{root}/redraft` route (Unit C), not this.
                 course.meta = {**(course.meta or {}), "blueprint": validate_blueprint(op["blueprint"])}
+            elif name == "set_section_enabled":
+                # ZERO LLM calls: rebuild course.meta["blueprint"] from what is
+                # ALREADY there, flipping exactly one section's `enabled` (and,
+                # optionally, its label in the course's own language) — the whole
+                # point of this op is that the model never has to reproduce the
+                # full blueprint object (see the module docstring). Reads the
+                # blueprint fresh off `course.meta` (not `validated` at call
+                # time) so an EARLIER op in this same plan (an `update_blueprint`
+                # ahead of this one) is respected, not clobbered. WHOLE-DICT
+                # reassignment through `validate_blueprint`, same as
+                # `update_blueprint` above — the stored shape is always the
+                # normalised one.
+                bp = blueprint_from_course_meta(course.meta)
+                lang = course.language or "el"
+                sections = []
+                for s in bp["sections"]:
+                    if s["key"] != op["section_key"]:
+                        sections.append(s)
+                        continue
+                    s = {**s, "enabled": bool(op.get("enabled", True))}
+                    if op.get("label"):
+                        s = {**s, "label": {**s["label"], lang: op["label"]}}
+                    sections.append(s)
+                course.meta = {**(course.meta or {}),
+                               "blueprint": validate_blueprint({"version": bp["version"], "sections": sections})}
             elif name == "add_segment":
                 lesson = db.get(Block, uuid.UUID(op["lesson_id"]))
                 siblings = db.scalars(

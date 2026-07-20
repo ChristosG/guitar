@@ -196,3 +196,103 @@ def test_validate_ops_drops_an_invalid_update_blueprint():
         assert out["ops"] == []                                 # both dropped, logged
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# THE ONE REPAIR PASS (2026-07-20 hotfix) — the incident's fix #2: a plan that
+# used to return `{"summary": <rosy>, "ops": []}` with no trace of what broke
+# now gets ONE corrective re-prompt before `plan_revision` gives up.
+# ---------------------------------------------------------------------------
+
+class _SequentialFakeProvider:
+    """Returns a DIFFERENT raw plan on each successive `guided_json` call —
+    the first-pass (bad) plan, then the repaired (good) one — so the repair
+    re-prompt's effect is observable, not just its trigger condition."""
+
+    def __init__(self, raws):
+        self.raws = list(raws)
+        self.calls = 0
+
+    def guided_json(self, messages, schema, role="plan"):
+        self.calls += 1
+        idx = min(self.calls - 1, len(self.raws) - 1)
+        return copy.deepcopy(self.raws[idx])
+
+
+def test_plan_revision_runs_one_repair_pass_and_keeps_the_fixed_plan(monkeypatch):
+    """Mirrors the production incident: the first pass names the module by an
+    M1-style shorthand (dropped — does not resolve), the repair pass names it
+    by the real bracketed uuid and survives. Exactly TWO provider calls, and
+    the FINAL plan is the repaired one, non-empty."""
+    db = SessionLocal()
+    try:
+        course, m, l = _seed(db)
+        bad_raw = {"summary": "add a DS-1 lesson", "ops": [
+            {"op": "insert_lesson", "module_id": "M1", "title": "DS-1",
+             "objective": "distortion", "reason": "gap after TS"},
+        ]}
+        good_raw = {"summary": "add a DS-1 lesson (fixed)", "ops": [
+            {"op": "insert_lesson", "module_id": str(m.id), "title": "DS-1",
+             "objective": "distortion", "reason": "gap after TS"},
+        ]}
+        provider = _SequentialFakeProvider([bad_raw, good_raw])
+        monkeypatch.setattr(revise, "get_provider", lambda: provider)
+        _stub_ground_topic(monkeypatch)
+
+        plan = revise.plan_revision(db, course.id, instruction="add a DS-1 lesson")
+
+        assert provider.calls == 2
+        assert len(plan["ops"]) == 1
+        assert plan["ops"][0]["module_id"] == str(m.id)
+        assert plan["dropped"] == []          # the repaired pass kept everything
+    finally:
+        db.close()
+
+
+def test_plan_revision_does_not_repair_when_nothing_was_dropped(monkeypatch):
+    db = SessionLocal()
+    try:
+        course, m, l = _seed(db)
+        raw = {"summary": "ok", "ops": [
+            {"op": "insert_lesson", "module_id": str(m.id), "title": "DS-1",
+             "objective": "distortion", "reason": "r"},
+        ]}
+        provider = _SequentialFakeProvider([raw])
+        monkeypatch.setattr(revise, "get_provider", lambda: provider)
+        _stub_ground_topic(monkeypatch)
+
+        plan = revise.plan_revision(db, course.id, instruction="x")
+
+        assert provider.calls == 1             # no repair spent
+        assert plan["dropped"] == []
+    finally:
+        db.close()
+
+
+def test_plan_revision_repair_diagnostics_reflect_only_the_final_pass(monkeypatch):
+    """If the repaired plan is STILL bad, `plan_revision` does not loop — it
+    returns whatever the (single) repair pass produced, and `dropped` names
+    THAT pass's failure, not the first one's."""
+    db = SessionLocal()
+    try:
+        course, m, l = _seed(db)
+        bad_raw = {"summary": "s", "ops": [
+            {"op": "insert_lesson", "module_id": "M1", "title": "DS-1",
+             "objective": "d", "reason": "r"},
+        ]}
+        still_bad_raw = {"summary": "s2", "ops": [
+            {"op": "insert_lesson", "module_id": "M1-again", "title": "DS-1",
+             "objective": "d", "reason": "r"},
+        ]}
+        provider = _SequentialFakeProvider([bad_raw, still_bad_raw])
+        monkeypatch.setattr(revise, "get_provider", lambda: provider)
+        _stub_ground_topic(monkeypatch)
+
+        plan = revise.plan_revision(db, course.id, instruction="x")
+
+        assert provider.calls == 2              # exactly one repair, no loop
+        assert plan["ops"] == []
+        assert len(plan["dropped"]) == 1
+        assert plan["dropped"][0]["op"]["module_id"] == "M1-again"   # the SECOND pass, not the first
+    finally:
+        db.close()

@@ -144,9 +144,12 @@ from app.curriculum.draft import (
 from app.curriculum.extend import MODULE_SLICE_ID, MODULE_TAIL, build_module_messages
 from app.curriculum.interview import DISTILL_SLICE_ID, DISTILL_SYSTEM
 from app.curriculum.revise import (
+    REVISE_REPAIR_MESSAGE,
+    REVISE_REPAIR_SLICE_ID,
     REVISE_SLICE_ID,
     REVISE_TAIL,
     _blueprint_block_text,
+    _revise_repair_message,
     build_revise_messages,
 )
 from app.curriculum.outline import (
@@ -689,6 +692,20 @@ _SAMPLE_MEASUREMENT = Measurement(
 
 _SAMPLE_BAD_CITATIONS = [("theory", "S1", 512)]
 
+# The dropped-op diagnostics `validate_ops` returns, shaped exactly like the
+# 2026-07-20 incident: an `update_blueprint` dropped for a missing field, and
+# the coupled `add_segment` that died with it because the section it targeted
+# was never actually enabled.
+_SAMPLE_REVISE_DROPPED = [
+    {"op": {"op": "update_blueprint", "reason": "enable homework"},
+     "reason": "missing required field(s) ['blueprint']"},
+    {"op": {"op": "add_segment", "lesson_id": "L1", "section_key": "homework",
+            "reason": "file the homework"},
+     "reason": "section_key='homework' is not an enabled blueprint section "
+               "(enabled: ['common_mistakes', 'demonstration', 'exercises', "
+               "'qa_prompts', 'recap', 'theory', 'warm_up'])"},
+]
+
 # Task 6 (Spec D): the lesson's LIVE segments, as `jobs/curriculum_draft.py:_draft_one`
 # builds them for a `modify_lesson` re-draft — `{section_or_title: body}`, the tutor's
 # DATA (what he already has), never a prompt this file authors.
@@ -987,6 +1004,11 @@ def _build_curriculum_revise(locale: str, db, course_language=None) -> _Built:
         (*_LANG_FROM_COURSE, language_directive(lang, db)),
         (*_ANSWER_IN_FROM_COURSE, answer_in(lang, db)),
     ]
+
+
+def _build_curriculum_revise_repair(locale: str, db, course_language=None) -> _Built:
+    built = _revise_repair_message(_SAMPLE_REVISE_DROPPED, db)
+    return _msgs([built]), []
 
 
 # Part 5's planning-chat exit. `{language_directive}` is the SAME
@@ -1659,7 +1681,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/revise.py:281",
+        source_ref="app/curriculum/revise.py:334",
         title_el="Η αναθεώρηση ενός τελειωμένου προγράμματος",
         what_it_does_el=(
             "Δείχνει στον βοηθό ΟΛΟΚΛΗΡΟ το πρόγραμμα όπως είναι σήμερα — μαθήματα "
@@ -1680,12 +1702,45 @@ _ENTRIES = [
         # NOTE: this pins an exact line in revise.py (test_registered_call_sites_
         # still_point_at_provider_calls enforces it byte-for-byte) — bump it if a
         # future edit adds/removes lines in revise.py ABOVE the guided_json() call.
-        call_sites=("curriculum/revise.py:536",),
+        # This is the FIRST-PASS call only — the one-shot repair pass (2026-07-20)
+        # has its own call site and its own entry, "curriculum.revise.repair"
+        # below, exactly like "lesson.draft"/"lesson.repair" split theirs.
+        call_sites=("curriculum/revise.py:686",),
         slices=(
             Slice(
                 id=REVISE_SLICE_ID,
                 label_el="Το κείμενο της οδηγίας",
                 default=REVISE_TAIL,
+                kind="replace",
+            ),
+        ),
+    ),
+    PromptEntry(
+        id="curriculum.revise.repair",
+        flow="curriculum",
+        kind="prompt",
+        source_ref="app/curriculum/revise.py:631",
+        title_el="Όταν το σχέδιο αναθεώρησης απορρίπτει προτάσεις",
+        what_it_does_el=(
+            "Η εφαρμογή ελέγχει κάθε πρόταση αλλαγής (op) του βοηθού: αν ένα id "
+            "δεν αντιστοιχεί σε πραγματικό στοιχείο του προγράμματος, ή λείπει "
+            "κάτι απαραίτητο, την απορρίπτει. Αν κάτι απορριφθεί, η εφαρμογή "
+            "σταματάει και του στέλνει αυτό: ποιες προτάσεις απορρίφθηκαν και "
+            "γιατί, με την υπενθύμιση να χρησιμοποιεί τα ΑΚΡΙΒΗ id από το δέντρο "
+            "και το set_section_enabled αντί για ολόκληρο νέο blueprint — και να "
+            "ξαναγράψει ολόκληρο το σχέδιο, διορθωμένο. Υπάρχει επειδή ένα σχέδιο "
+            "που φαινόταν σωστό αλλά είχε αθόρυβα χάσει κάθε πρότασή του δεν "
+            "εξηγούσε ποτέ στον δάσκαλο τι πήγε στραβά."
+        ),
+        when_it_runs_el="Μόνο όταν απορριφθεί έστω μία πρόταση. Το πολύ μία φορά ανά σχέδιο.",
+        source_of_truth=lambda: _revise_repair_message,
+        build=_build_curriculum_revise_repair,
+        call_sites=("curriculum/revise.py:695",),
+        slices=(
+            Slice(
+                id=REVISE_REPAIR_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=REVISE_REPAIR_MESSAGE,
                 kind="replace",
             ),
         ),

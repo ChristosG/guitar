@@ -14,6 +14,7 @@ creates/marks/deletes blocks. GENERATING a queued segment's body is a later task
 
 Mirrors test_revise_apply.py's fixture/skip-guard/setup_module conventions.
 """
+import logging
 import uuid
 
 import pytest
@@ -164,6 +165,168 @@ def test_validate_ops_still_drops_add_segment_for_a_key_enabled_nowhere(db_and_t
     ]}
     out = revise.validate_ops(db, course.id, plan)
     assert [o["op"] for o in out["ops"]] == ["update_blueprint"]
+
+
+# ---------------------------------------------------------------------------
+# set_section_enabled (2026-07-20 hotfix for the "add a homework section"
+# incident) — a full walkthrough of validate_ops, the add_segment union, and
+# apply's blueprint rebuild, in the EXACT production shape.
+# ---------------------------------------------------------------------------
+
+def test_validate_ops_keeps_set_section_enabled_for_an_existing_key(db_and_tree):
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    plan = {"summary": "s", "ops": [
+        {"op": "set_section_enabled", "section_key": "homework", "enabled": True, "reason": "r"},
+    ]}
+    out = revise.validate_ops(db, course.id, plan)
+    assert [o["op"] for o in out["ops"]] == ["set_section_enabled"]
+    assert out["dropped"] == []
+
+
+def test_validate_ops_drops_set_section_enabled_for_an_unknown_key(db_and_tree):
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    plan = {"summary": "s", "ops": [
+        {"op": "set_section_enabled", "section_key": "not_a_real_section", "reason": "r"},
+    ]}
+    out = revise.validate_ops(db, course.id, plan)
+    assert out["ops"] == []
+    assert len(out["dropped"]) == 1
+    assert out["dropped"][0]["op"]["section_key"] == "not_a_real_section"
+    assert "not_a_real_section" in out["dropped"][0]["reason"]
+
+
+def test_validate_ops_set_section_enabled_widens_the_add_segment_union(db_and_tree):
+    """THE EXACT production shape of the incident this hotfix targets: homework
+    starts disabled, and a plan both enables it (with a renamed Greek label) via
+    `set_section_enabled` AND files two `add_segment` ops under it, in the SAME
+    plan. `update_blueprint` already widened this union (an earlier fix); this
+    proves `set_section_enabled` widens it too — ALL THREE ops must survive, or
+    this hotfix has not actually closed the incident."""
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    bp = default_blueprint()
+    for s in bp["sections"]:
+        if s["key"] == "homework":
+            s["enabled"] = False
+    course.meta = {**course.meta, "blueprint": bp}
+    db.add(course)
+    db.commit()
+
+    plan = {"summary": "add a homework section to every lesson", "ops": [
+        {"op": "set_section_enabled", "section_key": "homework", "enabled": True,
+         "label": "Εργασίες για το σπίτι", "reason": "the tutor wants homework"},
+        {"op": "add_segment", "lesson_id": str(lesson.id), "title": "HW 1",
+         "instruction": "x", "section_key": "homework", "reason": "r"},
+        {"op": "add_segment", "lesson_id": str(lesson.id), "title": "HW 2",
+         "instruction": "y", "section_key": "homework", "reason": "r"},
+    ]}
+    out = revise.validate_ops(db, course.id, plan)
+    assert [o["op"] for o in out["ops"]] == [
+        "set_section_enabled", "add_segment", "add_segment",
+    ]
+    assert out["dropped"] == []
+
+
+def test_validate_ops_set_section_enabled_disabled_grants_nothing_to_the_union(db_and_tree):
+    """Negative case mirroring the update_blueprint one: a `set_section_enabled`
+    op that DISABLES (or omits `enabled`, defaulting true, but targets a
+    DIFFERENT key) grants nothing to a still-disabled section's add_segment."""
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    bp = default_blueprint()
+    for s in bp["sections"]:
+        if s["key"] == "homework":
+            s["enabled"] = False
+    course.meta = {**course.meta, "blueprint": bp}
+    db.add(course)
+    db.commit()
+
+    plan = {"summary": "s", "ops": [
+        {"op": "set_section_enabled", "section_key": "homework", "enabled": False, "reason": "r"},
+        {"op": "add_segment", "lesson_id": str(lesson.id), "title": "HW 1",
+         "instruction": "x", "section_key": "homework", "reason": "r"},
+    ]}
+    out = revise.validate_ops(db, course.id, plan)
+    assert [o["op"] for o in out["ops"]] == ["set_section_enabled"]
+
+
+def test_apply_set_section_enabled_flips_enabled_and_renames_only_the_course_language(db_and_tree):
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    bp = default_blueprint()
+    original_en_label = next(s["label"]["en"] for s in bp["sections"] if s["key"] == "homework")
+    for s in bp["sections"]:
+        if s["key"] == "homework":
+            s["enabled"] = False
+    course.meta = {**course.meta, "blueprint": bp}
+    db.add(course)
+    db.commit()
+
+    plan = {"summary": "s", "ops": [
+        {"op": "set_section_enabled", "section_key": "homework", "enabled": True,
+         "label": "Εργασίες για το σπίτι", "reason": "r"},
+    ]}
+    out = revise.apply_revision(db, course.id, plan)
+    assert out["applied"] == 1
+
+    db.expire_all()
+    refreshed = db.get(Block, course.id)
+    hw = next(s for s in refreshed.meta["blueprint"]["sections"] if s["key"] == "homework")
+    assert hw["enabled"] is True
+    assert hw["label"]["el"] == "Εργασίες για το σπίτι"
+    assert hw["label"]["en"] == original_en_label   # course.language is "el" — "en" untouched
+    # the rest of the blueprint (weight/kind/audience/description) survives
+    # the rebuild unchanged — this op flips ONE flag, not the whole section.
+    original = next(s for s in bp["sections"] if s["key"] == "homework")
+    assert hw["weight"] == original["weight"]
+    assert hw["kind"] == original["kind"]
+
+
+def test_apply_set_section_enabled_can_disable_a_section(db_and_tree):
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    out = revise.apply_revision(db, course.id, {"summary": "s", "ops": [
+        {"op": "set_section_enabled", "section_key": "recap", "enabled": False, "reason": "r"},
+    ]})
+    assert out["applied"] == 1
+    db.expire_all()
+    refreshed = db.get(Block, course.id)
+    recap = next(s for s in refreshed.meta["blueprint"]["sections"] if s["key"] == "recap")
+    assert recap["enabled"] is False
+
+
+def test_compute_impact_set_section_enabled_is_blueprint_changed_not_destructive():
+    ops = [{"op": "set_section_enabled", "section_key": "homework", "enabled": True, "reason": "r"}]
+    impact = revise.compute_impact(ops)
+    assert impact["blueprint_changed"] is True
+    assert impact["destructive"] is False
+
+
+def test_validate_ops_dropped_diagnostics_shape(db_and_tree):
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    plan = {"summary": "s", "ops": [
+        {"op": "add_segment", "lesson_id": str(uuid.uuid4()), "title": "x",
+         "instruction": "y", "reason": "r"},
+    ]}
+    out = revise.validate_ops(db, course.id, plan)
+    assert out["ops"] == []
+    assert len(out["dropped"]) == 1
+    entry = out["dropped"][0]
+    assert set(entry.keys()) == {"op", "reason"}
+    assert entry["op"]["op"] == "add_segment"
+    assert isinstance(entry["reason"], str) and entry["reason"]
+
+
+def test_validate_ops_logs_the_offending_id_value_not_a_bare_does_not_resolve(db_and_tree, caplog):
+    """The production incident's complaint (b): the OLD log line said only "an
+    id/payload does not resolve under root <root>" — no id, so nobody could
+    tell whether the model sent a malformed uuid or an M1/L1-style shorthand.
+    The new line must carry the actual offending value."""
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    bogus_id = "M1-L1"   # the exact shorthand shape suspected in the incident
+    plan = {"summary": "s", "ops": [
+        {"op": "add_segment", "lesson_id": bogus_id, "title": "x", "instruction": "y", "reason": "r"},
+    ]}
+    with caplog.at_level(logging.WARNING, logger="app.curriculum.revise"):
+        out = revise.validate_ops(db, course.id, plan)
+    assert out["ops"] == []
+    assert any(bogus_id in rec.message for rec in caplog.records)
 
 
 def test_validate_ops_rejects_edit_and_remove_segment_targeting_a_lesson_id(db_and_tree):
@@ -674,10 +837,14 @@ def test_build_revise_messages_blueprint_block_shows_enabled_and_disabled_keys(d
 
 
 def test_revise_tail_prefers_surgical_ops_and_states_coupled_blueprint_guidance():
-    """(c): the rendered REVISE_TAIL (default, via the overrides resolver's
-    fallback) tells the model to prefer the surgical ops over `modify_lesson`,
-    and that a new RECURRING section is an `update_blueprint` + per-lesson
-    `add_segment` pair in the SAME plan — never planned around silently."""
+    """(c) + the 2026-07-20 hotfix: the rendered REVISE_TAIL (default, via the
+    overrides resolver's fallback) tells the model to prefer the surgical ops
+    over `modify_lesson`; that enabling/renaming a RECURRING section is
+    `set_section_enabled` + per-lesson `add_segment` in the SAME plan (NOT
+    `update_blueprint`, which is reserved for a full restructure); that every
+    id must be the exact bracketed uuid, never an M1/L1-style shorthand; and
+    that an impossible-under-the-current-blueprint request must be said, not
+    hidden."""
     from app.prompts.overrides import resolve
 
     rendered = resolve(None, revise.REVISE_SLICE_ID, revise.REVISE_TAIL)
@@ -685,8 +852,12 @@ def test_revise_tail_prefers_surgical_ops_and_states_coupled_blueprint_guidance(
     # surgical-ops preference over modify_lesson
     assert "add_segment" in low and "modify_lesson" in low
     assert "before modify_lesson" in low or "prefer" in low
-    # a new recurring section = update_blueprint + add_segment, same plan
-    assert "update_blueprint" in low and "same plan" in low
+    # a new recurring section = set_section_enabled + add_segment, same plan;
+    # update_blueprint is reserved for a full restructure, not this coupling.
+    assert "set_section_enabled" in low and "same plan" in low
+    assert "update_blueprint" in low and "full restructure" in low
+    # every id must be the exact bracketed uuid, never the M1/L1 position label
+    assert "m1" in low and "l1" in low and "exact" in low
     # an impossible-under-the-current-blueprint request must be said, not hidden
     assert "impossible" in low and "summary" in low
 
