@@ -460,9 +460,9 @@
         "move_lesson": "Μετακίνηση του μαθήματος «{title}» στην ενότητα «{module}»",
         "remove_lesson": "Διαγραφή του μαθήματος «{title}»",
         "update_blueprint": "Αλλαγή δομής μαθήματος",
-        "add_segment": "Νέα ενότητα σε μάθημα",
-        "edit_segment": "Διόρθωση ενότητας",
-        "remove_segment": "Αφαίρεση ενότητας"
+        "add_segment": "Νέα ενότητα «{title}» στο μάθημα «{lesson}»",
+        "edit_segment": "Διόρθωση ενότητας «{title}»",
+        "remove_segment": "Αφαίρεση ενότητας «{title}»"
       },
       "impact": {
         "destructiveRewrites": "{count, plural, one {Θα ξαναγραφτεί # μάθημα από την αρχή} other {Θα ξαναγραφτούν # μαθήματα από την αρχή}} — το υπάρχον κείμενο θα αντικατασταθεί.",

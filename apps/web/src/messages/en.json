@@ -460,9 +460,9 @@
         "move_lesson": "Move lesson “{title}” to “{module}”",
         "remove_lesson": "Remove lesson “{title}”",
         "update_blueprint": "Change lesson structure",
-        "add_segment": "Add segment to lesson",
-        "edit_segment": "Edit segment",
-        "remove_segment": "Remove segment"
+        "add_segment": "Add segment “{title}” to lesson “{lesson}”",
+        "edit_segment": "Edit segment “{title}”",
+        "remove_segment": "Remove segment “{title}”"
       },
       "impact": {
         "destructiveRewrites": "{count, plural, one {# lesson will be rewritten from scratch} other {# lessons will be rewritten from scratch}} — existing text will be replaced.",

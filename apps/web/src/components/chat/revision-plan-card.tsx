@@ -31,8 +31,9 @@ type Translator = ReturnType<typeof useTranslations>;
  *    content until the tutor re-drafts them.
  *
  * `insert_lesson`/`insert_module` already carry their own `title` (the
- * schema requires it for those ops); `modify_lesson`/`move_lesson`/
- * `remove_lesson` carry only an id, so their name comes from `blockTitles` —
+ * schema requires it for those ops), as does `add_segment`;
+ * `modify_lesson`/`move_lesson`/`remove_lesson`/`edit_segment`/
+ * `remove_segment` carry only an id, so their name comes from `blockTitles` —
  * falling back to a generic label in the (should-be-rare) case a plan
  * references a block this client's own tree snapshot doesn't have. */
 function opLabel(op: RevisionPlanOp, blockTitles: Record<string, string>, t: Translator): string {
@@ -50,18 +51,21 @@ function opLabel(op: RevisionPlanOp, blockTitles: Record<string, string>, t: Tra
       return t("op.remove_lesson", { title: titleOf(op.lesson_id) });
     case "update_blueprint":
       return t("op.update_blueprint");
-    // The three surgical segment ops (2026-07-20, Spec A) — deliberately NO
-    // resolved title/lesson name here, matching `update_blueprint`'s own
-    // generic label above: the op's `reason` (rendered right below by the
-    // caller) already carries the specific "why", and `add_segment`'s
-    // `lesson_id` / `edit_segment`+`remove_segment`'s `segment_id` are still
-    // resolvable via `blockTitles` for any future caller that wants them.
+    // The three surgical segment ops (2026-07-20, Spec A; named-per-op fix
+    // 2026-07-20 review follow-up): `remove_segment` in particular is
+    // destructive, so the tutor must see WHICH segment before approving —
+    // same house pattern as `modify_lesson`/`move_lesson`/`remove_lesson`
+    // above, resolving the id through `titleOf` (falls back to
+    // `unknownBlock` for a stale plan whose id isn't in this client's own
+    // tree snapshot). `add_segment` carries its OWN proposed `title` (the
+    // schema requires it), shown together with the parent lesson's resolved
+    // name for context.
     case "add_segment":
-      return t("op.add_segment");
+      return t("op.add_segment", { title: op.title ?? "", lesson: titleOf(op.lesson_id) });
     case "edit_segment":
-      return t("op.edit_segment");
+      return t("op.edit_segment", { title: titleOf(op.segment_id) });
     case "remove_segment":
-      return t("op.remove_segment");
+      return t("op.remove_segment", { title: titleOf(op.segment_id) });
     default:
       // Defensive only — the backend's `_OP_ENUM` is closed and validate_ops
       // drops anything else before it ever reaches an approval.

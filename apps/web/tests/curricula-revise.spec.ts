@@ -54,7 +54,19 @@ interface FixtureBlock {
  * committed its one transaction; every `GET /curricula/{root}` after that
  * point reflects it, exactly like the real chained `curriculum_draft` job
  * would once it succeeds. */
-function mockCurriculumTree(rootId: string, moduleId: string, lesson1Id: string, lesson2Id: string, newLessonId: string) {
+function mockCurriculumTree(
+  rootId: string,
+  moduleId: string,
+  lesson1Id: string,
+  lesson2Id: string,
+  newLessonId: string,
+  // Segment leaves filed under lesson1 — optional and empty by default (most
+  // callers only revise at the lesson/module level); the surgical
+  // `add_segment`/`edit_segment`/`remove_segment` op tests below pass one so
+  // `collectTitles` (`revise-drawer.tsx`) has a REAL name to resolve, proving
+  // the plan card names the exact segment rather than a generic label.
+  segments: FixtureBlock[] = [],
+) {
   let applied = false;
   let draftError: string | null = null;
 
@@ -63,7 +75,7 @@ function mockCurriculumTree(rootId: string, moduleId: string, lesson1Id: string,
       {
         id: lesson1Id, kind: "lesson", title: "Pickups and Tone", body: "Pickup types and tone shaping.",
         est_minutes: 30, order: 0, language: "en", plane: "content", student_id: null,
-        meta: { draft_status: "ready", objective: "Understand pickup types." }, children: [],
+        meta: { draft_status: "ready", objective: "Understand pickup types." }, children: segments,
       },
       {
         id: lesson2Id, kind: "lesson", title: "Cables and Signal Integrity", body: "Cable quality and tone.",
@@ -798,7 +810,17 @@ test.describe("curriculum revise drawer (mocked API)", () => {
     const newLessonId = randomUUID();
     const segmentId = randomUUID();
 
-    const fixture = mockCurriculumTree(rootId, moduleId, lesson1Id, lesson2Id, newLessonId);
+    // A real, titled segment under lesson1 — so `edit_segment`'s
+    // `blockTitles[segment_id]` lookup resolves to an ACTUAL name, not the
+    // generic `unknownBlock` fallback (2026-07-20 review follow-up: the
+    // approval card must name the exact segment a surgical op targets).
+    const fixture = mockCurriculumTree(rootId, moduleId, lesson1Id, lesson2Id, newLessonId, [
+      {
+        id: segmentId, kind: "segment", title: "Tone Controls Explained", body: "How tone knobs shape sound.",
+        est_minutes: 5, order: 0, language: "en", plane: "content", student_id: null,
+        meta: null, children: [],
+      },
+    ]);
     const chatSessionStore = createChatSessionStore();
     await mockCurriculaApi(page, fixture, chatSessionStore);
     const chat = await mockChatApi(page, undefined, chatSessionStore);
@@ -847,8 +869,14 @@ test.describe("curriculum revise drawer (mocked API)", () => {
 
     const ops = page.getByTestId("revision-plan-op");
     await expect(ops).toHaveCount(2);
-    await expect(ops.nth(0)).toContainText("Add segment to lesson");
-    await expect(ops.nth(1)).toContainText("Edit segment");
+    // add_segment carries its OWN proposed title — never a bare "to lesson".
+    await expect(ops.nth(0)).toContainText("Add segment “Quick tuning check” to lesson “Pickups and Tone”");
+    // edit_segment carries only a bare `segment_id` — the card must resolve
+    // it to the REAL segment name via `blockTitles`, exactly like
+    // `modify_lesson` resolves a bare `lesson_id`. `remove_segment` shares
+    // the same resolution and is destructive, so a tutor seeing a generic
+    // "Edit segment"/"Remove segment" here would be approving blind.
+    await expect(ops.nth(1)).toContainText("Edit segment “Tone Controls Explained”");
 
     const impactBanner = page.getByTestId("plan-impact");
     await expect(impactBanner).toBeVisible();
