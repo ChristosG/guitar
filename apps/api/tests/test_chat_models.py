@@ -372,3 +372,31 @@ def test_approval_request_cascade_deletes_with_its_session():
         assert db3.get(ApprovalRequest, approval_id) is None  # cascaded via ondelete=CASCADE
     finally:
         db3.close()
+
+
+# ---------------------------------------------------------------------------
+# Part 5: planning chat columns
+# ---------------------------------------------------------------------------
+
+def test_chat_session_interview_id_and_interview_planning_brief_roundtrip():
+    """Part 5 columns: an interview-bound session (interview_id set, root_id
+    None) and the stored planning brief both persist and reload."""
+    from app.models.interview import CurriculumInterview
+
+    db = SessionLocal()
+    try:
+        interview = CurriculumInterview(title="Ήχος και Ενισχυτές")
+        db.add(interview)
+        db.flush()
+        interview.planning_brief = "Στόχος: 20 εβδομάδες για ήχο και ενισχυτές."
+        session = ChatSession(interview_id=interview.id, locale="el")
+        db.add(session)
+        db.commit()
+
+        db.expire_all()
+        reloaded = db.get(ChatSession, session.id)
+        assert reloaded.interview_id == interview.id
+        assert reloaded.root_id is None
+        assert db.get(CurriculumInterview, interview.id).planning_brief.startswith("Στόχος")
+    finally:
+        db.close()

@@ -91,6 +91,13 @@ class CurriculumInterview(Base, PkMixin, TimestampMixin):
     # respect, but the tutor describing the course he wants — which reaches the
     # outline prompt AND every lesson-draft prompt.
     brief: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The distilled-and-TUTOR-EDITED planning brief (Part 5) — what the
+    # planning chat concluded, in the tutor's own (edited) words. Nullable:
+    # the planning chat is optional, and byte-identity of the outline prompt
+    # without it is pinned by test. Injected into build_outline_messages as
+    # its own block, beside `brief` (the scope step's one-liner) — see
+    # app/curriculum/outline.py.
+    planning_brief: Mapped[str | None] = mapped_column(Text, nullable=True)
     # "library_only" | "general_knowledge" | "web" — the ceiling the tutor sets on
     # how far a module may stray from his own material when his material doesn't
     # cover it. Per-module tiers (assigned by the model reading the book) are

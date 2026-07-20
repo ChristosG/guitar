@@ -79,6 +79,15 @@ class ChatSession(Base, PkMixin, TimestampMixin):
     # record needs. A stale/dangling id is the accepted tradeoff (the injection
     # simply skips a root that no longer resolves to a course).
     root_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    # `interview_id` (Part 5, planning chat) BINDS this conversation to one
+    # CurriculumInterview — the pre-generation planning discussion. Same
+    # deliberate not-a-ForeignKey reasoning as `root_id`/`student_id` above:
+    # the transcript outlives the interview row. Mutually exclusive with
+    # `root_id` in practice (a session is bound to a curriculum OR an
+    # interview, never both) but not DB-enforced — every root_id-gated
+    # behavior in routers/chat.py simply doesn't fire for these sessions,
+    # which is exactly what a pre-generation chat needs.
+    interview_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     title: Mapped[str | None] = mapped_column(String(200), nullable=True)
     locale: Mapped[str] = mapped_column(String(5), nullable=False, server_default="el", default="el")
 
