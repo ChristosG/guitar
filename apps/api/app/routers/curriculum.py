@@ -467,8 +467,17 @@ def delete_curriculum(root_id: UUID, db: Session = Depends(get_db)) -> None:
     # for us the moment their owning `ChatSession` row is deleted. Deleting
     # them here too would just be redundant round trips to a table the DB is
     # already about to empty.
+    # Collect doomed interview ids FIRST: a planning-chat ChatSession binds to
+    # its interview via `interview_id`, not `root_id` (Part 5) — a session
+    # that only has `interview_id` set would survive the root_id-scoped
+    # delete below and orphan itself the moment its interview is gone.
+    interview_ids = db.scalars(
+        select(CurriculumInterview.id).where(CurriculumInterview.root_id == course.id)
+    ).all()
     session_ids = db.scalars(
-        select(ChatSession.id).where(ChatSession.root_id == course.id)
+        select(ChatSession.id).where(
+            or_(ChatSession.root_id == course.id, ChatSession.interview_id.in_(interview_ids))
+        )
     ).all()
     if session_ids:
         db.query(ChatSession).filter(ChatSession.id.in_(session_ids)).delete(synchronize_session=False)
@@ -604,11 +613,10 @@ def get_or_create_interview_chat_session(
     `app.i18n.locale_dep`, same as the curriculum route — only used for a
     session this call itself creates.
 
-    Route ordering: this path's literal `interview` segment is tried before
-    `/curricula/{root_id}/chat-session` only matters if FastAPI walked routes
-    in a conflicting order, but `root_id: UUID` on that route rejects the
-    literal string "interview" anyway, so registration order here is
-    unconstrained.
+    Route ordering: this path has 4 segments (`/curricula/interview/{id}/
+    chat-session`) and `get_or_create_curriculum_chat_session`'s has 3
+    (`/curricula/{root_id}/chat-session`) — different segment counts can
+    never collide, so registration order between the two is irrelevant.
     """
     interview = _get_interview_or_404(db, interview_id)
 

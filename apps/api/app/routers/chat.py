@@ -31,7 +31,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.agent.guards import CURRICULUM_CONTEXT_SENTINEL
+from app.agent.guards import CURRICULUM_CONTEXT_SENTINEL, PLANNING_CONTEXT_SENTINEL
 from app.agent.loop import AgentResult, run_agent_turn, stream_plain_turn
 from app.agent.tools import TOOLS, with_locale
 from app.agent.transcript import messages_to_wire, persist_new_messages, window_wire
@@ -307,12 +307,14 @@ def _inject_interview_context(db: Session, session: ChatSession, wire: list[dict
     if interview is None:
         return wire
     ctx = (
-        f"\n\n[PLANNING CONTEXT — the tutor is planning a NEW course titled "
-        f"\"{interview.title}\" that does not exist yet. Help him think it "
-        f"through: goals, topics, emphasis, sequencing, what to avoid. Ground "
-        f"answers in his library where relevant. Do NOT call "
+        f"\n\n{PLANNING_CONTEXT_SENTINEL} — the tutor is planning a NEW course "
+        f"titled \"{interview.title}\" that does not exist yet. Help him think "
+        f"it through: goals, topics, emphasis, sequencing, what to avoid. "
+        f"Ground answers in his library where relevant. Do NOT call "
         f"propose_curriculum_revision or apply_curriculum_revision — there is "
-        f"no curriculum to revise yet.]"
+        f"no curriculum to revise yet. Do NOT call generate_curriculum either "
+        f"— the tutor will generate the course through the wizard after this "
+        f"chat, not from here.]"
     )
     wire = list(wire)
     for i in range(len(wire) - 1, -1, -1):

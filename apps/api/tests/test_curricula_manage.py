@@ -99,6 +99,29 @@ def test_delete_curriculum_cascades_and_cleans_bound_rows():
         db.close()
 
 
+def test_delete_curriculum_also_removes_sessions_bound_via_interview_id():
+    """A planning-chat `ChatSession` binds to its `CurriculumInterview` via
+    `interview_id`, NOT `root_id` (Part 5). The delete route used to collect
+    doomed sessions by `root_id` only, so a session that had `interview_id`
+    set (and no `root_id`) survived the interview it belonged to — orphaned
+    the moment that interview's row was gone."""
+    db = SessionLocal()
+    try:
+        course, _, _ = _mk_course(db)
+        interview = CurriculumInterview(root_id=course.id, title=course.title)
+        db.add(interview); db.flush()
+        planning_chat = ChatSession(interview_id=interview.id, locale="el")
+        db.add(planning_chat); db.commit()
+        planning_chat_id, course_id = planning_chat.id, course.id
+
+        r = client.delete(f"/curricula/{course_id}")
+        assert r.status_code == 204
+        db.expire_all()
+        assert db.get(ChatSession, planning_chat_id) is None
+    finally:
+        db.close()
+
+
 def test_delete_refuses_while_a_job_is_active():
     """409 when a `pending`/`running` `GenerationJob` actually references this
     root — via `params["root_id"]`, which is how `curriculum_draft` (Resume/

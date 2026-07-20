@@ -1279,7 +1279,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: SUGGESTIONS_SYSTEM,
         build=_build_chat_suggestions,
-        call_sites=("routers/chat.py:955",),
+        call_sites=("routers/chat.py:957",),
         slices=(
             Slice(
                 id=SUGGESTIONS_SLICE_ID,
@@ -1592,7 +1592,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: DISTILL_SYSTEM,
         build=_build_interview_distill,
-        call_sites=("curriculum/interview.py:712",),
+        call_sites=("curriculum/interview.py:719",),
         slices=(
             Slice(
                 id=DISTILL_SLICE_ID,

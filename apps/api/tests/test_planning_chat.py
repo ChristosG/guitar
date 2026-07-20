@@ -83,6 +83,11 @@ def test_interview_context_injected_and_curriculum_context_not():
         assert out2[-1]["content"].startswith("θέλω ένα πρόγραμμα για ήχο")
         assert "[PLANNING CONTEXT" in out2[-1]["content"]
         assert interview.title in out2[-1]["content"]
+        # the steer forbids ALL THREE curriculum-mutating tools, not just the
+        # revise pair — a tutor saying "ωραία, φτιάξ' το" mid-planning-chat
+        # must not get a generate_curriculum approval card that bypasses the
+        # wizard and discards the still-unsaved brief.
+        assert "Do NOT call generate_curriculum" in out2[-1]["content"]
         # the original wire dicts are NEVER mutated in place
         assert wire[-1]["content"] == "θέλω ένα πρόγραμμα για ήχο"
     finally:
@@ -156,6 +161,45 @@ def test_distill_returns_brief_and_does_not_store(monkeypatch):
 
         db.expire_all()
         assert db.get(CurriculumInterview, interview.id).planning_brief is None  # not stored yet
+    finally:
+        db.close()
+
+
+def test_distill_falls_back_to_session_locale_when_who_is_empty(monkeypatch):
+    """`who.language` is essentially always empty at distill time — planning
+    chat runs BEFORE the "who" interview step. Without a fallback, distill
+    silently used DEFAULT_LOCALE ("el") even for an English-locale tutor. The
+    bound session's own locale (set from X-App-Locale when the planning chat
+    session was created) must reach the prompt instead."""
+    db = SessionLocal()
+    try:
+        interview = _mk_interview(db)
+        session = ChatSession(interview_id=interview.id, locale="en")
+        db.add(session); db.flush()
+        db.add(Message(session_id=session.id, role="user",
+                       content="I want 20 weeks on guitar tone, practical emphasis."))
+        db.add(Message(session_id=session.id, role="assistant",
+                       content="I suggest 4 modules: pickups, amps, speakers, pedals."))
+        db.commit()
+        # interview.answers has no "who" step at all — the common case here.
+        assert not (interview.answers or {}).get("who")
+
+        from app.curriculum import interview as interview_mod
+        seen = {}
+
+        class _FakeProvider:
+            def guided_json(self, messages, schema, *, role=None, **kw):
+                seen["messages"] = messages
+                return {"brief": "Goal: 20 weeks, practical emphasis, 4 modules."}
+
+        monkeypatch.setattr(interview_mod, "get_provider", lambda: _FakeProvider())
+
+        r = client.post(f"/curricula/interview/{interview.id}/distill")
+        assert r.status_code == 200
+
+        joined = str(seen["messages"])
+        # the shared language directive's English fragment, not the Greek default
+        assert "write everything you produce in English (en)" in joined
     finally:
         db.close()
 

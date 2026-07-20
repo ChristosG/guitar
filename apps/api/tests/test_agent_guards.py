@@ -515,6 +515,7 @@ def test_the_decline_no_longer_cites_copyright():
 
 from app.agent.guards import (  # extend the module's existing import if present
     CURRICULUM_CONTEXT_SENTINEL,
+    PLANNING_CONTEXT_SENTINEL,
     strip_curriculum_context,
 )
 
@@ -523,6 +524,12 @@ _CTX_TAIL = (
     'curriculum abc titled "Guitar Tone & Amps".\nCurrent structure:\n'
     "[uuid-1] Intro to Tone — what makes an amp sing\n"
     "[uuid-2] Solo riffs and sustain — Gilmour-style bends]"
+)
+
+_PLANNING_CTX_TAIL = (
+    "\n\n" + PLANNING_CONTEXT_SENTINEL + " — the tutor is planning a NEW "
+    'course titled "Guitar Tone & Amps" that does not exist yet. Help him '
+    "think it through: goals, topics, emphasis, sequencing, what to avoid.]"
 )
 
 
@@ -542,3 +549,20 @@ def test_enriched_text_trips_guard_but_stripped_text_does_not():
     raw = "μπορείς να αφαιρέσεις όλα τα inline citations από αυτό το curricula;"
     assert looks_like_named_song_request(raw + _CTX_TAIL) is True   # the bug
     assert looks_like_named_song_request(strip_curriculum_context(raw + _CTX_TAIL)) is False
+
+
+def test_strip_curriculum_context_also_strips_the_planning_context_tail():
+    """The planning chat's `[PLANNING CONTEXT ...]` block is the same kind of
+    transient tail-append injection (`_inject_interview_context`) — the
+    defense-in-depth fallback must strip it too, not just `[CURRICULUM
+    CONTEXT`."""
+    raw = "θέλω ένα πρόγραμμα για ήχο κιθάρας"
+    assert strip_curriculum_context(raw + _PLANNING_CTX_TAIL) == raw
+
+
+def test_strip_curriculum_context_strips_whichever_sentinel_appears_first():
+    # A session is only ever bound to one context or the other in practice,
+    # but the strip helper picks whichever sentinel occurs earliest — it does
+    # not assume which one a given caller means.
+    raw = "plain tutor text"
+    assert strip_curriculum_context(raw + _PLANNING_CTX_TAIL + _CTX_TAIL) == raw

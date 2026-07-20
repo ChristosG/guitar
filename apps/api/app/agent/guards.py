@@ -359,15 +359,30 @@ NAMED_SONG_DECLINE_MESSAGE = (
 # caller that doesn't.
 CURRICULUM_CONTEXT_SENTINEL = "[CURRICULUM CONTEXT"
 
+# `_inject_interview_context`'s planning-chat sibling injects a "[PLANNING
+# CONTEXT — ...]" block the same transient, tail-appended way — same reason
+# to strip it before any content-based guard scans the tutor's own words.
+# Single source of truth: `routers/chat.py` imports this constant rather than
+# hardcoding the literal a second time.
+PLANNING_CONTEXT_SENTINEL = "[PLANNING CONTEXT"
+
 
 def strip_curriculum_context(text: str) -> str:
-    """Return `text` without the trailing injected curriculum-context block.
+    """Return `text` without the trailing injected context block — curriculum
+    OR planning, whichever sentinel appears first.
 
     The block is always APPENDED (never prepended/interleaved — see
-    `_inject_curriculum_context`), so everything from the first sentinel
-    occurrence onward is injection, not tutor words.
+    `_inject_curriculum_context`/`_inject_interview_context`), so everything
+    from the first sentinel occurrence onward is injection, not tutor words.
+    A session is only ever bound to one or the other (never both — see
+    `_inject_interview_context`'s root_id guard), but this checks both
+    unconditionally rather than assume which one a given caller means.
     """
-    idx = text.find(CURRICULUM_CONTEXT_SENTINEL)
-    if idx == -1:
+    indices = [
+        idx
+        for idx in (text.find(CURRICULUM_CONTEXT_SENTINEL), text.find(PLANNING_CONTEXT_SENTINEL))
+        if idx != -1
+    ]
+    if not indices:
         return text
-    return text[:idx].rstrip()
+    return text[: min(indices)].rstrip()

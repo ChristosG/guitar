@@ -704,7 +704,14 @@ def distill_planning_brief(db: Session, interview: CurriculumInterview) -> str:
 
     transcript = "\n".join(f"{m.role.upper()}: {m.content.strip()}" for m in visible)
     who = (interview.answers or {}).get("who") or {}
-    lang_code = normalize_locale(who.get("language") or DEFAULT_LOCALE)
+    # Preference order: an explicit "who.language" answer, then the BOUND
+    # SESSION's own locale (`session` above — set from X-App-Locale when the
+    # planning chat session was created), then DEFAULT_LOCALE as the last
+    # resort. `who.get("language")` is almost always empty here on purpose —
+    # planning chat is a phase BEFORE the "who" interview step, so its answers
+    # have not been collected yet; without the session fallback this silently
+    # fell through to DEFAULT_LOCALE ("el") even for an English-locale tutor.
+    lang_code = normalize_locale(who.get("language") or session.locale or DEFAULT_LOCALE)
 
     prompt = resolve(db, DISTILL_SLICE_ID, DISTILL_SYSTEM).format(
         language_directive=language_directive(lang_code, db), transcript=transcript,
