@@ -45,6 +45,7 @@ from app.llm.factory import get_provider
 from app.models.block import Block
 from app.models.chat import ApprovalRequest, ChatSession, Message
 from app.models.generation_job import GenerationJob
+from app.models.interview import CurriculumInterview
 from app.prompts.overrides import resolve as resolve_text
 from app.schemas.chat import (
     ApprovalResolveRequest,
@@ -281,6 +282,33 @@ def _inject_curriculum_context(db: Session, session: ChatSession, wire: list[dic
         f"apply_curriculum_revision (with this root_id) to apply an approved plan."
         + (f" Brief: {brief}." if brief else "")
         + f"\nCurrent structure:\n{compact_tree_text(db, course)}]"
+    )
+    wire = list(wire)
+    for i in range(len(wire) - 1, -1, -1):
+        if wire[i].get("role") == "user":
+            wire[i] = {**wire[i], "content": (wire[i].get("content") or "") + ctx}
+            break
+    return wire
+
+
+def _inject_interview_context(db: Session, session: ChatSession, wire: list[dict]) -> list[dict]:
+    """Part 5: the planning chat's light steer — same transient tail-append
+    contract as `_inject_curriculum_context` above (new list, new dict, never
+    persisted, re-applied every turn), but deliberately MINIMAL: a title and a
+    role, no tree (nothing is materialized yet) and no revise-tool steering
+    (there is no root_id to revise)."""
+    if not getattr(session, "interview_id", None):
+        return wire
+    interview = db.get(CurriculumInterview, session.interview_id)
+    if interview is None:
+        return wire
+    ctx = (
+        f"\n\n[PLANNING CONTEXT — the tutor is planning a NEW course titled "
+        f"\"{interview.title}\" that does not exist yet. Help him think it "
+        f"through: goals, topics, emphasis, sequencing, what to avoid. Ground "
+        f"answers in his library where relevant. Do NOT call "
+        f"propose_curriculum_revision or apply_curriculum_revision — there is "
+        f"no curriculum to revise yet.]"
     )
     wire = list(wire)
     for i in range(len(wire) - 1, -1, -1):
@@ -620,6 +648,7 @@ def post_message(session_id: UUID, payload: ChatMessageIn, db: Session = Depends
 
     wire = window_wire(messages_to_wire(_ordered_messages(db, session_id)))
     wire = _inject_curriculum_context(db, session, wire)
+    wire = _inject_interview_context(db, session, wire)
     try:
         result = run_agent_turn(db, wire, locale=session.locale, raw_user_text=payload.content)
     except LLMError as e:
@@ -681,6 +710,7 @@ def post_message_stream(session_id: UUID, payload: ChatMessageIn, db: Session = 
     prior_wire = window_wire(messages_to_wire(_ordered_messages(db, session_id)))
     user_wire = {"role": "user", "content": payload.content}
     wire = _inject_curriculum_context(db, session, prior_wire + [user_wire])
+    wire = _inject_interview_context(db, session, wire)
 
     def event_stream():
         try:

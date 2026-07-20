@@ -583,6 +583,44 @@ def get_or_create_curriculum_chat_session(
     return ChatSessionCreated(session_id=session.id)
 
 
+@router.get("/curricula/interview/{interview_id}/chat-session", response_model=ChatSessionCreated)
+def get_or_create_interview_chat_session(
+    interview_id: UUID, locale: str = Depends(locale_dep), db: Session = Depends(get_db)
+) -> ChatSessionCreated:
+    """GET-or-create the planning chat's session (Part 5) — one per
+    interview, exactly the shape of `get_or_create_curriculum_chat_session`
+    above, just keyed off `ChatSession.interview_id` instead of `root_id`:
+    there is no course `Block` yet for this to bind to (the interview hasn't
+    reached "confirm"), so none of `routers/chat.py`'s root_id-gated revise
+    behaviors apply to a session created here.
+
+    Most-recently-created wins when more than one session is bound to this
+    interview, same reasoning as the curriculum route: a fresh `POST /chat`
+    "Clear chat" starts a new one rather than deleting the old, and this
+    endpoint must resume the newest. `locale` is `X-App-Locale` via
+    `app.i18n.locale_dep`, same as the curriculum route — only used for a
+    session this call itself creates.
+
+    Route ordering: this path's literal `interview` segment is tried before
+    `/curricula/{root_id}/chat-session` only matters if FastAPI walked routes
+    in a conflicting order, but `root_id: UUID` on that route rejects the
+    literal string "interview" anyway, so registration order here is
+    unconstrained.
+    """
+    interview = _get_interview_or_404(db, interview_id)
+
+    session = db.scalars(
+        select(ChatSession)
+        .where(ChatSession.interview_id == interview.id)
+        .order_by(ChatSession.created_at.desc())
+    ).first()
+    if session is None:
+        session = ChatSession(interview_id=interview.id, locale=locale)
+        db.add(session)
+        db.commit()
+    return ChatSessionCreated(session_id=session.id)
+
+
 @router.post("/curricula/{root_id}/draft", response_model=JobAccepted, status_code=202,
              dependencies=[Depends(require_llm_configured)])
 def resume_curriculum_draft(
