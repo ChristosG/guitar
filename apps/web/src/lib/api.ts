@@ -164,6 +164,10 @@ export interface CreateSourceInput {
   language?: string | null;
   text?: string | null;
   url?: string | null;
+  /** kind="url" only: >1 follows same-site links breadth-first from the URL
+   * (multi-page guides — justinguitar-style course indexes) and stores one
+   * Page per crawled page. Server caps at 50; omit/1 = single-page fetch. */
+  crawl_pages?: number;
 }
 
 export interface UploadSourceInput {
@@ -948,6 +952,11 @@ export interface InterviewOption {
   type?: string;
   char_count?: number | null;
   default_selected?: boolean;
+  /** Canon compile status — sources-step only. `true` = a ready BookCompile
+   * exists, so above the whole-read threshold this source arrives as canon;
+   * `false` = it rides along verbatim (or via retrieval). Absent on the wire
+   * for steps whose options are not sources. */
+  compiled?: boolean;
 }
 
 /** One lesson of the outline, BEFORE anything has been drafted. Titles,
@@ -1011,6 +1020,10 @@ export interface InterviewFindings {
    * blueprint in `interview.answers`, and confirm falls back to this same
    * settings default (spec invariant #7). */
   blueprint?: BlueprintShape;
+  /** "structure" step only — the lesson length the tutor booked two steps
+   * earlier, so the blueprint editor can show each section's share as real
+   * minutes of HIS lesson instead of a bare percentage. */
+  minutes_per_lesson?: number | null;
 }
 
 /** The `{interview_id, step, question, options?, findings?, error?}` envelope
@@ -1862,6 +1875,15 @@ export interface ChatSuggestionsOut {
  * same as every other call in this file. */
 export function getChatSuggestions(sessionId: string): Promise<ChatSuggestionsOut> {
   return request<ChatSuggestionsOut>(`/chat/${sessionId}/suggestions`, { method: "POST" });
+}
+
+/** `POST /chat/{session_id}/distill` — the revise chat's "talk it through
+ * first" exit: distills the conversation into ONE tutor-voiced revision
+ * instruction and returns it for the tutor to review/edit in the composer.
+ * Curriculum-bound sessions only; the API 409s otherwise (and for a chat with
+ * no tutor turns yet). Nothing is planned or applied by this call. */
+export function distillChatInstruction(sessionId: string): Promise<{ instruction: string }> {
+  return request<{ instruction: string }>(`/chat/${sessionId}/distill`, { method: "POST" });
 }
 
 /**

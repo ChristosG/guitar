@@ -78,7 +78,12 @@ function StepTrail({ currentStep }: { currentStep: string }) {
  * cannot spin the dialog forever; hitting it throws, and `handleAnswer`'s catch
  * shows the generic answer error. */
 async function pollOutlineJob(jobId: string): Promise<JobOut> {
-  const DEADLINE_MS = Date.now() + 6 * 60 * 1000;
+  // 25 min: past the server's own outline allowance (`claude_cli`'s
+  // role="plan" 1200s timeout + queueing) — the SERVER is the one that
+  // decides a job failed; this deadline exists only for a job that wedges
+  // without ever reaching a terminal status. At the old 6 min the client
+  // gave up on outlines the backend went on to finish.
+  const DEADLINE_MS = Date.now() + 25 * 60 * 1000;
   for (;;) {
     await new Promise((resolve) => setTimeout(resolve, 2000));
     const job = await getJob(jobId);
@@ -369,6 +374,7 @@ export function InterviewDialog({ onMaterialized }: InterviewDialogProps) {
               <InterviewStructureStep
                 key={state.step}
                 blueprint={findings?.blueprint}
+                minutesPerLesson={findings?.minutes_per_lesson}
                 submitting={submitting}
                 error={state.error}
                 onSubmit={handleAnswer}

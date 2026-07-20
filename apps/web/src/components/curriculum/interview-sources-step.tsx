@@ -64,6 +64,14 @@ export function InterviewSourcesStep({ options, shape, submitting, error, onSubm
   );
   const regime = estTokens <= 300_000 ? "whole" : estTokens <= 600_000 ? "canon" : "search";
 
+  // Above the whole-read threshold the canon carries the compiled sources and
+  // anything uncompiled rides along verbatim (or falls to retrieval) — worth a
+  // heads-up naming them, where the old flow failed the job after the fact.
+  const uncompiledSelected = useMemo(
+    () => options.filter((o) => selected.has(o.value) && o.compiled === false),
+    [options, selected],
+  );
+
   return (
     <form onSubmit={handleSubmit} className="flex flex-col gap-3">
       <div>
@@ -82,6 +90,18 @@ export function InterviewSourcesStep({ options, shape, submitting, error, onSubm
         </p>
       )}
 
+      {regime !== "whole" && uncompiledSelected.length > 0 && (
+        <p
+          data-testid="sources-uncompiled-hint"
+          className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400"
+        >
+          {t("steps.sources.uncompiledHint", {
+            count: uncompiledSelected.length,
+            titles: uncompiledSelected.map((o) => o.label).join(", "),
+          })}
+        </p>
+      )}
+
       {shape && (
         <p
           data-testid="interview-shape-echo"
@@ -93,7 +113,6 @@ export function InterviewSourcesStep({ options, shape, submitting, error, onSubm
             perModule: shape.lessons_per_module.join("+"),
             words: shape.target_words_per_lesson,
             taught: shape.teaching_minutes,
-            qa: shape.qa_minutes,
           })}
         </p>
       )}
@@ -144,6 +163,20 @@ export function InterviewSourcesStep({ options, shape, submitting, error, onSubm
             {opt.type && (
               <Badge variant="outline" className="shrink-0">
                 {opt.type}
+              </Badge>
+            )}
+            {opt.compiled !== undefined && (
+              <Badge
+                variant="outline"
+                data-testid={`interview-source-canon-${opt.value}`}
+                className={cn(
+                  "shrink-0",
+                  opt.compiled
+                    ? "border-emerald-500/40 text-emerald-600 dark:text-emerald-400"
+                    : "border-amber-500/40 text-amber-600 dark:text-amber-400",
+                )}
+              >
+                {opt.compiled ? t("steps.sources.canonReady") : t("steps.sources.canonMissing")}
               </Badge>
             )}
             <span

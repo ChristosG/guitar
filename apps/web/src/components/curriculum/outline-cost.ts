@@ -13,13 +13,9 @@
  * range. */
 const WORDS_PER_MINUTE = 55;
 
-/** `app/curriculum/shape.py::QA_MINUTES` — a FIXED span, not a fraction. A 30-
- * minute lesson and a 60-minute lesson both end with roughly ten minutes of "any
- * questions?", because that is a property of a room full of students. */
-const QA_MINUTES = 10;
-
-/** `app/curriculum/shape.py::MIN_TEACHING_MINUTES`. */
-const MIN_TEACHING_MINUTES = 10;
+/* No Q&A carve-out any more (`shape.py`, 2026-07-21): 50 means 50 — the whole
+ * booked slot is teaching time, and Q&A only exists as a weighted blueprint
+ * section inside it. */
 
 /** What ONE lesson costs to draft, at Sonnet 5 prices, WITH THE LIBRARY ALREADY
  * CACHED: ~90K library tokens read at 0.1x ($0.027) + ~6K output tokens ($0.09).
@@ -47,8 +43,7 @@ interface Sized {
  * lesson is *drafted* to and the words this footer *promises* are the same number,
  * derived the same way, from the minutes he can edit right here. */
 export function targetWords(estMinutes: number): number {
-  const teaching = Math.max(MIN_TEACHING_MINUTES, (estMinutes || 0) - QA_MINUTES);
-  return teaching * WORDS_PER_MINUTE;
+  return Math.max(1, estMinutes || 0) * WORDS_PER_MINUTE;
 }
 
 export function outlineTotals(modules: Sized[]): OutlineTotals {

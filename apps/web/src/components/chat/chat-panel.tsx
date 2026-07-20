@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { useLocale, useTranslations } from "next-intl";
-import { Loader2, Send } from "lucide-react";
+import { Loader2, Send, Wand2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ApprovalCard } from "@/components/chat/approval-card";
@@ -16,6 +16,7 @@ import {
   getChatSuggestions,
   getCurriculumProgress,
   getJob,
+  distillChatInstruction,
   getPendingApproval,
   resolveApproval,
   sendChatMessage,
@@ -142,6 +143,7 @@ export function ChatPanel({ sessionId, rootId, blockTitles, onJobDone }: ChatPan
   const [approvalError, setApprovalError] = useState<string | null>(null);
 
   const [jobPending, setJobPending] = useState(false);
+  const [distilling, setDistilling] = useState(false);
 
   // "Next move" suggestion chips (chat overhaul, Piece B). Fetched
   // NON-BLOCKING, after a genuine assistant answer has already rendered —
@@ -603,6 +605,34 @@ export function ChatPanel({ sessionId, rootId, blockTitles, onJobDone }: ChatPan
             placeholder={t("placeholder")}
             disabled={composerDisabled}
           />
+          {/* "Talk it through first" exit — curriculum-bound chats only: one
+              cheap call distills the conversation into the instruction the
+              tutor MEANT and drops it in the composer for him to edit and
+              send. Nothing is planned or applied until he presses Send. */}
+          {rootId && (
+            <Button
+              type="button"
+              variant="outline"
+              size="lg"
+              data-testid="chat-distill"
+              disabled={composerDisabled || distilling || messages.length === 0}
+              onClick={async () => {
+                setDistilling(true);
+                setComposerError(null);
+                try {
+                  const { instruction } = await distillChatInstruction(sessionId);
+                  setDraft(instruction);
+                } catch (e) {
+                  setComposerError(e instanceof ApiError && e.detail ? e.detail : t("distillFailed"));
+                } finally {
+                  setDistilling(false);
+                }
+              }}
+            >
+              {distilling ? <Loader2 className="animate-spin" /> : <Wand2 />}
+              {t("distill")}
+            </Button>
+          )}
           <Button type="submit" size="lg" disabled={composerDisabled || !draft.trim()} data-testid="chat-send">
             {sending ? <Loader2 className="animate-spin" /> : <Send />}
             {t("send")}

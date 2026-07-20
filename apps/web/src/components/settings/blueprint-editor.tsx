@@ -25,6 +25,10 @@ type StructuredKind = "exercises" | "qa";
 interface BlueprintEditorProps {
   value: BlueprintShape;
   onChange: (next: BlueprintShape) => void;
+  /** The real lesson length to preview section minutes against. The wizard
+   * passes the duration the tutor just booked; Settings omits it and the
+   * editor offers its own small preview-minutes input (default 50). */
+  minutesPerLesson?: number | null;
 }
 
 /** THE SHARED BLUEPRINT EDITOR (Plan C, Task 6; full delete/re-add follow-up
@@ -63,9 +67,28 @@ interface BlueprintEditorProps {
  * just be rejected server-side (`structured_section_duplicate`), so the menu
  * simply does not present that dead end.
  */
-export function BlueprintEditor({ value, onChange }: BlueprintEditorProps) {
+export function BlueprintEditor({ value, onChange, minutesPerLesson }: BlueprintEditorProps) {
   const t = useTranslations("blueprint");
   const [addError, setAddError] = useState<string | null>(null);
+  // The minutes the percentage column previews against. Seeded from the caller
+  // when it knows the real lesson length (the wizard does), else 50.
+  const [previewMinutes, setPreviewMinutes] = useState<number>(minutesPerLesson || 50);
+
+  // The tutor edits PERCENTAGES; `weight` (0..1) stays the stored model. The
+  // clock preview divides by the enabled total — exactly what the server's
+  // `_section_minutes` does — so the minutes always sum to the lesson even
+  // while the percentages are mid-edit and don't yet add to 100.
+  const enabledTotalPct = value.sections.reduce(
+    (sum, s) => sum + (s.enabled ? Math.round((s.weight || 0) * 100) : 0),
+    0,
+  );
+  const remainingPct = 100 - enabledTotalPct;
+
+  function sectionMinutes(section: BlueprintSection): number {
+    if (!section.enabled || enabledTotalPct <= 0) return 0;
+    const pct = Math.round((section.weight || 0) * 100);
+    return Math.max(1, Math.round((pct / enabledTotalPct) * previewMinutes));
+  }
 
   function patchSection(i: number, patch: Partial<BlueprintSection>) {
     const sections = [...value.sections];
@@ -132,6 +155,46 @@ export function BlueprintEditor({ value, onChange }: BlueprintEditorProps) {
 
   return (
     <div className="flex flex-col gap-3" data-testid="blueprint-editor">
+      {/* THE BUDGET LINE — the answer to "how much of the 0.4 is left". Always
+          visible while he edits: the enabled total, what remains (or the
+          overshoot), and the lesson minutes it previews against. Shares are
+          normalized server-side either way, so an off-100 total still drafts
+          sanely — the line is a compass, not a gate. */}
+      <div
+        data-testid="blueprint-budget"
+        className={cn(
+          "sticky top-0 z-10 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border px-3 py-2 text-xs",
+          enabledTotalPct === 100
+            ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+            : "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-400",
+        )}
+      >
+        <span className="font-medium" data-testid="blueprint-budget-total">
+          {t("budgetTotal", { total: enabledTotalPct })}
+        </span>
+        {remainingPct !== 0 && (
+          <span data-testid="blueprint-budget-remaining">
+            {remainingPct > 0
+              ? t("budgetRemaining", { left: remainingPct })
+              : t("budgetOver", { over: -remainingPct })}
+          </span>
+        )}
+        <span className="ml-auto flex items-center gap-1.5 text-muted-foreground">
+          {t("previewMinutesLabel")}
+          <Input
+            type="number"
+            min={5}
+            max={240}
+            step={5}
+            value={previewMinutes}
+            data-testid="blueprint-preview-minutes"
+            onChange={(e) => setPreviewMinutes(Number(e.target.value) || 50)}
+            className="h-7 w-16 text-xs"
+          />
+          ′
+        </span>
+      </div>
+
       <div className="flex flex-col gap-2.5">
         {value.sections.map((section, i) => {
           const structured = section.kind !== "prose";
@@ -231,17 +294,29 @@ export function BlueprintEditor({ value, onChange }: BlueprintEditorProps) {
 
                   <div className="flex flex-wrap items-end gap-3">
                     <div className="flex min-w-0 flex-col gap-1">
-                      <Label className="text-xs">{t("weightLabel")}</Label>
-                      <Input
-                        type="number"
-                        min={0}
-                        max={1}
-                        step={0.01}
-                        value={section.weight}
-                        data-testid={`blueprint-weight-${rowId}`}
-                        onChange={(e) => patchSection(i, { weight: Number(e.target.value) })}
-                        className="h-8 w-24"
-                      />
+                      <Label className="text-xs">{t("percentLabel")}</Label>
+                      <div className="flex items-center gap-2">
+                        <Input
+                          type="number"
+                          min={0}
+                          max={100}
+                          step={1}
+                          value={Math.round((section.weight || 0) * 100)}
+                          data-testid={`blueprint-weight-${rowId}`}
+                          onChange={(e) =>
+                            patchSection(i, { weight: Number(e.target.value) / 100 })
+                          }
+                          className="h-8 w-20"
+                        />
+                        <span
+                          data-testid={`blueprint-minutes-${rowId}`}
+                          className="whitespace-nowrap text-xs text-muted-foreground"
+                        >
+                          {section.enabled
+                            ? t("sectionMinutes", { min: sectionMinutes(section) })
+                            : "—"}
+                        </span>
+                      </div>
                     </div>
 
                     <div className="flex min-w-0 flex-col gap-1">

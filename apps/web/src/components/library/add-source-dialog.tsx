@@ -42,6 +42,9 @@ export function AddSourceDialog({ onCreated }: AddSourceDialogProps) {
   const [title, setTitle] = useState("");
   const [text, setText] = useState("");
   const [url, setUrl] = useState("");
+  // 1 = the classic single-page fetch; >1 = scoped same-site crawl for
+  // guides that span linked pages (server-capped at 50 in brain/crawl.py).
+  const [crawlPages, setCrawlPages] = useState(1);
   const [file, setFile] = useState<File | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -50,6 +53,7 @@ export function AddSourceDialog({ onCreated }: AddSourceDialogProps) {
     setTitle("");
     setText("");
     setUrl("");
+    setCrawlPages(1);
     setFile(null);
     setError(null);
   }
@@ -90,6 +94,7 @@ export function AddSourceDialog({ onCreated }: AddSourceDialogProps) {
           title,
           text: mode === "text" ? text : undefined,
           url: mode === "url" ? url : undefined,
+          crawl_pages: mode === "url" && crawlPages > 1 ? crawlPages : undefined,
         });
       }
       reset();
@@ -178,6 +183,19 @@ export function AddSourceDialog({ onCreated }: AddSourceDialogProps) {
                   placeholder={t("urlPlaceholder")}
                   required
                 />
+                <Label htmlFor="add-source-crawl" className="mt-1.5">
+                  {t("crawlLabel")}
+                </Label>
+                <Input
+                  id="add-source-crawl"
+                  data-testid="add-source-crawl"
+                  type="number"
+                  min={1}
+                  max={50}
+                  value={crawlPages}
+                  onChange={(e) => setCrawlPages(Math.max(1, Math.min(50, Number(e.target.value) || 1)))}
+                />
+                <p className="text-xs text-muted-foreground">{t("crawlHint")}</p>
               </div>
             )}
 

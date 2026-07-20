@@ -12,6 +12,9 @@ interface InterviewStructureStepProps {
    * practice (`describe_step`'s "structure" branch always sends it), but typed
    * optional because `InterviewFindings` is a shared, all-optional shape. */
   blueprint: BlueprintShape | undefined;
+  /** `findings.minutes_per_lesson` — the lesson length booked at the duration
+   * step, so the editor previews each section's share in real minutes. */
+  minutesPerLesson?: number | null;
   submitting: boolean;
   error: string | null | undefined;
   onSubmit: (answer: unknown) => void;
@@ -41,6 +44,7 @@ const EMPTY_BLUEPRINT: BlueprintShape = { version: 1, sections: [] };
  */
 export function InterviewStructureStep({
   blueprint,
+  minutesPerLesson,
   submitting,
   error,
   onSubmit,
@@ -61,7 +65,7 @@ export function InterviewStructureStep({
       </div>
 
       <fieldset disabled={submitting} className="flex min-w-0 flex-col gap-3">
-        <BlueprintEditor value={draft} onChange={setDraft} />
+        <BlueprintEditor value={draft} onChange={setDraft} minutesPerLesson={minutesPerLesson} />
       </fieldset>
 
       {error && (

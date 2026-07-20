@@ -322,7 +322,7 @@
           "heading": "How long does this run?",
           "weeksLabel": "Weeks",
           "perWeekLabel": "Sessions/week",
-          "minutesLabel": "Minutes per session"
+          "minutesLabel": "Minutes per lesson"
         },
         "scope": {
           "heading": "In your own words: what is this course FOR?",
@@ -350,7 +350,10 @@
           "regimeSearch": "≈ {tokens, number} tokens — very large, so the model drafts from a per-module search over these books rather than the full text.",
           "empty": "Your library is empty — this will draw on general knowledge only.",
           "charCount": "{count, number} chars",
-          "shape": "{lessons} lessons -> {modules} modules ({perModule}) -> ~{words} words each ({taught} min taught + {qa} min Q&A)"
+          "shape": "{lessons} lessons -> {modules} modules ({perModule}) -> ~{words} words each ({taught} min per lesson)",
+          "canonReady": "canon ✓",
+          "canonMissing": "not compiled",
+          "uncompiledHint": "{count, plural, one {# selected source is not compiled into the canon yet} other {# selected sources are not compiled into the canon yet}}: {titles}. They will still be included (read verbatim or via search) — compiling them from the Library screen gives the model a cleaner, cross-referenced view."
         },
         "outline": {
           "working": "Reading your whole library and writing the course — this can take a couple of minutes…"
@@ -538,7 +541,9 @@
       "cancel": "Cancel",
       "submit": "Add",
       "submitting": "Adding…",
-      "error": "Could not add this source."
+      "error": "Could not add this source.",
+      "crawlLabel": "Pages to follow (same site)",
+      "crawlHint": "1 = just this page. Higher = also follow the page's own links on the same site (a multi-page guide or course), up to 50 pages."
     },
     "collectionDialog": {
       "trigger": "New collection",
@@ -864,7 +869,9 @@
       "createError": "Could not start a new conversation.",
       "renameError": "Could not rename this conversation.",
       "deleteError": "Could not delete this conversation."
-    }
+    },
+    "distill": "Draft the instruction",
+    "distillFailed": "Could not distill the conversation — try again."
   },
   "login": {
     "title": "Guitar Tutor Copilot",
@@ -1036,7 +1043,13 @@
       "save_failed": "It didn't save. Try again.",
       "load_failed": "The structure didn't load. Refresh the page.",
       "network": "Couldn't reach the server. Check your connection."
-    }
+    },
+    "percentLabel": "Share %",
+    "sectionMinutes": "≈ {min}′",
+    "budgetTotal": "Total: {total}%",
+    "budgetRemaining": "{left}% left to assign",
+    "budgetOver": "{over}% over — shares will be scaled down proportionally",
+    "previewMinutesLabel": "for a lesson of"
   },
   "confirm": {
     "cancel": "Cancel",
