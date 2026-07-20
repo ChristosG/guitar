@@ -508,6 +508,15 @@ def persist_lesson(
     collection causing a delete-orphan cascade to eat re-parented items) and solved
     it with `db.expire(..., ["children"])`; the same expire runs at the end here, so
     the caller's next read of `.children` is fresh.
+
+    CUSTOM SEGMENTS SURVIVE THE DELETE (2026-07-20, Spec A). `revise.apply_revision`'s
+    `add_segment` op can surgically add a segment outside the blueprint entirely
+    (`meta.custom is True`) — a redraft that blew those away along with the
+    regenerated blueprint sections would silently undo a tutor's surgical edit the
+    next time he re-drafted the lesson. So the delete-all below spares any child
+    carrying `meta.custom`, and they are re-appended AFTER the freshly-built
+    blueprint sections, in their prior relative order, with `order` continuing on
+    from where the new sections left off.
     """
     from sqlalchemy import select
 
@@ -517,8 +526,14 @@ def persist_lesson(
 
     bp = blueprint if blueprint is not None else _bp.default_blueprint()
 
-    for old in db.scalars(select(Block).where(Block.parent_id == lesson_block.id)).all():
-        db.delete(old)
+    children = db.scalars(
+        select(Block).where(Block.parent_id == lesson_block.id).order_by(Block.order)
+    ).all()
+    customs = [b for b in children if (b.meta or {}).get("custom")]
+    custom_ids = {b.id for b in customs}
+    for old in children:
+        if old.id not in custom_ids:
+            db.delete(old)
     db.flush()
 
     # Fallback is "el", not "en" — i18n.py's own rule: anything in this codebase
@@ -566,6 +581,15 @@ def persist_lesson(
                 "citations": cites,
             },
         ))
+        order += 1
+
+    # The preserved customs (see docstring): re-appended AFTER the freshly-built
+    # blueprint sections, in their prior relative order (`children` above was
+    # already ordered), `order` continuing on from where the loop left off. These
+    # rows are the SAME blocks — not deleted/recreated — so their id/body/meta are
+    # untouched by this redraft.
+    for custom in customs:
+        custom.order = order
         order += 1
 
     if lesson.get("summary"):

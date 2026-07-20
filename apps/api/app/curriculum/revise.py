@@ -27,11 +27,17 @@ commits exactly once.
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 
 from sqlalchemy import select
 
-from app.curriculum.blueprint import BlueprintInvalid, validate_blueprint
+from app.curriculum.blueprint import (
+    BlueprintInvalid,
+    blueprint_from_course_meta,
+    section_keys,
+    validate_blueprint,
+)
 from app.curriculum.corpus import CURRICULUM_SYSTEM, CURRICULUM_SYSTEM_SLICE_ID
 from app.curriculum.ground import ground_topic
 from app.curriculum.outline import TIER_ORDER
@@ -55,9 +61,16 @@ class ReviseError(ValueError):
 # also reshape an existing course's lesson blueprint). It carries the full
 # replacement blueprint object and NEVER auto-re-drafts — re-drafting existing
 # lessons under a new blueprint stays the opt-in `POST /curricula/{root}/redraft`.
+#
+# `add_segment` / `edit_segment` / `remove_segment` (2026-07-20, Spec A) are the
+# SURGICAL ops: they target one SEGMENT inside a lesson rather than the whole
+# lesson `modify_lesson` rewrites. Apply only creates/marks/deletes the segment
+# block here — GENERATING a queued segment's body is a later task (the job), same
+# division as every other queued op in this module.
 _OP_ENUM = [
     "insert_lesson", "insert_module", "modify_lesson", "move_lesson",
     "remove_lesson", "update_blueprint",
+    "add_segment", "edit_segment", "remove_segment",
 ]
 
 REVISION_PLAN_SCHEMA: dict = {
@@ -80,11 +93,18 @@ REVISION_PLAN_SCHEMA: dict = {
                                         "description": "insert_module: place AFTER this module id, or omit"},
                     "to_module_id": {"type": "string", "description": "move_lesson: the destination module id"},
                     "lesson_id": {"type": "string",
-                                  "description": "modify_lesson/move_lesson/remove_lesson: the target lesson id"},
+                                  "description": "modify_lesson/move_lesson/remove_lesson: the target lesson id; "
+                                                 "add_segment: the lesson to add the new segment to"},
+                    "segment_id": {"type": "string",
+                                   "description": "edit_segment/remove_segment: the target segment id"},
+                    "section_key": {"type": "string",
+                                    "description": "add_segment: file the new segment under this ENABLED "
+                                                   "blueprint section key; omit for a custom, unfiled segment"},
                     "title": {"type": "string"},
                     "objective": {"type": "string"},
                     "instruction": {"type": "string",
-                                    "description": "modify_lesson: what to change about the lesson"},
+                                    "description": "modify_lesson: what to change about the lesson; "
+                                                   "add_segment/edit_segment: what the new/edited segment should say"},
                     "tier": {"type": "string", "enum": list(TIER_ORDER),
                              "description": "insert_module: where its material comes from — say honestly"},
                     "lessons": {
@@ -122,6 +142,9 @@ _REQUIRED: dict[str, tuple[str, ...]] = {
     "move_lesson": ("lesson_id", "to_module_id"),
     "remove_lesson": ("lesson_id",),
     "update_blueprint": ("blueprint",),
+    "add_segment": ("lesson_id", "title", "instruction"),
+    "edit_segment": ("segment_id", "instruction"),
+    "remove_segment": ("segment_id",),
 }
 
 
@@ -232,12 +255,34 @@ def _lesson_module(db, lesson_id: uuid.UUID) -> uuid.UUID | None:
     return l.parent_id if l is not None and l.kind == "lesson" else None
 
 
+def _segment_course_id(db, segment_id_str: str) -> uuid.UUID | None:
+    """The course id a segment lives under, walking its fixed-depth ancestry
+    (segment -> lesson -> module -> course), or None if `segment_id_str` does not
+    resolve to a live `kind=="segment"` block with that whole chain intact —
+    covers a malformed id, an id that names a lesson/module instead, and a
+    segment that is a real block but orphaned or outside a course."""
+    try:
+        segment_id = uuid.UUID(segment_id_str)
+    except (ValueError, TypeError, AttributeError):
+        return None
+    seg = db.get(Block, segment_id)
+    if seg is None or seg.kind != "segment" or seg.parent_id is None:
+        return None
+    lesson = db.get(Block, seg.parent_id)
+    if lesson is None or lesson.kind != "lesson" or lesson.parent_id is None:
+        return None
+    module = db.get(Block, lesson.parent_id)
+    return module.parent_id if module is not None and module.kind == "module" else None
+
+
 def validate_ops(db, root_id: uuid.UUID, raw: dict) -> dict:
     """Drop every op whose required fields are missing or whose ids do not resolve
     to a real block of the right kind UNDER THIS ROOT (constraint #2). Logs each
     drop. Returns {summary, ops} — ops trimmed, ids kept as the model's strings
     (apply re-resolves them)."""
     module_ids, lesson_ids = _tree_ids(db, root_id)
+    course = db.get(Block, root_id)
+    enabled_keys = set(section_keys(blueprint_from_course_meta(course.meta if course else None)))
     kept: list[dict] = []
     for op in raw.get("ops") or []:
         name = op.get("op")
@@ -281,6 +326,16 @@ def validate_ops(db, root_id: uuid.UUID, raw: dict) -> dict:
             except BlueprintInvalid as e:
                 log.warning("revise: dropping update_blueprint op — invalid blueprint (%s)", e.code)
                 ok = False
+        elif name == "add_segment":
+            ok = op["lesson_id"] in lesson_ids
+            section_key = op.get("section_key")
+            if ok and section_key and section_key not in enabled_keys:
+                log.warning(
+                    "revise: dropping add_segment op — section_key %r is not an enabled "
+                    "blueprint section (enabled: %s)", section_key, sorted(enabled_keys))
+                ok = False
+        elif name in ("edit_segment", "remove_segment"):
+            ok = _segment_course_id(db, op["segment_id"]) == root_id
         if not ok:
             log.warning("revise: dropping %s op — an id/payload does not resolve under root %s",
                         name, root_id)
@@ -344,6 +399,33 @@ def _queue(block: Block) -> None:
     block.meta = {**(block.meta or {}), "draft_status": "queued", "error": None}
 
 
+_SLUG_NON_WORD_RE = re.compile(r"[^\w-]+")
+
+
+def _slug(title: str) -> str:
+    """lowercase, spaces -> '-', strip anything non-word — the tiny helper behind
+    a custom segment's `section: "custom:<slug>"` key. Never empty: an all-symbol
+    title falls back to "segment" rather than minting `custom:`."""
+    slug = _SLUG_NON_WORD_RE.sub("", title.strip().lower().replace(" ", "-"))
+    return slug or "segment"
+
+
+def _recompute_lesson_word_count(db, lesson: Block) -> None:
+    """After ANY segment op on `lesson`, its `word_count`/`meets_floor` meta must
+    reflect the segments as they now stand — a queued segment's body is "" until
+    the (later) generation job fills it in, so this undercounts until then, same
+    as any other queued lesson. WHOLE-DICT reassignment (Constraint #4)."""
+    segments = db.scalars(
+        select(Block).where(Block.parent_id == lesson.id, Block.kind == "segment")
+    ).all()
+    word_count = sum(len((s.body or "").split()) for s in segments)
+    meta = {**(lesson.meta or {}), "word_count": word_count}
+    floor_words = meta.get("floor_words")
+    if floor_words is not None:
+        meta["meets_floor"] = word_count >= floor_words
+    lesson.meta = meta
+
+
 def apply_revision(db, root_id: uuid.UUID, plan: dict) -> dict:
     """Execute an APPROVED plan in ONE transaction (Global Constraint #3). Re-validates
     every id (defence in depth — the chat path round-trips the plan through the
@@ -402,6 +484,52 @@ def apply_revision(db, root_id: uuid.UUID, plan: dict) -> dict:
                 # the NORMALISED blueprint. NEVER re-drafts existing lessons — that is
                 # the opt-in `POST /curricula/{root}/redraft` route (Unit C), not this.
                 course.meta = {**(course.meta or {}), "blueprint": validate_blueprint(op["blueprint"])}
+            elif name == "add_segment":
+                lesson = db.get(Block, uuid.UUID(op["lesson_id"]))
+                siblings = db.scalars(
+                    select(Block).where(Block.parent_id == lesson.id, Block.kind == "segment")
+                ).all()
+                section_key = op.get("section_key")
+                seg_meta = {"segment_status": "queued", "segment_instruction": op["instruction"]}
+                if section_key:
+                    seg_meta["section"] = section_key
+                else:
+                    # No enabled section named — files as its OWN custom section, never
+                    # silently attached to an existing one (persist_lesson's survival
+                    # rule keys off `meta.custom`, not this key's shape).
+                    seg_meta["custom"] = True
+                    seg_meta["section"] = f"custom:{_slug(op['title'])}"
+                db.add(Block(
+                    kind="segment", title=op["title"], body="", order=len(siblings),
+                    parent_id=lesson.id, language=lesson.language, meta=seg_meta))
+                db.flush()
+                _recompute_lesson_word_count(db, lesson)
+            elif name == "edit_segment":
+                segment = db.get(Block, uuid.UUID(op["segment_id"]))
+                lesson = db.get(Block, segment.parent_id)
+                # The refine-flow meta contract VERBATIM (refine.py:169-175) so
+                # POST /blocks/{id}/undo (undo_refine, refine.py:179-190) works
+                # unchanged on a surgically-edited segment.
+                segment.meta = {
+                    **(segment.meta or {}),
+                    "segment_status": "queued",
+                    "segment_instruction": op["instruction"],
+                    "prev_body": segment.body,
+                    "prev_title": segment.title,
+                    "refined": True,
+                    "refine_instruction": op["instruction"],
+                }
+                _recompute_lesson_word_count(db, lesson)
+            elif name == "remove_segment":
+                segment = db.get(Block, uuid.UUID(op["segment_id"]))
+                lesson_id = segment.parent_id
+                db.delete(segment)
+                db.flush()
+                if lesson_id is not None:
+                    edit._renormalise(db, lesson_id)
+                    lesson = db.get(Block, lesson_id)
+                    if lesson is not None:
+                        _recompute_lesson_word_count(db, lesson)
             applied += 1
         db.commit()
     except Exception:

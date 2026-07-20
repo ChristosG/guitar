@@ -1,0 +1,347 @@
+"""Task 1 (Spec A, apply side): surgical segment-level ops.
+
+Today the smallest revise op rewrites a whole LESSON (`modify_lesson`). This adds
+`add_segment` / `edit_segment` / `remove_segment` — ops that target one SEGMENT
+inside a lesson — to the ops schema and `apply_revision`, plus the custom-segment
+survival rule in `persist_lesson`: without it, any later lesson redraft would
+silently delete a surgically-added segment along with the blueprint sections it
+regenerates.
+
+`apply_revision` still keeps its four properties for these ops too: ONE
+transaction, ONE commit, rollback-on-exception, ZERO provider calls — apply only
+creates/marks/deletes blocks. GENERATING a queued segment's body is a later task
+(the job), not this one.
+
+Mirrors test_revise_apply.py's fixture/skip-guard/setup_module conventions.
+"""
+import uuid
+
+import pytest
+from sqlalchemy import select, text
+
+from app.db import Base, SessionLocal, engine
+from app.models.block import Block
+from app.curriculum.blueprint import default_blueprint, section_keys
+from app.curriculum.refine import undo_refine
+import app.curriculum.revise as revise
+
+try:
+    with engine.connect() as _c:
+        _c.execute(text("SELECT 1"))
+except Exception:
+    pytest.skip("database not reachable", allow_module_level=True)
+
+
+def setup_module(_):
+    Base.metadata.create_all(engine)
+
+
+def _children(db, parent_id, kind=None):
+    q = select(Block).where(Block.parent_id == parent_id)
+    if kind:
+        q = q.where(Block.kind == kind)
+    return db.scalars(q.order_by(Block.order)).all()
+
+
+@pytest.fixture
+def db_and_tree():
+    """course (blueprint = code default) -> module -> lesson -> 2 segments
+    (theory, exercises). `floor_words=10` on the lesson so `meets_floor`
+    recomputation is exercised (8 words to start, under floor)."""
+    db = SessionLocal()
+    course = Block(kind="course", title="Tone", is_template=True, language="el",
+                   meta={"brief": None, "source_ids": None,
+                         "gap_policy": "general_knowledge", "blueprint": default_blueprint()})
+    db.add(course)
+    db.flush()
+    module = Block(kind="module", title="M1", parent_id=course.id, order=0, language="el",
+                   meta={"objective": "m1"})
+    db.add(module)
+    db.flush()
+    lesson = Block(kind="lesson", title="L1", parent_id=module.id, order=0, language="el",
+                   meta={"objective": "l1", "floor_words": 10})
+    db.add(lesson)
+    db.flush()
+    seg1 = Block(kind="segment", title="Theory", body="word word word word word",
+                 order=0, parent_id=lesson.id, language="el", meta={"section": "theory"})
+    seg2 = Block(kind="segment", title="Exercises", body="word word word",
+                 order=1, parent_id=lesson.id, language="el", meta={"section": "exercises"})
+    db.add_all([seg1, seg2])
+    db.commit()
+    yield db, course, module, lesson, seg1, seg2
+    db.close()
+
+
+# ---------------------------------------------------------------------------
+# validate_ops
+# ---------------------------------------------------------------------------
+
+def test_validate_ops_accepts_the_three_new_ops_with_required_fields(db_and_tree):
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    plan = {"summary": "s", "ops": [
+        {"op": "add_segment", "lesson_id": str(lesson.id), "title": "New bit",
+         "instruction": "add a paragraph", "reason": "r"},
+        {"op": "add_segment", "lesson_id": str(lesson.id), "title": "More theory",
+         "instruction": "expand", "section_key": "theory", "reason": "r"},
+        {"op": "edit_segment", "segment_id": str(seg1.id), "instruction": "simplify", "reason": "r"},
+        {"op": "remove_segment", "segment_id": str(seg2.id), "reason": "r"},
+    ]}
+    out = revise.validate_ops(db, course.id, plan)
+    assert [o["op"] for o in out["ops"]] == [
+        "add_segment", "add_segment", "edit_segment", "remove_segment",
+    ]
+
+
+def test_validate_ops_rejects_add_segment_with_a_disabled_section_key(db_and_tree):
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    plan = {"summary": "s", "ops": [
+        {"op": "add_segment", "lesson_id": str(lesson.id), "title": "Bad",
+         "instruction": "x", "section_key": "not_a_real_section", "reason": "r"}]}
+    out = revise.validate_ops(db, course.id, plan)
+    assert out["ops"] == []
+
+
+def test_validate_ops_rejects_edit_and_remove_segment_targeting_a_lesson_id(db_and_tree):
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    plan = {"summary": "s", "ops": [
+        {"op": "edit_segment", "segment_id": str(lesson.id), "instruction": "x", "reason": "r"},
+        {"op": "remove_segment", "segment_id": str(lesson.id), "reason": "r"},
+    ]}
+    out = revise.validate_ops(db, course.id, plan)
+    assert out["ops"] == []
+
+
+def test_validate_ops_rejects_segment_ops_targeting_a_segment_outside_the_course(db_and_tree):
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    other_course = Block(kind="course", title="Other", is_template=True, language="el", meta={})
+    db.add(other_course)
+    db.flush()
+    other_module = Block(kind="module", title="OM", parent_id=other_course.id, order=0, language="el",
+                         meta={})
+    db.add(other_module)
+    db.flush()
+    other_lesson = Block(kind="lesson", title="OL", parent_id=other_module.id, order=0, language="el",
+                         meta={})
+    db.add(other_lesson)
+    db.flush()
+    other_seg = Block(kind="segment", title="OS", body="x", order=0, parent_id=other_lesson.id,
+                      language="el", meta={})
+    db.add(other_seg)
+    db.commit()
+
+    plan = {"summary": "s", "ops": [
+        {"op": "edit_segment", "segment_id": str(other_seg.id), "instruction": "x", "reason": "r"},
+        {"op": "remove_segment", "segment_id": str(other_seg.id), "reason": "r"},
+    ]}
+    out = revise.validate_ops(db, course.id, plan)
+    assert out["ops"] == []
+
+
+# ---------------------------------------------------------------------------
+# apply_revision — add_segment
+# ---------------------------------------------------------------------------
+
+def test_apply_add_segment_without_section_key_is_custom(db_and_tree):
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    out = revise.apply_revision(db, course.id, {"summary": "s", "ops": [
+        {"op": "add_segment", "lesson_id": str(lesson.id), "title": "Bonus: Pedal chains",
+         "instruction": "explain pedal chaining order", "reason": "r"}]})
+    assert out == {"applied": 1, "root_id": str(course.id)}
+
+    segs = _children(db, lesson.id, "segment")
+    assert [s.title for s in segs] == ["Theory", "Exercises", "Bonus: Pedal chains"]
+    new = segs[-1]
+    assert new.body == ""
+    assert new.meta["segment_status"] == "queued"
+    assert new.meta["segment_instruction"] == "explain pedal chaining order"
+    assert new.meta["custom"] is True
+    assert new.meta["section"] == "custom:bonus-pedal-chains"
+
+    db.refresh(lesson)
+    assert lesson.meta["word_count"] == 8            # 5 + 3, the new segment's body is ""
+    assert lesson.meta["meets_floor"] is False        # 8 < floor_words=10
+
+
+def test_apply_add_segment_with_enabled_section_key(db_and_tree):
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    revise.apply_revision(db, course.id, {"summary": "s", "ops": [
+        {"op": "add_segment", "lesson_id": str(lesson.id), "title": "More on scales",
+         "instruction": "expand theory", "section_key": "theory", "reason": "r"}]})
+    new = _children(db, lesson.id, "segment")[-1]
+    assert new.meta["section"] == "theory"
+    assert "custom" not in new.meta
+
+
+# ---------------------------------------------------------------------------
+# apply_revision — edit_segment, and the undo_refine contract match
+# ---------------------------------------------------------------------------
+
+def test_apply_edit_segment_matches_the_refine_contract_and_undo_restores_it(db_and_tree):
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    revise.apply_revision(db, course.id, {"summary": "s", "ops": [
+        {"op": "edit_segment", "segment_id": str(seg1.id), "instruction": "simplify the wording",
+         "reason": "r"}]})
+    db.refresh(seg1)
+    assert seg1.meta["segment_status"] == "queued"
+    assert seg1.meta["segment_instruction"] == "simplify the wording"
+    assert seg1.meta["prev_body"] == "word word word word word"
+    assert seg1.meta["prev_title"] == "Theory"
+    assert seg1.meta["refined"] is True
+    assert seg1.meta["refine_instruction"] == "simplify the wording"
+
+    db.refresh(lesson)
+    assert lesson.meta["word_count"] == 8             # recomputed even though bodies unchanged
+
+    # Simulate the LATER generation step overwriting the segment, then undo it —
+    # this is undo_refine (refine.py:179-190) unchanged, proving the meta keys
+    # edit_segment stashes are exactly what it restores/strips.
+    seg1.body = "the generated replacement body"
+    seg1.title = "Renamed by generation"
+    db.commit()
+
+    assert undo_refine(seg1) is True
+    db.commit()
+    db.expire_all()
+
+    seg1 = db.get(Block, seg1.id)
+    assert seg1.body == "word word word word word"
+    assert seg1.title == "Theory"
+    for key in ("prev_body", "prev_title", "refined", "refine_instruction"):
+        assert key not in seg1.meta
+    # segment_status/segment_instruction are NOT part of undo_refine's strip set —
+    # they are left as-is, same as any other meta key it does not know about.
+    assert seg1.meta["segment_status"] == "queued"
+
+
+# ---------------------------------------------------------------------------
+# apply_revision — remove_segment
+# ---------------------------------------------------------------------------
+
+def test_apply_remove_segment_deletes_renormalises_and_recomputes(db_and_tree):
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    seg3 = Block(kind="segment", title="Recap", body="word word", order=2, parent_id=lesson.id,
+                language="el", meta={"section": "recap"})
+    db.add(seg3)
+    db.commit()
+
+    out = revise.apply_revision(db, course.id, {"summary": "s", "ops": [
+        {"op": "remove_segment", "segment_id": str(seg1.id), "reason": "r"}]})
+    assert out["applied"] == 1
+
+    segs = _children(db, lesson.id, "segment")
+    assert [s.title for s in segs] == ["Exercises", "Recap"]
+    assert [s.order for s in segs] == [0, 1]           # renormalised
+
+    db.refresh(lesson)
+    assert lesson.meta["word_count"] == 5              # 3 (Exercises) + 2 (Recap)
+    assert lesson.meta["meets_floor"] is False
+
+
+# ---------------------------------------------------------------------------
+# apply_revision — transactionality
+# ---------------------------------------------------------------------------
+
+def test_apply_revision_rolls_back_the_whole_plan_on_a_later_bad_op(db_and_tree, monkeypatch):
+    """A plan whose second op is invalid AT APPLY TIME (simulated by monkeypatching
+    validate_ops to pass everything through unfiltered, standing in for a garbled
+    id that slipped past a weakened validate) must roll back the first op too —
+    ONE transaction, not partial application (Global Constraint #3)."""
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    before = {b.id: (b.title, b.order, b.parent_id, b.meta) for b in db.query(Block).all()}
+
+    def passthrough(db_, root_id, raw):
+        return {"summary": raw.get("summary") or "", "ops": raw.get("ops") or []}
+
+    monkeypatch.setattr(revise, "validate_ops", passthrough)
+
+    plan = {"summary": "s", "ops": [
+        {"op": "add_segment", "lesson_id": str(lesson.id), "title": "Will be rolled back",
+         "instruction": "x", "reason": "r"},
+        {"op": "remove_segment", "segment_id": str(uuid.uuid4()),
+         "reason": "bogus id — passed a weakened validate"},
+    ]}
+    with pytest.raises(Exception):
+        revise.apply_revision(db, course.id, plan)
+    db.rollback()
+
+    after = {b.id: (b.title, b.order, b.parent_id, b.meta) for b in db.query(Block).all()}
+    assert after == before
+
+
+# ---------------------------------------------------------------------------
+# persist_lesson — custom-segment survival
+# ---------------------------------------------------------------------------
+
+def _drafted_lesson() -> dict:
+    """A minimal but schema-valid drafted lesson for the default blueprint —
+    trimmed copy of test_blueprint_regression.py's `_lesson()` fixture shape."""
+    def prose(n):
+        return {"body": " ".join(["word"] * n), "citations": []}
+
+    return {
+        "title": "Sample lesson title here",
+        "summary": " ".join(["sum"] * 12),
+        "warm_up": prose(40),
+        "theory": prose(500),
+        "demonstration": prose(300),
+        "exercises": {
+            "body": " ".join(["ex"] * 120),
+            "items": [
+                {"title": "Ex one", "instructions": " ".join(["do"] * 120), "est_minutes": 5},
+                {"title": "Ex two", "instructions": " ".join(["do"] * 80), "est_minutes": 5},
+            ],
+            "citations": [],
+        },
+        "common_mistakes": prose(90),
+        "recap": prose(30),
+        "homework": prose(35),
+        "qa_prompts": {
+            "body": " ".join(["qa"] * 20),
+            "items": [
+                {"question": " ".join(["q"] * 10), "answer_key": " ".join(["a"] * 15)},
+            ],
+            "citations": [],
+        },
+    }
+
+
+def test_persist_lesson_preserves_custom_segments_appended_after(db):
+    from app.curriculum.corpus import LibraryContext
+    from app.curriculum.depth import measure
+    from app.curriculum.draft import persist_lesson
+
+    lesson_block = Block(kind="lesson", title="L1", language="el", meta={})
+    db.add(lesson_block)
+    db.flush()
+
+    # A pre-existing blueprint segment that WILL be regenerated/replaced by the redraft.
+    old_theory = Block(kind="segment", title="Old Theory", body="stale", order=0,
+                       parent_id=lesson_block.id, language="el", meta={"section": "theory"})
+    # A custom segment surgically added by add_segment (Task 1) — must SURVIVE.
+    custom = Block(kind="segment", title="Bonus bit", body="", order=1,
+                  parent_id=lesson_block.id, language="el",
+                  meta={"custom": True, "section": "custom:bonus-bit",
+                        "segment_status": "queued", "segment_instruction": "explain X"})
+    db.add_all([old_theory, custom])
+    db.commit()
+
+    bp = default_blueprint()
+    lesson = _drafted_lesson()
+    library = LibraryContext(text="", token_count=0, fits=True)
+    m = measure(lesson, bp, teaching_minutes=40)
+    persist_lesson(db, lesson_block, lesson, m, library, bp, qa_minutes=10, teaching_minutes=40)
+    db.commit()
+    db.expire_all()
+
+    lesson_block = db.get(Block, lesson_block.id)
+    segments = sorted(lesson_block.children, key=lambda b: b.order)
+
+    keys = [s.meta.get("section") for s in segments]
+    assert keys[:-1] == list(section_keys(bp))         # blueprint sections regenerated, in order
+    assert keys[-1] == "custom:bonus-bit"              # custom segment appended AFTER them
+
+    assert segments[-1].id == custom.id                # the SAME row — not deleted/recreated
+    assert segments[-1].body == ""                     # untouched by the redraft
+    assert segments[-1].title == "Bonus bit"
+
+    assert [s.order for s in segments] == list(range(len(segments)))   # sequential order
