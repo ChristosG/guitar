@@ -113,3 +113,76 @@ def test_interview_context_yields_to_curriculum_when_both_ids_set():
         assert _inject_interview_context(db, session, wire) == wire
     finally:
         db.close()
+
+
+from app.models.chat import Message
+
+
+def _mk_bound_session_with_transcript(db, interview):
+    session = ChatSession(interview_id=interview.id, locale="el")
+    db.add(session); db.flush()
+    db.add(Message(session_id=session.id, role="user",
+                   content="Θέλω 20 εβδομάδες για ήχο κιθάρας, έμφαση στην πράξη."))
+    db.add(Message(session_id=session.id, role="assistant",
+                   content="Προτείνω 4 ενότητες: μαγνήτες, ενισχυτές, ηχεία, πετάλια."))
+    db.commit()
+    return session
+
+
+def test_distill_returns_brief_and_does_not_store(monkeypatch):
+    db = SessionLocal()
+    try:
+        interview = _mk_interview(db)
+        _mk_bound_session_with_transcript(db, interview)
+
+        from app.curriculum import interview as interview_mod
+        seen = {}
+
+        class _FakeProvider:
+            def guided_json(self, messages, schema, *, role=None, **kw):
+                seen["messages"] = messages
+                seen["role"] = role
+                return {"brief": "Στόχος: 20 εβδομάδες, πρακτική έμφαση, 4 ενότητες."}
+
+        monkeypatch.setattr(interview_mod, "get_provider", lambda: _FakeProvider())
+
+        r = client.post(f"/curricula/interview/{interview.id}/distill")
+        assert r.status_code == 200
+        assert r.json()["brief"].startswith("Στόχος")
+        assert seen["role"] == "chat"
+        # the transcript reached the model
+        joined = str(seen["messages"])
+        assert "20 εβδομάδες" in joined and "4 ενότητες" in joined
+
+        db.expire_all()
+        assert db.get(CurriculumInterview, interview.id).planning_brief is None  # not stored yet
+    finally:
+        db.close()
+
+
+def test_distill_409_when_no_chat_or_empty_transcript():
+    db = SessionLocal()
+    try:
+        interview = _mk_interview(db)
+        r = client.post(f"/curricula/interview/{interview.id}/distill")
+        assert r.status_code == 409
+    finally:
+        db.close()
+
+
+def test_put_planning_brief_stores_and_clears():
+    db = SessionLocal()
+    try:
+        interview = _mk_interview(db)
+        r = client.put(f"/curricula/interview/{interview.id}/planning-brief",
+                       json={"brief": "  Τελικό σχέδιο: πρακτική πρώτα.  "})
+        assert r.status_code == 204
+        db.expire_all()
+        assert db.get(CurriculumInterview, interview.id).planning_brief == "Τελικό σχέδιο: πρακτική πρώτα."
+
+        r2 = client.put(f"/curricula/interview/{interview.id}/planning-brief", json={"brief": ""})
+        assert r2.status_code == 204
+        db.expire_all()
+        assert db.get(CurriculumInterview, interview.id).planning_brief is None
+    finally:
+        db.close()

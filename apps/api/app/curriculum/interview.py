@@ -76,9 +76,11 @@ from app.curriculum.outline import (
 )
 from app.curriculum.shape import plan_shape
 from app.i18n import DEFAULT_LOCALE, normalize_locale
+from app.llm.factory import get_provider
 from app.models.interview import CurriculumInterview
 from app.models.knowledge import KnowledgeSource
 from app.models.student import Student
+from app.prompts.overrides import resolve
 from app.students.context import build_student_brief
 
 STEP_ORDER = ["who", "duration", "scope", "structure", "sources", "outline", "confirm"]
@@ -642,3 +644,68 @@ def answer_interview(db: Session, interview: CurriculumInterview, answer) -> dic
         interview.step = "done" if result["done"] else STEP_ORDER[STEP_ORDER.index(step) + 1]
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Part 5: planning chat -> editable brief
+# ---------------------------------------------------------------------------
+
+# Part 5: transcript -> editable brief, ONE cheap guided_json call
+# (role="chat": no thinking, non-streaming — same tier as chat.suggestions,
+# and for the same reason: a short synchronous summarization on the request
+# path, well inside the Cloudflare edge cap). Tutor-editable via the registry
+# (interview.planning_distill); {language} and {transcript} are filled by
+# distill_planning_brief — the tutor's edit is the TEMPLATE, same contract as
+# chat.suggestions.
+DISTILL_SYSTEM = (
+    "You read a planning conversation between a guitar TUTOR and an "
+    "assistant about a course the tutor wants to create. Distill what the "
+    "TUTOR actually wants into a brief IN {language}, written as if the "
+    "tutor wrote it himself, structured as short lines under these headers: "
+    "goals, topics to cover, emphasis/priorities, teaching preferences, "
+    "things to avoid. Keep ONLY conclusions the tutor stated or clearly "
+    "agreed to — dead ends and rejected ideas stay out. No preamble, no "
+    "commentary; return ONLY the JSON the schema describes.\n\n"
+    "THE CONVERSATION:\n{transcript}"
+)
+DISTILL_SLICE_ID = "interview.planning_distill"
+
+DISTILL_SCHEMA = {
+    "type": "object",
+    "properties": {"brief": {"type": "string"}},
+    "required": ["brief"],
+    "additionalProperties": False,
+}
+
+
+def distill_planning_brief(db: Session, interview: CurriculumInterview) -> str:
+    """The planning chat's exit: transcript in, tutor-voiced brief out.
+    Raises ValueError when there is nothing to distill (no bound session or
+    no user turns) — the router maps that to a 409 the UI can explain."""
+    from app.models.chat import ChatSession, Message  # local: avoid cycles if any
+
+    session = db.scalars(
+        select(ChatSession)
+        .where(ChatSession.interview_id == interview.id)
+        .order_by(ChatSession.created_at.desc())
+    ).first()
+    if session is None:
+        raise ValueError("no planning chat session for this interview")
+    messages = db.scalars(
+        select(Message).where(Message.session_id == session.id).order_by(Message.created_at)
+    ).all()
+    visible = [m for m in messages if m.role in ("user", "assistant") and (m.content or "").strip()]
+    if not any(m.role == "user" for m in visible):
+        raise ValueError("planning chat has no tutor turns to distill")
+
+    transcript = "\n".join(f"{m.role.upper()}: {m.content.strip()}" for m in visible)
+    who = (interview.answers or {}).get("who") or {}
+    language = "Greek" if (who.get("language") or "el") == "el" else "English"
+
+    prompt = resolve(db, DISTILL_SLICE_ID, DISTILL_SYSTEM).format(
+        language=language, transcript=transcript,
+    )
+    result = get_provider().guided_json(
+        [{"role": "user", "content": prompt}], DISTILL_SCHEMA, role="chat",
+    )
+    return (result.get("brief") or "").strip()

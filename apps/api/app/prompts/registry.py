@@ -139,6 +139,7 @@ from app.curriculum.draft import (
     build_lesson_messages,
 )
 from app.curriculum.extend import MODULE_SLICE_ID, MODULE_TAIL, build_module_messages
+from app.curriculum.interview import DISTILL_SLICE_ID, DISTILL_SYSTEM
 from app.curriculum.revise import REVISE_SLICE_ID, REVISE_TAIL, build_revise_messages
 from app.curriculum.outline import (
     OUTLINE_SLICE_ID,
@@ -922,6 +923,31 @@ def _build_curriculum_revise(locale: str, db, course_language=None) -> _Built:
     ]
 
 
+# Part 5's planning-chat exit. `{language}` is a plain English word ("Greek"/
+# "English"), not the `language_directive`/`answer_in` fragments the other
+# COURSE_LANGUAGE_PROMPTS interpolate — but it is decided the same way theirs
+# is (`who.get("language")`, i.e. the student/course, never the cockpit), so
+# it carries the same `language_from_course` flag and reuses the same
+# "origin" span label `test_the_language_span_says_where_the_language_
+# actually_comes_from` checks for.
+_SAMPLE_DISTILL_TRANSCRIPT = (
+    "USER: Θέλω 20 εβδομάδες για ήχο κιθάρας, έμφαση στην πράξη.\n"
+    "ASSISTANT: Προτείνω 4 ενότητες: μαγνήτες, ενισχυτές, ηχεία, πετάλια."
+)
+
+
+def _build_interview_distill(locale: str, db, course_language=None) -> _Built:
+    lang_code = _course_language(locale, course_language)
+    language = "Greek" if lang_code == "el" else "English"
+    prompt = resolve_text(db, DISTILL_SLICE_ID, DISTILL_SYSTEM).format(
+        language=language, transcript=_SAMPLE_DISTILL_TRANSCRIPT,
+    )
+    return [RenderedMessage(role="user", content=prompt)], [
+        (*_LANG_FROM_COURSE, language),
+        ("transcript", "Ένα δείγμα της συζήτησης σχεδιασμού", _SAMPLE_DISTILL_TRANSCRIPT),
+    ]
+
+
 def _build_lesson_draft(locale: str, db, course_language=None) -> _Built:
     lang = _course_language(locale, course_language)
     built = build_lesson_messages(
@@ -1531,6 +1557,39 @@ _ENTRIES = [
                 id=REVISE_SLICE_ID,
                 label_el="Το κείμενο της οδηγίας",
                 default=REVISE_TAIL,
+                kind="replace",
+            ),
+        ),
+    ),
+    PromptEntry(
+        id="interview.planning_distill",
+        language_from_course=True,
+        flow="curriculum",
+        kind="prompt",
+        source_ref="app/curriculum/interview.py:660",
+        title_el="Η απόσταξη της συζήτησης σχεδιασμού",
+        what_it_does_el=(
+            "Διαβάζει ολόκληρη τη συζήτηση σχεδιασμού ανάμεσα σε σένα και τον "
+            "βοηθό και γράφει, με τα δικά σου λόγια, ένα σύντομο σχέδιο σε "
+            "γραμμές — στόχοι, θέματα προς κάλυψη, έμφαση/προτεραιότητες, "
+            "προτιμήσεις διδασκαλίας, τι να αποφευχθεί. Κρατάει μόνο ό,τι "
+            "πράγματι είπες ή συμφώνησες· ό,τι απορρίφθηκε στη συζήτηση μένει "
+            "έξω. ΔΕΝ αποθηκεύει τίποτα από μόνο του — γυρίζει ένα κείμενο "
+            "που το διαβάζεις, το διορθώνεις όσο θέλεις, και μετά το "
+            "αποθηκεύεις εσύ."
+        ),
+        when_it_runs_el=(
+            "Όταν πατάς «Χρησιμοποίησε αυτό το σχέδιο» στον οδηγό σχεδιασμού, "
+            "αφού έχεις συζητήσει το πρόγραμμα με τον βοηθό."
+        ),
+        source_of_truth=lambda: DISTILL_SYSTEM,
+        build=_build_interview_distill,
+        call_sites=("curriculum/interview.py:708",),
+        slices=(
+            Slice(
+                id=DISTILL_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=DISTILL_SYSTEM,
                 kind="replace",
             ),
         ),

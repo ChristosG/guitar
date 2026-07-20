@@ -58,6 +58,8 @@ from app.schemas.curriculum import (
     LessonFromChat,
     ModuleCreate,
     ModuleGenerateRequest,
+    PlanningBriefIn,
+    PlanningBriefOut,
     RefineRequest,
     ReorderRequest,
     ReviseRequest,
@@ -619,6 +621,33 @@ def get_or_create_interview_chat_session(
         db.add(session)
         db.commit()
     return ChatSessionCreated(session_id=session.id)
+
+
+@router.post(
+    "/curricula/interview/{interview_id}/distill",
+    response_model=PlanningBriefOut,
+    dependencies=[Depends(require_llm_configured)],
+)
+def distill_interview_planning_brief(interview_id: UUID, db: Session = Depends(get_db)) -> dict:
+    """Distill the planning chat into an EDITABLE brief. Deliberately does
+    NOT store: the tutor reviews/edits first, then PUT planning-brief saves
+    the approved text — approve-before-spend, the input-side mirror of the
+    revise engine's approve-before-apply."""
+    interview = _get_interview_or_404(db, interview_id)
+    try:
+        brief = interview_service.distill_planning_brief(db, interview)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    return {"brief": brief}
+
+
+@router.put("/curricula/interview/{interview_id}/planning-brief", status_code=204, response_model=None)
+def put_interview_planning_brief(
+    interview_id: UUID, payload: PlanningBriefIn, db: Session = Depends(get_db)
+) -> None:
+    interview = _get_interview_or_404(db, interview_id)
+    interview.planning_brief = payload.brief.strip() or None
+    db.commit()
 
 
 @router.post("/curricula/{root_id}/draft", response_model=JobAccepted, status_code=202,

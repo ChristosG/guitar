@@ -190,6 +190,18 @@ class ReviseRequest(BaseModel):
     plan: dict | None = None
 
 
+class PlanningBriefIn(BaseModel):
+    """`PUT /curricula/interview/{id}/planning-brief` body — the tutor's
+    reviewed/edited text, stored verbatim (after a strip)."""
+    brief: str = Field(max_length=20000)
+
+
+class PlanningBriefOut(BaseModel):
+    """`POST /curricula/interview/{id}/distill` response — the freshly
+    distilled brief, NOT yet stored (see `distill_planning_brief`)."""
+    brief: str
+
+
 class DraftProgressOut(BaseModel):
     """What the board polls every 2 seconds. A GROUP BY over the lesson blocks —
     never a counter on the job row (see `curriculum.draft.draft_progress`).
