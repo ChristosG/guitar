@@ -210,15 +210,48 @@ function draftLesson(lesson: FixtureBlock): FixtureBlock {
   };
 }
 
+interface PlanningChatRow {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  created_at: string;
+  citations: null;
+}
+
 interface MockOptions {
   /** Report the first lesson as drafted on the VERY FIRST poll — the case where the
    * lessons finished between the tree fetch and the first poll. See the test at the
    * bottom of this file: the board must not sit there showing "queued" rows under a
    * progress bar that says they are done. */
   readyFromStart?: boolean;
+  /** Seeds the planning chat's `GET /chat/{id}` (history) with N real turns
+   * instead of the default empty transcript. Task 6's layout fix (a definite
+   * height on `DialogContent` + an internally-scrolling chat wrapper in
+   * `planning-chat.tsx`) has NO test that can catch a regression against an
+   * empty transcript — an empty chat never overflows anything. */
+  planningHistoryTurns?: number;
 }
 
-async function mockInterviewApi(page: Page, { readyFromStart = false }: MockOptions = {}) {
+/** A real multi-turn transcript, long enough to overflow the dialog's
+ * `85dvh` cap on a normal viewport — the whole point of the layout fix this
+ * seeds a test for (see `planningHistoryTurns` above). */
+function makePlanningHistory(turns: number): PlanningChatRow[] {
+  return Array.from({ length: turns }, (_, i) => ({
+    id: randomUUID(),
+    role: i % 2 === 0 ? "user" : "assistant",
+    content:
+      i % 2 === 0
+        ? `Turn ${i}: I want a live-tone-focused course, three weeks, mostly evenings, leaning on my own library before you fill any gaps from general knowledge.`
+        : `Turn ${i}: Got it — pedal-first, three weeks, your library first. Want me to sketch a rough week-by-week shape next, or keep talking through the gear list?`,
+    created_at: new Date(2026, 0, 1, 0, i).toISOString(),
+    citations: null,
+  }));
+}
+
+async function mockInterviewApi(
+  page: Page,
+  { readyFromStart = false, planningHistoryTurns = 0 }: MockOptions = {},
+) {
   const interviewId = randomUUID();
   const rootId = randomUUID();
 
@@ -319,9 +352,12 @@ async function mockInterviewApi(page: Page, { readyFromStart = false }: MockOpti
 
     // The planning chat mounts a real `ChatPanel` (Task 5 reuses it wholesale),
     // which hydrates on mount via `GET /chat/{id}` (history) and `GET
-    // /chat/{id}/pending` (any HITL approval left open) — an empty transcript,
-    // no pending approval, matching a session nobody has spoken in yet.
-    if (pathname === `/chat/${planningSessionId}` && method === "GET") return json([]);
+    // /chat/{id}/pending` (any HITL approval left open) — an empty transcript
+    // by default (no pending approval, matching a session nobody has spoken in
+    // yet), or `planningHistoryTurns` real turns when a test asks for them.
+    if (pathname === `/chat/${planningSessionId}` && method === "GET") {
+      return json(makePlanningHistory(planningHistoryTurns));
+    }
     if (pathname === `/chat/${planningSessionId}/pending` && method === "GET") return json(null);
     if (pathname === `/chat/${planningSessionId}/suggestions` && method === "POST") {
       return json({ suggestions: [] });
@@ -942,11 +978,10 @@ test.describe("the guided interview, v2 (mocked API)", () => {
       expect(mock.calls.start).toBe(1);
       await expect(page.getByTestId("planning-chat")).toBeVisible();
       await expect(page.getByTestId("chat-input")).toBeVisible();
-      // >= 1, not exactly 1: Next dev mode's StrictMode double-invokes mount
-      // effects (same caveat `chat-panel.tsx`'s own hydration effect guards
-      // against with a ref) — the GET is idempotent-resume either way, so
-      // this pins "it fired", not a call count.
-      await expect.poll(() => mock.calls.chatSession).toBeGreaterThanOrEqual(1);
+      // Exactly 1: `planning-chat.tsx`'s mount effect now guards against Next
+      // dev mode's StrictMode double-invoke with a ref (`chat-panel.tsx`'s own
+      // hydration-guard pattern), so the session bootstrap fires only once.
+      await expect.poll(() => mock.calls.chatSession).toBe(1);
 
       await page.getByTestId("planning-skip").click();
 
@@ -997,6 +1032,50 @@ test.describe("the guided interview, v2 (mocked API)", () => {
       );
       // Still on the chat phase — nothing was saved, and he can try again.
       await expect(page.getByTestId("chat-input")).toBeVisible();
+    });
+
+    test("a real multi-turn transcript scrolls in its own region — Skip and Use this plan never leave the dialog", async ({ page }) => {
+      // Task 6's layout fix: `PlanningChat`'s chat wrapper used to have no
+      // `overflow-y-auto` of its own, so a transcript taller than the wrapper's
+      // flex-computed box just painted past it (`overflow: visible`) instead of
+      // clipping and scrolling — never truly off past the viewport, but a
+      // genuinely broken, unscrollable mess overlapping whatever sat below it.
+      // `DialogContent` getting a DEFINITE height for this phase (`h-[85dvh]`,
+      // not just `max-h`) is what makes that wrapper's `flex-1`/`min-h-0` a
+      // real, bounded box in the first place. Every other test in this file
+      // mocks an EMPTY transcript, which can never reproduce this — nothing to
+      // overflow. This one seeds 24 real turns.
+      await mockInterviewApi(page, { planningHistoryTurns: 24 });
+      await page.goto("/en/curricula");
+      await page.getByTestId("curricula-generate-button").click();
+      await page.getByTestId("interview-title").fill("Getting a Great Guitar Tone");
+      await page.getByTestId("interview-plan-first").click();
+      await expect(page.getByTestId("planning-chat")).toBeVisible();
+
+      // The transcript actually hydrated with the seeded history, not just an
+      // empty panel that would trivially pass the checks below.
+      await expect(page.getByText("Turn 23:", { exact: false })).toBeAttached();
+
+      // Both action buttons stay inside the dialog card, not carried off past
+      // its clipped edge.
+      await expect(page.getByTestId("planning-skip")).toBeInViewport();
+      await expect(page.getByTestId("planning-distill")).toBeInViewport();
+
+      // THE MECHANISM ITSELF: `planning-transcript` must be a genuine scroll
+      // container — content taller than its box (`scrollHeight >
+      // clientHeight`), AND actually scrollable (`scrollTop` moves when set).
+      // A box that merely overflows with `overflow: visible` reports the same
+      // scrollHeight/clientHeight gap but ignores `scrollTop` entirely (it is
+      // not a scroll container at all) — that is exactly the pre-fix state,
+      // and geometry-only checks on sibling buttons do not reliably catch it.
+      const transcript = page.getByTestId("planning-transcript");
+      const scroll = await transcript.evaluate((el) => {
+        const before = { scrollHeight: el.scrollHeight, clientHeight: el.clientHeight };
+        el.scrollTop = el.scrollHeight;
+        return { ...before, scrollTopAfter: el.scrollTop };
+      });
+      expect(scroll.scrollHeight).toBeGreaterThan(scroll.clientHeight);
+      expect(scroll.scrollTopAfter).toBeGreaterThan(0);
     });
   });
 });

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
 import { Loader2, MessageCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -28,7 +28,15 @@ export function PlanningChat({ interviewId, onDone }: PlanningChatProps) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Guard against React Strict Mode's dev double-invoke of mount effects.
+  // Harmless for two GETs against `getOrCreateInterviewChatSession` (it's
+  // idempotent-resume either way), but there is no reason to fire it twice —
+  // the ref keeps it to one call, mirroring `chat-panel.tsx`'s own hydration
+  // effect guard for the identical caveat.
+  const sessionRequestedRef = useRef(false);
   useEffect(() => {
+    if (sessionRequestedRef.current) return;
+    sessionRequestedRef.current = true;
     getOrCreateInterviewChatSession(interviewId)
       .then((r) => setSessionId(r.session_id))
       .catch((err) => setError(err instanceof ApiError ? err.detail : t("sessionError")));
@@ -67,7 +75,21 @@ export function PlanningChat({ interviewId, onDone }: PlanningChatProps) {
       {phase === "chat" && (
         <>
           <p className="text-sm text-muted-foreground">{t("chatHint")}</p>
-          <div className="min-h-0 flex-1">
+          {/* This is its own scroll region, distinct from `DialogBody`'s
+              (`dialog.tsx`'s docstring calls that one "the one part allowed
+              to scroll" — true everywhere else). Without `overflow-y-auto`
+              here, a transcript taller than this box's flex-computed height
+              didn't get clipped OR scroll — it just painted past its own
+              edges (`overflow: visible`'s default), overlapping the
+              Skip/Use-this-plan buttons below instead of letting the tutor
+              scroll up through it. `min-h-0` is what lets `flex-1` shrink
+              this box below its content size at all; `overflow-y-auto` is
+              what turns that shrunk box into an actual scroll container. Both
+              only produce a BOUNDED box because `InterviewDialog` gives
+              `DialogContent` a DEFINITE height for this phase (`h-[85dvh]`,
+              not just the shared `max-h`) — a flex item's `flex-1`/`min-h-0`
+              needs a definite ancestor size to shrink-and-scroll against. */}
+          <div className="min-h-0 flex-1 overflow-y-auto" data-testid="planning-transcript">
             {sessionId ? (
               <ChatSessionsProvider>
                 <ChatPanel key={sessionId} sessionId={sessionId} />

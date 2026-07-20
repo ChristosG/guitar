@@ -245,8 +245,21 @@ export function InterviewDialog({ onMaterialized }: InterviewDialogProps) {
       {/* The outline editor is the tallest thing in this app. `sm:max-w-2xl` gives
           it a column wide enough to actually edit in; `DialogContent` is
           height-capped and `overflow-hidden`, so it scrolls INSIDE the card rather
-          than painting over the backdrop. */}
-      <DialogContent data-testid="interview-dialog" className="sm:max-w-2xl">
+          than painting over the backdrop.
+          The planning phase is the one place that needs more than a cap: its
+          chat wrapper (`planning-chat.tsx`) has to scroll INTERNALLY so the
+          Skip/Use-this-plan buttons stay pinned below it, and a flex item can't
+          `flex-1`/`h-full` against an ancestor whose height is only an intrinsic
+          `max-h` — there is no definite size to fill. `h-[85dvh]` here (on TOP of
+          the shared `max-h-[85dvh]`, harmlessly redundant) makes the dialog's
+          height DEFINITE for that one phase, which is what lets the whole
+          `DialogBody` -> `PlanningChat` root -> chat wrapper chain of
+          `flex-1`/`min-h-0` actually resolve. Every other phase stays
+          content-sized, exactly as before. */}
+      <DialogContent
+        data-testid="interview-dialog"
+        className={cn("sm:max-w-2xl", phase === "planning" && "h-[85dvh]")}
+      >
         <DialogHeader>
           <DialogTitle>{t("dialogHeading")}</DialogTitle>
           {phase === "intro" && <DialogDescription>{t("introDescription")}</DialogDescription>}
