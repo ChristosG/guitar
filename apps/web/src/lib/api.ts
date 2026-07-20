@@ -1438,6 +1438,15 @@ export interface RevisionPlanOp {
   after_module_id?: string;
   to_module_id?: string;
   lesson_id?: string;
+  /** `edit_segment`/`remove_segment`: the target segment id. `add_segment`
+   * carries no `segment_id` of its own — it's a NEW segment, filed under
+   * `lesson_id` (+ optional `section_key`) instead. */
+  segment_id?: string;
+  /** `add_segment` only: files the new segment under this ENABLED blueprint
+   * section (`curriculum/revise.py`'s `_ENABLED_SECTION_KEYS` check drops the
+   * op server-side if it names a disabled one). Omitted lets the backend
+   * place it wherever `apply_revision`'s default does. */
+  section_key?: string;
   title?: string;
   objective?: string;
   instruction?: string;
@@ -1446,14 +1455,37 @@ export interface RevisionPlanOp {
   blueprint?: Record<string, unknown>;
 }
 
+/** Pure, server-computed blast-radius summary attached to every plan by
+ * `_validate_pending_revision` (`compute_impact` in `curriculum/revise.py`,
+ * 2026-07-20, Spec A) — counted from the VALIDATED op shapes, never from the
+ * model's own `reason` claims, so `RevisionPlanCard`'s banner can show the
+ * tutor honest numbers the model cannot spin. `destructive` is true iff the
+ * plan REWRITES or REMOVES something that already exists (`rewrites`,
+ * `lesson_removals`, `segment_removals`); pure additions and a bare
+ * blueprint reshape are not, by themselves, destructive. */
+export interface RevisionImpact {
+  rewrites: number;
+  segment_additions: number;
+  segment_edits: number;
+  segment_removals: number;
+  lesson_removals: number;
+  lessons_added: number;
+  blueprint_changed: boolean;
+  destructive: boolean;
+}
+
 /** `propose_curriculum_revision`'s return value / `apply_curriculum_
  * revision`'s `plan` argument — mirrors `curriculum/revise.py`'s
  * `{summary, ops}` shape, id-validated server-side before it ever reaches
  * an `ApprovalRequest` (see `routers/chat.py`'s `_validate_pending_
- * revision`). */
+ * revision`). `impact` is optional: an `ApprovalRequest` created before this
+ * shipped has no `impact` key on its stored `tool_args.plan`, and
+ * `RevisionPlanCard` renders no banner in that case rather than fabricate
+ * one client-side. */
 export interface RevisionPlan {
   summary: string;
   ops: RevisionPlanOp[];
+  impact?: RevisionImpact;
 }
 
 export interface ResolveApprovalInput {

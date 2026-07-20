@@ -29,7 +29,14 @@ interface ReviseDrawerProps {
  * (`curriculum/revise.py`'s flat op schema never repeats a title the model
  * already said once), so `RevisionPlanCard` needs this to render "Rewrite
  * lesson «X»" — the controller's own required wording — with a real name in
- * place of X rather than a raw id. */
+ * place of X rather than a raw id.
+ *
+ * Recurses through EVERY child regardless of `kind`, so this already reaches
+ * segment leaves (`course -> module -> lesson -> segment` — see `BlockNode`'s
+ * own docstring in `lib/api.ts`) without any extra branch: the surgical
+ * `add_segment`/`edit_segment`/`remove_segment` ops (2026-07-20, Spec A)
+ * reference a `lesson_id` or `segment_id` the same way the lesson-level ops
+ * above reference theirs, and both resolve through this one map. */
 function collectTitles(node: BlockNode, into: Record<string, string>): Record<string, string> {
   into[node.id] = node.title;
   for (const child of node.children) collectTitles(child, into);

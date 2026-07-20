@@ -459,7 +459,19 @@
         "modify_lesson": "Rewrite lesson “{title}”",
         "move_lesson": "Move lesson “{title}” to “{module}”",
         "remove_lesson": "Remove lesson “{title}”",
-        "update_blueprint": "Change lesson structure"
+        "update_blueprint": "Change lesson structure",
+        "add_segment": "Add segment to lesson",
+        "edit_segment": "Edit segment",
+        "remove_segment": "Remove segment"
+      },
+      "impact": {
+        "destructiveRewrites": "{count, plural, one {# lesson will be rewritten from scratch} other {# lessons will be rewritten from scratch}} — existing text will be replaced.",
+        "destructiveRemovals": "{count, plural, one {# lesson/segment will be removed.} other {# lessons/segments will be removed.}}",
+        "surgicalAdditions": "{count, plural, one {# new segment} other {# new segments}}",
+        "surgicalEdits": "{count, plural, one {# edit} other {# edits}}",
+        "surgicalPrefix": "Targeted change: ",
+        "surgicalSuffix": " — everything else stays as is.",
+        "surgicalNeutral": "Everything else stays as is."
       }
     }
   },

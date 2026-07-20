@@ -459,7 +459,19 @@
         "modify_lesson": "Ξαναγράψιμο του μαθήματος «{title}»",
         "move_lesson": "Μετακίνηση του μαθήματος «{title}» στην ενότητα «{module}»",
         "remove_lesson": "Διαγραφή του μαθήματος «{title}»",
-        "update_blueprint": "Αλλαγή δομής μαθήματος"
+        "update_blueprint": "Αλλαγή δομής μαθήματος",
+        "add_segment": "Νέα ενότητα σε μάθημα",
+        "edit_segment": "Διόρθωση ενότητας",
+        "remove_segment": "Αφαίρεση ενότητας"
+      },
+      "impact": {
+        "destructiveRewrites": "{count, plural, one {Θα ξαναγραφτεί # μάθημα από την αρχή} other {Θα ξαναγραφτούν # μαθήματα από την αρχή}} — το υπάρχον κείμενο θα αντικατασταθεί.",
+        "destructiveRemovals": "{count, plural, one {Θα αφαιρεθεί # μάθημα/ενότητα.} other {Θα αφαιρεθούν # μαθήματα/ενότητες.}}",
+        "surgicalAdditions": "{count, plural, one {# νέα ενότητα} other {# νέες ενότητες}}",
+        "surgicalEdits": "{count, plural, one {# διόρθωση} other {# διορθώσεις}}",
+        "surgicalPrefix": "Στοχευμένη αλλαγή: ",
+        "surgicalSuffix": " — τα υπόλοιπα μένουν ως έχουν.",
+        "surgicalNeutral": "Τα υπόλοιπα μένουν ως έχουν."
       }
     }
   },

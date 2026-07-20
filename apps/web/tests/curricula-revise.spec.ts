@@ -567,6 +567,13 @@ test.describe("curriculum revise drawer (mocked API)", () => {
                 reason: "Shorten the intro section on every lesson.",
               },
             ],
+            // Server-computed by `compute_impact` (`curriculum/revise.py`,
+            // 2026-07-20, Spec A) — one `modify_lesson` rewrite above, no
+            // removals, so `destructive` is true on `rewrites` alone.
+            impact: {
+              rewrites: 1, segment_additions: 0, segment_edits: 0, segment_removals: 0,
+              lesson_removals: 0, lessons_added: 1, blueprint_changed: true, destructive: true,
+            },
           },
         },
         description: "Here is a proposed revision.",
@@ -604,6 +611,16 @@ test.describe("curriculum revise drawer (mocked API)", () => {
     // content" note, never an auto-redraft.
     await expect(ops.nth(2)).toContainText("Change lesson structure");
     await expect(page.getByTestId("revision-blueprint-note")).toContainText("keep their current content");
+
+    // The honest blast-radius banner (Spec A, Task 5) — amber, because a
+    // `modify_lesson` rewrite is present, naming ONLY the rewrite count
+    // (removals is 0, so that sentence drops out entirely).
+    const impactBanner = page.getByTestId("plan-impact");
+    await expect(impactBanner).toBeVisible();
+    await expect(impactBanner).toHaveAttribute("data-destructive", "true");
+    await expect(impactBanner).toContainText("1 lesson will be rewritten from scratch");
+    await expect(impactBanner).toContainText("existing text will be replaced");
+    await expect(impactBanner).not.toContainText("removed");
 
     // No raw-JSON edit affordance on this card (unlike the generic ApprovalCard).
     await expect(page.getByTestId("approval-edit")).toHaveCount(0);
@@ -764,6 +781,84 @@ test.describe("curriculum revise drawer (mocked API)", () => {
     await expect(
       page.getByTestId("chat-message").filter({ hasText: "Understood, I left the curriculum as it was." }),
     ).toBeVisible();
+
+    expect(chat.unexpected).toEqual([]);
+  });
+
+  // Spec A / Task 5 — the three surgical segment ops (`add_segment`,
+  // `edit_segment`, `remove_segment`) and the calm register of the impact
+  // banner: a plan with none of `rewrites`/`lesson_removals`/
+  // `segment_removals` is NOT destructive, so the banner names only the
+  // additive/edit counts instead of going amber.
+  test("a surgical-only revision (segment ops) shows the calm banner and the new op labels", async ({ page }) => {
+    const rootId = randomUUID();
+    const moduleId = randomUUID();
+    const lesson1Id = randomUUID();
+    const lesson2Id = randomUUID();
+    const newLessonId = randomUUID();
+    const segmentId = randomUUID();
+
+    const fixture = mockCurriculumTree(rootId, moduleId, lesson1Id, lesson2Id, newLessonId);
+    const chatSessionStore = createChatSessionStore();
+    await mockCurriculaApi(page, fixture, chatSessionStore);
+    const chat = await mockChatApi(page, undefined, chatSessionStore);
+
+    await page.goto(`/en/curricula/${rootId}`);
+    await page.getByTestId("revise-open").click();
+    await expect(page.getByTestId("chat-input")).toBeEnabled();
+
+    const approvalId = randomUUID();
+    chat.setNextMessage({
+      status: "awaiting_approval",
+      approval_id: approvalId,
+      tool_name: "apply_curriculum_revision",
+      tool_args: {
+        root_id: rootId,
+        plan: {
+          summary: "Add a tuning-check segment and tighten one segment's wording.",
+          ops: [
+            {
+              op: "add_segment",
+              lesson_id: lesson1Id,
+              title: "Quick tuning check",
+              instruction: "Add a short note on checking tuning before practice.",
+              reason: "The tutor asked for a quick tuning reminder.",
+            },
+            {
+              op: "edit_segment",
+              segment_id: segmentId,
+              instruction: "Tighten the wording, no new content.",
+              reason: "The paragraph on tone was too wordy.",
+            },
+          ],
+          // No rewrites/removals anywhere in this plan, so `compute_impact`
+          // marks it non-destructive.
+          impact: {
+            rewrites: 0, segment_additions: 1, segment_edits: 1, segment_removals: 0,
+            lesson_removals: 0, lessons_added: 0, blueprint_changed: false, destructive: false,
+          },
+        },
+      },
+      description: "Here is a proposed revision.",
+    });
+    await page.getByTestId("chat-input").fill("Add a tuning tip and tighten one segment.");
+    await page.getByTestId("chat-send").click();
+    await expect(page.getByTestId("revision-plan-card")).toBeVisible();
+
+    const ops = page.getByTestId("revision-plan-op");
+    await expect(ops).toHaveCount(2);
+    await expect(ops.nth(0)).toContainText("Add segment to lesson");
+    await expect(ops.nth(1)).toContainText("Edit segment");
+
+    const impactBanner = page.getByTestId("plan-impact");
+    await expect(impactBanner).toBeVisible();
+    await expect(impactBanner).toHaveAttribute("data-destructive", "false");
+    await expect(impactBanner).toContainText(
+      "Targeted change: 1 new segment, 1 edit — everything else stays as is.",
+    );
+
+    chat.setNextResolve({ status: "answer", content: "Understood, I left the curriculum as it was." });
+    await page.getByTestId("revision-reject").click();
 
     expect(chat.unexpected).toEqual([]);
   });

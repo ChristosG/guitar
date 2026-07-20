@@ -1,10 +1,10 @@
 "use client";
 
 import { useTranslations } from "next-intl";
-import { Loader2 } from "lucide-react";
+import { AlertTriangle, Info, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import type { RevisionPlan, RevisionPlanOp } from "@/lib/api";
+import type { RevisionImpact, RevisionPlan, RevisionPlanOp } from "@/lib/api";
 
 interface RevisionPlanCardProps {
   plan: RevisionPlan;
@@ -50,11 +50,56 @@ function opLabel(op: RevisionPlanOp, blockTitles: Record<string, string>, t: Tra
       return t("op.remove_lesson", { title: titleOf(op.lesson_id) });
     case "update_blueprint":
       return t("op.update_blueprint");
+    // The three surgical segment ops (2026-07-20, Spec A) — deliberately NO
+    // resolved title/lesson name here, matching `update_blueprint`'s own
+    // generic label above: the op's `reason` (rendered right below by the
+    // caller) already carries the specific "why", and `add_segment`'s
+    // `lesson_id` / `edit_segment`+`remove_segment`'s `segment_id` are still
+    // resolvable via `blockTitles` for any future caller that wants them.
+    case "add_segment":
+      return t("op.add_segment");
+    case "edit_segment":
+      return t("op.edit_segment");
+    case "remove_segment":
+      return t("op.remove_segment");
     default:
       // Defensive only — the backend's `_OP_ENUM` is closed and validate_ops
       // drops anything else before it ever reaches an approval.
       return op.op;
   }
+}
+
+/** Composes the approval card's blast-radius banner from `plan.impact`
+ * (server-computed, never LLM-derived — see `RevisionImpact` in `lib/api.ts`).
+ * Two registers, chosen by `impact.destructive`:
+ *  - destructive: one sentence per non-zero bucket that REWRITES or REMOVES
+ *    existing material — `rewrites` (`modify_lesson`+`move_lesson`), then
+ *    removals (`lesson_removals` + `segment_removals`, combined into one
+ *    count: the tutor doesn't need to parse "1 lesson and 2 segments" to
+ *    know something existing is going away). `destructive` is only ever true
+ *    because one of these is >0, so this branch never falls through empty.
+ *  - surgical: names only the additive/edit segment counts
+ *    (`segment_additions`, `segment_edits`) that make this plan
+ *    non-destructive; falls back to a bare "everything else stays as is"
+ *    when neither is present (e.g. a plan that's pure `insert_lesson`/
+ *    `update_blueprint` — those already get their own per-op label in the
+ *    list below, so the banner doesn't repeat them).
+ * Each part carries its own ICU plural for the count noun; the SENTENCES
+ * (not the counts within one sentence) are what drop out at zero, composed
+ * here in JS rather than baked into one giant conditional message key. */
+function impactMessage(impact: RevisionImpact, t: Translator): string {
+  if (impact.destructive) {
+    const parts: string[] = [];
+    if (impact.rewrites > 0) parts.push(t("impact.destructiveRewrites", { count: impact.rewrites }));
+    const removals = impact.lesson_removals + impact.segment_removals;
+    if (removals > 0) parts.push(t("impact.destructiveRemovals", { count: removals }));
+    return parts.join(" ");
+  }
+  const parts: string[] = [];
+  if (impact.segment_additions > 0) parts.push(t("impact.surgicalAdditions", { count: impact.segment_additions }));
+  if (impact.segment_edits > 0) parts.push(t("impact.surgicalEdits", { count: impact.segment_edits }));
+  if (parts.length === 0) return t("impact.surgicalNeutral");
+  return t("impact.surgicalPrefix") + parts.join(", ") + t("impact.surgicalSuffix");
 }
 
 /**
@@ -94,6 +139,25 @@ export function RevisionPlanCard({
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
         <fieldset disabled={resolving} className="flex flex-col gap-3">
+          {plan.impact && (
+            <div
+              data-testid="plan-impact"
+              data-destructive={plan.impact.destructive ? "true" : "false"}
+              className={
+                plan.impact.destructive
+                  ? "flex items-start gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300"
+                  : "flex items-start gap-2 rounded-xl border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
+              }
+            >
+              {plan.impact.destructive ? (
+                <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+              ) : (
+                <Info className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+              )}
+              <span>{impactMessage(plan.impact, t)}</span>
+            </div>
+          )}
+
           <ul data-testid="revision-plan-ops" className="flex flex-col gap-2 text-sm">
             {plan.ops.map((op, i) => (
               <li key={i} data-testid="revision-plan-op" className="rounded-md border border-border p-2">
