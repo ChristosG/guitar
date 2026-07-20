@@ -575,3 +575,105 @@ def test_job_marks_a_failing_segment_failed_and_still_generates_the_rest(db_and_
     assert failed.body == ""
     assert succeeded.meta["segment_status"] == "done"
     assert succeeded.body == "word word word word"
+
+
+# ---------------------------------------------------------------------------
+# Task 3 (Spec B): the planner SEES the blueprint and the segment tree
+#
+# The 2026-07-20 "structurally impossible plan" incident: the planner could see
+# modules and lessons but not the segment tree beneath them, nor the blueprint a
+# lesson is actually built from, so it proposed ops the current shape could not
+# hold. This gives it both, and steers it toward the surgical ops (Tasks 1-2)
+# instead of `modify_lesson` for a targeted change.
+# ---------------------------------------------------------------------------
+
+def test_compact_tree_text_includes_segment_id_lines(db_and_tree):
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    txt = revise.compact_tree_text(db, course)
+    assert f"    [{seg1.id}] Theory" in txt
+    assert f"    [{seg2.id}] Exercises" in txt
+    # still no bodies — the token discipline the module docstring is built on
+    assert "word word word word word" not in txt
+
+
+def test_build_revise_messages_blueprint_block_shows_enabled_and_disabled_keys(db_and_tree):
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    bp = default_blueprint()
+    for s in bp["sections"]:
+        if s["key"] == "homework":
+            s["enabled"] = False
+    course.meta = {**(course.meta or {}), "blueprint": bp}
+    db.commit()
+
+    msgs = revise.build_revise_messages(
+        course_title=course.title, brief=None, language="el",
+        tree_text=revise.compact_tree_text(db, course), instruction="add a warm-up drill",
+        retrieved=None, course_meta=course.meta,
+    )
+    user = next(m["content"] for m in msgs if m["role"] == "user")
+    assert "warm_up (Ζέσταμα)" in user                       # an ENABLED key + label
+    assert "disabled: homework (Εργασία για το σπίτι)" in user  # the DISABLED key + label
+
+
+def test_revise_tail_prefers_surgical_ops_and_states_coupled_blueprint_guidance():
+    """(c): the rendered REVISE_TAIL (default, via the overrides resolver's
+    fallback) tells the model to prefer the surgical ops over `modify_lesson`,
+    and that a new RECURRING section is an `update_blueprint` + per-lesson
+    `add_segment` pair in the SAME plan — never planned around silently."""
+    from app.prompts.overrides import resolve
+
+    rendered = resolve(None, revise.REVISE_SLICE_ID, revise.REVISE_TAIL)
+    low = rendered.lower()
+    # surgical-ops preference over modify_lesson
+    assert "add_segment" in low and "modify_lesson" in low
+    assert "before modify_lesson" in low or "prefer" in low
+    # a new recurring section = update_blueprint + add_segment, same plan
+    assert "update_blueprint" in low and "same plan" in low
+    # an impossible-under-the-current-blueprint request must be said, not hidden
+    assert "impossible" in low and "summary" in low
+
+
+def test_plan_revision_grounds_the_tree_with_the_courses_own_blueprint(monkeypatch):
+    """(d)-adjacent: `plan_revision` (not just `build_revise_messages` directly)
+    threads the live course's blueprint through, so a real revise call sees the
+    same enabled/disabled split `validate_ops` already enforces at apply time —
+    the planner and the validator can no longer disagree about what add_segment's
+    section_key may target."""
+    db = SessionLocal()
+    try:
+        bp = default_blueprint()
+        for s in bp["sections"]:
+            if s["key"] == "qa_prompts":
+                s["enabled"] = False
+        course = Block(kind="course", title="Tone", is_template=True, language="el",
+                       meta={"brief": None, "source_ids": None, "blueprint": bp})
+        db.add(course)
+        db.flush()
+        module = Block(kind="module", title="M1", parent_id=course.id, order=0,
+                       language="el", meta={"objective": "m1"})
+        db.add(module)
+        db.flush()
+        lesson = Block(kind="lesson", title="L1", parent_id=module.id, order=0,
+                       language="el", meta={"objective": "l1"})
+        db.add(lesson)
+        db.commit()
+
+        captured = {}
+
+        def _fake_provider():
+            class _P:
+                def guided_json(self, messages, schema, role="plan"):
+                    captured["messages"] = messages
+                    return {"summary": "s", "ops": []}
+            return _P()
+
+        monkeypatch.setattr(revise, "get_provider", _fake_provider)
+        monkeypatch.setattr(revise, "ground_topic", lambda db, topic, *, source_ids=None, k=5: [])
+
+        revise.plan_revision(db, course.id, instruction="add a warm-up drill")
+
+        sent = " ".join(m["content"] for m in captured["messages"])
+        assert "disabled: qa_prompts" in sent
+        assert "warm_up (" in sent and "enabled:" in sent
+    finally:
+        db.close()

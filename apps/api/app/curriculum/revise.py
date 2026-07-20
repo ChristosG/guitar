@@ -19,6 +19,20 @@ re-read 45,000 words it already wrote. `role="plan"` guided_json, same None-vs-[
 source_ids rule as the rest of the curriculum path. The task in the tail is not
 "design one module" but "propose a list of ops on THIS tree".
 
+THE PLANNER SEES THE SEGMENT TREE AND THE BLUEPRINT (2026-07-20, Task 3 — the fix
+for the "structurally impossible plan" incident of the same date). Before this,
+`compact_tree_text` stopped at lessons: the model could not target a segment it
+could not see, and had no way to know which blueprint sections a lesson was even
+built from — so it proposed `modify_lesson` rewrites for asks a surgical
+`edit_segment` would have covered, or an `add_segment` under a `section_key` the
+current blueprint had disabled. Now the tree carries one indented `[id] title`
+line per segment, and `build_revise_messages` renders `REVISE_BLUEPRINT_BLOCK` —
+the course's own enabled/disabled section keys — right after it. The tail's
+guidance follows from having both: prefer the surgical ops (Tasks 1-2) over
+`modify_lesson`, couple a new RECURRING section to `update_blueprint` +
+per-lesson `add_segment` in the same plan, and say so in `summary`, never plan
+around it, when the current blueprint makes the request impossible.
+
 NOTHING IN THE PLANNER WRITES. plan_revision is a pure read. validate_ops resolves
 every id against the live tree and DROPS what does not resolve, so a hallucinated
 module id can never reach apply. apply_revision (below) is the only writer, and it
@@ -36,6 +50,7 @@ from app.curriculum.blueprint import (
     BlueprintInvalid,
     blueprint_from_course_meta,
     section_keys,
+    section_labels,
     validate_blueprint,
 )
 from app.curriculum.corpus import CURRICULUM_SYSTEM, CURRICULUM_SYSTEM_SLICE_ID
@@ -150,15 +165,24 @@ _REQUIRED: dict[str, tuple[str, ...]] = {
 
 def compact_tree_text(db, course: Block) -> str:
     """The tree as the model needs it to locate an insertion point: every module
-    and lesson with its id, title and objective — and NOTHING ELSE.
+    and lesson with its id, title and objective, and — one indented line each —
+    every SEGMENT a lesson already has, id + title only. This is what the
+    2026-07-20 "structurally impossible plan" incident was missing: a planner
+    that could see modules and lessons but not the segment tree beneath them had
+    no way to know a surgical `edit_segment`/`remove_segment` even had a target,
+    and proposed `modify_lesson` rewrites (or worse) for asks a one-segment edit
+    would have covered.
 
-    NO LESSON BODIES. A drafted lesson's `body` is a one-line summary
+    NO LESSON OR SEGMENT BODIES. A drafted lesson's `body` is a one-line summary
     (persist_lesson sets it from the draft's `summary`), but it is still content
     the planner does not need to say "add a lesson after this one" — and an
     UN-drafted lesson's body carries its objective, which we already print. The
-    full section prose lives in child `segment` blocks (45k words) and never comes
-    near here. Keeping the tree to ids + titles + objectives is the token
-    discipline the whole read-only planner rides on (Global Constraint #5)."""
+    full section prose lives in the segments' `body` (45k words across a lesson)
+    and never comes near here — only the id and title the model needs to
+    reference one with `edit_segment`/`remove_segment`, or to place a new one
+    relative to with `add_segment`. Keeping the tree to ids + titles + objectives
+    is the token discipline the whole read-only planner rides on (Global
+    Constraint #5)."""
     modules = db.scalars(
         select(Block).where(Block.parent_id == course.id, Block.kind == "module").order_by(Block.order)
     ).all()
@@ -172,6 +196,11 @@ def compact_tree_text(db, course: Block) -> str:
         for li, l in enumerate(lessons, start=1):
             lobj = (l.meta or {}).get("objective") or ""
             lines.append(f"  L{li} [{l.id}] {l.title} — {lobj}")
+            segments = db.scalars(
+                select(Block).where(Block.parent_id == l.id, Block.kind == "segment").order_by(Block.order)
+            ).all()
+            for s in segments:
+                lines.append(f"    [{s.id}] {s.title}")
     return "\n".join(lines) or "(the course has no modules yet)"
 
 
@@ -192,10 +221,24 @@ REVISE_TAIL = (
     "or incomplete passage is never a reason to leave a gap in his course.\n"
     "\nCOURSE: {course_title}{course_brief_block}\n"
     "\nTHE COURSE AS IT STANDS (teaching order; [id] is what you reference):\n{tree}\n"
+    "{blueprint_block}"
     "{retrieved_block}"
     "\nTHE TUTOR ASKS:\n{instruction}\n"
-    "\nReference modules and lessons ONLY by an [id] shown above. Every op needs a "
-    "one-sentence `reason`. Tier any new module honestly.\n"
+    "\nReference modules, lessons and segments ONLY by an [id] shown above. Every "
+    "op needs a one-sentence `reason`. Tier any new module honestly.\n"
+    "\nPREFER SURGICAL OPS. Reach for add_segment, edit_segment or remove_segment "
+    "before modify_lesson whenever the request targets one piece of a lesson — a "
+    "new paragraph, a rewritten explanation, a section that no longer belongs. "
+    "modify_lesson rewrites the WHOLE lesson; use it only when the request genuinely "
+    "needs the whole thing re-taught, not as the default move.\n"
+    "\nA NEW SECTION THAT SHOULD RECUR ACROSS LESSONS is a BLUEPRINT change, not a "
+    "one-off segment: propose update_blueprint (enable or add the section) TOGETHER "
+    "WITH an add_segment per affected lesson carrying the matching section_key, in "
+    "the SAME plan — a section you enable but file no segments under teaches "
+    "nothing.\n"
+    "\nIF THE CURRENT BLUEPRINT MAKES THE REQUEST IMPOSSIBLE AS ASKED, SAY SO "
+    "PLAINLY in `summary` — never silently plan around it or quietly substitute "
+    "something smaller.\n"
     "\n{language_directive}\n\n{answer_in}"
 )
 REVISE_BRIEF_BLOCK = "\n\nWHAT THE TUTOR WANTS FROM THIS COURSE, IN HIS OWN WORDS:\n{brief}"
@@ -207,24 +250,57 @@ REVISE_RETRIEVED_BLOCK = (
     "\nRELEVANT PASSAGES FROM HIS LIBRARY (retrieved for THIS request — for "
     "grounding citations only, not a limit on what you may propose):\n{retrieved}\n"
 )
+# The lesson BLUEPRINT this course drafts under — the 2026-07-20 incident's root
+# cause was a planner that could see the tree but not the SHAPE each lesson is
+# built from, so it proposed sections the blueprint had disabled and structural
+# changes the current shape could not hold. `enabled` names the sections
+# add_segment's `section_key` may target today; `disabled` are the ones a
+# `update_blueprint` op would need to re-enable first — never silently worked
+# around.
+REVISE_BLUEPRINT_BLOCK = (
+    "\nCURRENT LESSON STRUCTURE (blueprint) — every lesson in this course is built "
+    "from these sections; add_segment's section_key must be one of the ENABLED "
+    "ones, or omitted for a custom, unfiled segment:\n"
+    "enabled: {enabled}\ndisabled: {disabled}\n"
+)
+
+
+def _blueprint_block_text(course_meta: dict | None, language: str) -> str:
+    """`REVISE_BLUEPRINT_BLOCK`, filled from the course's own blueprint (its frozen
+    `meta["blueprint"]`, or the code default for a course that has none —
+    `blueprint_from_course_meta`'s own fallback rule). Labelled in the course's
+    language, same as everything else the tutor-facing UI shows for a section."""
+    bp = blueprint_from_course_meta(course_meta)
+    labels = section_labels(bp, language)
+    enabled = [s["key"] for s in bp["sections"] if s.get("enabled", True)]
+    disabled = [s["key"] for s in bp["sections"] if not s.get("enabled", True)]
+    fmt = lambda keys: ", ".join(f"{k} ({labels[k]})" for k in keys) or "(none)"
+    return REVISE_BLUEPRINT_BLOCK.format(enabled=fmt(enabled), disabled=fmt(disabled))
 
 
 def build_revise_messages(*, course_title, brief, language, tree_text, instruction,
-                          retrieved=None, source=None) -> list[dict]:
+                          retrieved=None, course_meta=None, source=None) -> list[dict]:
     """Pure. The curriculum SYSTEM message (shared, so overrides re-mint one cache,
     not one-per-variant), then every request-specific fact after it — the compact
-    tree, the targeted retrieval passages, and the tutor's instruction last.
+    tree, the current blueprint, the targeted retrieval passages, and the tutor's
+    instruction last.
 
     `retrieved` is the pre-formatted grounding block (`ground_topic` passages), or
     None when retrieval found nothing. It grounds CITATIONS only; the tail's freedom
     directive tells the model an empty/thin block must not narrow what it suggests.
     No whole-library prefix here — that is curriculum GENERATION's path, not the
-    revise chat's (see the module docstring)."""
+    revise chat's (see the module docstring).
+
+    `course_meta` is the course's own `meta` dict (or None), fed straight to
+    `blueprint_from_course_meta` — its fallback to the code default means every
+    call here (including a bare `course_meta=None`, e.g. a caller that has not
+    threaded a course through yet) renders SOME blueprint block, never a hole."""
     system = resolve(source, CURRICULUM_SYSTEM_SLICE_ID, CURRICULUM_SYSTEM)
     content = resolve(source, REVISE_SLICE_ID, REVISE_TAIL).format(
         course_title=course_title,
         course_brief_block=(REVISE_BRIEF_BLOCK.format(brief=brief) if brief else ""),
         tree=tree_text,
+        blueprint_block=_blueprint_block_text(course_meta, language),
         retrieved_block=(REVISE_RETRIEVED_BLOCK.format(retrieved=retrieved) if retrieved else ""),
         instruction=instruction.strip(),
         language_directive=language_directive(language, source),
@@ -376,7 +452,7 @@ def plan_revision(db, root_id: uuid.UUID, *, instruction: str) -> dict:
     messages = build_revise_messages(
         course_title=course.title, brief=meta.get("brief"), language=course.language,
         tree_text=compact_tree_text(db, course), instruction=instruction,
-        retrieved=retrieved, source=db,
+        retrieved=retrieved, course_meta=meta, source=db,
     )
     raw = get_provider().guided_json(messages, REVISION_PLAN_SCHEMA, role="plan")
     return validate_ops(db, root_id, raw)

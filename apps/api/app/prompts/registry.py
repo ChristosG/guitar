@@ -117,6 +117,7 @@ from app.curriculum.corpus import (
     library_message,
     prefix_messages,
 )
+from app.curriculum.blueprint import default_blueprint
 from app.curriculum.depth import Measurement
 from app.curriculum.draft import (
     LESSON_DEEPEN_BLOCK,
@@ -140,7 +141,12 @@ from app.curriculum.draft import (
 )
 from app.curriculum.extend import MODULE_SLICE_ID, MODULE_TAIL, build_module_messages
 from app.curriculum.interview import DISTILL_SLICE_ID, DISTILL_SYSTEM
-from app.curriculum.revise import REVISE_SLICE_ID, REVISE_TAIL, build_revise_messages
+from app.curriculum.revise import (
+    REVISE_SLICE_ID,
+    REVISE_TAIL,
+    _blueprint_block_text,
+    build_revise_messages,
+)
 from app.curriculum.outline import (
     OUTLINE_SLICE_ID,
     OUTLINE_TAIL,
@@ -643,6 +649,17 @@ _SAMPLE_REVISE_INSTRUCTION = (
     "Πρόσθεσε ένα μάθημα για το σχήμα G ανάμεσα στο C και το A."
 )
 
+# The blueprint the sample course drafts under — one section disabled (homework),
+# so the preview actually shows BOTH halves of the block (enabled AND disabled),
+# not just the all-enabled code default. `_blueprint_block_text` is the SAME
+# private helper `build_revise_messages` calls, not a re-typed copy of its format
+# — reusing it here is what keeps this span honest if that formatting ever changes.
+_SAMPLE_REVISE_BLUEPRINT = default_blueprint()
+for _s in _SAMPLE_REVISE_BLUEPRINT["sections"]:
+    if _s["key"] == "homework":
+        _s["enabled"] = False
+_SAMPLE_REVISE_COURSE_META = {"blueprint": _SAMPLE_REVISE_BLUEPRINT}
+
 _SAMPLE_LESSON_CTX = LessonContext(
     lesson_title="Το σχήμα C και η ρίζα του",
     lesson_objective="Ο μαθητής βρίσκει τη ρίζα του σχήματος C οπουδήποτε στο μπράτσο.",
@@ -947,13 +964,15 @@ def _build_curriculum_revise(locale: str, db, course_language=None) -> _Built:
     built = build_revise_messages(
         course_title=_SAMPLE_COURSE_TITLE, brief=_SAMPLE_COURSE_BRIEF, language=lang,
         tree_text=_SAMPLE_REVISE_TREE, instruction=_SAMPLE_REVISE_INSTRUCTION,
-        retrieved=_SAMPLE_LIBRARY_TEXT, source=db,
+        retrieved=_SAMPLE_LIBRARY_TEXT, course_meta=_SAMPLE_REVISE_COURSE_META, source=db,
     )
     return _msgs(built), [
         (*_RETRIEVED, _SAMPLE_LIBRARY_TEXT),
         ("course_title", "Ο τίτλος του προγράμματος", _SAMPLE_COURSE_TITLE),
         ("course_brief", "Τι ζήτησες, με τα δικά σου λόγια", _SAMPLE_COURSE_BRIEF),
         ("tree", "Το πρόγραμμα όπως είναι σήμερα", _SAMPLE_REVISE_TREE),
+        ("blueprint_block", "Η δομή του μαθήματος (blueprint) — ενεργές/ανενεργές ενότητες",
+         _blueprint_block_text(_SAMPLE_REVISE_COURSE_META, lang)),
         ("instruction", "Η οδηγία σου", _SAMPLE_REVISE_INSTRUCTION),
         (*_LANG_FROM_COURSE, language_directive(lang, db)),
         (*_ANSWER_IN_FROM_COURSE, answer_in(lang, db)),
@@ -1612,15 +1631,18 @@ _ENTRIES = [
         language_from_course=True,
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/revise.py:212",
+        source_ref="app/curriculum/revise.py:281",
         title_el="Η αναθεώρηση ενός τελειωμένου προγράμματος",
         what_it_does_el=(
-            "Δείχνει στον βοηθό ΟΛΟΚΛΗΡΟ το πρόγραμμα όπως είναι σήμερα — μόνο "
-            "τίτλους, στόχους και τα id, ποτέ το ίδιο το κείμενο των μαθημάτων — "
-            "και του ζητάει να προτείνει ΔΟΜΙΚΕΣ αλλαγές: να προσθέσει, να "
-            "μετακινήσει, να ξαναγράψει ή να αφαιρέσει μαθήματα και ενότητες, με "
-            "έναν λόγο για την καθεμία. ΔΕΝ αλλάζει τίποτα μόνο του: γυρίζει ένα "
-            "σχέδιο που το εγκρίνεις εσύ πριν εφαρμοστεί."
+            "Δείχνει στον βοηθό ΟΛΟΚΛΗΡΟ το πρόγραμμα όπως είναι σήμερα — μαθήματα "
+            "ΚΑΙ τις μικρότερες ενότητές τους (segments), μόνο τίτλους, στόχους και "
+            "τα id, ποτέ το ίδιο το κείμενο — μαζί με το τρέχον σκελετό μαθήματος "
+            "(blueprint): ποιες ενότητες είναι ενεργές και ποιες όχι. Του ζητάει να "
+            "προτείνει ΔΟΜΙΚΕΣ αλλαγές: να προσθέσει, να μετακινήσει, να ξαναγράψει "
+            "ή να αφαιρέσει μαθήματα, ή να επεξεργαστεί μία μεμονωμένη ενότητα "
+            "χειρουργικά αντί να ξαναγράψει όλο το μάθημα, με έναν λόγο για την "
+            "καθεμία. ΔΕΝ αλλάζει τίποτα μόνο του: γυρίζει ένα σχέδιο που το "
+            "εγκρίνεις εσύ πριν εφαρμοστεί."
         ),
         when_it_runs_el=(
             "Όταν συζητάς αλλαγές σε ένα ήδη φτιαγμένο πρόγραμμα από το πλαϊνό chat."
@@ -1630,7 +1652,7 @@ _ENTRIES = [
         # NOTE: this pins an exact line in revise.py (test_registered_call_sites_
         # still_point_at_provider_calls enforces it byte-for-byte) — bump it if a
         # future edit adds/removes lines in revise.py ABOVE the guided_json() call.
-        call_sites=("curriculum/revise.py:381",),
+        call_sites=("curriculum/revise.py:457",),
         slices=(
             Slice(
                 id=REVISE_SLICE_ID,
