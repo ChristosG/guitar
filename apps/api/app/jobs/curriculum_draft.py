@@ -157,6 +157,27 @@ def _release(db, lesson_id: uuid.UUID, status: str, error: str | None = None) ->
 # `draft_lesson`'s own thin-check is measuring against the new ask, not the old one.
 DEEPEN_TARGET_RATIO = 1.4
 
+# `revise_current`'s per-section cap. A typical Greek section runs ~300-450 words,
+# ~1800-2700 chars — routinely OVER this, not under it. Truncating silently would
+# hand the model a body that just stops mid-sentence, with no way to tell "that's
+# the whole section" from "that's where I cut it off"; a model asked to PRESERVE
+# content it doesn't know was cut can't. So a truncated body carries a directive
+# marker naming the cut, not just the cut.
+REVISE_CURRENT_CHAR_LIMIT = 2000
+REVISE_CURRENT_TRUNCATION_MARKER = (
+    "\n…[το υπόλοιπο περικόπηκε — διατήρησέ το ως έχει]"
+)
+
+
+def _revise_current_body(body: str | None) -> str:
+    """One section's value in the `revise_current` map: stripped, capped at
+    `REVISE_CURRENT_CHAR_LIMIT` chars, with the truncation marker appended when
+    (and only when) it was actually cut."""
+    text = (body or "").strip()
+    if len(text) <= REVISE_CURRENT_CHAR_LIMIT:
+        return text
+    return text[:REVISE_CURRENT_CHAR_LIMIT] + REVISE_CURRENT_TRUNCATION_MARKER
+
 
 def _lesson_size(lesson: Block, plan: dict, *, deepen: bool) -> dict:
     """How long THIS lesson should be — the course shape, unless the tutor said
@@ -227,10 +248,14 @@ def _draft_one(lesson_id: uuid.UUID, plan: dict) -> None:
             # `meta.section` (a blueprint key, or `custom:<slug>` for a surgically
             # added one — CUSTOM SEGMENTS ARE INCLUDED, they are part of the lesson
             # the tutor knows); the title is the fallback for a segment with none.
-            # Truncated ~2000 chars each — enough to show the model what is there
-            # without re-sending 45,000 words of a lesson it is about to rewrite.
+            # Capped at `REVISE_CURRENT_CHAR_LIMIT` chars each — enough to show the
+            # model what is there without re-sending 45,000 words of a lesson it is
+            # about to rewrite — via `_revise_current_body`, which appends the
+            # truncation marker so a cut section reads as "keep the rest", not as
+            # "this is all there ever was". A freshly-queued placeholder segment
+            # (`add_segment`, body="") is excluded — there's nothing yet to preserve.
             current = {
-                (seg.meta or {}).get("section") or seg.title: (seg.body or "").strip()[:2000]
+                (seg.meta or {}).get("section") or seg.title: _revise_current_body(seg.body)
                 for seg in segments if (seg.body or "").strip()
             }
             if current:

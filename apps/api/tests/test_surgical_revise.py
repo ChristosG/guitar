@@ -901,3 +901,92 @@ def test_draft_one_without_a_revise_instruction_sends_no_current_content(db_and_
     assert provider.calls
     sent = " ".join(m["content"] for m in provider.calls[0])
     assert "A sentence that must NOT reach the prompt without an instruction." not in sent
+
+
+def test_revise_current_body_passes_short_bodies_through_unchanged():
+    """Under the cap: stripped, but otherwise untouched — no marker appended."""
+    body = "  Το σχήμα C ξεκινάει στην πέμπτη χορδή.  "
+    out = fanout_mod._revise_current_body(body)
+    assert out == body.strip()
+    assert fanout_mod.REVISE_CURRENT_TRUNCATION_MARKER not in out
+
+
+def test_revise_current_body_truncates_at_2000_and_appends_the_keep_directive():
+    """Over the cap: cut at exactly 2000 chars of the original body, with the
+    Greek "keep the rest as-is" marker appended — the model must be TOLD the
+    tail was cut, not left to guess the section just ends mid-sentence."""
+    tail = "ΟΥΡΑ_ΠΟΥ_ΔΕΝ_ΠΡΕΠΕΙ_ΝΑ_ΠΕΡΑΣΕΙ"
+    body = ("Α" * fanout_mod.REVISE_CURRENT_CHAR_LIMIT) + tail
+
+    out = fanout_mod._revise_current_body(body)
+
+    assert out.endswith(fanout_mod.REVISE_CURRENT_TRUNCATION_MARKER)
+    kept = out[: -len(fanout_mod.REVISE_CURRENT_TRUNCATION_MARKER)]
+    assert len(kept) == fanout_mod.REVISE_CURRENT_CHAR_LIMIT
+    assert kept == "Α" * fanout_mod.REVISE_CURRENT_CHAR_LIMIT
+    assert tail not in out
+
+
+def test_draft_one_excludes_a_freshly_queued_empty_segment_from_revise_current(
+    db_and_tree, monkeypatch,
+):
+    """`add_segment` files a placeholder with `body=""` until `generate_segment`
+    fills it (a later, separate job). A `modify_lesson` re-draft that lands
+    before that happens must not hand the model an empty section — there is
+    nothing yet to preserve, and an empty entry would only confuse it about
+    what "keep the rest" refers to."""
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    seg1.body = "The blues scale starts on the root note E, third fret."
+    db.commit()
+    placeholder = Block(
+        kind="segment", title="Bonus: new section", order=2, parent_id=lesson.id,
+        language="el", meta={"segment_status": "queued", "segment_instruction": "write it",
+                              "custom": True, "section": "custom:bonus"},
+        body="",
+    )
+    db.add(placeholder)
+    db.commit()
+
+    provider = _RevisingFakeProvider()
+    monkeypatch.setattr(draft_mod, "get_provider", lambda: provider)
+
+    lesson.meta = {**(lesson.meta or {}), "draft_status": "queued",
+                   "revise_instruction": "make it punchier"}
+    db.commit()
+
+    fanout_mod._draft_one(lesson.id, _draft_plan(lesson.id))
+
+    assert provider.calls
+    sent = " ".join(m["content"] for m in provider.calls[0])
+    assert "The blues scale starts on the root note E, third fret." in sent
+    assert "custom:bonus" not in sent
+    assert "Bonus: new section" not in sent
+
+
+def test_draft_one_sends_the_keep_directive_when_a_section_is_over_the_cap(
+    db_and_tree, monkeypatch,
+):
+    """A section body over `REVISE_CURRENT_CHAR_LIMIT` chars (routine for a
+    normal ~300-450 word Greek section) must reach the model WITH the marker,
+    and the un-sent tail must not leak through some other path."""
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    tail = "ΟΥΡΑ_ΠΟΥ_ΔΕΝ_ΠΡΕΠΕΙ_ΝΑ_ΦΤΑΣΕΙ_ΣΤΟ_ΜΟΝΤΕΛΟ"
+    seg1.body = ("Β" * 2500) + tail
+    db.commit()
+
+    provider = _RevisingFakeProvider()
+    monkeypatch.setattr(draft_mod, "get_provider", lambda: provider)
+
+    lesson.meta = {**(lesson.meta or {}), "draft_status": "queued",
+                   "revise_instruction": "tighten it"}
+    db.commit()
+
+    fanout_mod._draft_one(lesson.id, _draft_plan(lesson.id))
+
+    assert provider.calls
+    sent = " ".join(m["content"] for m in provider.calls[0])
+    # `revise_current` reaches the prompt via `json.dumps` (draft.py:257), which
+    # escapes the marker's leading "\n" to a literal backslash-n — check the
+    # marker's text, not its raw (pre-JSON-escaping) form.
+    assert fanout_mod.REVISE_CURRENT_TRUNCATION_MARKER.lstrip("\n") in sent
+    assert tail not in sent
