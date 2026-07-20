@@ -677,3 +677,68 @@ def test_plan_revision_grounds_the_tree_with_the_courses_own_blueprint(monkeypat
         assert "warm_up (" in sent and "enabled:" in sent
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# Task 4: compute_impact — pure, server-computed plan impact
+# ---------------------------------------------------------------------------
+
+def test_compute_impact_mixed_plan_counts_each_bucket():
+    """One op per bucket, including insert_module's inline `lessons` array (2
+    lessons -> +2 lessons_added on top of insert_lesson's +1) — every count and
+    the derived `destructive` flag pinned exactly."""
+    ops = [
+        {"op": "modify_lesson", "lesson_id": "l1", "instruction": "x", "reason": "r"},
+        {"op": "move_lesson", "lesson_id": "l2", "to_module_id": "m1", "reason": "r"},
+        {"op": "add_segment", "lesson_id": "l1", "title": "t", "instruction": "i", "reason": "r"},
+        {"op": "add_segment", "lesson_id": "l1", "title": "t2", "instruction": "i2", "reason": "r"},
+        {"op": "edit_segment", "segment_id": "s1", "instruction": "i", "reason": "r"},
+        {"op": "remove_segment", "segment_id": "s2", "reason": "r"},
+        {"op": "remove_lesson", "lesson_id": "l3", "reason": "r"},
+        {"op": "insert_lesson", "module_id": "m1", "title": "t", "objective": "o", "reason": "r"},
+        {"op": "insert_module", "title": "t", "objective": "o", "tier": "library",
+         "lessons": [{"title": "a", "objective": "oa"}, {"title": "b", "objective": "ob"}],
+         "reason": "r"},
+        {"op": "update_blueprint", "blueprint": {}, "reason": "r"},
+    ]
+    assert revise.compute_impact(ops) == {
+        "rewrites": 2,
+        "segment_additions": 2,
+        "segment_edits": 1,
+        "segment_removals": 1,
+        "lesson_removals": 1,
+        "lessons_added": 3,       # insert_lesson (1) + insert_module.lessons (2)
+        "blueprint_changed": True,
+        "destructive": True,      # rewrites>0 (also lesson/segment removals>0)
+    }
+
+
+def test_compute_impact_surgical_only_plan_is_not_destructive():
+    ops = [
+        {"op": "add_segment", "lesson_id": "l1", "title": "t", "instruction": "i", "reason": "r"},
+        {"op": "edit_segment", "segment_id": "s1", "instruction": "i", "reason": "r"},
+    ]
+    impact = revise.compute_impact(ops)
+    assert impact["destructive"] is False
+    assert impact["rewrites"] == 0
+    assert impact["lesson_removals"] == 0
+    assert impact["segment_removals"] == 0
+    assert impact["segment_additions"] == 1
+    assert impact["segment_edits"] == 1
+
+
+def test_compute_impact_insert_module_without_lessons_list_adds_zero_lessons():
+    """A TIER_GAP insert_module (apply_revision fills it with gap_body, no
+    lesson blocks) carries no `lessons` array — must count 0, not crash on the
+    missing key, and must not itself count as destructive."""
+    ops = [{"op": "insert_module", "title": "t", "objective": "o", "tier": "gap", "reason": "r"}]
+    impact = revise.compute_impact(ops)
+    assert impact["lessons_added"] == 0
+    assert impact["destructive"] is False
+
+
+def test_compute_impact_empty_plan_is_all_zero_and_not_destructive():
+    assert revise.compute_impact([]) == {
+        "rewrites": 0, "segment_additions": 0, "segment_edits": 0, "segment_removals": 0,
+        "lesson_removals": 0, "lessons_added": 0, "blueprint_changed": False, "destructive": False,
+    }

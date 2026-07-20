@@ -264,6 +264,55 @@ def test_validate_pending_revision_drops_a_bogus_op_before_the_card():
         db.close()
 
 
+def test_validate_pending_revision_attaches_the_computed_impact():
+    """Task 4: `plan["impact"]` is server-computed (`compute_impact`) off the
+    VALIDATED ops — never the model's own claim — and lands on `pending`
+    alongside the trimmed op list."""
+    db = SessionLocal()
+    try:
+        course, m, lesson = _seed_tree(db)
+        pending = {
+            "tool_call_id": "call_1",
+            "name": "apply_curriculum_revision",
+            "arguments": {"root_id": str(course.id), "plan": {"summary": "s", "ops": [
+                {"op": "insert_lesson", "module_id": str(m.id), "title": "DS-1",
+                 "objective": "o", "reason": "keep"},
+                {"op": "remove_lesson", "lesson_id": str(lesson.id), "reason": "cut"},
+                {"op": "insert_lesson", "module_id": str(uuid.uuid4()),  # bogus, dropped
+                 "title": "ghost", "objective": "x", "reason": "drop"},
+            ]}},
+        }
+        _validate_pending_revision(db, pending)
+        plan = pending["arguments"]["plan"]
+        assert len(plan["ops"]) == 2                     # bogus op dropped BEFORE impact is computed
+        assert plan["impact"] == {
+            "rewrites": 0, "segment_additions": 0, "segment_edits": 0, "segment_removals": 0,
+            "lesson_removals": 1, "lessons_added": 1, "blueprint_changed": False, "destructive": True,
+        }
+    finally:
+        db.close()
+
+
+def test_validate_pending_revision_impact_is_not_destructive_for_a_surgical_only_plan():
+    db = SessionLocal()
+    try:
+        course, m, lesson = _seed_tree(db)
+        pending = {
+            "tool_call_id": "call_1",
+            "name": "apply_curriculum_revision",
+            "arguments": {"root_id": str(course.id), "plan": {"summary": "s", "ops": [
+                {"op": "add_segment", "lesson_id": str(lesson.id), "title": "Warm-up",
+                 "instruction": "add a warm-up drill", "reason": "keep"},
+            ]}},
+        }
+        _validate_pending_revision(db, pending)
+        impact = pending["arguments"]["plan"]["impact"]
+        assert impact["destructive"] is False
+        assert impact["segment_additions"] == 1
+    finally:
+        db.close()
+
+
 def test_validate_pending_revision_leaves_other_tools_untouched():
     db = SessionLocal()
     try:
@@ -310,9 +359,12 @@ def test_respond_to_turn_stores_the_VALIDATED_plan_on_the_approval_and_response(
 
         assert out.status == "awaiting_approval"
         assert len(out.tool_args["plan"]["ops"]) == 1        # response carries validated plan
+        assert out.tool_args["plan"]["impact"]["lessons_added"] == 1   # and its computed impact
+        assert out.tool_args["plan"]["impact"]["destructive"] is False
         approval = db.get(ApprovalRequest, out.approval_id)
         assert len(approval.tool_args["plan"]["ops"]) == 1   # stored plan is validated too
         assert approval.tool_args["plan"]["ops"][0]["module_id"] == str(m.id)
+        assert approval.tool_args["plan"]["impact"]["lessons_added"] == 1  # stored impact too
     finally:
         db.close()
 

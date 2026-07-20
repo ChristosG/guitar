@@ -35,7 +35,7 @@ from app.agent.guards import CURRICULUM_CONTEXT_SENTINEL, PLANNING_CONTEXT_SENTI
 from app.agent.loop import AgentResult, run_agent_turn, stream_plain_turn
 from app.agent.tools import TOOLS, with_locale
 from app.agent.transcript import messages_to_wire, persist_new_messages, window_wire
-from app.curriculum.revise import compact_tree_text, validate_ops
+from app.curriculum.revise import compact_tree_text, compute_impact, validate_ops
 from app.db import get_db
 from app.i18n import normalize_locale
 from app.jobs.curriculum_revise import run_curriculum_revise_job
@@ -410,7 +410,13 @@ def _validate_pending_revision(db: Session, pending: dict) -> None:
 
     Best-effort: a malformed/absent root_id or plan is left untouched (the runner
     and `apply_revision` re-validate regardless) rather than raised — a garbled
-    proposal must degrade to a harmless card, not a 500 on the turn."""
+    proposal must degrade to a harmless card, not a 500 on the turn.
+
+    Also attaches `plan["impact"]` — `compute_impact`'s pure, server-computed
+    blast-radius summary of the VALIDATED ops (never the model's own claim about
+    what it did). It rides the same stored/returned plan the card and apply see,
+    so the tutor-facing UI (Task 5) never has to trust the model's `reason` text
+    for how big a change actually is."""
     if pending.get("name") != "apply_curriculum_revision":
         return
     args = pending.get("arguments") or {}
@@ -428,6 +434,7 @@ def _validate_pending_revision(db: Session, pending: dict) -> None:
         log.warning("revise: could not pre-validate a proposed plan for the "
                     "approval card (root_id=%s)", raw_root, exc_info=True)
         return
+    validated = {**validated, "impact": compute_impact(validated["ops"])}
     pending["arguments"] = {**args, "plan": validated}
 
 

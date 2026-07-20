@@ -420,6 +420,70 @@ def validate_ops(db, root_id: uuid.UUID, raw: dict) -> dict:
     return {"summary": raw.get("summary") or "", "ops": kept}
 
 
+def compute_impact(ops: list[dict]) -> dict:
+    """Pure, deterministic blast-radius summary of a VALIDATED ops list — NEVER
+    LLM-derived. The model's `reason` text on each op is its own claim about why
+    a change belongs; this counts what the op actually DOES, from the op shape
+    alone, so a tutor-facing approval card can show honest numbers the model
+    cannot spin. Called from `_validate_pending_revision` (chat.py) on the
+    already-`validate_ops`-cleaned plan, so a dropped/hallucinated op is never
+    counted.
+
+    Buckets:
+      - rewrites: `modify_lesson` + `move_lesson` — an EXISTING lesson's content
+        or position changes.
+      - segment_additions / segment_edits / segment_removals: the three
+        surgical segment ops, 1:1.
+      - lesson_removals: `remove_lesson`.
+      - lessons_added: `insert_lesson` (1 each) + the length of each
+        `insert_module` op's `lessons` array. An `insert_module` op carries its
+        new lessons INLINE (see `REVISION_PLAN_SCHEMA["lessons"]` and
+        `apply_revision`'s `insert_module` branch) rather than as separate ops,
+        so counting them means reading that array, not counting `insert_module`
+        occurrences; a module with no/empty `lessons` (e.g. a TIER_GAP module,
+        which `apply_revision` fills with `gap_body` instead of lessons) adds 0.
+      - blueprint_changed: any `update_blueprint` op present.
+      - destructive: True iff something above REMOVES or REWRITES existing
+        material (`rewrites`, `lesson_removals`, `segment_removals`) — pure
+        additions (`insert_lesson`, `insert_module`, `add_segment`) and a bare
+        blueprint reshape are not, by themselves, destructive."""
+    rewrites = 0
+    segment_additions = 0
+    segment_edits = 0
+    segment_removals = 0
+    lesson_removals = 0
+    lessons_added = 0
+    blueprint_changed = False
+    for op in ops:
+        name = op.get("op")
+        if name in ("modify_lesson", "move_lesson"):
+            rewrites += 1
+        elif name == "add_segment":
+            segment_additions += 1
+        elif name == "edit_segment":
+            segment_edits += 1
+        elif name == "remove_segment":
+            segment_removals += 1
+        elif name == "remove_lesson":
+            lesson_removals += 1
+        elif name == "insert_lesson":
+            lessons_added += 1
+        elif name == "insert_module":
+            lessons_added += len(op.get("lessons") or [])
+        elif name == "update_blueprint":
+            blueprint_changed = True
+    return {
+        "rewrites": rewrites,
+        "segment_additions": segment_additions,
+        "segment_edits": segment_edits,
+        "segment_removals": segment_removals,
+        "lesson_removals": lesson_removals,
+        "lessons_added": lessons_added,
+        "blueprint_changed": blueprint_changed,
+        "destructive": rewrites > 0 or lesson_removals > 0 or segment_removals > 0,
+    }
+
+
 REVISE_RETRIEVAL_K = 8
 
 
