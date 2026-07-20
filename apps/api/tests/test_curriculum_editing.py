@@ -565,6 +565,6 @@ def test_a_90_minute_lesson_is_drafted_to_90_minutes_worth_of_words(db):
     size = _lesson_size(lesson, plan, deepen=False)
 
     assert size["minutes"] == 90
-    assert size["teaching_minutes"] == 80  # 90 - QA_MINUTES
-    assert size["target_words"] == target_words(80)
-    assert size["floor_words"] == floor_words(80)
+    assert size["teaching_minutes"] == 90  # 50 means 50: no Q&A carve-out
+    assert size["target_words"] == target_words(90)
+    assert size["floor_words"] == floor_words(90)

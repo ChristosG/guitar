@@ -99,6 +99,10 @@ class IngestPayload:
     text: str | None = None
     url: str | None = None
     data: bytes | None = None
+    # kind="url" only: >1 turns the single-page fetch into a scoped same-site
+    # crawl (`brain/crawl.py`) — one Page per crawled page, capped there at
+    # MAX_CRAWL_PAGES. 1 (the default) is byte-identical to the old behavior.
+    crawl_pages: int = 1
 
 
 def ingest_source(db, source_id, payload: IngestPayload) -> None:
@@ -124,8 +128,21 @@ def ingest_source(db, source_id, payload: IngestPayload) -> None:
         # Create/replace this source's Page rows first (Plan 9 Task 3's
         # paginate_source — idempotent, deletes-then-recreates). Every chunk
         # created below gets linked to one of these via page_id.
+        # A multi-page URL source crawls FIRST (network, outside paginate's
+        # transaction), then paginates from the in-memory result — so a crawl
+        # that dies mid-site can't leave half a source's Pages behind.
+        crawled = None
+        if payload.kind == "url" and payload.crawl_pages > 1 and payload.url:
+            from app.brain.crawl import crawl_site
+
+            # `or None`: a crawl that found nothing falls back to the plain
+            # single-page path below, keeping the two branches consistent
+            # (paginate would otherwise take one path and sections the other).
+            crawled = crawl_site(payload.url, max_pages=payload.crawl_pages) or None
+
         pages = paginate_source(
-            db, source_id, kind=payload.kind, data=payload.data, url=payload.url, text=payload.text,
+            db, source_id, kind=payload.kind, data=payload.data, url=payload.url,
+            text=payload.text, crawled=crawled,
         )
         page_by_no = {p.page_no: p for p in pages}
 
@@ -143,7 +160,16 @@ def ingest_source(db, source_id, payload: IngestPayload) -> None:
         # images and opportunistically captures an existing text layer (or
         # leaves a page "pending" for the Task 4 OCR job) — it does not run
         # the full heading-aware section extraction the chunker needs.
-        if payload.kind == "url":
+        if payload.kind == "url" and crawled is not None:
+            # Crawled multi-page source: one Section per crawled page, heading
+            # = the page's own title (or URL), page = its Page row — so chunks
+            # cite the exact crawled page, same as a PDF's page citations.
+            sections = [
+                Section(heading=title or url, text=page.text, page=page.page_no)
+                for (url, title, _), page in zip(crawled, pages)
+                if page.text
+            ]
+        elif payload.kind == "url":
             single_page = pages[0] if pages else None
             sections = (
                 [Section(heading=None, text=single_page.text, page=single_page.page_no)]

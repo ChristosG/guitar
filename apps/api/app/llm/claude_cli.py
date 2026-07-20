@@ -153,6 +153,13 @@ _GUIDED_TIMEOUT_S: dict[str, float] = {
     # case; a genuine hang still dies here. The real cure is the API key (no
     # subscription throttle, true parallelism) — this is the claude -p stopgap.
     "draft": 1200.0,
+    # The outline (`role="plan"`) reads the SAME cached library prefix a draft
+    # does — up to a 300K-token whole-library read, or the canon block — and then
+    # writes a 20-lesson outline. On 2026-07-20 a real outline died at exactly the
+    # 600s default ("Outline generation timed out. Try again.") while the drafts
+    # around it, with the same context, were granted 1200s. Same read, same
+    # throttle exposure, same budget.
+    "plan": 1200.0,
 }
 _DEFAULT_GUIDED_TIMEOUT_S = 600.0
 

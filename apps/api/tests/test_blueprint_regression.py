@@ -126,7 +126,7 @@ def test_persist_lesson_labels_come_from_blueprint(db):
     m = measure(lesson, bp, teaching_minutes=40)
     persist_lesson(
         db, lesson_block, lesson, m, library, bp,
-        qa_minutes=10, teaching_minutes=40,
+        teaching_minutes=40,
     )
     db.commit()
     db.expire_all()

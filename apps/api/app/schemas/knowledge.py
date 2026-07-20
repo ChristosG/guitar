@@ -33,6 +33,11 @@ class SourceCreate(BaseModel):
     language: str | None = None
     text: str | None = None
     url: str | None = None
+    # kind="url" only: >1 follows same-site links breadth-first from the URL
+    # (a multi-page guide like justinguitar's course indexes) and stores one
+    # Page per crawled page. Server-side hard ceiling in `brain/crawl.py`
+    # (MAX_CRAWL_PAGES); 1 keeps the classic single-page fetch.
+    crawl_pages: int = Field(default=1, ge=1, le=50)
 
     @model_validator(mode="after")
     def _text_or_url_matches_kind(self) -> "SourceCreate":

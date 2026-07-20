@@ -138,6 +138,14 @@ class PendingApprovalOut(BaseModel):
     created_at: datetime
 
 
+class DistilledInstructionOut(BaseModel):
+    """`POST /chat/{session_id}/distill`'s response — the revise chat's "talk
+    it through first" exit. One tutor-voiced revision instruction distilled
+    from the conversation, returned for the tutor to REVIEW AND EDIT in his
+    composer; nothing is planned, proposed, or applied by this call."""
+    instruction: str
+
+
 class SuggestionsOut(BaseModel):
     """`POST /chat/{session_id}/suggestions`'s response (chat overhaul, Piece
     B "next move" chips). 0-3 short, concrete, DOABLE next actions — never a

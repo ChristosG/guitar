@@ -161,6 +161,15 @@ class Settings(BaseSettings):
     # binding constraint long before wall-clock is. A 429 puts a lesson back to
     # `queued`, not `failed` — but the cheapest 429 is the one we never provoke.
     draft_concurrency: int = 2
+    # ...and the wider cap the REAL API gets. `claude_cli` stays at 2 because
+    # the bridge serializes at 3 slots shared with chat/vision — a wider pool
+    # there just queues inside the bridge while the caller's read timeout runs.
+    # The API has no such shared choke point; the SDK's own retries (and the
+    # queued-lesson backoff pass in `run_curriculum_draft_job`) absorb a 429
+    # burst if the account tier is low. Picked per-run in the draft job from
+    # the RESOLVED provider, not here, so flipping the Settings toggle is
+    # enough — no restart, no env edit.
+    draft_concurrency_api: int = 6
 
     # ---- Connection pool --------------------------------------------------
     #

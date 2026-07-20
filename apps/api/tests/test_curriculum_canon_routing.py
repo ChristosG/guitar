@@ -14,8 +14,12 @@ ships instead.
 
 The uncompiled-book rule is the anti-silent-miss guarantee: a selected book
 whose compile has not finished must never be silently dropped from a canon. Full
-context is used whenever it still fits; only when it does NOT fit and a book is
-uncompiled do we refuse — plainly, naming the book, never degrading in silence.
+context is used whenever it still fits; when it does NOT fit and a book is
+uncompiled, two graceful rungs replace the old refusal (which killed the tutor's
+real run twice on 2026-07-20): a MIXED context (canon for the compiled books +
+the uncompiled sources verbatim, disjoint refs), and per-lesson retrieval when
+even that does not fit. Nothing is silently lost on either rung — the mixed
+block carries every source on the page, and retrieval searches every chunk.
 """
 import uuid
 
@@ -144,24 +148,50 @@ def test_uncompiled_book_above_threshold_falls_back_to_full_context_when_it_fits
     assert "<canon" not in body, "a canon that omits a selected book must NOT ship"
 
 
-def test_uncompiled_book_that_does_NOT_fit_refuses_plainly(db, monkeypatch):
-    """It does not fit whole AND a selected book is uncompiled: we can neither
-    read it whole nor build a complete canon. Refuse — never silently degrade to
-    a partial canon during an unattended run."""
-    a = _book(db, "Compiled Book")
+def test_uncompiled_book_that_does_NOT_fit_gets_the_MIXED_context(db, monkeypatch):
+    """It does not fit whole AND a selected book is uncompiled: the canon carries
+    the compiled book, the uncompiled one rides along VERBATIM after it, and the
+    refs stay disjoint so citations still resolve. This replaced the refusal that
+    failed the tutor's real run twice on 2026-07-20."""
+    # A REALISTICALLY large compiled book: its canon render (one concept + the
+    # legend) must be far smaller than its raw text, like the tutor's real books
+    # (300K raw -> a few K of canon). A two-page fixture would invert that ratio
+    # and the mixed rung could never fit.
+    a = _book(db, "Compiled Book", pages=tuple(range(1, 40)),
+              body="a long page of real prose about pickup height and tone " * 20)
     b = _book(db, "Uncompiled Book")
     _compile(db, a, key="pickup-height", label_en="Pickup height", page=19)
     from app.curriculum.corpus import build_library_context
 
     tokens = build_library_context(db, [a.id, b.id]).token_count
     monkeypatch.setattr(corpus_mod.settings, "canon_threshold", tokens - 1)
-    # it does NOT fit whole
+    # it does NOT fit whole — but canon(a) + verbatim(b) does
     monkeypatch.setattr(corpus_mod.settings, "full_context_budget", tokens - 1)
 
-    with pytest.raises(CurriculumContextError) as exc:
-        build_curriculum_context(db, [a.id, b.id])
+    context = build_curriculum_context(db, [a.id, b.id])
+    body = _prefix_text(context)
+    assert "<canon" in body, "the compiled book must arrive as canon"
+    assert 'title="Uncompiled Book"' in body, "the uncompiled book must ride along verbatim"
+    assert context.fits
+    # Disjoint refs: the canon claimed S1, so the verbatim block starts at S2 —
+    # a shared ref would corrupt every citation check downstream.
+    assert set(context.ref_to_source_id.keys()) == {"S1", "S2"}
+    assert context.ref_to_source_id["S2"] == b.id
 
-    assert "Uncompiled Book" in str(exc.value), "the refusal must NAME the book to compile"
+
+def test_when_even_the_mixed_context_does_not_fit_it_degrades_to_retrieval(db, monkeypatch):
+    """The last rung: nothing readable fits whole, so ground per-lesson via
+    retrieval (fits=False) — never refuse, never fail the unattended run."""
+    a = _book(db, "Compiled Book")
+    b = _book(db, "Uncompiled Book")
+    _compile(db, a, key="pickup-height", label_en="Pickup height", page=19)
+
+    monkeypatch.setattr(corpus_mod.settings, "canon_threshold", 1)
+    monkeypatch.setattr(corpus_mod.settings, "full_context_budget", 1)
+
+    context = build_curriculum_context(db, [a.id, b.id])
+    assert not context.fits, "retrieval context grounds per-lesson"
+    assert not context.is_empty
 
 
 def test_below_threshold_an_uncompiled_book_is_full_context_as_usual(db, monkeypatch):

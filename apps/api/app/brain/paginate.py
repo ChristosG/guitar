@@ -66,7 +66,9 @@ def source_pdf_path(source_id) -> str:
     return os.path.join(settings.media_dir, str(source_id), SOURCE_PDF_NAME)
 
 
-def paginate_source(db, source_id, *, kind, data=None, url=None, text=None) -> list[Page]:
+def paginate_source(
+    db, source_id, *, kind, data=None, url=None, text=None, crawled=None
+) -> list[Page]:
     """Create this source's Page rows — idempotent: re-running for an
     existing source (Task 6's retry-a-failed-ingest path) REPLACES its Page
     rows rather than duplicating them. Deleting a source's Pages cascades
@@ -99,6 +101,8 @@ def paginate_source(db, source_id, *, kind, data=None, url=None, text=None) -> l
 
     if kind == "pdf" and data:
         return _paginate_pdf(db, source_id, data)
+    if kind == "url" and crawled:
+        return _paginate_crawled(db, source_id, crawled)
     return _single_page(db, source_id, kind=kind, url=url, text=text)
 
 
@@ -163,6 +167,29 @@ def _paginate_pdf(db, source_id, data: bytes) -> list[Page]:
         return pages
     finally:
         doc.close()
+
+
+def _paginate_crawled(db, source_id, crawled) -> list[Page]:
+    """One Page per crawled web page, in BFS/navigation order (`brain/crawl.py`).
+
+    Each Page.text opens with the page's own URL and title — that line is what
+    makes a "p.7" citation on a crawled site VERIFIABLE: the Reader shows the
+    page, the first line says exactly where on the site it came from. The same
+    shape a PDF book has, so nothing downstream branches on "crawled or not".
+    """
+    pages: list[Page] = []
+    for i, (page_url, title, body) in enumerate(crawled, start=1):
+        header = f"{page_url}\n{title}".strip()
+        page = Page(
+            source_id=source_id, page_no=i, image_path=None,
+            text=f"{header}\n\n{body}".strip() or None,
+            status="ready" if body else "empty",
+        )
+        db.add(page)
+        pages.append(page)
+    db.commit()
+    log.info("paginate: source=%s crawled pages=%d", source_id, len(pages))
+    return pages
 
 
 def _single_page(db, source_id, *, kind, url, text) -> list[Page]:

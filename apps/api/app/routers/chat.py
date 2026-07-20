@@ -56,6 +56,7 @@ from app.schemas.chat import (
     ChatSessionSummary,
     ChatSessionUpdate,
     ChatTurnOut,
+    DistilledInstructionOut,
     MessageOut,
     PendingApprovalOut,
     SuggestionsOut,
@@ -971,6 +972,36 @@ def resolve_approval(
     wire_with_answer = wire + [tool_msg]
     result = run_agent_turn(db, wire_with_answer, locale=session.locale)
     return _respond_to_turn(db, session_id, wire_with_answer, result)
+
+
+@router.post("/chat/{session_id}/distill", response_model=DistilledInstructionOut)
+def distill_chat_instruction(
+    session_id: UUID, db: Session = Depends(get_db)
+) -> DistilledInstructionOut:
+    """The revise chat's "talk it through first" exit (task 7, 2026-07-21):
+    the tutor thinks a change through with the assistant, presses the distill
+    button, and ONE cheap call writes the revision instruction he MEANT —
+    which lands back in his composer to review, edit, and send. Deliberately
+    approve-before-spend, same posture as the interview's planning distill:
+    this endpoint returns text; it never plans, proposes, or applies anything.
+
+    409s (not empty 200s) for the states the tutor can fix: a session that is
+    not bound to a curriculum, a conversation he hasn't spoken in yet, or a
+    model reply with nothing usable in it — each with a sentence naming it.
+    """
+    from app.curriculum.revise import distill_revise_instruction
+
+    session = _get_session_or_404(db, session_id)
+    if not session.root_id:
+        raise HTTPException(
+            status_code=409,
+            detail="This chat is not attached to a curriculum — open it from a course's Revise panel.",
+        )
+    try:
+        instruction = distill_revise_instruction(db, session)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return DistilledInstructionOut(instruction=instruction)
 
 
 @router.post("/chat/{session_id}/suggestions", response_model=SuggestionsOut)

@@ -162,7 +162,12 @@ class ClaudeProvider(LLMProvider):
                     "auth",
                     "No Anthropic API key configured. Open Settings and paste your key.",
                 )
-            kw: dict[str, Any] = {"api_key": self._api_key, "max_retries": 2, "timeout": 600.0}
+            # max_retries=4: the SDK backs off exponentially on 408/429/5xx/529.
+            # Two retries survived a blip but not a real 429 burst — a 20-lesson
+            # fan-out that trips the tier's RPM limit needs the later, longer
+            # waits (the 3rd/4th retry) to outlive the window instead of
+            # surfacing `rate_limit` and parking the lesson for a manual Resume.
+            kw: dict[str, Any] = {"api_key": self._api_key, "max_retries": 4, "timeout": 600.0}
             # `anthropic_base_url`, NOT `llm_base_url`. They look interchangeable
             # and they are not: `llm_base_url` belongs to the QWEN provider and
             # defaults to `http://qwen-vllm:6888/v1`, which is always truthy. An

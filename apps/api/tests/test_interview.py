@@ -290,9 +290,9 @@ def test_the_sources_step_echoes_the_derived_shape_back_at_him(db):
     assert shape["lessons_total"] == 20
     assert shape["modules"] == 5                      # never 4 again
     assert shape["lessons_per_module"] == [4, 4, 4, 4, 4]
-    assert shape["target_words_per_lesson"] == 2200   # 40 taught min x 55 wpm
-    assert shape["teaching_minutes"] == 40
-    assert shape["qa_minutes"] == 10                  # the 10' he asked for
+    assert shape["target_words_per_lesson"] == 2750   # 50 min x 55 wpm — 50 means 50
+    assert shape["teaching_minutes"] == 50
+    assert shape["qa_minutes"] == 0                   # Q&A lives in the blueprint now
 
     # ...and nothing user-facing crosses the wire in English.
     assert not any(isinstance(v, str) for v in shape.values())

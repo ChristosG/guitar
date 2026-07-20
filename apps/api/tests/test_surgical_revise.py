@@ -657,7 +657,7 @@ def test_persist_lesson_preserves_custom_segments_appended_after(db):
     lesson = _drafted_lesson()
     library = LibraryContext(text="", token_count=0, fits=True)
     m = measure(lesson, bp, teaching_minutes=40)
-    persist_lesson(db, lesson_block, lesson, m, library, bp, qa_minutes=10, teaching_minutes=40)
+    persist_lesson(db, lesson_block, lesson, m, library, bp, teaching_minutes=40)
     db.commit()
     db.expire_all()
 
@@ -1134,9 +1134,8 @@ def _draft_plan(lesson_id, *, blueprint=None) -> dict:
         "source_ids": None,
         "positions": {str(lesson_id): "lesson 1 of 1, module 1 of 1"},
         "minutes_per_lesson": 50,
-        "teaching_minutes": 40,
-        "qa_minutes": 10,
-        "target_words": 2200,
+        "teaching_minutes": 50,
+        "target_words": 2750,
         "floor_words": 10,
     }
 
@@ -1292,12 +1291,13 @@ def test_draft_one_excludes_a_freshly_queued_empty_segment_from_revise_current(
 def test_draft_one_sends_the_keep_directive_when_a_section_is_over_the_cap(
     db_and_tree, monkeypatch,
 ):
-    """A section body over `REVISE_CURRENT_CHAR_LIMIT` chars (routine for a
-    normal ~300-450 word Greek section) must reach the model WITH the marker,
-    and the un-sent tail must not leak through some other path."""
+    """A section body over `REVISE_CURRENT_CHAR_LIMIT` chars (a genuine outlier
+    at the 6000-char cap — normal sections now arrive whole) must reach the
+    model WITH the marker, and the un-sent tail must not leak through some
+    other path."""
     db, course, module, lesson, seg1, seg2 = db_and_tree
     tail = "ΟΥΡΑ_ΠΟΥ_ΔΕΝ_ΠΡΕΠΕΙ_ΝΑ_ΦΤΑΣΕΙ_ΣΤΟ_ΜΟΝΤΕΛΟ"
-    seg1.body = ("Β" * 2500) + tail
+    seg1.body = ("Β" * 6500) + tail
     db.commit()
 
     provider = _RevisingFakeProvider()

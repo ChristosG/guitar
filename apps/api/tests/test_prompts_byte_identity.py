@@ -30,7 +30,7 @@ from __future__ import annotations
 import pytest
 
 from app.prompts import registry
-from tests.prompt_baseline import LOCALES, load_baseline, render_all
+from prompt_baseline import LOCALES, load_baseline, render_all
 
 BASELINE = load_baseline()
 

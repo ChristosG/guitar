@@ -198,11 +198,33 @@ def describe_step(db: Session, interview: CurriculumInterview) -> dict:
             # code default (`resolve_default_blueprint`'s own contract) — never
             # `default_blueprint()` directly, which would silently ignore a
             # settings-level customisation the moment he opens the wizard.
-            "findings": {"blueprint": resolve_default_blueprint(db)},
+            #
+            # `minutes_per_lesson` rides along (duration is answered two steps
+            # earlier) so the editor can translate each section's percentage
+            # into REAL minutes of his actual lesson — he thinks in "10 λεπτά
+            # θεωρία", not in 0.25.
+            "findings": {
+                "blueprint": resolve_default_blueprint(db),
+                "minutes_per_lesson": (
+                    _shape_of(interview).minutes_per_lesson if _shape_of(interview) else None
+                ),
+            },
         }
 
     if step == "sources":
         sources = db.scalars(select(KnowledgeSource).order_by(KnowledgeSource.title)).all()
+        # Per-source canon status, so the tutor sees WHICH selections are compiled
+        # BEFORE he pays for a run — on 2026-07-20 he learned it from two failed
+        # jobs naming six sources after the fact. One query, decorated onto every
+        # option the same way `SourceOut.compile` decorates the library screen.
+        from app.models.canon import BookCompile
+
+        compiled = {
+            str(sid)
+            for sid in db.scalars(
+                select(BookCompile.source_id).where(BookCompile.status == "ready")
+            ).all()
+        }
         options = [
             {
                 "value": str(s.id),
@@ -214,6 +236,7 @@ def describe_step(db: Session, interview: CurriculumInterview) -> dict:
                 # retrieval floor uses, reused here rather than a second arbitrary
                 # number.
                 "default_selected": (s.char_count or 0) >= MIN_PASSAGE_CHARS,
+                "compiled": str(s.id) in compiled,
             }
             for s in sources
         ]

@@ -131,7 +131,7 @@ LESSON_TAIL = (
     "POSITION: {position}. Do not re-teach what earlier lessons covered; "
     "build on it.\n"
     "\nLENGTH IS NOT OPTIONAL. This lesson is {teaching_minutes} minutes "
-    "of teaching plus a Q&A block, and it must run to about "
+    "of teaching, and it must run to about "
     "{target_words} words in total across its sections — roughly four to "
     "five pages. A lesson under {floor_words} words is a rejected "
     "lesson: it will be sent back to you to be written properly. Write the "
@@ -486,19 +486,28 @@ def draft_lesson(
 # Persisting a drafted lesson
 # ---------------------------------------------------------------------------
 
-# How the taught minutes are spread across the sections on the printed script.
+# How the session's minutes are spread across the sections on the printed script.
 # Derived from the same weights `depth` measures against, so a section that is 25%
 # of the words is 25% of the clock — the two numbers cannot drift apart.
+#
+# Weights are NORMALIZED by the enabled total, not read raw: the tutor edits
+# weights section-by-section in the blueprint editor and disables sections
+# per-course, so the enabled weights routinely sum to 0.94 or 1.10 — and a raw
+# multiply would print a 47-minute clock on a 50-minute lesson. Shares of the
+# whole are what he means; shares are what the clock shows. Q&A gets no special
+# case any more (Chris, 2026-07-21: "if he has Q&A on his blueprint... it just
+# takes it from his weight set") — a `qa`-kind section is clocked from its
+# weight exactly like prose, and a disabled one simply isn't here.
 def _section_minutes(
-    name: str, teaching_minutes: int, qa_minutes: int, blueprint: dict | None = None,
+    name: str, teaching_minutes: int, blueprint: dict | None = None,
 ) -> int:
     from app.curriculum import blueprint as _bp
 
     bp = blueprint if blueprint is not None else _bp.default_blueprint()
-    kinds = {s["key"]: s["kind"] for s in bp["sections"]}
-    if kinds.get(name) == "qa":
-        return max(1, qa_minutes)
-    return max(1, round(_bp.section_weights(bp)[name] * teaching_minutes))
+    weights = _bp.section_weights(bp)
+    total = sum(weights.values())
+    share = weights[name] / total if total > 0 else 1.0 / max(1, len(weights))
+    return max(1, round(share * teaching_minutes))
 
 
 def _render_section(name: str, section: dict) -> str:
@@ -532,7 +541,6 @@ def persist_lesson(
     library: LibraryContext,
     blueprint: dict | None = None,
     *,
-    qa_minutes: int,
     teaching_minutes: int,
 ) -> None:
     """Replace `lesson_block`'s segments with the drafted lesson's sections, and
@@ -615,7 +623,7 @@ def persist_lesson(
             kind="segment",
             title=labels[name],
             body=body,
-            est_minutes=_section_minutes(name, teaching_minutes, qa_minutes, bp),
+            est_minutes=_section_minutes(name, teaching_minutes, bp),
             order=order,
             parent_id=lesson_block.id,
             language=lesson_block.language,

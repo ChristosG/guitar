@@ -144,6 +144,8 @@ from app.curriculum.draft import (
 from app.curriculum.extend import MODULE_SLICE_ID, MODULE_TAIL, build_module_messages
 from app.curriculum.interview import DISTILL_SLICE_ID, DISTILL_SYSTEM
 from app.curriculum.revise import (
+    REVISE_DISTILL_SLICE_ID,
+    REVISE_DISTILL_SYSTEM,
     REVISE_REPAIR_MESSAGE,
     REVISE_REPAIR_SLICE_ID,
     REVISE_SLICE_ID,
@@ -674,9 +676,9 @@ _SAMPLE_LESSON_CTX = LessonContext(
     tier=TIER_LIBRARY,
     position="lesson 2 of 4, module 3 of 5",
     minutes=50,
-    teaching_minutes=40,
-    target_words=2200,
-    floor_words=1600,
+    teaching_minutes=50,
+    target_words=2750,
+    floor_words=2200,
 )
 
 _SAMPLE_PREVIOUS_DRAFT = {
@@ -1044,6 +1046,25 @@ def _build_interview_distill(locale: str, db, course_language=None) -> _Built:
     ]
 
 
+_SAMPLE_REVISE_DISTILL_TRANSCRIPT = (
+    "USER: Το μάθημα για τα πετάλια μου φαίνεται ρηχό — θέλω περισσότερη πράξη.\n"
+    "ASSISTANT: Να προσθέσουμε ασκήσεις με αλυσίδα πεταλιών στο μάθημα 12;\n"
+    "USER: Ναι, και βγάλε τη θεωρία για τα τρανζίστορ, δεν τη χρειάζονται."
+)
+
+
+def _build_revise_distill(locale: str, db, course_language=None) -> _Built:
+    lang_code = _course_language(locale, course_language)
+    prompt = resolve_text(db, REVISE_DISTILL_SLICE_ID, REVISE_DISTILL_SYSTEM).format(
+        language_directive=language_directive(lang_code, db),
+        transcript=_SAMPLE_REVISE_DISTILL_TRANSCRIPT,
+    )
+    return [RenderedMessage(role="user", content=prompt)], [
+        (*_LANG_FROM_COURSE, language_directive(lang_code, db)),
+        ("transcript", "Ένα δείγμα της συζήτησης αναθεώρησης", _SAMPLE_REVISE_DISTILL_TRANSCRIPT),
+    ]
+
+
 def _build_lesson_draft(locale: str, db, course_language=None) -> _Built:
     lang = _course_language(locale, course_language)
     built = build_lesson_messages(
@@ -1385,7 +1406,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: SUGGESTIONS_SYSTEM,
         build=_build_chat_suggestions,
-        call_sites=("routers/chat.py:1019",),
+        call_sites=("routers/chat.py:1050",),
         slices=(
             Slice(
                 id=SUGGESTIONS_SLICE_ID,
@@ -1421,7 +1442,7 @@ _ENTRIES = [
         id="tools.system_claude_cli",
         flow="tools",
         kind="prompt",
-        source_ref="app/llm/claude_cli.py:576",
+        source_ref="app/llm/claude_cli.py:583",
         title_el="Τα εργαλεία, γραμμένα σαν οδηγίες (τρέχουσα σύνδεση)",
         what_it_does_el=(
             "Με τη σύνδεση που χρησιμοποιείς αυτή τη στιγμή, τα εργαλεία δεν "
@@ -1479,7 +1500,7 @@ _ENTRIES = [
         curriculum_group=True,
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/corpus.py:490",
+        source_ref="app/curriculum/corpus.py:524",
         title_el="Ολόκληρη η βιβλιοθήκη σου",
         what_it_does_el=(
             "Δίνει στον βοηθό όλα τα βιβλία που διάλεξες, ολόκληρα, με τον "
@@ -1508,7 +1529,7 @@ _ENTRIES = [
         id="curriculum.no_library",
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/corpus.py:472",
+        source_ref="app/curriculum/corpus.py:479",
         title_el="Όταν δεν διάλεξες κανένα βιβλίο",
         what_it_does_el=(
             "Αν δεν διαλέξεις καμία πηγή, μπαίνει αυτό στη θέση της "
@@ -1533,7 +1554,7 @@ _ENTRIES = [
         id="curriculum.library_too_large",
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/corpus.py:463",
+        source_ref="app/curriculum/corpus.py:480",
         title_el="Όταν η βιβλιοθήκη σου δεν χωράει",
         what_it_does_el=(
             "Αν τα βιβλία που διάλεξες είναι πάρα πολλά για να διαβαστούν "
@@ -1573,7 +1594,7 @@ _ENTRIES = [
         when_it_runs_el="Μία φορά, μόλις πατήσεις δημιουργία προγράμματος.",
         source_of_truth=lambda: build_outline_messages,
         build=_build_curriculum_outline,
-        call_sites=("curriculum/outline.py:305",),
+        call_sites=("curriculum/outline.py:302",),
         slices=(
             Slice(
                 id=OUTLINE_SLICE_ID,
@@ -1705,7 +1726,7 @@ _ENTRIES = [
         # This is the FIRST-PASS call only — the one-shot repair pass (2026-07-20)
         # has its own call site and its own entry, "curriculum.revise.repair"
         # below, exactly like "lesson.draft"/"lesson.repair" split theirs.
-        call_sites=("curriculum/revise.py:710",),
+        call_sites=("curriculum/revise.py:775",),
         slices=(
             Slice(
                 id=REVISE_SLICE_ID,
@@ -1719,7 +1740,7 @@ _ENTRIES = [
         id="curriculum.revise.repair",
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/revise.py:655",
+        source_ref="app/curriculum/revise.py:720",
         title_el="Όταν το σχέδιο αναθεώρησης απορρίπτει προτάσεις",
         what_it_does_el=(
             "Η εφαρμογή ελέγχει κάθε πρόταση αλλαγής (op) του βοηθού: αν ένα id "
@@ -1735,12 +1756,45 @@ _ENTRIES = [
         when_it_runs_el="Μόνο όταν απορριφθεί έστω μία πρόταση. Το πολύ μία φορά ανά σχέδιο.",
         source_of_truth=lambda: _revise_repair_message,
         build=_build_curriculum_revise_repair,
-        call_sites=("curriculum/revise.py:719",),
+        call_sites=("curriculum/revise.py:784",),
         slices=(
             Slice(
                 id=REVISE_REPAIR_SLICE_ID,
                 label_el="Το κείμενο της οδηγίας",
                 default=REVISE_REPAIR_MESSAGE,
+                kind="replace",
+            ),
+        ),
+    ),
+    PromptEntry(
+        id="curriculum.revise_distill",
+        language_from_course=True,
+        flow="curriculum",
+        kind="prompt",
+        source_ref="app/curriculum/revise.py:664",
+        title_el="Η απόσταξη της συζήτησης αναθεώρησης",
+        what_it_does_el=(
+            "Διαβάζει τη συζήτησή σου με τον βοηθό μέσα από το πάνελ "
+            "«Αναθεώρηση με AI» και γράφει, με τα δικά σου λόγια, ΜΙΑ καθαρή "
+            "οδηγία αναθεώρησης — ποια μαθήματα ή ενότητες αφορά, τι να "
+            "αλλάξει στο καθένα, τι να μείνει ως έχει. Κρατάει μόνο ό,τι "
+            "πράγματι αποφάσισες· ό,τι απορρίφθηκε στη συζήτηση μένει έξω. "
+            "ΔΕΝ προτείνει ούτε εφαρμόζει τίποτα από μόνο του — το κείμενο "
+            "μπαίνει στο πεδίο σου, το διορθώνεις όσο θέλεις, και το στέλνεις "
+            "εσύ."
+        ),
+        when_it_runs_el=(
+            "Όταν πατάς «Φτιάξε την οδηγία» μέσα στη συζήτηση αναθεώρησης "
+            "ενός προγράμματος, αφού την έχεις συζητήσει με τον βοηθό."
+        ),
+        source_of_truth=lambda: REVISE_DISTILL_SYSTEM,
+        build=_build_revise_distill,
+        call_sites=("curriculum/revise.py:711",),
+        slices=(
+            Slice(
+                id=REVISE_DISTILL_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=REVISE_DISTILL_SYSTEM,
                 kind="replace",
             ),
         ),
@@ -1768,7 +1822,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: DISTILL_SYSTEM,
         build=_build_interview_distill,
-        call_sites=("curriculum/interview.py:719",),
+        call_sites=("curriculum/interview.py:742",),
         slices=(
             Slice(
                 id=DISTILL_SLICE_ID,

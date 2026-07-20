@@ -23,7 +23,7 @@ from app.curriculum.depth import (
     measure,
     target_words,
 )
-from app.curriculum.shape import QA_MINUTES, enforce_shape, plan_shape
+from app.curriculum.shape import enforce_shape, plan_shape
 from app.llm.errors import GuidedJSONError
 from app.llm.schema import to_anthropic_schema, unsupported_keywords
 
@@ -41,25 +41,25 @@ def test_twenty_weeks_is_five_modules_of_four_lessons_not_four_modules():
     assert shape.lessons_per_module == (4, 4, 4, 4, 4)
 
 
-def test_a_fifty_minute_session_is_forty_taught_minutes_and_a_ten_minute_qa():
-    """"each lesson has to be around 40 mins, then 10 mins for questions" — so the
-    word target is computed from the TAUGHT minutes, not the session length.
-    Counting the Q&A block as prose would inflate every lesson by 25% and then fail
-    it for being thin."""
+def test_a_fifty_minute_session_is_fifty_taught_minutes_no_qa_carve_out():
+    """Chris, 2026-07-21: "forget the extra Q&A ... so 50 is 50. and if he has
+    Q&A it just takes it from his weight set." The word target is computed from
+    the WHOLE session; Q&A is an ordinary blueprint section inside it, not a
+    fixed ten-minute deduction."""
     shape = plan_shape(20, 1, 50)
 
-    assert shape.teaching_minutes == 40
-    assert shape.qa_minutes == QA_MINUTES == 10
-    # "those 40 mins has to be around 4-5 pages" — 2,200 words is ~4.5 pages.
-    assert shape.target_words_per_lesson == 2200
-    assert shape.floor_words_per_lesson == 1760
+    assert shape.teaching_minutes == 50
+    assert shape.qa_minutes == 0
+    # 50 min × 55 words/min — the full slot's worth of pages.
+    assert shape.target_words_per_lesson == 2750
+    assert shape.floor_words_per_lesson == 2200
 
 
 def test_the_derived_shape_is_echoed_back_to_the_tutor_before_he_pays_for_it():
     line = plan_shape(20, 1, 50).describe()
     assert "20 sessions" in line
     assert "5 modules" in line
-    assert "2,200 words" in line
+    assert "2,750 words" in line
 
 
 @pytest.mark.parametrize(
@@ -85,12 +85,10 @@ def test_the_lessons_always_add_up_to_the_sessions_he_asked_for(
 
 
 def test_a_short_session_still_gets_real_teaching_minutes():
-    """A 12-minute session is not 2 minutes of teaching and 10 of Q&A — a word
-    target of ~110 would make every lesson trivially 'deep enough' and the floor
-    would stop meaning anything."""
+    """With no carve-out, a 12-minute session is 12 minutes of teaching."""
     shape = plan_shape(4, 1, 12)
-    assert shape.teaching_minutes >= 10
-    assert shape.target_words_per_lesson > 0
+    assert shape.teaching_minutes == 12
+    assert shape.target_words_per_lesson == 12 * 55
 
 
 @pytest.mark.parametrize("bad", [(0, 1, 50), (4, 0, 50), (4, 1, 0), (-2, 1, 50)])

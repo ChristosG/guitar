@@ -1,5 +1,8 @@
 services:
   postgres:
+    # After a host reboot the whole app must come back with nobody at the
+    # keyboard — 2026-07-21 it sat down for 33 minutes until someone noticed.
+    restart: unless-stopped
     image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-guitar}
@@ -17,6 +20,9 @@ services:
     networks: [appnet]
 
   api:
+    # After a host reboot the whole app must come back with nobody at the
+    # keyboard — 2026-07-21 it sat down for 33 minutes until someone noticed.
+    restart: unless-stopped
     build: { context: ./apps/api }
     env_file: .env
     depends_on:
@@ -34,6 +40,9 @@ services:
     networks: [appnet, platform-net]
 
   worker:
+    # After a host reboot the whole app must come back with nobody at the
+    # keyboard — 2026-07-21 it sat down for 33 minutes until someone noticed.
+    restart: unless-stopped
     build: { context: ./apps/api }
     env_file: .env
     command: ["python", "-c", "print('worker stub — ingestion lands in the Brain plan'); import time; time.sleep(1e9)"]
@@ -116,6 +125,9 @@ services:
     networks: [appnet]
 
   web:
+    # After a host reboot the whole app must come back with nobody at the
+    # keyboard — 2026-07-21 it sat down for 33 minutes until someone noticed.
+    restart: unless-stopped
     build:
       context: ./apps/web
       args:

@@ -149,7 +149,9 @@ def _page_texts(db, source_id: UUID) -> list[tuple[int, str]]:
     ]
 
 
-def build_library_context(db, source_ids: list[UUID] | None) -> LibraryContext:
+def build_library_context(
+    db, source_ids: list[UUID] | None, *, ref_start: int = 1
+) -> LibraryContext:
     """The selected sources' complete text as ONE page-annotated block:
 
         <source id="S1" title="Getting Great Guitar Sounds">
@@ -161,6 +163,11 @@ def build_library_context(db, source_ids: list[UUID] | None) -> LibraryContext:
     sends when the caller names no sources. An empty LIST means "none", which is
     a different, deliberate answer and is respected as one: the result is an empty
     context and every module will be a general-knowledge tier.
+
+    `ref_start` offsets the `S{n}` numbering — the MIXED context in
+    `build_curriculum_context` concatenates this block after a canon block that
+    already claimed S1..Sk, and two sources sharing one ref would corrupt every
+    citation check downstream.
 
     The `[p.N]` markers are not decoration. They are the only mechanism by which
     a model reading 90K tokens of prose can tell us WHICH PAGE a claim came from,
@@ -181,7 +188,7 @@ def build_library_context(db, source_ids: list[UUID] | None) -> LibraryContext:
     page_index: dict[str, set[int]] = {}
     ref_to_source_id: dict[str, UUID] = {}
 
-    for i, source in enumerate(sources, start=1):
+    for i, source in enumerate(sources, start=ref_start):
         pages = _page_texts(db, source.id)
         if not pages:
             continue  # a source with no readable text is not a source, it is a row
@@ -309,14 +316,54 @@ def build_curriculum_context(db, source_ids: list[UUID] | None):
         )
         return library
 
-    titles = ", ".join(s.get("title") or s["id"] for s in uncompiled)
-    raise CurriculumContextError(
-        f"The selected library is too large to read whole ({library.token_count:,} "
-        f"tokens) and these books have not been compiled into the canon yet, so it "
-        f"cannot be built without silently leaving them out: {titles}. Compile them "
-        f"(or select fewer books) and try again.",
-        uncompiled=uncompiled,
+    # Too large to read whole AND some contributors are uncompiled. This used to
+    # REFUSE ("compile them and try again") — which is how the tutor's real run
+    # died twice on 2026-07-20: he had selected his 4 compiled books plus a text
+    # doc and five URL sources, and the wizard failed after the fact instead of
+    # building what it honestly could. Two graceful rungs replace the refusal:
+    #
+    #   1. MIXED: the canon for the compiled books + the uncompiled sources read
+    #      VERBATIM after it. His uncompiled sources are the small ones (URLs, a
+    #      course-spine note); the canon is ~40K tokens — together they almost
+    #      always fit, and NOTHING is silently left out: compiled books are in
+    #      the canon, uncompiled ones are on the page.
+    #   2. RETRIEVAL: if even that doesn't fit, ground per-lesson via retrieval,
+    #      which searches every chunk of every source regardless of compile
+    #      status — the same degrade `run_curriculum_draft_job` already trusted.
+    uncompiled_ids = [UUID(s["id"]) for s in uncompiled]
+    compiled_ids = [
+        UUID(s["id"]) for s in library.sources if s["id"] not in {u["id"] for u in uncompiled}
+    ]
+    from app.canon.render import build_canon_context
+
+    canon = build_canon_context(db, compiled_ids)
+    tail = build_library_context(
+        db, uncompiled_ids, ref_start=len(canon.ref_to_source_id) + 1
     )
+    mixed_tokens = canon.token_count + tail.token_count
+    if not canon.is_empty and mixed_tokens <= settings.full_context_budget:
+        log.info(
+            "curriculum: MIXED context — canon for %d compiled book(s) (%d tokens) "
+            "+ %d uncompiled source(s) verbatim (%d tokens)",
+            len(compiled_ids), canon.token_count, len(uncompiled_ids), tail.token_count,
+        )
+        return LibraryContext(
+            text=f"{canon.text}\n\n{tail.text}",
+            token_count=mixed_tokens,
+            fits=True,
+            sources=canon.sources + tail.sources,
+            page_index={**canon.page_index, **tail.page_index},
+            ref_to_source_id={**canon.ref_to_source_id, **tail.ref_to_source_id},
+        )
+
+    titles = ", ".join(s.get("title") or s["id"] for s in uncompiled)
+    log.warning(
+        "curriculum: selection too large to read whole (%d tokens), uncompiled "
+        "source(s) (%s) keep it out of the canon, and the mixed context does not "
+        "fit either (%d tokens) — grounding per-lesson via retrieval",
+        library.token_count, titles, mixed_tokens,
+    )
+    return build_retrieval_context(db, source_ids)
 
 
 def build_retrieval_context(db, source_ids: list[UUID] | None) -> LibraryContext:

@@ -151,7 +151,11 @@ def create_source(payload: SourceCreate, db: Session = Depends(get_db)) -> Sourc
     db.commit()  # assigns source.id; durable row before ingest_source's own commits
 
     ingest_source(
-        db, source.id, IngestPayload(kind=payload.kind, text=payload.text, url=payload.url)
+        db, source.id,
+        IngestPayload(
+            kind=payload.kind, text=payload.text, url=payload.url,
+            crawl_pages=payload.crawl_pages,
+        ),
     )
     return _decorate(db, [source])[0]
 

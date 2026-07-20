@@ -652,6 +652,71 @@ REVISE_REPAIR_MESSAGE = (
 REVISE_REPAIR_SLICE_ID = "curriculum.revise.repair"
 
 
+# ---------------------------------------------------------------------------
+# "Talk it through first" for the revise chat — transcript -> ONE crafted
+# instruction. The same trick the planning chat already has (`interview.
+# DISTILL_SYSTEM` -> brief -> outline), pointed at revision: the tutor thinks
+# out loud with the assistant, reaches a conclusion, and one cheap call writes
+# the instruction he MEANT — better than the one he would have typed — which
+# lands in his composer to review, edit, and send. Nothing is planned or
+# applied by this call; it only writes text.
+# ---------------------------------------------------------------------------
+REVISE_DISTILL_SYSTEM = (
+    "You read a conversation between a guitar TUTOR and an assistant about "
+    "changes the tutor wants to make to an existing course. Distill what the "
+    "TUTOR actually decided into ONE clear, complete revision instruction, "
+    "written as if the tutor wrote it himself — naming the lessons, modules or "
+    "sections concerned in plain words (never internal ids), what should "
+    "change in each, and anything that must stay as it is. Keep ONLY "
+    "conclusions the tutor stated or clearly agreed to — dead ends and "
+    "rejected ideas stay out. No preamble, no commentary; return ONLY the "
+    "JSON the schema describes.\n\n{language_directive}\n\n"
+    "THE CONVERSATION:\n{transcript}"
+)
+REVISE_DISTILL_SLICE_ID = "curriculum.revise_distill"
+
+REVISE_DISTILL_SCHEMA = {
+    "type": "object",
+    "properties": {"instruction": {"type": "string"}},
+    "required": ["instruction"],
+    "additionalProperties": False,
+}
+
+
+def distill_revise_instruction(db, session) -> str:
+    """The revise chat's "crystallize the ask" exit: transcript in, one
+    tutor-voiced revision instruction out. Raises ValueError when there is
+    nothing to distill (no tutor turns) or the model returns nothing usable —
+    the router maps both to a 409 the UI can explain. Mirrors
+    `interview.distill_planning_brief` deliberately, including the locale
+    preference (the session's own locale, then the default)."""
+    from app.i18n import DEFAULT_LOCALE, normalize_locale
+    from app.models.chat import Message
+
+    messages = db.scalars(
+        select(Message).where(Message.session_id == session.id).order_by(Message.created_at)
+    ).all()
+    visible = [
+        m for m in messages if m.role in ("user", "assistant") and (m.content or "").strip()
+    ]
+    if not any(m.role == "user" for m in visible):
+        raise ValueError("this chat has no tutor turns to distill")
+
+    transcript = "\n".join(f"{m.role.upper()}: {m.content.strip()}" for m in visible)
+    lang_code = normalize_locale(session.locale or DEFAULT_LOCALE)
+
+    prompt = resolve(db, REVISE_DISTILL_SLICE_ID, REVISE_DISTILL_SYSTEM).format(
+        language_directive=language_directive(lang_code, db), transcript=transcript,
+    )
+    result = get_provider().guided_json(
+        [{"role": "user", "content": prompt}], REVISE_DISTILL_SCHEMA, role="chat",
+    )
+    instruction = (result.get("instruction") or "").strip()
+    if not instruction:
+        raise ValueError("distillation produced an empty instruction — try again")
+    return instruction
+
+
 def _revise_repair_message(dropped: list[dict], source=None) -> dict:
     """The one corrective re-prompt `plan_revision` sends back after a plan came
     back with dropped ops — same shape as draft.py's `_repair_message`, applied

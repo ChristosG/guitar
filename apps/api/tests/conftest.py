@@ -158,6 +158,16 @@ def _fake_embedder(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def _no_rate_limit_backoff(monkeypatch):
+    """The draft job's end-of-run backoff passes wait 30s+90s for a rate-limit
+    window to reset — real time that a unit test leaving one lesson `queued`
+    would otherwise buy in full, twice, per test."""
+    import app.jobs.curriculum_draft as _cd
+
+    monkeypatch.setattr(_cd, "RATE_LIMIT_BACKOFF_S", ())
+
+
+@pytest.fixture(autouse=True)
 def _no_live_retrieval(monkeypatch):
     """Unit tests must not reach the live embedding server.
 

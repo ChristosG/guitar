@@ -621,7 +621,7 @@ def test_a_drafted_lesson_becomes_segments_with_resolvable_citations(db):
     from app.curriculum.depth import measure
     persist_lesson(
         db, lesson_block, lesson, measure(lesson, teaching_minutes=40), library,
-        qa_minutes=10, teaching_minutes=40,
+        teaching_minutes=40,
     )
     db.commit()
     db.expire_all()
@@ -657,7 +657,7 @@ def test_persisting_twice_replaces_the_segments_rather_than_duplicating_them(db)
     for _ in range(2):
         persist_lesson(
             db, lesson_block, lesson, measure(lesson, teaching_minutes=40), library,
-            qa_minutes=10, teaching_minutes=40,
+            teaching_minutes=40,
         )
         db.commit()
 
@@ -685,14 +685,16 @@ def test_the_qa_answer_keys_survive_into_the_persisted_segment(db):
     from app.curriculum.depth import measure
     persist_lesson(
         db, lesson_block, lesson, measure(lesson, teaching_minutes=40), library,
-        qa_minutes=10, teaching_minutes=40,
+        teaching_minutes=40,
     )
     db.commit()
 
     qa = next(s for s in lesson_block.children if s.meta["section"] == "qa_prompts")
     assert "Why does a humbucker cancel hum?" in qa.body
     assert "Opposed coils." in qa.body
-    assert qa.est_minutes == 10
+    # Q&A is clocked from its blueprint weight now, like every other section
+    # (0.06 of 40 minutes -> 2), not from a fixed ten-minute carve-out.
+    assert qa.est_minutes == 2
 
 
 # ---------------------------------------------------------------------------
@@ -804,26 +806,35 @@ def app_db():
 
 
 @pytest.mark.integration
-def test_his_real_library_fits_in_one_prompt(app_db):
-    """THE MEASUREMENT THE WHOLE ARCHITECTURE RESTS ON. ~359,000 chars ~= 90K
-    tokens = 9% of Sonnet 5's window. If this ever stops being true the app does
-    not break — it degrades to retrieval, honestly, with a banner — but the cost
-    model and the "no false gaps" guarantee both change, and we would want to know.
+def test_his_real_library_routes_to_a_context_that_fits(app_db):
+    """THE MEASUREMENT THE WHOLE ARCHITECTURE RESTS ON — updated 2026-07-21.
+
+    The original premise ("~90K tokens = 9% of the window, read it whole") died
+    on 2026-07-17: four OCR'd books put the raw library at ~800K tokens. The
+    architecture's answer is the ROUTER: whole-read below 300K, the canon above
+    it, a MIXED context (canon + uncompiled verbatim) when some sources are
+    uncompiled, retrieval as the last rung. What we hold onto is: the router
+    must return a NON-EMPTY context, and for his real library (4 compiled books
+    + a handful of small URL/text sources) it must still FIT in one prompt —
+    if it ever degrades to per-lesson retrieval, the cost model and the "no
+    false gaps" guarantee both change, and we want this test to say so.
     """
-    library = build_library_context(app_db, None)
+    from app.curriculum.corpus import build_curriculum_context
 
-    print(f"\nLIBRARY: {library.summary()}")
-    for source in library.sources:
-        print(f"  {source['ref']}: {source['title']!r} — "
-              f"{source['pages']} pages, {source['chars']:,} chars")
+    context = build_curriculum_context(app_db, None)
 
-    assert not library.is_empty, "the real library is empty — is the app db seeded?"
-    assert library.fits, (
-        f"his library no longer fits whole ({library.token_count:,} tokens > "
-        f"{corpus_mod.settings.full_context_budget:,}) — authoring will now degrade "
-        f"to retrieval, which is exactly what Stage 6 exists to avoid"
+    print(f"\nCONTEXT: {context.summary()}")
+    for source in context.sources:
+        print(f"  {source['ref']}: {source['title']!r}")
+
+    assert not context.is_empty, "the real library is empty — is the app db seeded?"
+    assert context.fits, (
+        f"his library no longer routes to a context that fits whole "
+        f"({context.token_count:,} tokens > "
+        f"{corpus_mod.settings.full_context_budget:,}) — authoring will now ground "
+        f"per-lesson via retrieval; compile the uncompiled sources into the canon"
     )
-    assert library.page_index, "no page markers — citations cannot be validated"
+    assert context.page_index, "no page markers — citations cannot be validated"
 
 
 @pytest.mark.integration
@@ -836,9 +847,10 @@ def test_a_real_greek_curriculum_is_outlined_from_his_book_and_tiered_honestly(a
     its English twin, cleared no floor, and every module came back a false GAP. That
     is, verbatim, the bug he reported.
     """
+    from app.curriculum.corpus import build_curriculum_context
     from app.llm.factory import get_provider
 
-    library = build_library_context(app_db, None)
+    library = build_curriculum_context(app_db, None)
     assert library.fits
 
     shape = plan_shape(20, 1, 50)
@@ -884,9 +896,10 @@ def test_a_real_lesson_is_drafted_to_length_in_greek_with_citations_that_resolve
     `cache_read_input_tokens` is zero, the prefix is not stable, every lesson is
     re-writing 90K tokens at 1.25x, and nothing else looks any different.
     """
+    from app.curriculum.corpus import build_curriculum_context
     from app.llm.factory import get_provider
 
-    library = build_library_context(app_db, None)
+    library = build_curriculum_context(app_db, None)
     assert library.fits
 
     provider = get_provider()

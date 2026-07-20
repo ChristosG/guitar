@@ -147,8 +147,7 @@ OUTLINE_TAIL = (
     "{planning_brief_block}"
     "{student_brief_block}"
     "\n\nSHAPE: {lessons_total} lessons across {modules} modules "
-    "({counts}). Each lesson is {minutes_per_lesson} minutes "
-    "({teaching_minutes} taught + {qa_minutes} of Q&A) and will "
+    "({counts}). Each lesson is {minutes_per_lesson} minutes and will "
     "later be drafted to ~{target_words_per_lesson} words.\n"
     "\nGAP POLICY: {gap_policy}\n"
     "\n{answer_in}"
@@ -208,8 +207,6 @@ def build_outline_messages(
         lessons_total=shape.lessons_total,
         counts=counts,
         minutes_per_lesson=shape.minutes_per_lesson,
-        teaching_minutes=shape.teaching_minutes,
-        qa_minutes=shape.qa_minutes,
         target_words_per_lesson=f"{shape.target_words_per_lesson:,}",
         language_directive=language_directive(language, source),
         title=title,

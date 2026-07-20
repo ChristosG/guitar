@@ -16,29 +16,21 @@ output match it afterwards, by construction rather than by request.
 
 "20 weeks, 4 modules" is now unrepresentable.
 
-THE 40+10 SPLIT IS HIS, NOT OURS. Chris: "each lesson has to be around 40 mins,
-then 10 mins for questions/discussion, and those 40 mins has to be around 4-5
-pages." So a 50-minute session is 40 minutes of taught material plus a 10-minute
-Q&A block — which is why `teaching_minutes`, not `minutes_per_lesson`, is what
-`app.curriculum.depth` turns into a word target. Counting the Q&A time as prose
-would inflate every lesson by 25% and then "fail" it for being thin.
+50 MEANS 50. Chris, 2026-07-21, reversing the earlier hardcoded 40+10 split:
+"forget the extra Q&A. if he has Q&A on his blueprint, then he does. otherwise
+it doesnt. so 50 is 50. and if he has Q&A it just takes it from his weight set."
+So the WHOLE session is teaching time and the word target is derived from all of
+it; Q&A is not a fixed carve-out any more — it is an ordinary blueprint section
+(`qa_prompts`, kind="qa") that takes its share of the minutes from its own
+weight, exactly like theory or exercises, and disappears entirely when the tutor
+disables it. `teaching_minutes` is kept on the wire (== `minutes_per_lesson`)
+so `ShapeOut` consumers don't churn; `qa_minutes` is retired to 0.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 from app.curriculum.depth import floor_words, target_words
-
-# The Q&A / discussion block at the end of every session. Chris's number, and a
-# FIXED span rather than a fraction: a 30-minute lesson and a 60-minute lesson
-# both end with roughly ten minutes of "any questions?", because that is a
-# property of a room full of students, not of the syllabus.
-QA_MINUTES = 10
-
-# Below this, a session is all Q&A and no lesson. Rather than emit a
-# zero-teaching-minute shape (which would give a word target of 0 and make every
-# lesson trivially "deep enough"), we keep a floor of real teaching time.
-MIN_TEACHING_MINUTES = 10
 
 # The lessons-per-module the module count is derived FROM. Four ~40-minute
 # lessons is a month of weekly teaching and a coherent unit of subject matter —
@@ -85,7 +77,7 @@ class Shape:
         return (
             f"{self.lessons_total} sessions -> {self.modules} modules "
             f"({per} lessons) -> ~{self.target_words_per_lesson:,} words each "
-            f"({self.teaching_minutes} min taught + {self.qa_minutes} min Q&A)"
+            f"({self.teaching_minutes} min per session)"
         )
 
 
@@ -124,17 +116,18 @@ def plan_shape(weeks: int, sessions_per_week: int = 1, minutes: int = 50) -> Sha
     )
     assert sum(lessons_per_module) == lessons_total  # the identity enforce_shape trusts
 
-    teaching_minutes = max(MIN_TEACHING_MINUTES, minutes - QA_MINUTES)
-
+    # 50 means 50: the whole session is teaching time. Q&A, when the tutor's
+    # blueprint has it, is an ordinary weighted section INSIDE these minutes —
+    # never a fixed carve-out (see the module docstring).
     return Shape(
         lessons_total=lessons_total,
         modules=modules,
         lessons_per_module=lessons_per_module,
         minutes_per_lesson=minutes,
-        teaching_minutes=teaching_minutes,
-        qa_minutes=min(QA_MINUTES, minutes),
-        target_words_per_lesson=target_words(teaching_minutes),
-        floor_words_per_lesson=floor_words(teaching_minutes),
+        teaching_minutes=minutes,
+        qa_minutes=0,
+        target_words_per_lesson=target_words(minutes),
+        floor_words_per_lesson=floor_words(minutes),
     )
 
 

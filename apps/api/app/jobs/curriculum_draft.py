@@ -39,6 +39,7 @@ paragraph.
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
@@ -56,7 +57,6 @@ from app.curriculum.blueprint import blueprint_from_course_meta
 from app.curriculum.draft import LessonContext, draft_lesson, draft_progress, persist_lesson
 from app.curriculum.outline import TIER_GENERAL
 from app.curriculum.segment_generate import drain_queued_segments
-from app.curriculum.shape import MIN_TEACHING_MINUTES, QA_MINUTES
 from app.db import SessionLocal
 from app.llm.errors import LLMError, LLMNotConfigured
 from app.models.block import Block
@@ -65,6 +65,52 @@ from app.prompts import overrides
 from app.students.context import build_student_brief
 
 log = logging.getLogger(__name__)
+
+# The waits between the rate-limit backoff passes at the end of a draft run.
+# Module-level so tests can zero it — a unit test that leaves one lesson queued
+# must not buy a two-minute nap. 30s then 90s: most per-minute windows reset
+# inside the first wait, a genuinely saturated tier inside the second.
+RATE_LIMIT_BACKOFF_S: tuple[float, ...] = (30.0, 90.0)
+
+
+def _draft_workers() -> int:
+    """How many lessons draft at once — decided by the RESOLVED provider, not a
+    static setting. The bridge (`claude_cli`) chokes at 3 shared slots, so a
+    wider pool there only queues inside the bridge while the caller's read
+    timeout keeps running; the real API has no shared choke point and gets
+    `draft_concurrency_api`. Resolved fresh per call so flipping the Settings
+    provider toggle mid-day changes the very next run — no restart."""
+    try:
+        from app.settings_store import resolve_llm_config
+
+        if resolve_llm_config().provider == "claude":
+            return settings.draft_concurrency_api
+    except Exception:
+        log.warning("_draft_workers: could not resolve provider; using default", exc_info=True)
+    return settings.draft_concurrency
+
+
+def _rate_limited_lesson_ids(db, root_id: uuid.UUID) -> list[uuid.UUID]:
+    """The lessons a 429 put BACK to `queued` mid-run — the only ones the backoff
+    passes retry. `failed` is deliberately NOT here (unlike `_queued_lesson_ids`,
+    which feeds Resume): a hard failure retried seconds later fails the same way
+    at the same price, and its retry belongs to the tutor's Resume button."""
+    module = aliased(Block)
+    rows = db.execute(
+        select(Block.id, Block.meta)
+        .join(module, Block.parent_id == module.id)
+        .where(
+            module.parent_id == root_id,
+            module.kind == "module",
+            Block.kind == "lesson",
+        )
+        .order_by(module.order, Block.order)
+    ).all()
+    return [
+        lesson_id
+        for lesson_id, meta in rows
+        if (meta or {}).get("draft_status", "queued") == "queued"
+    ]
 
 
 def _queued_lesson_ids(db, root_id: uuid.UUID) -> list[uuid.UUID]:
@@ -159,12 +205,13 @@ def _release(db, lesson_id: uuid.UUID, status: str, error: str | None = None) ->
 DEEPEN_TARGET_RATIO = 1.4
 
 # `revise_current`'s per-section cap. A typical Greek section runs ~300-450 words,
-# ~1800-2700 chars — routinely OVER this, not under it. Truncating silently would
-# hand the model a body that just stops mid-sentence, with no way to tell "that's
-# the whole section" from "that's where I cut it off"; a model asked to PRESERVE
-# content it doesn't know was cut can't. So a truncated body carries a directive
-# marker naming the cut, not just the cut.
-REVISE_CURRENT_CHAR_LIMIT = 2000
+# ~1800-2700 chars — so at the old 2000 cap MOST sections arrived cut, and a
+# model that cannot see a section cannot preserve it; "keep the rest intact"
+# degraded into paraphrase. 6000 covers even a long section whole (~1.5K tokens
+# for a full 8-section lesson — noise next to the 32K-output draft call), and
+# the truncation marker below remains for the genuine outlier. A truncated body
+# carries a directive naming the cut, not just the cut.
+REVISE_CURRENT_CHAR_LIMIT = 6000
 REVISE_CURRENT_TRUNCATION_MARKER = (
     "\n…[το υπόλοιπο περικόπηκε — διατήρησέ το ως έχει]"
 )
@@ -196,7 +243,9 @@ def _lesson_size(lesson: Block, plan: dict, *, deepen: bool) -> dict:
         teaching = plan["teaching_minutes"]
         target, floor = plan["target_words"], plan["floor_words"]
     else:
-        teaching = max(MIN_TEACHING_MINUTES, minutes - QA_MINUTES)
+        # 50 means 50: the whole booked slot is teaching time (Q&A, if the
+        # blueprint has it, is a weighted section inside it — shape.py).
+        teaching = minutes
         target, floor = target_words(teaching), floor_words(teaching)
 
     if deepen:
@@ -206,7 +255,6 @@ def _lesson_size(lesson: Block, plan: dict, *, deepen: bool) -> dict:
     return {
         "minutes": minutes,
         "teaching_minutes": teaching,
-        "qa_minutes": max(0, minutes - teaching),
         "target_words": target,
         "floor_words": floor,
     }
@@ -336,7 +384,7 @@ def _draft_one(lesson_id: uuid.UUID, plan: dict) -> None:
             return
         persist_lesson(
             db, lesson_block, lesson_json, m, library, plan["blueprint"],
-            qa_minutes=size["qa_minutes"], teaching_minutes=size["teaching_minutes"],
+            teaching_minutes=size["teaching_minutes"],
         )
         db.commit()
     except Exception:
@@ -453,11 +501,14 @@ def run_curriculum_draft_job(job_id: uuid.UUID) -> None:
             "course_brief": meta.get("brief"),
             "source_ids": source_ids,
             "positions": positions,
+            # 50 means 50 (shape.py): teaching time IS the whole booked slot,
+            # derived from minutes_per_lesson rather than read from the stored
+            # shape — a course materialized under the old 40+10 carve-out would
+            # otherwise redraft to the old, thinner word target forever.
             "minutes_per_lesson": shape.get("minutes_per_lesson", 50),
-            "teaching_minutes": shape.get("teaching_minutes", 40),
-            "qa_minutes": shape.get("minutes_per_lesson", 50) - shape.get("teaching_minutes", 40),
-            "target_words": shape.get("target_words_per_lesson", 2200),
-            "floor_words": shape.get("floor_words_per_lesson", 1760),
+            "teaching_minutes": shape.get("minutes_per_lesson", 50),
+            "target_words": target_words(shape.get("minutes_per_lesson", 50)),
+            "floor_words": floor_words(shape.get("minutes_per_lesson", 50)),
         }
 
         job.progress = {"phase": "drafting"}
@@ -473,13 +524,40 @@ def run_curriculum_draft_job(job_id: uuid.UUID) -> None:
         db.close()
 
     if lesson_ids:
-        workers = min(settings.draft_concurrency, len(lesson_ids))
+        workers = min(_draft_workers(), len(lesson_ids))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             # `_draft_one` never raises, so there is nothing to collect and nothing
             # to re-raise — a `result()` loop here would only be able to report a
             # bug in the error handling itself. The outcome of every lesson is on
             # its own Block row, which is the only place the tutor ever looks.
             list(pool.map(lambda lid: _draft_one(lid, plan), lesson_ids))
+
+        # THE RATE-LIMIT BACKOFF PASSES. A 429 requeues a lesson to `queued`
+        # rather than failing it — but until now "requeued" meant "sits there
+        # until the tutor finds the Resume button". An unattended overnight run
+        # deserves better: wait out the per-minute window, then re-run whatever
+        # is still queued, twice, before handing the remainder to Resume. Each
+        # pass re-reads the queue from the DB, so lessons drafted meanwhile (or
+        # deleted) are naturally excluded; `_draft_one`'s claim step keeps a
+        # concurrent Resume from double-drafting.
+        for wait_s in RATE_LIMIT_BACKOFF_S:
+            db = SessionLocal()
+            try:
+                started = set(lesson_ids)
+                remaining = [
+                    lid for lid in _rate_limited_lesson_ids(db, root_id) if lid in started
+                ]
+            finally:
+                db.close()
+            if not remaining:
+                break
+            log.info(
+                "run_curriculum_draft_job: %d lesson(s) requeued (rate limit?) — "
+                "waiting %ds then retrying them", len(remaining), wait_s,
+            )
+            time.sleep(wait_s)
+            with ThreadPoolExecutor(max_workers=min(_draft_workers(), len(remaining))) as pool:
+                list(pool.map(lambda lid: _draft_one(lid, plan), remaining))
 
     db = SessionLocal()
     try:
