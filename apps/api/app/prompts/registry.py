@@ -1447,7 +1447,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/outline.py:161",
+        source_ref="app/curriculum/outline.py:173",
         title_el="Ο σκελετός του προγράμματος",
         what_it_does_el=(
             "Ζητάει μόνο τη δομή: τίτλους ενοτήτων και μαθημάτων με μία "
@@ -1459,7 +1459,7 @@ _ENTRIES = [
         when_it_runs_el="Μία φορά, μόλις πατήσεις δημιουργία προγράμματος.",
         source_of_truth=lambda: build_outline_messages,
         build=_build_curriculum_outline,
-        call_sites=("curriculum/outline.py:286",),
+        call_sites=("curriculum/outline.py:305",),
         slices=(
             Slice(
                 id=OUTLINE_SLICE_ID,
@@ -1566,7 +1566,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/interview.py:660",
+        source_ref="app/curriculum/interview.py:661",
         title_el="Η απόσταξη της συζήτησης σχεδιασμού",
         what_it_does_el=(
             "Διαβάζει ολόκληρη τη συζήτηση σχεδιασμού ανάμεσα σε σένα και τον "
@@ -1584,7 +1584,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: DISTILL_SYSTEM,
         build=_build_interview_distill,
-        call_sites=("curriculum/interview.py:708",),
+        call_sites=("curriculum/interview.py:709",),
         slices=(
             Slice(
                 id=DISTILL_SLICE_ID,

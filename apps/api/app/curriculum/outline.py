@@ -144,6 +144,7 @@ OUTLINE_TAIL = (
     "\n{language_directive}\n"
     "\nCOURSE TITLE: {title}"
     "{course_brief_block}"
+    "{planning_brief_block}"
     "{student_brief_block}"
     "\n\nSHAPE: {lessons_total} lessons across {modules} modules "
     "({counts}). Each lesson is {minutes_per_lesson} minutes "
@@ -155,6 +156,17 @@ OUTLINE_TAIL = (
 OUTLINE_SLICE_ID = "curriculum.outline"
 
 OUTLINE_COURSE_BRIEF_BLOCK = "\n\nWHAT THE TUTOR WANTS FROM THIS COURSE, IN HIS OWN WORDS:\n{brief}"
+
+# Part 5: the planning chat's distilled-and-tutor-edited conclusions. A SEPARATE
+# block from OUTLINE_COURSE_BRIEF_BLOCK (the scope step's one-liner): the two
+# answer different questions — "what course is this" vs "what did the tutor and
+# the assistant conclude when they talked it through" — and the model weighs an
+# explicit agreed plan differently from a one-line wish.
+# Empty string when absent — byte-identity without a brief is pinned by test.
+OUTLINE_PLANNING_BRIEF_BLOCK = (
+    "\n\nWHAT THE TUTOR CONCLUDED IN THE PLANNING DISCUSSION (edited and approved "
+    "by him — follow it closely where it is specific):\n{planning_brief}"
+)
 OUTLINE_STUDENT_BRIEF_BLOCK = "\n\n{student_brief}"
 
 
@@ -167,6 +179,7 @@ def build_outline_messages(
     library: LibraryContext,
     student_brief: str | None,
     gap_policy: str,
+    planning_brief: str | None = None,
     source=None,
 ) -> list[dict]:
     """The messages for the outline call. Pure — no model, no DB — so the ONE
@@ -202,6 +215,10 @@ def build_outline_messages(
         title=title,
         course_brief_block=(
             OUTLINE_COURSE_BRIEF_BLOCK.format(brief=brief) if brief else ""
+        ),
+        planning_brief_block=(
+            OUTLINE_PLANNING_BRIEF_BLOCK.format(planning_brief=planning_brief)
+            if planning_brief else ""
         ),
         student_brief_block=(
             OUTLINE_STUDENT_BRIEF_BLOCK.format(student_brief=student_brief)
@@ -270,6 +287,7 @@ def generate_outline(
     library: LibraryContext,
     student_brief: str | None,
     gap_policy: str,
+    planning_brief: str | None = None,
 ) -> dict:
     """ONE guided_json over the whole library -> the outline, shape-enforced.
 
@@ -281,6 +299,7 @@ def generate_outline(
     messages = build_outline_messages(
         title=title, brief=brief, language=language, shape=shape,
         library=library, student_brief=student_brief, gap_policy=gap_policy,
+        planning_brief=planning_brief,
         source=db,
     )
     raw = get_provider().guided_json(messages, OUTLINE_SCHEMA, role="plan")

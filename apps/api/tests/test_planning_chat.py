@@ -216,6 +216,69 @@ def test_distill_409_when_brief_is_empty(monkeypatch):
         db.close()
 
 
+def test_outline_prompt_byte_identical_without_planning_brief():
+    """Spec §5 regression pin: no planning brief -> the outline prompt is
+    EXACTLY today's. Same discipline as the blueprint byte-identity test."""
+    from app.curriculum.corpus import LibraryContext
+    from app.curriculum.outline import build_outline_messages
+    from app.curriculum.shape import plan_shape
+
+    kwargs = dict(
+        title="Ήχος", brief="σύντομο", language="el",
+        shape=plan_shape(4, 1, 60),
+        library=LibraryContext(text="", token_count=0, fits=True),
+        student_brief=None, gap_policy="general_knowledge",
+    )
+    baseline = build_outline_messages(**kwargs)
+    with_default = build_outline_messages(**kwargs, planning_brief=None)
+    assert baseline == with_default
+
+
+def test_outline_prompt_includes_planning_brief_when_set():
+    from app.curriculum.corpus import LibraryContext
+    from app.curriculum.outline import build_outline_messages
+    from app.curriculum.shape import plan_shape
+
+    kwargs = dict(
+        title="Ήχος", brief="σύντομο", language="el",
+        shape=plan_shape(4, 1, 60),
+        library=LibraryContext(text="", token_count=0, fits=True),
+        student_brief=None, gap_policy="general_knowledge",
+    )
+    msgs = build_outline_messages(**kwargs, planning_brief="Έμφαση στην πράξη, όχι φυσική.")
+    joined = str(msgs)
+    assert "Έμφαση στην πράξη" in joined
+    assert "PLANNING DISCUSSION" in joined  # the block header
+    # and the scope brief still present alongside — the two blocks coexist
+    assert "σύντομο" in joined
+
+
+def test_generate_interview_outline_passes_planning_brief(monkeypatch):
+    """The interview job seam: interview.planning_brief reaches generate_outline."""
+    from app.curriculum import interview as interview_mod
+
+    captured = {}
+
+    def _fake_generate_outline(db, **kwargs):
+        captured.update(kwargs)
+        return {"modules": []}
+
+    monkeypatch.setattr(interview_mod, "generate_outline", _fake_generate_outline)
+
+    db = SessionLocal()
+    try:
+        interview = _mk_interview(db)
+        interview.answers = {
+            "duration": {"weeks": 8, "sessions_per_week": 1, "minutes_per_session": 50},
+        }
+        interview.planning_brief = "Πρακτική πρώτα."
+        db.commit()
+        interview_mod.generate_interview_outline(db, interview)
+        assert captured.get("planning_brief") == "Πρακτική πρώτα."
+    finally:
+        db.close()
+
+
 def test_put_planning_brief_stores_and_clears():
     db = SessionLocal()
     try:

@@ -553,6 +553,7 @@ def generate_interview_outline(db: Session, interview: CurriculumInterview) -> d
         library=library,
         student_brief=build_student_brief(db, student_id),
         gap_policy=interview.gap_policy or POLICY_GENERAL,
+        planning_brief=interview.planning_brief,
     )
 
 
