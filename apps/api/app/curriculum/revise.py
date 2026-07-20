@@ -432,18 +432,34 @@ def validate_ops(db, root_id: uuid.UUID, raw: dict) -> dict:
     # enable — but only for an op that itself resolves/validates; a
     # hallucinated section_key or an invalid update_blueprint grants nothing
     # here, same as before.
+    #
+    # 2026-07-20 hotfix: the union used to only GROW — a `set_section_enabled`
+    # that DISABLES an already-enabled key never took it back out, so a plan
+    # that disabled X while ALSO adding a segment under section_key=X let that
+    # add through anyway (the disable "won" at apply, the stray segment stayed
+    # filed under a section the tutor just turned off). Compute each
+    # `set_section_enabled` op's FINAL per-key effect first — last op for a
+    # given key wins, same as apply_revision's own sequential rebuild — and
+    # apply that against the stored-enabled baseline (add OR remove) BEFORE
+    # union-ing in update_blueprint's keys, which still only ever widens.
+    toggles: dict[str, bool] = {}
     for op in raw.get("ops") or []:
-        op_name = op.get("op")
-        if op_name == "update_blueprint":
+        if op.get("op") == "set_section_enabled":
+            key = op.get("section_key")
+            if key in stored_keys:
+                toggles[key] = bool(op.get("enabled", True))
+    for key, is_enabled in toggles.items():
+        if is_enabled:
+            enabled_keys.add(key)
+        else:
+            enabled_keys.discard(key)
+    for op in raw.get("ops") or []:
+        if op.get("op") == "update_blueprint":
             try:
                 plan_bp = validate_blueprint(op.get("blueprint"))
             except BlueprintInvalid:
                 continue
             enabled_keys |= set(section_keys(plan_bp))
-        elif op_name == "set_section_enabled":
-            key = op.get("section_key")
-            if key in stored_keys and op.get("enabled", True):
-                enabled_keys.add(key)
     kept: list[dict] = []
     dropped: list[dict] = []
     for op in raw.get("ops") or []:
@@ -522,8 +538,16 @@ def validate_ops(db, root_id: uuid.UUID, raw: dict) -> dict:
                 section_key = op.get("section_key")
                 if section_key and section_key not in enabled_keys:
                     ok = False
-                    detail = (f"section_key={section_key!r} is not an enabled blueprint section "
-                              f"(enabled: {sorted(enabled_keys)})")
+                    if toggles.get(section_key) is False:
+                        # Disabled by THIS SAME PLAN's own set_section_enabled — name
+                        # that explicitly, not just "not enabled", so the tutor-facing
+                        # drop reason reads as a consequence of the disable, not a
+                        # mystery.
+                        detail = (f"section_key={section_key!r} was disabled by this plan's "
+                                  f"set_section_enabled op (enabled: {sorted(enabled_keys)})")
+                    else:
+                        detail = (f"section_key={section_key!r} is not an enabled blueprint section "
+                                  f"(enabled: {sorted(enabled_keys)})")
         elif name in ("edit_segment", "remove_segment"):
             ok = _segment_course_id(db, op["segment_id"]) == root_id
             if not ok:

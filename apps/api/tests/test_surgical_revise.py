@@ -248,6 +248,54 @@ def test_validate_ops_set_section_enabled_disabled_grants_nothing_to_the_union(d
     assert [o["op"] for o in out["ops"]] == ["set_section_enabled"]
 
 
+def test_validate_ops_in_plan_disable_removes_an_already_enabled_key_from_the_union(db_and_tree):
+    """2026-07-20 hotfix (a): the union used to only GROW, so a plan that DISABLES
+    an already-enabled section while ALSO adding a segment under that same
+    section_key let the add through anyway — the disable "won" at apply, but the
+    stray add_segment stayed filed under a section the tutor just turned off.
+    `theory` starts enabled (the default blueprint); a plan that disables it must
+    now drop the coupled add_segment, with a reason naming the disable."""
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    plan = {"summary": "s", "ops": [
+        {"op": "set_section_enabled", "section_key": "theory", "enabled": False, "reason": "r"},
+        {"op": "add_segment", "lesson_id": str(lesson.id), "title": "More theory",
+         "instruction": "x", "section_key": "theory", "reason": "r"},
+    ]}
+    out = revise.validate_ops(db, course.id, plan)
+    assert [o["op"] for o in out["ops"]] == ["set_section_enabled"]
+    assert len(out["dropped"]) == 1
+    dropped = out["dropped"][0]
+    assert dropped["op"]["op"] == "add_segment"
+    assert "disabled" in dropped["reason"] and "theory" in dropped["reason"]
+
+
+def test_validate_ops_set_section_enabled_last_toggle_per_key_wins(db_and_tree):
+    """2026-07-20 hotfix (b): enable-then-disable the SAME key in one plan — the
+    disable (last op for that key) wins, so a coupled add_segment still drops."""
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    bp = default_blueprint()
+    for s in bp["sections"]:
+        if s["key"] == "homework":
+            s["enabled"] = False
+    course.meta = {**course.meta, "blueprint": bp}
+    db.add(course)
+    db.commit()
+
+    plan = {"summary": "s", "ops": [
+        {"op": "set_section_enabled", "section_key": "homework", "enabled": True, "reason": "r"},
+        {"op": "set_section_enabled", "section_key": "homework", "enabled": False, "reason": "r2"},
+        {"op": "add_segment", "lesson_id": str(lesson.id), "title": "HW 1",
+         "instruction": "x", "section_key": "homework", "reason": "r"},
+    ]}
+    out = revise.validate_ops(db, course.id, plan)
+    # BOTH set_section_enabled ops survive validate_ops (each is individually
+    # valid — section_key exists in the stored blueprint); it is the UNION's
+    # final per-key state, not op survival, that reflects "last wins".
+    assert [o["op"] for o in out["ops"]] == ["set_section_enabled", "set_section_enabled"]
+    assert len(out["dropped"]) == 1
+    assert out["dropped"][0]["op"]["op"] == "add_segment"
+
+
 def test_apply_set_section_enabled_flips_enabled_and_renames_only_the_course_language(db_and_tree):
     db, course, module, lesson, seg1, seg2 = db_and_tree
     bp = default_blueprint()
@@ -289,6 +337,58 @@ def test_apply_set_section_enabled_can_disable_a_section(db_and_tree):
     refreshed = db.get(Block, course.id)
     recap = next(s for s in refreshed.meta["blueprint"]["sections"] if s["key"] == "recap")
     assert recap["enabled"] is False
+
+
+def test_validate_ops_then_apply_revision_the_full_homework_incident_shape(db_and_tree):
+    """The COMBINED apply-level production-shape test: the exact plan shape the
+    "add a homework section" incident's fix targets — set_section_enabled
+    (enable + rename) coupled with two add_segment ops under that section_key,
+    in ONE plan — run through validate_ops (as chat.py's approval path does)
+    THEN apply_revision (as the approved-plan endpoint does). Both steps must
+    agree: nothing this hotfix's union-widening keeps in validate_ops may be
+    dropped again at apply, and the blueprint flip + both segments must land in
+    the SAME transaction."""
+    db, course, module, lesson, seg1, seg2 = db_and_tree
+    bp = default_blueprint()
+    for s in bp["sections"]:
+        if s["key"] == "homework":
+            s["enabled"] = False
+    course.meta = {**course.meta, "blueprint": bp}
+    db.add(course)
+    db.commit()
+
+    plan = {"summary": "add a homework section to every lesson", "ops": [
+        {"op": "set_section_enabled", "section_key": "homework", "enabled": True,
+         "label": "Εργασίες για το σπίτι", "reason": "the tutor wants homework"},
+        {"op": "add_segment", "lesson_id": str(lesson.id), "title": "HW 1",
+         "instruction": "practice the new chord shape daily", "section_key": "homework",
+         "reason": "r"},
+        {"op": "add_segment", "lesson_id": str(lesson.id), "title": "HW 2",
+         "instruction": "record yourself and listen back", "section_key": "homework",
+         "reason": "r"},
+    ]}
+
+    validated = revise.validate_ops(db, course.id, plan)
+    assert [o["op"] for o in validated["ops"]] == [
+        "set_section_enabled", "add_segment", "add_segment",
+    ]
+    assert validated["dropped"] == []
+
+    out = revise.apply_revision(db, course.id, plan)
+    assert out["applied"] == 3
+
+    db.expire_all()
+    refreshed = db.get(Block, course.id)
+    hw = next(s for s in refreshed.meta["blueprint"]["sections"] if s["key"] == "homework")
+    assert hw["enabled"] is True
+    assert hw["label"]["el"] == "Εργασίες για το σπίτι"
+
+    new_segs = _children(db, lesson.id, "segment")[2:]
+    assert len(new_segs) == 2
+    for seg in new_segs:
+        assert seg.meta["section"] == "homework"
+        assert seg.meta["segment_status"] == "queued"
+        assert "custom" not in seg.meta
 
 
 def test_compute_impact_set_section_enabled_is_blueprint_changed_not_destructive():
