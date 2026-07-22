@@ -724,20 +724,21 @@ test.describe("the guided interview, v2 (mocked API)", () => {
     await mockInterviewApi(page);
     await startToStep(page, "outline");
 
-    // A 50-minute lesson is 40 taught minutes + 10 of Q&A; 40 x 55 words/min =
-    // 2,200 words. Three of them: 6,600 words, 3 x $0.12 = $0.36. The same
-    // constants `depth.py`/`shape.py` draft against — not a second set.
+    // 50 MEANS 50: the whole session is teaching time (no Q&A carve-out any
+    // more — Chris, 2026-07-21), so a 50-minute lesson targets 50 x 55
+    // words/min = 2,750 words. Three of them: 8,250 words, 3 x $0.12 = $0.36.
+    // The same constants `depth.py`/`shape.py` draft against — not a second set.
     const footer = page.getByTestId("outline-footer-summary");
     await expect(footer).toContainText("2 modules");
     await expect(footer).toContainText("3 lessons");
-    await expect(footer).toContainText("6,600");
+    await expect(footer).toContainText("8,250");
     await expect(footer).toContainText("$0.36");
 
     // Delete a module -> the money moves. That is why the number is there at all.
     await page.getByTestId("outline-module-delete-1").click();
     await page.getByTestId("confirm-accept").click();
     await expect(footer).toContainText("1 module");
-    await expect(footer).toContainText("4,400");
+    await expect(footer).toContainText("5,500");
     await expect(footer).toContainText("$0.24");
   });
 
