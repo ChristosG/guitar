@@ -364,11 +364,15 @@ export function BlockCard({
         <span
           data-testid="block-card-title"
           // Mobile: the title WRAPS and the badges drop below it — every chip in
-          // this row is shrink-0, so a truncating flex-1 title was the only thing
-          // that could yield and it collapsed to nothing. From `sm` up there is
-          // room for one line, so it truncates as before.
+          // this row is shrink-0, so a truncating title was the only thing that
+          // could yield and it collapsed to nothing. The 12rem flex-BASIS is the
+          // load-bearing part: `flex-1` means basis 0%, and a zero-basis item
+          // never claims a line in a flex-wrap row — the badges stayed put and
+          // the title wrapped one character per column. With a real basis the
+          // chips can't fit beside it on a phone and wrap below instead. From
+          // `sm` up there is room for one line, so it truncates as before.
           className={cn(
-            "min-w-0 flex-1 break-words text-left sm:truncate",
+            "min-w-0 flex-[1_1_12rem] break-words text-left sm:flex-1 sm:truncate",
             KIND_TITLE_CLASS[node.kind] ?? "text-sm font-medium",
           )}
         >
