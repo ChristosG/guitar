@@ -363,8 +363,12 @@ export function BlockCard({
       ) : (
         <span
           data-testid="block-card-title"
+          // Mobile: the title WRAPS and the badges drop below it — every chip in
+          // this row is shrink-0, so a truncating flex-1 title was the only thing
+          // that could yield and it collapsed to nothing. From `sm` up there is
+          // room for one line, so it truncates as before.
           className={cn(
-            "min-w-0 flex-1 truncate text-left",
+            "min-w-0 flex-1 break-words text-left sm:truncate",
             KIND_TITLE_CLASS[node.kind] ?? "text-sm font-medium",
           )}
         >

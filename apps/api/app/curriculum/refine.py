@@ -23,7 +23,8 @@ uncited general-knowledge one that still has the citation chip attached.
 """
 from __future__ import annotations
 
-from app.i18n import answer_in, language_directive
+from app.curriculum.sanitize import strip_inline_citations
+from app.i18n import answer_in, curriculum_style, language_directive
 from app.prompts.overrides import resolve
 from app.llm.factory import get_provider
 
@@ -58,7 +59,8 @@ REFINE_SYSTEM = (
     "NEVER invent a page citation. The provenance below is what this block was "
     "written from; if your edit goes beyond it, say so in the prose rather "
     "than attaching a page number to it.\n\n"
-    "{language_directive}"
+    "{language_directive}\n\n"
+    "{style_directive}"
 )
 REFINE_SYSTEM_SLICE_ID = "curriculum.refine"
 
@@ -93,6 +95,7 @@ def build_refine_messages(
     call."""
     system = resolve(source, REFINE_SYSTEM_SLICE_ID, REFINE_SYSTEM).format(
         language_directive=language_directive(language, source),
+        style_directive=curriculum_style(language, source),
     )
 
     cited = ", ".join(
@@ -164,7 +167,9 @@ def refine_block(db, block, instruction: str) -> dict:
 
     prev_body, prev_title = block.body, block.title
     block.title = (result.get("title") or block.title).strip() or block.title
-    block.body = result.get("body") or block.body
+    # Same net as `segment_generate`: the block's provenance is `meta.citations`,
+    # so any page marker the model writes into the prose is stripped, not shown.
+    block.body = strip_inline_citations(result.get("body")) or block.body
     # WHOLE-DICT REASSIGNMENT — Block.meta is plain sa.JSON with no MutableDict.
     block.meta = {
         **meta,

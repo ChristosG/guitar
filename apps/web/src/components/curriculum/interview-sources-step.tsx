@@ -180,7 +180,10 @@ export function InterviewSourcesStep({ options, shape, submitting, error, onSubm
               </Badge>
             )}
             <span
-              className="shrink-0 text-xs text-muted-foreground"
+              // Hidden on phones: three shrink-0 chips on one card row left the
+              // title a word-per-line sliver. The type and canon badges are the
+              // ones a grounding decision needs; the char count is desktop detail.
+              className="hidden shrink-0 text-xs text-muted-foreground sm:block"
               data-testid={`interview-source-charcount-${opt.value}`}
             >
               {t("steps.sources.charCount", { count: opt.char_count ?? 0 })}

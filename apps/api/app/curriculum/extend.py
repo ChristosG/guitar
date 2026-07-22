@@ -33,7 +33,7 @@ from app.curriculum.outline import (
     clamp_tier,
     gap_body,
 )
-from app.i18n import answer_in, language_directive
+from app.i18n import answer_in, curriculum_style, language_directive
 from app.prompts.overrides import resolve
 from app.llm.factory import get_provider
 from app.models.block import Block
@@ -165,6 +165,7 @@ MODULE_TAIL = (
     "unlabelled gap is.\n"
     "\nGAP POLICY: {gap_policy}\n"
     "\n{language_directive}\n"
+    "\n{style_directive}\n"
     "\n{answer_in}"
 )
 MODULE_SLICE_ID = "curriculum.extend"
@@ -212,6 +213,7 @@ def build_module_messages(
         target_words=f"{target_words:,}",
         gap_policy=_policy_sentence(gap_policy),
         language_directive=language_directive(language, source),
+        style_directive=curriculum_style(language, source),
         answer_in=answer_in(language, source),
     )
 

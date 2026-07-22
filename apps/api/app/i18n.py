@@ -123,6 +123,47 @@ LANGUAGE_DIRECTIVE_SLICE_ID = "shared.language_directive"
 ANSWER_IN = "Answer in {name} ({code})."
 ANSWER_IN_SLICE_ID = "shared.answer_in"
 
+# THE CURRICULUM REGISTER RULE (2026-07-22, Chris: "everything in Greek except
+# terminology... zero citations inside... like the teacher is reading those
+# blocks and teaching at the same time").
+#
+# WHY THIS EXISTS AS A SECOND RULE INSTEAD OF AN EDIT TO `LANGUAGE_DIRECTIVE`:
+# the two rules serve different products. Chat exists to ANSWER FROM HIS
+# LIBRARY, so a quotation there must stay English and verbatim — that is what
+# makes it checkable against the page scan. A curriculum exists to be TAUGHT
+# FROM: its text is read aloud to a Greek student, its provenance lives in the
+# structured citations array (the "Πηγές" modal), and an English sentence
+# spliced into Greek prose — «η κιθάρα transmits the tonal quality...» — is not
+# grounding, it is a lesson the tutor cannot read out. So every curriculum
+# WRITING flow appends this AFTER `language_directive` (recency wins, and the
+# override is explicit), and chat never sees it.
+CURRICULUM_STYLE = (
+    "HOW THE COURSE TEXT MUST READ — these rules apply to everything you "
+    "write for this course (titles, objectives, section text), and they "
+    "OVERRIDE the quotation rule above:\n"
+    "- SPOKEN, NOT WRITTEN: write the teaching text as the words the tutor "
+    "actually SAYS to the student, addressing the student directly — a "
+    "script he can read aloud in the lesson exactly as written, not book "
+    "prose he has to paraphrase on the fly. If a sentence would sound "
+    "stiff said out loud across a music stand, rewrite it until it sounds "
+    "like teaching.\n"
+    "- ONE LANGUAGE: every sentence is {name} from start to finish — never "
+    "splice English words or half-sentences into {name} prose. English is "
+    "reserved for technical guitar and audio terminology (humbucker, "
+    "single coil, compressor, sustain), gear and model names, book titles "
+    "and proper names. An ordinary word with an everyday {name} "
+    "equivalent is written in {name}.\n"
+    "- NO QUOTES, NO SOURCE TALK: never copy a sentence from the library "
+    "into the text, not even in quotation marks, and never mention books, "
+    "sources, pages or 'the literature' in the prose. Teach the idea "
+    "directly, in your own {name} words, as the tutor's own knowledge.\n"
+    "- NO CITATIONS IN THE TEXT: page references such as (S9, p.47) or "
+    "[p.12] never appear inside titles or body text. Where the schema has "
+    "a citations array, that array is the ONLY place a page reference "
+    "belongs; the app shows the tutor his sources separately."
+)
+CURRICULUM_STYLE_SLICE_ID = "shared.curriculum_style"
+
 
 def language_directive(locale: str, source=None) -> str:
     """THE language rule, in one place, for every prompt builder in the app
@@ -141,6 +182,21 @@ def language_directive(locale: str, source=None) -> str:
 
     return resolve(source, LANGUAGE_DIRECTIVE_SLICE_ID, LANGUAGE_DIRECTIVE).format(
         name=language_name(locale), code=normalize_locale(locale),
+    )
+
+
+def curriculum_style(locale: str, source=None) -> str:
+    """THE CURRICULUM REGISTER RULE — see `CURRICULUM_STYLE` above for why it is
+    a second rule and not an edit to `language_directive`. Appended immediately
+    AFTER `language_directive` by every flow that WRITES course material
+    (`curriculum/outline.py`, `curriculum/draft.py`, `curriculum/extend.py`,
+    `curriculum/segment_generate.py`, `curriculum/refine.py`) and by none that
+    answers questions from the library.
+    """
+    from app.prompts.overrides import resolve
+
+    return resolve(source, CURRICULUM_STYLE_SLICE_ID, CURRICULUM_STYLE).format(
+        name=language_name(locale),
     )
 
 

@@ -464,67 +464,74 @@ export function SourceRow({
         )}
       </div>
 
-      <select
-        aria-label={t("moveTo")}
-        data-testid={`move-${source.id}`}
-        disabled={moving}
-        value={source.collection_id ?? ""}
-        onChange={(e) => onMove(source.id, e.target.value || null)}
-        className="h-7 shrink-0 rounded-md border border-border bg-background px-2 text-xs text-muted-foreground outline-none disabled:opacity-50"
-      >
-        {collectionOptions.map((opt) => (
-          <option key={opt.id ?? "unfiled"} value={opt.id ?? ""}>
-            {opt.name}
-          </option>
-        ))}
-      </select>
+      {/* The controls are ONE flex item, not four siblings: every one of them is
+          shrink-0, so as siblings on a phone they crushed the `flex-1` title
+          column to nothing and then wrapped one by one — a row three lines tall
+          with an unreadable title. Grouped, they wrap BELOW the title as a unit
+          on mobile (`w-full`) and sit inline to the right from `sm` up. */}
+      <div className="flex w-full min-w-0 items-center gap-2 sm:ml-auto sm:w-auto sm:gap-3">
+        <select
+          aria-label={t("moveTo")}
+          data-testid={`move-${source.id}`}
+          disabled={moving}
+          value={source.collection_id ?? ""}
+          onChange={(e) => onMove(source.id, e.target.value || null)}
+          className="h-7 min-w-0 flex-1 rounded-md border border-border bg-background px-2 text-xs text-muted-foreground outline-none disabled:opacity-50 sm:max-w-48 sm:flex-none"
+        >
+          {collectionOptions.map((opt) => (
+            <option key={opt.id ?? "unfiled"} value={opt.id ?? ""}>
+              {opt.name}
+            </option>
+          ))}
+        </select>
 
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon-sm"
-        aria-label={t("rename")}
-        data-testid={`rename-${source.id}`}
-        onClick={() => setRenaming(true)}
-        className="shrink-0 text-muted-foreground hover:text-foreground"
-      >
-        <Pencil />
-      </Button>
-
-      {/* Re-read with Claude (`POST .../reocr`). The OCR job has always been
-          re-runnable server-side and no UI ever offered it on a HEALTHY book — so
-          a book that OCR'd badly (a bad scan, a model hiccup, or a text layer
-          inherited from someone else's Tesseract) could only be fixed by deleting
-          and re-uploading it. Hidden while a job is running: the server would just
-          hand back the same job, but a button that looks like it does nothing is
-          worse than no button. */}
-      {source.type === "pdf" && !reading && (
         <Button
           type="button"
           variant="ghost"
           size="icon-sm"
-          aria-label={t("reocr")}
-          disabled={retrying}
-          data-testid={`reocr-${source.id}`}
-          onClick={requestReocr}
+          aria-label={t("rename")}
+          data-testid={`rename-${source.id}`}
+          onClick={() => setRenaming(true)}
           className="shrink-0 text-muted-foreground hover:text-foreground"
         >
-          <RefreshCw />
+          <Pencil />
         </Button>
-      )}
 
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon-sm"
-        aria-label={t("delete")}
-        disabled={deleting}
-        data-testid={`delete-${source.id}`}
-        onClick={requestDelete}
-        className="shrink-0 text-muted-foreground hover:text-destructive"
-      >
-        <Trash2 />
-      </Button>
+        {/* Re-read with Claude (`POST .../reocr`). The OCR job has always been
+            re-runnable server-side and no UI ever offered it on a HEALTHY book — so
+            a book that OCR'd badly (a bad scan, a model hiccup, or a text layer
+            inherited from someone else's Tesseract) could only be fixed by deleting
+            and re-uploading it. Hidden while a job is running: the server would just
+            hand back the same job, but a button that looks like it does nothing is
+            worse than no button. */}
+        {source.type === "pdf" && !reading && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label={t("reocr")}
+            disabled={retrying}
+            data-testid={`reocr-${source.id}`}
+            onClick={requestReocr}
+            className="shrink-0 text-muted-foreground hover:text-foreground"
+          >
+            <RefreshCw />
+          </Button>
+        )}
+
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          aria-label={t("delete")}
+          disabled={deleting}
+          data-testid={`delete-${source.id}`}
+          onClick={requestDelete}
+          className="shrink-0 text-muted-foreground hover:text-destructive"
+        >
+          <Trash2 />
+        </Button>
+      </div>
 
       <RenameDialog
         open={renaming}

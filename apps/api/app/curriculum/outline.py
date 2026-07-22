@@ -35,7 +35,7 @@ import uuid
 
 from app.curriculum.corpus import LibraryContext, prefix_messages
 from app.curriculum.shape import Shape, enforce_shape
-from app.i18n import answer_in, language_directive
+from app.i18n import answer_in, curriculum_style, language_directive
 from app.prompts.overrides import resolve
 from app.llm.factory import get_provider
 from app.models.block import Block
@@ -142,6 +142,7 @@ OUTLINE_TAIL = (
     "Say 'general_knowledge' instead. That is not a failure; an unlabelled "
     "gap is.\n"
     "\n{language_directive}\n"
+    "\n{style_directive}\n"
     "\nCOURSE TITLE: {title}"
     "{course_brief_block}"
     "{planning_brief_block}"
@@ -209,6 +210,7 @@ def build_outline_messages(
         minutes_per_lesson=shape.minutes_per_lesson,
         target_words_per_lesson=f"{shape.target_words_per_lesson:,}",
         language_directive=language_directive(language, source),
+        style_directive=curriculum_style(language, source),
         title=title,
         course_brief_block=(
             OUTLINE_COURSE_BRIEF_BLOCK.format(brief=brief) if brief else ""

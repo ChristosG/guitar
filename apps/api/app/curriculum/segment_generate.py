@@ -53,7 +53,8 @@ from sqlalchemy.orm import aliased
 
 from app.curriculum.ground import ground_topic
 from app.curriculum.revise import _recompute_lesson_word_count
-from app.i18n import answer_in, language_directive
+from app.curriculum.sanitize import strip_inline_citations
+from app.i18n import answer_in, curriculum_style, language_directive
 from app.llm.factory import get_provider
 from app.models.block import Block
 from app.prompts.overrides import resolve
@@ -93,7 +94,8 @@ SEGMENT_SYSTEM = (
     "NEVER invent a page citation. The passages below are what this section may "
     "be grounded in; where they do not cover something you still need to say, "
     "write it from your own knowledge rather than attaching a citation to it.\n\n"
-    "{language_directive}"
+    "{language_directive}\n\n"
+    "{style_directive}"
 )
 SEGMENT_SYSTEM_SLICE_ID = "segment.generate"
 
@@ -135,6 +137,7 @@ def build_segment_messages(
     `build_refine_messages`."""
     system = resolve(source, SEGMENT_SYSTEM_SLICE_ID, SEGMENT_SYSTEM).format(
         language_directive=language_directive(language, source),
+        style_directive=curriculum_style(language, source),
     )
     user = resolve(source, SEGMENT_TAIL_SLICE_ID, SEGMENT_TAIL).format(
         lesson_title=lesson_title,
@@ -221,7 +224,10 @@ def generate_segment(db, segment: Block) -> None:
     )
 
     segment.title = (result.get("title") or segment.title).strip() or segment.title
-    segment.body = result.get("body") or segment.body
+    # The style rule tells the model to keep page markers out of the prose;
+    # `strip_inline_citations` is what holds when it writes one anyway — the
+    # REAL provenance is `meta.citations` below, never the body text.
+    segment.body = strip_inline_citations(result.get("body")) or segment.body
     citations = [
         {"source_id": str(p.source_id), "source_title": p.source_title, "page": p.page_no}
         for p in passages

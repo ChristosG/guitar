@@ -181,10 +181,13 @@ from app.curriculum.shape import plan_shape
 from app.i18n import (
     ANSWER_IN,
     ANSWER_IN_SLICE_ID,
+    CURRICULUM_STYLE,
+    CURRICULUM_STYLE_SLICE_ID,
     DEFAULT_LOCALE,
     LANGUAGE_DIRECTIVE,
     LANGUAGE_DIRECTIVE_SLICE_ID,
     answer_in,
+    curriculum_style,
     language_directive,
 )
 from app.lessons.draft import (
@@ -1258,6 +1261,10 @@ def _build_shared_answer_in(locale: str, db, course_language=None) -> _Built:
     return [RenderedMessage(role="user", content=answer_in(locale, db))], []
 
 
+def _build_shared_curriculum_style(locale: str, db, course_language=None) -> _Built:
+    return [RenderedMessage(role="system", content=curriculum_style(locale, db))], []
+
+
 def _build_shared_student_brief(locale: str, db, course_language=None) -> _Built:
     brief = _sample_student_brief(db)
     return [RenderedMessage(role="user", content=brief)], [
@@ -1594,7 +1601,7 @@ _ENTRIES = [
         when_it_runs_el="Μία φορά, μόλις πατήσεις δημιουργία προγράμματος.",
         source_of_truth=lambda: build_outline_messages,
         build=_build_curriculum_outline,
-        call_sites=("curriculum/outline.py:302",),
+        call_sites=("curriculum/outline.py:304",),
         slices=(
             Slice(
                 id=OUTLINE_SLICE_ID,
@@ -1610,7 +1617,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/extend.py:181",
+        source_ref="app/curriculum/extend.py:182",
         title_el="Η νέα ενότητα σε υπάρχον πρόγραμμα",
         what_it_does_el=(
             "Δείχνει στον βοηθό το πρόγραμμα όπως είναι σήμερα και ζητάει μία "
@@ -1621,7 +1628,7 @@ _ENTRIES = [
         when_it_runs_el="Όταν προσθέτεις ενότητα σε πρόγραμμα που ήδη υπάρχει.",
         source_of_truth=lambda: build_module_messages,
         build=_build_curriculum_extend,
-        call_sites=("curriculum/extend.py:245",),
+        call_sites=("curriculum/extend.py:247",),
         slices=(
             Slice(
                 id=MODULE_SLICE_ID,
@@ -1636,7 +1643,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/refine.py:80",
+        source_ref="app/curriculum/refine.py:82",
         title_el="Η διόρθωση ενός κομματιού",
         what_it_does_el=(
             "Του δίνει το κείμενο που θέλεις να αλλάξει, από πού γράφτηκε, και "
@@ -1647,7 +1654,7 @@ _ENTRIES = [
         when_it_runs_el="Όταν ζητάς αλλαγή σε ένα κομμάτι μαθήματος.",
         source_of_truth=lambda: build_refine_messages,
         build=_build_curriculum_refine,
-        call_sites=("curriculum/refine.py:150",),
+        call_sites=("curriculum/refine.py:153",),
         slices=(
             Slice(
                 id=REFINE_SYSTEM_SLICE_ID,
@@ -1668,7 +1675,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/segment_generate.py:122",
+        source_ref="app/curriculum/segment_generate.py:124",
         title_el="Η συγγραφή μεμονωμένης ενότητας μαθήματος",
         what_it_does_el=(
             "Του δίνει τον τίτλο και τον στόχο του μαθήματος, τις άλλες ενότητές "
@@ -1681,7 +1688,7 @@ _ENTRIES = [
         when_it_runs_el="Όταν εγκρίνεται σχέδιο με προσθήκη/διόρθωση ενότητας.",
         source_of_truth=lambda: build_segment_messages,
         build=_build_segment_generate,
-        call_sites=("curriculum/segment_generate.py:208",),
+        call_sites=("curriculum/segment_generate.py:211",),
         slices=(
             Slice(
                 id=SEGMENT_SYSTEM_SLICE_ID,
@@ -1840,7 +1847,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="lesson",
         kind="prompt",
-        source_ref="app/curriculum/draft.py:195",
+        source_ref="app/curriculum/draft.py:198",
         title_el="Η συγγραφή ενός μαθήματος",
         what_it_does_el=(
             "Ζητάει το ίδιο το μάθημα — τις σελίδες που θα διδάξεις, όχι ένα "
@@ -1856,7 +1863,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: build_lesson_messages,
         build=_build_lesson_draft,
-        call_sites=("curriculum/draft.py:442",),
+        call_sites=("curriculum/draft.py:446",),
         slices=(
             Slice(
                 id=LESSON_SLICE_ID,
@@ -1872,7 +1879,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="lesson",
         kind="prompt",
-        source_ref="app/curriculum/draft.py:195",
+        source_ref="app/curriculum/draft.py:198",
         title_el="Το ξαναγράψιμο ενός κοντού μαθήματος",
         what_it_does_el=(
             "Αν το μάθημα βγήκε πιο κοντό από το όριο, γυρίζει πίσω με την "
@@ -1886,7 +1893,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: build_lesson_messages,
         build=_build_lesson_deepen,
-        call_sites=("curriculum/draft.py:464",),
+        call_sites=("curriculum/draft.py:468",),
         slices=(
             Slice(
                 id=LESSON_DEEPEN_SLICE_ID,
@@ -1901,7 +1908,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="lesson",
         kind="fragment",
-        source_ref="app/curriculum/draft.py:195",
+        source_ref="app/curriculum/draft.py:198",
         title_el="Όταν αναθεωρείς ένα μάθημα: το τρέχον περιεχόμενό του",
         what_it_does_el=(
             "Μπαίνει στη συγγραφή του μαθήματος όταν ζητάς μια αναθεώρηση σε ένα "
@@ -1962,7 +1969,7 @@ _ENTRIES = [
         curriculum_group=True,
         flow="lesson",
         kind="prompt",
-        source_ref="app/curriculum/draft.py:357",
+        source_ref="app/curriculum/draft.py:361",
         title_el="Όταν παραπέμπει σε σελίδα που δεν υπάρχει",
         what_it_does_el=(
             "Η εφαρμογή ελέγχει κάθε παραπομπή σε σελίδα που γράφει ο βοηθός. "
@@ -1975,7 +1982,7 @@ _ENTRIES = [
         when_it_runs_el="Μόνο όταν πιαστεί λάθος παραπομπή. Το πολύ μία φορά ανά μάθημα.",
         source_of_truth=lambda: _repair_message,
         build=_build_lesson_repair,
-        call_sites=("curriculum/draft.py:448",),
+        call_sites=("curriculum/draft.py:452",),
         slices=(
             Slice(
                 id=REPAIR_SLICE_ID,
@@ -1990,7 +1997,7 @@ _ENTRIES = [
         curriculum_group=True,
         flow="lesson",
         kind="fragment",
-        source_ref="app/curriculum/draft.py:110",
+        source_ref="app/curriculum/draft.py:112",
         title_el="Οδηγία: η ενότητα είναι μέσα στα βιβλία σου",
         what_it_does_el=(
             "Μπαίνει στη συγγραφή του μαθήματος όταν η ενότητα έχει "
@@ -2016,7 +2023,7 @@ _ENTRIES = [
         curriculum_group=True,
         flow="lesson",
         kind="fragment",
-        source_ref="app/curriculum/draft.py:110",
+        source_ref="app/curriculum/draft.py:112",
         title_el="Οδηγία: η ενότητα ΔΕΝ είναι στα βιβλία σου",
         what_it_does_el=(
             "Μπαίνει όταν η ενότητα δεν καλύπτεται από τη βιβλιοθήκη σου και "
@@ -2042,7 +2049,7 @@ _ENTRIES = [
         curriculum_group=True,
         flow="lesson",
         kind="fragment",
-        source_ref="app/curriculum/draft.py:110",
+        source_ref="app/curriculum/draft.py:112",
         title_el="Οδηγία: η ενότητα θέλει πρόσφατες πληροφορίες",
         what_it_does_el=(
             "Μπαίνει όταν η ενότητα δεν είναι στα βιβλία σου και χρειάζεται "
@@ -2450,7 +2457,7 @@ _ENTRIES = [
         id="shared.language_directive",
         flow="shared",
         kind="fragment",
-        source_ref="app/i18n.py:127",
+        source_ref="app/i18n.py:168",
         title_el="Ο κανόνας της γλώσσας",
         what_it_does_el=(
             "Ο πιο σημαντικός κανόνας της εφαρμογής, γραμμένος μία φορά και "
@@ -2479,10 +2486,43 @@ _ENTRIES = [
         ),
     ),
     PromptEntry(
+        id="shared.curriculum_style",
+        flow="shared",
+        kind="fragment",
+        source_ref="app/i18n.py:188",
+        title_el="Το ύφος των μαθημάτων",
+        what_it_does_el=(
+            "Ο κανόνας του ύφους για ό,τι γράφεται ΜΕΣΑ σε πρόγραμμα "
+            "σπουδών, και υπερισχύει του κανόνα της παράθεσης: εκεί δεν "
+            "αντιγράφουμε αγγλικές προτάσεις από τα βιβλία — τις λέμε με "
+            "δικά μας ελληνικά λόγια. Λέει τέσσερα πράγματα: γράψε σαν να "
+            "ΜΙΛΑΣ στον μαθητή, λέξεις που διαβάζονται φωναχτά όπως είναι· "
+            "κάθε πρόταση ελληνική από την αρχή ως το τέλος, με αγγλικά "
+            "ΜΟΝΟ την ορολογία (humbucker, compressor) και τα ονόματα· "
+            "καμία αναφορά σε βιβλία και πηγές μέσα στο κείμενο· και καμία "
+            "παραπομπή σελίδας — π.χ. (S9, p.47) — μέσα στην πρόζα. Οι "
+            "πηγές έχουν το δικό τους παράθυρο."
+        ),
+        when_it_runs_el=(
+            "Σε κάθε γραφή περιεχομένου προγράμματος: σκελετός, μαθήματα, "
+            "νέες ενότητες, νέα τμήματα, διορθώσεις — ποτέ στη συνομιλία."
+        ),
+        source_of_truth=lambda: curriculum_style,
+        build=_build_shared_curriculum_style,
+        slices=(
+            Slice(
+                id=CURRICULUM_STYLE_SLICE_ID,
+                label_el="Το κείμενο του κανόνα",
+                default=CURRICULUM_STYLE,
+                kind="replace",
+            ),
+        ),
+    ),
+    PromptEntry(
         id="shared.answer_in",
         flow="shared",
         kind="fragment",
-        source_ref="app/i18n.py:147",
+        source_ref="app/i18n.py:203",
         title_el="Η τελευταία υπενθύμιση γλώσσας",
         what_it_does_el=(
             "Μία γραμμή, κολλημένη στο τέλος-τέλος, μετά τα αγγλικά "

@@ -101,10 +101,10 @@ export default function CurriculaPage() {
         {shown.length > 0 && (
           <div className="flex flex-wrap gap-3" data-testid="templates-list">
             {shown.map((item) => (
-              <div key={item.id} className="relative" data-testid="template-item">
+              <div key={item.id} className="relative w-full sm:w-auto" data-testid="template-item">
                 <Link
                   href={`/${locale}/curricula/${item.id}`}
-                  className="flex w-56 flex-col gap-1 rounded-xl border border-border bg-card p-3 pr-10 text-left text-sm ring-1 ring-foreground/10 transition-colors hover:bg-muted/50"
+                  className="flex w-full flex-col gap-1 rounded-xl border border-border bg-card p-3 pr-10 text-left text-sm ring-1 ring-foreground/10 transition-colors hover:bg-muted/50 sm:w-56"
                 >
                   <span className="truncate font-medium" data-testid="template-title">
                     {item.title}

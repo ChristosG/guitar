@@ -45,7 +45,8 @@ from app.curriculum.depth import (
 )
 from app.curriculum.ground import ground_topic
 from app.curriculum.outline import TIER_GENERAL, TIER_LIBRARY, TIER_WEB
-from app.i18n import answer_in, language_directive
+from app.curriculum.sanitize import strip_inline_citations
+from app.i18n import answer_in, curriculum_style, language_directive
 from app.prompts.overrides import resolve
 from app.llm.factory import get_provider
 
@@ -80,11 +81,12 @@ class LessonContext:
 # substitute INTO the lesson tail below, because `str.format` scans only the template
 # it is called on, never the values it substitutes.)
 TIER_LIBRARY_DIRECTIVE = (
-    "THIS MODULE IS GROUNDED IN HIS LIBRARY. Teach it from the pages above. "
-    "Quote and paraphrase HIS material, and cite the page you used on every "
-    "section — {source_id, page} against the <source> ids and [p.N] markers "
-    "you were given. Cite ONLY pages you actually read. Do not invent a page "
-    "number; an empty citations array is always better than a wrong one."
+    "THIS MODULE IS GROUNDED IN HIS LIBRARY. Teach it from the pages above, "
+    "in your own words, and cite the page you used on every section's "
+    "citations array — {source_id, page} against the <source> ids and [p.N] "
+    "markers you were given. Cite ONLY pages you actually read. Do not invent "
+    "a page number; an empty citations array is always better than a wrong "
+    "one."
 )
 TIER_LIBRARY_SLICE_ID = "lesson.tier_library"
 
@@ -138,7 +140,8 @@ LESSON_TAIL = (
     "theory out in full, in real paragraphs. Do not write bullet points and "
     "call them a lesson.\n"
     "\n{tier_directive}\n"
-    "\n{language_directive}"
+    "\n{language_directive}\n"
+    "\n{style_directive}"
     "{course_brief_block}"
     "{student_brief_block}"
     "{retrieved_block}"
@@ -268,6 +271,7 @@ def build_lesson_messages(
         floor_words=f"{ctx.floor_words:,}",
         tier_directive=_tier_directive(ctx.tier, source),
         language_directive=language_directive(language, source),
+        style_directive=curriculum_style(language, source),
         course_brief_block=(
             LESSON_COURSE_BRIEF_BLOCK.format(course_brief=course_brief)
             if course_brief else ""
@@ -517,6 +521,13 @@ def _render_section(name: str, section: dict) -> str:
     stored as separate child blocks: they are what the tutor READS OFF THE PAGE
     while teaching, and a Q&A prompt separated from its answer key by a tree
     boundary is a Q&A prompt he cannot use.
+
+    `strip_inline_citations` runs HERE, on the joined text, because this is the
+    single point where every draft path (first draft, deepen, modify re-draft)
+    turns a section dict into the string that lands on `Block.body` — the
+    structured citations array is untouched, it is the prose the markers must
+    never reach. The "(5 min)" heads built two lines up are safe by that
+    function's own contract: no page marker, no match.
     """
     parts = [section.get("body") or ""]
     for item in section.get("items") or []:
@@ -530,7 +541,7 @@ def _render_section(name: str, section: dict) -> str:
             if mins:
                 head = f"{head} ({mins} min)"
             parts.append(f"\n{head}\n{item.get('instructions', '')}")
-    return "\n".join(p for p in parts if p.strip()).strip()
+    return strip_inline_citations("\n".join(p for p in parts if p.strip()))
 
 
 def persist_lesson(
@@ -645,7 +656,7 @@ def persist_lesson(
         order += 1
 
     if lesson.get("summary"):
-        lesson_block.body = lesson["summary"]
+        lesson_block.body = strip_inline_citations(lesson["summary"])
 
     # See the docstring: the caller's cached `children` collection is stale the
     # moment we delete and re-add. Expiring it makes the next read a fresh SELECT.
