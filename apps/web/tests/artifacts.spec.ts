@@ -537,6 +537,14 @@ test.describe("curriculum board segment artifacts (mocked API)", () => {
     await page.getByTestId("template-item").click();
     await expect(page.getByTestId("tree-board")).toBeVisible();
 
+    // Only the course ROOT is expanded on load (`block-card.tsx`'s
+    // `useState(isRoot)` — the 2843-node board redesign). The segment does not
+    // exist in the DOM until its module and lesson are opened, so walk down.
+    await page.locator('[data-testid="block-card"][data-kind="module"]').first()
+      .getByTestId("block-card-header").first().click();
+    await page.locator('[data-testid="block-card"][data-kind="lesson"]').first()
+      .getByTestId("block-card-header").first().click();
+
     // The segment shows its chord diagram with NO request of its own. Every segment
     // leaf used to fire `GET /artifacts?block_id=` on mount — ~120 in parallel on a
     // real curriculum, which IS the "Could not load attached artifacts" error.

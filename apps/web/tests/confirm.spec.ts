@@ -196,6 +196,14 @@ async function mockApi(page: Page) {
     }
 
     if (method === "DELETE") {
+      // The board's course-root delete goes through `deleteCurriculum()` —
+      // `DELETE /curricula/{id}`, the CASCADE-safe endpoint with the drafting
+      // guard — NOT `DELETE /blocks/{id}` (block-card.tsx's own comment on why).
+      if (pathname === `/curricula/${CURRICULUM_ID}`) {
+        mutations.push(`DELETE ${pathname}`);
+        await route.fulfill({ status: 204, headers: CORS_HEADERS });
+        return;
+      }
       const blockMatch = pathname.match(/^\/blocks\/([^/]+)$/);
       if (blockMatch) {
         mutations.push(`DELETE ${pathname}`);
@@ -346,7 +354,10 @@ test.describe("destructive actions are confirm-guarded (mocked API)", () => {
     const root = page.locator('[data-testid="block-card"][data-kind="course"]').first();
     await expect(page.getByTestId("confirm-dialog")).toHaveCount(0);
 
-    await root.getByTestId("block-card-delete").first().click();
+    // Delete lives in the card's ⋯ dropdown since the board redesign — there
+    // is no standalone trash button on the header row any more.
+    await root.getByTestId("block-card-menu").first().click();
+    await page.getByTestId("menu-delete").click();
     await expect(page.getByTestId("confirm-title")).toContainText("Delete the entire curriculum");
     // The numbers ARE the requirement: the tutor must see what a cascade costs.
     await expect(page.getByTestId("confirm-body")).toContainText("2 modules");
@@ -359,9 +370,12 @@ test.describe("destructive actions are confirm-guarded (mocked API)", () => {
     expect(mock.mutations).toEqual([]);
     await expect(page.getByTestId("tree-board")).toBeVisible(); // nothing was destroyed
 
-    await root.getByTestId("block-card-delete").first().click();
+    await root.getByTestId("block-card-menu").first().click();
+    await page.getByTestId("menu-delete").click();
     await page.getByTestId("confirm-accept").click();
-    await expect.poll(() => mock.mutations).toEqual([`DELETE /blocks/${CURRICULUM_ID}`]);
+    // The root goes through `deleteCurriculum()` -> DELETE /curricula/{id} —
+    // the CASCADE-safe endpoint — never the raw blocks route.
+    await expect.poll(() => mock.mutations).toEqual([`DELETE /curricula/${CURRICULUM_ID}`]);
     expect(mock.unexpected).toEqual([]);
   });
 
@@ -373,13 +387,29 @@ test.describe("destructive actions are confirm-guarded (mocked API)", () => {
     const moduleCard = page.locator('[data-testid="block-card"][data-kind="module"]').first();
     await expect(moduleCard).toBeVisible();
 
-    await expectGuarded(
-      page,
-      mock,
-      moduleCard.getByTestId("block-card-delete").first(),
-      "DELETE /blocks/module-1",
-      /Gain staging/,
-    );
+    // Inlined rather than `expectGuarded`: the delete now lives behind the
+    // card's ⋯ dropdown, so the trigger is two clicks, not one locator.
+    const dialog = page.getByTestId("confirm-dialog");
+    const openDelete = async () => {
+      await moduleCard.getByTestId("block-card-menu").first().click();
+      await page.getByTestId("menu-delete").click();
+    };
+
+    await openDelete();
+    await expect(dialog).toBeVisible();
+    await expect(page.getByTestId("confirm-body")).toContainText(/Gain staging/);
+    expect(mock.mutations).toEqual([]);
+
+    await page.getByTestId("confirm-cancel").click();
+    await expect(dialog).toHaveCount(0);
+    await page.waitForTimeout(150);
+    expect(mock.mutations).toEqual([]);
+
+    await openDelete();
+    await expect(dialog).toBeVisible();
+    await page.getByTestId("confirm-accept").click();
+    await expect(dialog).toHaveCount(0);
+    await expect.poll(() => mock.mutations).toEqual(["DELETE /blocks/module-1"]);
     expect(mock.unexpected).toEqual([]);
   });
 
