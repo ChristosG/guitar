@@ -51,10 +51,17 @@ export function InterviewSourcesStep({ options, shape, submitting, error, onSubm
   }
 
   // Live "what will the model actually do with this selection" hint. The rough
-  // chars/4 estimate is client-side only; the API re-counts server-side
-  // (corpus._count_tokens) and routes on canon_threshold (300K) /
-  // full_context_budget (600K) in app/config.py. This keeps the sources-step
-  // promise honest instead of claiming "read whole" unconditionally.
+  // chars/4 estimate is client-side only; the API re-counts server-side and
+  // routes in corpus.build_mixed_context: raw ≤ full_context_budget (600K,
+  // app/config.py) is read WHOLE — the 300K canon_threshold picks a
+  // representation server-side, not a different promise — and only ABOVE 600K
+  // does the canon carry the compiled books (uncompiled ride verbatim), with
+  // retrieval strictly the last rung, when there is no canon to lean on.
+  // 2026-07-22: this line used to re-derive the ladder wrong (>600K claimed
+  // "retrieval") — the tutor picked 603K of books, read the warning, and the
+  // job then built an 87K canon context and read it whole. The web must not
+  // out-guess corpus.py; it mirrors the two facts it can know: does the raw
+  // sum fit, and is there any canon among the selection.
   const estTokens = useMemo(
     () =>
       Math.round(
@@ -62,7 +69,11 @@ export function InterviewSourcesStep({ options, shape, submitting, error, onSubm
       ),
     [options, selected],
   );
-  const regime = estTokens <= 300_000 ? "whole" : estTokens <= 600_000 ? "canon" : "search";
+  const anyCompiledSelected = useMemo(
+    () => options.some((o) => selected.has(o.value) && o.compiled === true),
+    [options, selected],
+  );
+  const regime = estTokens <= 600_000 ? "whole" : anyCompiledSelected ? "canon" : "search";
 
   // Above the whole-read threshold the canon carries the compiled sources and
   // anything uncompiled rides along verbatim (or falls to retrieval) — worth a
