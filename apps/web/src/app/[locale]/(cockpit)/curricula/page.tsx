@@ -8,7 +8,28 @@ import { CurriculumActionsMenu } from "@/components/curriculum/curriculum-action
 import { InterviewDialog } from "@/components/curriculum/interview-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { ApiError, listCurricula, type CurriculumListItem } from "@/lib/api";
+import {
+  ApiError,
+  getOpenInterview,
+  listCurricula,
+  type CurriculumListItem,
+  type OpenInterviewOut,
+} from "@/lib/api";
+
+// Resume chips the tutor explicitly dismissed — kept client-side because
+// dismissal is a UI preference, not interview state: the server row stays
+// resumable (another browser may still want it), this browser just stops
+// offering it.
+const DISMISSED_KEY = "curricula.dismissedInterviews";
+
+function dismissedIds(): string[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(DISMISSED_KEY) ?? "[]");
+    return Array.isArray(raw) ? raw.filter((x) => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
 
 // Client component for the same reason as knowledge/page.tsx and
 // students/page.tsx: it calls the API straight from the browser.
@@ -30,6 +51,10 @@ export default function CurriculaPage() {
   const [templatesLoading, setTemplatesLoading] = useState(true);
   const [templatesError, setTemplatesError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  // A crash-orphaned interview to offer resuming (2026-07-23: a desktop OOM
+  // kill closed the wizard mid-flight; the server state survived, the pointer
+  // didn't). Best-effort: a failed probe means no chip, never an error state.
+  const [openInterview, setOpenInterview] = useState<OpenInterviewOut | null>(null);
 
   const fetchTemplates = useCallback(() => {
     return listCurricula()
@@ -41,6 +66,28 @@ export default function CurriculaPage() {
   useEffect(() => {
     fetchTemplates();
   }, [fetchTemplates]);
+
+  useEffect(() => {
+    getOpenInterview()
+      .then((oi) => {
+        if (oi && !dismissedIds().includes(oi.interview_id)) setOpenInterview(oi);
+      })
+      .catch(() => {
+        // Best-effort — the page works exactly as before without the chip.
+      });
+  }, []);
+
+  const dismissOpenInterview = useCallback(() => {
+    setOpenInterview((current) => {
+      if (current) {
+        localStorage.setItem(
+          DISMISSED_KEY,
+          JSON.stringify([...dismissedIds(), current.interview_id]),
+        );
+      }
+      return null;
+    });
+  }, []);
 
   /** The interview's confirm step MATERIALIZED the tree — it exists right now, with
    * every lesson `queued` and not one word drafted. So this navigates straight to
@@ -67,7 +114,11 @@ export default function CurriculaPage() {
           </h1>
           <p className="text-sm text-muted-foreground">{t("subheading")}</p>
         </div>
-        <InterviewDialog onMaterialized={handleMaterialized} />
+        <InterviewDialog
+          onMaterialized={handleMaterialized}
+          resume={openInterview}
+          onResumeDismissed={dismissOpenInterview}
+        />
       </div>
 
       <div className="flex flex-col gap-2">

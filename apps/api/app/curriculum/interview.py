@@ -298,7 +298,15 @@ def describe_step(db: Session, interview: CurriculumInterview) -> dict:
 
 
 def render_state(db: Session, interview: CurriculumInterview, *, error: str | None = None) -> dict:
-    """The full envelope every route returns."""
+    """The full envelope every route returns.
+
+    `prior` is the answer this step ALREADY has, if the tutor gave one — the
+    thing that makes going BACK non-destructive (2026-07-23). Without it a
+    revisited step rendered its blank defaults, and pressing Continue silently
+    replaced his earlier choice with them: the sources step re-seeded from
+    `default_selected`, the structure step from the settings blueprint. The
+    step components seed their state from `prior` when it is present.
+    """
     info = describe_step(db, interview)
     return {
         "interview_id": interview.id,
@@ -306,8 +314,26 @@ def render_state(db: Session, interview: CurriculumInterview, *, error: str | No
         "error": error,
         "root_id": interview.root_id,
         "job_id": interview.job_id,
+        "prior": interview.answers.get(interview.step),
         **info,
     }
+
+
+def step_back(db: Session, interview: CurriculumInterview) -> dict:
+    """Move ONE step back, keeping every answer already given (they live in
+    `interview.answers`, keyed by step — going back destroys nothing, and the
+    revisited step renders with `prior` so Continue re-submits what he chose).
+
+    A first-step or `done` interview is a NO-OP that re-renders the current
+    state: "back" past the beginning is not an error worth surfacing, and a
+    materialized interview has a course tree that no wizard step can unwind —
+    the board's own tools are how a built course changes.
+    """
+    if interview.step in STEP_ORDER:
+        i = STEP_ORDER.index(interview.step)
+        if i > 0:
+            interview.step = STEP_ORDER[i - 1]
+    return render_state(db, interview)
 
 
 # ---------------------------------------------------------------------------
@@ -647,6 +673,17 @@ def answer_interview(db: Session, interview: CurriculumInterview, answer) -> dic
     Does not commit — the caller commits once, after inspecting the result.
     """
     step = interview.step
+    # BACK-NAVIGATION HONESTY (2026-07-23, with `step_back`): a generated
+    # outline reflects the duration/scope/sources answers it was built from.
+    # If the tutor goes back and CHANGES one of those, the cached outline is a
+    # $1.50 answer to a question he is no longer asking — keeping it would show
+    # him (and at confirm, BUILD) a course drawn from inputs he just replaced.
+    # Snapshot the step's stored answer here; after a successful re-answer that
+    # actually changed it, drop the outline so the outline step regenerates.
+    # An UNCHANGED re-answer (he went back only to look) keeps it — free.
+    _outline_input_before = (
+        interview.answers.get(step) if step in ("duration", "scope", "sources") else None
+    )
     if step == "who":
         result = _answer_who(db, interview, answer)
     elif step == "duration":
@@ -666,6 +703,14 @@ def answer_interview(db: Session, interview: CurriculumInterview, answer) -> dic
 
     if result["ok"] and not result.get("stay"):
         interview.step = "done" if result["done"] else STEP_ORDER[STEP_ORDER.index(step) + 1]
+
+    if (
+        result["ok"]
+        and interview.outline is not None
+        and step in ("duration", "scope", "sources")
+        and interview.answers.get(step) != _outline_input_before
+    ):
+        interview.outline = None
 
     return result
 

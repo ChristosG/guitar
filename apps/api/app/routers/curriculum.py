@@ -66,7 +66,12 @@ from app.schemas.curriculum import (
     ReviseRequest,
     SegmentRequest,
 )
-from app.schemas.interview import InterviewAnswerRequest, InterviewStartRequest, InterviewStateOut
+from app.schemas.interview import (
+    InterviewAnswerRequest,
+    InterviewStartRequest,
+    InterviewStateOut,
+    OpenInterviewOut,
+)
 from app.schemas.jobs import JobAccepted
 
 router = APIRouter(tags=["curriculum"])
@@ -173,6 +178,50 @@ def start_curriculum_interview(
     """
     interview = interview_service.start_interview(db, title=payload.title)
     return interview_service.render_state(db, interview)
+
+
+@router.post("/curricula/interview/{interview_id}/back", response_model=InterviewStateOut)
+def back_curriculum_interview(interview_id: UUID, db: Session = Depends(get_db)) -> dict:
+    """Move the interview ONE step back (2026-07-23: the wizard could only go
+    forward). Answers already given are kept — `render_state`'s `prior` is what
+    the revisited step re-renders them from. No-op on the first step and on a
+    `done` interview; same unconditional-commit convention as `/answer`."""
+    interview = _get_interview_or_404(db, interview_id)
+    result = interview_service.step_back(db, interview)
+    db.commit()
+    return result
+
+
+@router.get("/curricula/interview/open", response_model=OpenInterviewOut | None)
+def get_open_curriculum_interview(db: Session = Depends(get_db)) -> dict | None:
+    """The newest resumable interview — step short of "done", touched within 48
+    hours — or `null`. The interview state machine has always been fully
+    server-side and refresh-safe; what a crashed browser lost was only the
+    POINTER to it (2026-07-23: a desktop OOM kill took the whole session down
+    mid-wizard). The curricula page asks this on load and offers to resume.
+
+    DECLARED BEFORE `/{interview_id}`: route order is what keeps the literal
+    path segment "open" from being parsed — and 422'd — as a UUID.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    row = db.scalars(
+        select(CurriculumInterview)
+        .where(
+            CurriculumInterview.step != "done",
+            CurriculumInterview.updated_at
+            > datetime.now(timezone.utc) - timedelta(hours=48),
+        )
+        .order_by(CurriculumInterview.updated_at.desc())
+    ).first()
+    if row is None:
+        return None
+    return {
+        "interview_id": row.id,
+        "title": row.title,
+        "step": row.step,
+        "updated_at": row.updated_at,
+    }
 
 
 @router.get("/curricula/interview/{interview_id}", response_model=InterviewStateOut)

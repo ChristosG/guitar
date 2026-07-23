@@ -1041,6 +1041,10 @@ export interface InterviewStateOut {
   options: InterviewOption[] | null;
   findings: InterviewFindings | null;
   error: string | null;
+  /** The answer this step already has — set when navigating BACK, so the
+   * revisited step re-renders the tutor's earlier choice, never blank
+   * defaults. Shape depends on the step (same shape that step submits). */
+  prior?: unknown;
   /** Set once "confirm" has materialized the tree. */
   root_id?: string | null;
   job_id?: string | null;
@@ -1060,13 +1064,34 @@ export function startInterview(input: InterviewStartInput): Promise<InterviewSta
 
 /** Current state of an in-progress interview — refresh-safe (`GET
  * .../{id}` never recomputes the cached "preview" findings, per
- * `app.curriculum.interview.render_state`'s own docstring). Exposed for
- * completeness; `InterviewDialog` keeps its own in-memory state across
- * steps and doesn't need to re-fetch mid-flow, same "not yet called, here
- * for future resume support" posture as `getChatHistory` elsewhere in this
- * file. */
+ * `app.curriculum.interview.render_state`'s own docstring). This is what the
+ * resume path hydrates the dialog from. */
 export function getInterview(interviewId: string): Promise<InterviewStateOut> {
   return request<InterviewStateOut>(`/curricula/interview/${interviewId}`);
+}
+
+/** One step BACK (2026-07-23: forward-only wizard). Answers already given are
+ * kept server-side; the response's `prior` is what the revisited step
+ * re-renders them from, so Continue re-submits the tutor's earlier choice. */
+export function backInterview(interviewId: string): Promise<InterviewStateOut> {
+  return request<InterviewStateOut>(`/curricula/interview/${interviewId}/back`, {
+    method: "POST",
+  });
+}
+
+/** The newest resumable interview (step short of "done", touched within 48h),
+ * or null. The state machine was always server-side and refresh-safe; a crashed
+ * browser only ever lost the POINTER to it — this is how the curricula page
+ * finds it again (2026-07-23: a desktop OOM kill closed the wizard mid-flight). */
+export interface OpenInterviewOut {
+  interview_id: string;
+  title: string;
+  step: string;
+  updated_at: string;
+}
+
+export function getOpenInterview(): Promise<OpenInterviewOut | null> {
+  return request<OpenInterviewOut | null>("/curricula/interview/open");
 }
 
 /** Advances one step of the interview. The response is EITHER the next

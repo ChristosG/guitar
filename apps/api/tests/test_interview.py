@@ -30,6 +30,7 @@ from app.curriculum.interview import (
     generate_interview_outline,
     render_state,
     start_interview,
+    step_back,
 )
 from app.models.block import Block
 from app.models.generation_job import GenerationJob
@@ -765,3 +766,67 @@ def test_confirm_returns_202_with_BOTH_a_job_id_and_a_root_id(client, db, monkey
     assert interview.step == "done"
     assert interview.job_id == job_id
     assert interview.root_id == root_id
+
+
+# ---------------------------------------------------------------------------
+# Back navigation (2026-07-23) — the wizard could only go forward
+# ---------------------------------------------------------------------------
+
+def test_back_moves_one_step_and_renders_the_answer_already_given(db):
+    interview = _start(db)
+    _walk_to(db, interview, "scope")
+    assert interview.step == "scope"
+
+    state = step_back(db, interview)
+    assert interview.step == "duration"
+    assert state["step"] == "duration"
+    # `prior` is what makes going back non-destructive: the step re-renders
+    # the tutor's earlier numbers, so Continue re-submits HIS answer.
+    assert state["prior"] == {
+        "weeks": 8, "sessions_per_week": 1, "minutes_per_session": 50,
+    }
+
+
+def test_back_on_the_first_step_is_a_noop_not_an_error(db):
+    interview = _start(db)
+    assert interview.step == "who"
+    state = step_back(db, interview)
+    assert interview.step == "who"
+    assert state["step"] == "who"
+
+
+def test_back_never_unwinds_a_done_interview(db):
+    interview = _start(db)
+    interview.step = "done"
+    step_back(db, interview)
+    assert interview.step == "done"
+
+
+def test_an_unchanged_reanswer_keeps_the_paid_outline(db):
+    interview = _start(db)
+    _walk_to(db, interview, "sources")
+    interview.outline = {"title": "T", "modules": [{"title": "M", "lessons": []}]}
+
+    # Back to duration, then re-answer with the SAME numbers: he went back
+    # only to look — the $1.50 outline must survive the round trip.
+    step_back(db, interview)  # sources -> structure
+    step_back(db, interview)  # structure -> scope
+    step_back(db, interview)  # scope -> duration
+    answer_interview(db, interview, {"weeks": 8, "sessions_per_week": 1,
+                                     "minutes_per_session": 50})
+    assert interview.outline is not None
+
+
+def test_a_changed_outline_input_drops_the_stale_outline(db):
+    interview = _start(db)
+    _walk_to(db, interview, "sources")
+    interview.outline = {"title": "T", "modules": [{"title": "M", "lessons": []}]}
+
+    step_back(db, interview)  # sources -> structure
+    step_back(db, interview)  # structure -> scope
+    step_back(db, interview)  # scope -> duration
+    answer_interview(db, interview, {"weeks": 12, "sessions_per_week": 1,
+                                     "minutes_per_session": 50})
+    # The outline was built from an 8-week shape he just replaced — keeping it
+    # would show (and at confirm, BUILD) a course from inputs he abandoned.
+    assert interview.outline is None

@@ -2,7 +2,7 @@
 
 import { useState, type FormEvent } from "react";
 import { useTranslations } from "next-intl";
-import { Loader2, Sparkles } from "lucide-react";
+import { ArrowLeft, History, Loader2, Sparkles, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -20,6 +20,7 @@ import { Label } from "@/components/ui/label";
 import {
   ApiError,
   answerInterview,
+  backInterview,
   getInterview,
   getJob,
   isJobAccepted,
@@ -49,6 +50,15 @@ interface InterviewDialogProps {
    * arrive. This is NOT a "generation finished" callback — nothing has been
    * written yet, and that is the entire point. */
   onMaterialized: (rootId: string) => void;
+  /** A crash-orphaned interview the page found via `getOpenInterview()`. The
+   * server state machine was always refresh-safe — a dead browser only lost
+   * the pointer (2026-07-23: a desktop OOM kill closed the wizard mid-flight,
+   * with a paid outline sitting finished on the server). When set, a resume
+   * chip renders beside the trigger; clicking it re-enters the interview at
+   * whatever step the server says it is on. */
+  resume?: { interview_id: string; title: string } | null;
+  /** The X on the resume chip — the page owns the dismissal (localStorage). */
+  onResumeDismissed?: () => void;
 }
 
 /** Seven quiet segments, not a numbered wizard chrome. */
@@ -111,7 +121,7 @@ async function pollOutlineJob(jobId: string): Promise<JobOut> {
  * a real curriculum immediately, and the lessons fill in underneath him. There is
  * nothing left to wait for in a dialog.
  */
-export function InterviewDialog({ onMaterialized }: InterviewDialogProps) {
+export function InterviewDialog({ onMaterialized, resume, onResumeDismissed }: InterviewDialogProps) {
   const t = useTranslations("curricula.interview");
   const tJobErrors = useTranslations("jobErrors");
 
@@ -156,6 +166,56 @@ export function InterviewDialog({ onMaterialized }: InterviewDialogProps) {
       setPhase(target);
     } catch (err) {
       setError(err instanceof ApiError ? err.detail : t("startError"));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  /** Re-enter a crash-orphaned interview at whatever step the server says.
+   * If the crash happened while an OUTLINE JOB was running, `state.job_id`
+   * re-attaches to it: poll to terminal, then re-fetch — the paid outline is
+   * recovered, never re-bought. */
+  async function handleResume() {
+    if (!resume) return;
+    setOpen(true);
+    setPhase("interview");
+    setInterviewId(resume.interview_id);
+    setTitle(resume.title);
+    setSubmitting(true);
+    setError(null);
+    try {
+      let s = await getInterview(resume.interview_id);
+      if (s.step === "outline" && !s.findings?.modules?.length && s.job_id) {
+        const job = await getJob(s.job_id);
+        if (job.status === "pending" || job.status === "running") {
+          const done = await pollOutlineJob(s.job_id);
+          s = await getInterview(resume.interview_id);
+          if (done.status === "failed") setError(jobErrorText(done, tJobErrors));
+        }
+      }
+      setState(s);
+      setOutlineEpoch((n) => n + 1);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.detail : t("answerError"));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  /** One step back — server-side move, answers kept; the revisited step
+   * renders from `state.prior`. Changing duration/scope/sources back there
+   * invalidates the cached outline server-side (`answer_interview`), so the
+   * outline step regenerates only when its inputs actually changed. */
+  async function handleBack() {
+    if (!interviewId || submitting) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      const s = await backInterview(interviewId);
+      setState(s);
+      setOutlineEpoch((n) => n + 1);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.detail : t("answerError"));
     } finally {
       setSubmitting(false);
     }
@@ -232,6 +292,26 @@ export function InterviewDialog({ onMaterialized }: InterviewDialogProps) {
   const findings = state?.findings ?? null;
 
   return (
+    <>
+    {resume && (
+      <span className="inline-flex items-center gap-0.5" data-testid="interview-resume-chip">
+        <Button type="button" variant="outline" data-testid="interview-resume" onClick={handleResume}>
+          <History />
+          <span className="max-w-48 truncate">{t("resume", { title: resume.title })}</span>
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          aria-label={t("resumeDismiss")}
+          data-testid="interview-resume-dismiss"
+          onClick={onResumeDismissed}
+          className="text-muted-foreground hover:text-foreground"
+        >
+          <X />
+        </Button>
+      </span>
+    )}
     <Dialog
       open={open}
       onOpenChange={(next) => {
@@ -327,7 +407,25 @@ export function InterviewDialog({ onMaterialized }: InterviewDialogProps) {
 
         {phase === "interview" && state && (
           <DialogBody data-testid="interview-body">
-            <StepTrail currentStep={state.step} />
+            <div className="flex items-center gap-2">
+              {STEP_ORDER.indexOf(state.step as (typeof STEP_ORDER)[number]) > 0 && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label={t("back")}
+                  data-testid="interview-back"
+                  disabled={submitting}
+                  onClick={handleBack}
+                  className="shrink-0 text-muted-foreground hover:text-foreground"
+                >
+                  <ArrowLeft />
+                </Button>
+              )}
+              <div className="flex-1">
+                <StepTrail currentStep={state.step} />
+              </div>
+            </div>
 
             {/* The outline call reads the WHOLE library and takes 30-60 seconds. A
                 silently disabled button for a minute reads as a broken app, so it
@@ -346,6 +444,7 @@ export function InterviewDialog({ onMaterialized }: InterviewDialogProps) {
             {state.step === "who" && (
               <InterviewWhoStep
                 key={state.step}
+                prior={state.prior}
                 options={state.options ?? []}
                 levels={findings?.levels ?? []}
                 submitting={submitting}
@@ -356,6 +455,7 @@ export function InterviewDialog({ onMaterialized }: InterviewDialogProps) {
             {state.step === "duration" && (
               <InterviewDurationStep
                 key={state.step}
+                prior={state.prior}
                 submitting={submitting}
                 error={state.error}
                 onSubmit={handleAnswer}
@@ -364,6 +464,7 @@ export function InterviewDialog({ onMaterialized }: InterviewDialogProps) {
             {state.step === "scope" && (
               <InterviewScopeStep
                 key={state.step}
+                prior={state.prior}
                 options={state.options ?? []}
                 submitting={submitting}
                 error={state.error}
@@ -373,6 +474,7 @@ export function InterviewDialog({ onMaterialized }: InterviewDialogProps) {
             {state.step === "structure" && (
               <InterviewStructureStep
                 key={state.step}
+                prior={state.prior}
                 blueprint={findings?.blueprint}
                 minutesPerLesson={findings?.minutes_per_lesson}
                 submitting={submitting}
@@ -383,6 +485,7 @@ export function InterviewDialog({ onMaterialized }: InterviewDialogProps) {
             {state.step === "sources" && (
               <InterviewSourcesStep
                 key={state.step}
+                prior={state.prior}
                 options={state.options ?? []}
                 shape={findings?.shape}
                 submitting={submitting}
@@ -428,5 +531,6 @@ export function InterviewDialog({ onMaterialized }: InterviewDialogProps) {
         )}
       </DialogContent>
     </Dialog>
+    </>
   );
 }

@@ -77,6 +77,7 @@ async function mockInterviewOnSourcesStep(page: Page) {
       return json({ provider: "anthropic", model: "claude-sonnet-5", configured: true, key_hint: "ab12" });
     }
 
+    if (pathname === "/curricula/interview/open" && method === "GET") return json(null);
     if (pathname === "/curricula" && method === "GET") return json([]);
     if (pathname === "/curricula/interview" && method === "POST") {
       return json(

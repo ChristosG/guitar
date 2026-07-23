@@ -15,6 +15,10 @@ interface InterviewSourcesStepProps {
    * anything. (It used to produce 4 modules for 20 weeks, because the count was
    * a sentence in a prompt the model was free to ignore.) */
   shape?: InterviewShape;
+  /** `InterviewStateOut.prior` — set when navigating back; his earlier
+   * selection wins over `default_selected` seeding, so returning to this step
+   * never silently re-adds a source he deselected (or vice versa). */
+  prior?: unknown;
   submitting: boolean;
   error: string | null | undefined;
   onSubmit: (answer: unknown) => void;
@@ -30,10 +34,16 @@ interface InterviewSourcesStepProps {
  * nothing is silently excluded, and the tutor's own choice always wins;
  * `[]` (deselect everything) is a valid, deliberate answer the API itself
  * accepts (`_answer_sources`'s own docstring). */
-export function InterviewSourcesStep({ options, shape, submitting, error, onSubmit }: InterviewSourcesStepProps) {
+export function InterviewSourcesStep({ options, shape, prior, submitting, error, onSubmit }: InterviewSourcesStepProps) {
   const t = useTranslations("curricula.interview");
+  const p = (prior ?? null) as { source_ids?: string[] } | null;
   const [selected, setSelected] = useState<Set<string>>(
-    () => new Set(options.filter((o) => o.default_selected).map((o) => o.value)),
+    () =>
+      new Set(
+        Array.isArray(p?.source_ids)
+          ? p.source_ids
+          : options.filter((o) => o.default_selected).map((o) => o.value),
+      ),
   );
 
   function toggle(id: string) {

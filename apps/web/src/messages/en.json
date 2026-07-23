@@ -365,7 +365,10 @@
           "backgroundHint": "The lessons are written in the background. The board opens immediately — you can read module 1 while module 5 is still being written.",
           "approve": "Write the lessons"
         }
-      }
+      },
+      "resume": "Resume: “{title}”",
+      "resumeDismiss": "Dismiss",
+      "back": "Back"
     },
     "planning": {
       "chatHint": "Talk through your idea — goals, topics, what to avoid. When you're ready, press \"Use this plan\".",

@@ -352,6 +352,7 @@ async function mockCurriculaForSegmentTest(page: Page, tree: FixtureBlockNode) {
     const json = (body: unknown, status = 200) =>
       route.fulfill({ status, contentType: "application/json", headers: CORS_HEADERS, body: JSON.stringify(body) });
 
+    if (pathname === "/curricula/interview/open" && method === "GET") return json(null);
     if (pathname === "/curricula" && method === "GET") {
       return json([
         {

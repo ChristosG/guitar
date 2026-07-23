@@ -1829,7 +1829,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: DISTILL_SYSTEM,
         build=_build_interview_distill,
-        call_sites=("curriculum/interview.py:742",),
+        call_sites=("curriculum/interview.py:787",),
         slices=(
             Slice(
                 id=DISTILL_SLICE_ID,

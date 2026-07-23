@@ -13,6 +13,9 @@ interface InterviewScopeStepProps {
   /** The gap policies the API accepts (`library_only` / `general_knowledge`, and
    * `web` once Tier 3 ships) — from `describe_step`, never invented here. */
   options: InterviewOption[];
+  /** `InterviewStateOut.prior` — set when navigating back; seeds the brief and
+   * gap policy so Continue re-submits what he wrote, never blanks. */
+  prior?: unknown;
   submitting: boolean;
   error: string | null | undefined;
   onSubmit: (answer: unknown) => void;
@@ -33,12 +36,13 @@ interface InterviewScopeStepProps {
  * topic his library does not cover gets filled from Claude's general knowledge —
  * labelled — or left as an honest, visible gap.
  */
-export function InterviewScopeStep({ options, submitting, error, onSubmit }: InterviewScopeStepProps) {
+export function InterviewScopeStep({ options, prior, submitting, error, onSubmit }: InterviewScopeStepProps) {
   const t = useTranslations("curricula.interview");
   const locale = useLocale();
 
-  const [brief, setBrief] = useState("");
-  const [policy, setPolicy] = useState(options[0]?.value ?? "general_knowledge");
+  const p = (prior ?? null) as { brief?: string; gap_policy?: string } | null;
+  const [brief, setBrief] = useState(p?.brief ?? "");
+  const [policy, setPolicy] = useState(p?.gap_policy ?? options[0]?.value ?? "general_knowledge");
 
   const canSubmit = brief.trim().length > 0;
 

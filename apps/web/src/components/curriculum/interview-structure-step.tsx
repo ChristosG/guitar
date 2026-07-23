@@ -12,6 +12,10 @@ interface InterviewStructureStepProps {
    * practice (`describe_step`'s "structure" branch always sends it), but typed
    * optional because `InterviewFindings` is a shared, all-optional shape. */
   blueprint: BlueprintShape | undefined;
+  /** `InterviewStateOut.prior` — set when navigating back. His EDITED blueprint
+   * (if he pressed Continue rather than Skip) wins over the settings default,
+   * so returning to this step never silently discards his section edits. */
+  prior?: unknown;
   /** `findings.minutes_per_lesson` — the lesson length booked at the duration
    * step, so the editor previews each section's share in real minutes. */
   minutesPerLesson?: number | null;
@@ -44,6 +48,7 @@ const EMPTY_BLUEPRINT: BlueprintShape = { version: 1, sections: [] };
  */
 export function InterviewStructureStep({
   blueprint,
+  prior,
   minutesPerLesson,
   submitting,
   error,
@@ -52,9 +57,11 @@ export function InterviewStructureStep({
   const t = useTranslations("curricula.interview");
 
   // A local, deep-copied draft — his edits are his own until he presses
-  // Continue, same posture as `InterviewOutlineStep`'s `draft`.
+  // Continue, same posture as `InterviewOutlineStep`'s `draft`. A blueprint he
+  // already SUBMITTED (navigating back) wins over the settings default.
+  const p = (prior ?? null) as { skip?: boolean; blueprint?: BlueprintShape } | null;
   const [draft, setDraft] = useState<BlueprintShape>(() =>
-    structuredClone(blueprint ?? EMPTY_BLUEPRINT),
+    structuredClone(p?.blueprint ?? blueprint ?? EMPTY_BLUEPRINT),
   );
 
   return (

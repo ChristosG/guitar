@@ -6,6 +6,7 @@ Kept separate from `app.models.interview.CurriculumInterview` per this
 codebase's established model/schema split (mirrors `schemas/curriculum.py`
 vs `app.models.block`).
 """
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -50,7 +51,24 @@ class InterviewStateOut(BaseModel):
     options: list[dict] | None = None
     findings: dict | None = None
     error: str | None = None
+    # The answer this step already has (going BACK renders it so Continue
+    # re-submits the tutor's earlier choice instead of blank defaults).
+    prior: Any = None
     # Set once "confirm" materializes the tree: the board can be opened on
     # `root_id` while `job_id` is still drafting into it.
     root_id: UUID | None = None
     job_id: UUID | None = None
+
+
+class OpenInterviewOut(BaseModel):
+    """The newest interview a crash may have orphaned — step short of "done",
+    touched in the last 48 hours (2026-07-23: Chris's desktop session was
+    OOM-killed mid-wizard; the server state survived intact but the UI offered
+    no way back in). The curricula page shows a resume chip for this;
+    `GET /curricula/interview/{id}` then renders the full step state, which was
+    always refresh-safe — this type exists only to FIND the interview again.
+    """
+    interview_id: UUID
+    title: str
+    step: str
+    updated_at: datetime

@@ -183,6 +183,7 @@ async function mockApi(page: Page) {
       if (pathname === "/artifacts") return json([ARTIFACT]);
       if (pathname === "/knowledge/sources") return json([SOURCE]);
       if (pathname === "/library/collections") return json([COLLECTION]);
+      if (pathname === "/curricula/interview/open") return json(null);
       if (pathname === "/curricula")
         return json([{ id: CURRICULUM_ID, title: curriculum.title, language: "en", target_profile: null, created_at: NOW }]);
       if (pathname === `/curricula/${CURRICULUM_ID}`) return json(curriculum);

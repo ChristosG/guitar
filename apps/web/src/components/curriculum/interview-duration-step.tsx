@@ -7,6 +7,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
 interface InterviewDurationStepProps {
+  /** `InterviewStateOut.prior` — set when navigating back; seeds the three
+   * numbers so Continue re-submits what he chose, never blanks. */
+  prior?: unknown;
   submitting: boolean;
   error: string | null | undefined;
   onSubmit: (answer: unknown) => void;
@@ -23,11 +26,16 @@ interface InterviewDurationStepProps {
  * ("20 sessions -> 5 modules x 4 lessons -> ~2,200 words each") — computed by the
  * API, not guessed at here.
  */
-export function InterviewDurationStep({ submitting, error, onSubmit }: InterviewDurationStepProps) {
+export function InterviewDurationStep({ prior, submitting, error, onSubmit }: InterviewDurationStepProps) {
   const t = useTranslations("curricula.interview");
-  const [weeks, setWeeks] = useState("");
-  const [perWeek, setPerWeek] = useState("1");
-  const [minutes, setMinutes] = useState("");
+  const p = (prior ?? null) as {
+    weeks?: number;
+    sessions_per_week?: number;
+    minutes_per_session?: number;
+  } | null;
+  const [weeks, setWeeks] = useState(p?.weeks ? String(p.weeks) : "");
+  const [perWeek, setPerWeek] = useState(p?.sessions_per_week ? String(p.sessions_per_week) : "1");
+  const [minutes, setMinutes] = useState(p?.minutes_per_session ? String(p.minutes_per_session) : "");
 
   const weeksNum = Number(weeks);
   const perWeekNum = Number(perWeek);

@@ -12,6 +12,10 @@ interface InterviewWhoStepProps {
   /** `findings.levels` — the levels the API will accept. Not hardcoded here: a
    * level this client invented would just be re-asked by the validator. */
   levels: string[];
+  /** `InterviewStateOut.prior` — the answer this step already has, present when
+   * the tutor navigated BACK. Seeds the initial selection so Continue
+   * re-submits his earlier choice instead of the blank defaults. */
+  prior?: unknown;
   submitting: boolean;
   error: string | null | undefined;
   onSubmit: (answer: unknown) => void;
@@ -31,11 +35,12 @@ const NO_STUDENT = "none";
  * level (on file) wins over it anyway (`_answer_who`), and a control that cannot
  * change the outcome is a lie about what the app is doing.
  */
-export function InterviewWhoStep({ options, levels, submitting, error, onSubmit }: InterviewWhoStepProps) {
+export function InterviewWhoStep({ options, levels, prior, submitting, error, onSubmit }: InterviewWhoStepProps) {
   const t = useTranslations("curricula.interview");
 
-  const [selected, setSelected] = useState<string>(NO_STUDENT);
-  const [level, setLevel] = useState<string>(levels[0] ?? "all_levels");
+  const p = (prior ?? null) as { student_id?: string | null; level?: string } | null;
+  const [selected, setSelected] = useState<string>(p?.student_id ?? NO_STUDENT);
+  const [level, setLevel] = useState<string>(p?.level ?? levels[0] ?? "all_levels");
 
   function handleSubmit(e: FormEvent) {
     e.preventDefault();

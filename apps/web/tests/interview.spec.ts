@@ -224,6 +224,10 @@ interface MockOptions {
    * bottom of this file: the board must not sit there showing "queued" rows under a
    * progress bar that says they are done. */
   readyFromStart?: boolean;
+  /** Pretend a crash orphaned an interview at this step: `GET
+   * /curricula/interview/open` returns it, and `GET .../{id}` renders that
+   * step's entry state — the resume-chip flow (2026-07-23). */
+  orphanAtStep?: string;
   /** Seeds the planning chat's `GET /chat/{id}` (history) with N real turns
    * instead of the default empty transcript. Task 6's layout fix (a definite
    * height on `DialogContent` + an internally-scrolling chat wrapper in
@@ -250,12 +254,15 @@ function makePlanningHistory(turns: number): PlanningChatRow[] {
 
 async function mockInterviewApi(
   page: Page,
-  { readyFromStart = false, planningHistoryTurns = 0 }: MockOptions = {},
+  { readyFromStart = false, planningHistoryTurns = 0, orphanAtStep }: MockOptions = {},
 ) {
   const interviewId = randomUUID();
   const rootId = randomUUID();
 
-  let step = "who";
+  let step = orphanAtStep ?? "who";
+  // Answers already given, keyed by step — what the real API returns as
+  // `prior` when a step is revisited (back navigation / resume).
+  const savedAnswers: Record<string, unknown> = {};
   let currentOutline: Outline = makeOutline();
   let tree: FixtureBlock | null = null;
   let polls = 0;
@@ -292,6 +299,51 @@ async function mockInterviewApi(
     interview_id: interviewId, options: null, findings: null, error: null, ...over,
   });
 
+  /** The ENTRY state of a step — what the real API renders when the step is
+   * (re)visited via back navigation or a resume `GET`, `prior` included. The
+   * forward-transition payloads in the answer switch below stay the source of
+   * truth for the forward flow; this mirrors them for re-entry. */
+  const entryState = (s: string) => {
+    const prior = savedAnswers[s] ?? null;
+    if (s === "who")
+      return state({
+        step: "who", prior, question: "Who is this curriculum for?",
+        options: [{ value: "none", label: "No particular student", kind: "none" }],
+        findings: { levels: ["all_levels", "beginner", "intermediate", "advanced"] },
+      });
+    if (s === "duration") return state({ step: "duration", prior, question: "How long does this run?" });
+    if (s === "scope")
+      return state({
+        step: "scope", prior, question: "What is this course FOR?",
+        options: [
+          { value: "library_only", label: "Only my library." },
+          { value: "general_knowledge", label: "Fill the gaps from general knowledge." },
+        ],
+      });
+    if (s === "structure")
+      return state({
+        step: "structure", prior, question: "The lesson structure — an optional step",
+        findings: { blueprint: makeDefaultBlueprint() },
+      });
+    if (s === "sources")
+      return state({
+        step: "sources", prior, question: "Which sources?",
+        options: SOURCES.map((src) => ({
+          value: src.id, label: src.title, type: src.type,
+          char_count: src.char_count, default_selected: src.default_selected,
+        })),
+        findings: {
+          shape: {
+            lessons_total: 3, modules: 1, lessons_per_module: [3],
+            target_words_per_lesson: 2200, teaching_minutes: 40, qa_minutes: 10,
+          },
+        },
+      });
+    if (s === "outline")
+      return state({ step: "outline", question: "Here is the course.", findings: currentOutline });
+    return state({ step: "confirm", question: "Ready?", findings: currentOutline });
+  };
+
   async function handler(route: Route) {
     const req = route.request();
     const method = req.method();
@@ -314,6 +366,22 @@ async function mockInterviewApi(
       return json([]);
     }
 
+    if (pathname === "/curricula/interview/open" && method === "GET") {
+      return json(
+        orphanAtStep
+          ? { interview_id: interviewId, title: "Orphaned course", step, updated_at: new Date().toISOString() }
+          : null,
+      );
+    }
+    if (pathname.match(/^\/curricula\/interview\/[^/]+\/back$/) && method === "POST") {
+      const order = ["who", "duration", "scope", "structure", "sources", "outline", "confirm"];
+      const i = order.indexOf(step);
+      if (i > 0) step = order[i - 1];
+      return json(entryState(step));
+    }
+    if (pathname.match(/^\/curricula\/interview\/[^/]+$/) && method === "GET") {
+      return json(entryState(step));
+    }
     if (pathname === "/curricula" && method === "GET") return json([]);
 
     if (pathname === "/curricula/interview" && method === "POST") {
@@ -367,6 +435,9 @@ async function mockInterviewApi(
       calls.answer++;
       const answer = (req.postDataJSON() as { answer: Record<string, unknown> }).answer;
       answerBodies.push(answer);
+      if (["who", "duration", "scope", "structure", "sources"].includes(step)) {
+        savedAnswers[step] = answer;
+      }
 
       if (step === "who") {
         step = "duration";
@@ -718,6 +789,52 @@ test.describe("the guided interview, v2 (mocked API)", () => {
     // whole book — not a cosine score with a 0.021 separation margin.
     await expect(page.getByTestId("outline-module-coverage-0")).toContainText("pp. 56-75");
     await expect(page.getByTestId("outline-module-coverage-1")).toContainText("Not in your library");
+  });
+
+  test("BACK re-renders the previous step with the answer he already gave", async ({ page }) => {
+    await mockInterviewApi(page);
+    await startToStep(page, "scope");
+
+    // No back button on the very first step; from scope, go back to duration.
+    await page.getByTestId("interview-back").click();
+
+    // The three numbers he typed on the way forward are prefilled — Continue
+    // re-submits HIS answer, never blank defaults (`prior` on the wire).
+    await expect(page.getByTestId("interview-duration-weeks")).toHaveValue("3");
+    await expect(page.getByTestId("interview-duration-minutes")).toHaveValue("60");
+
+    // Forward again lands where he left off, values intact server-side.
+    await page.getByTestId("interview-answer-submit").click();
+    await expect(page.getByTestId("interview-scope-brief")).toBeVisible();
+  });
+
+  test("the back button does not render on the first step", async ({ page }) => {
+    await mockInterviewApi(page);
+    await startToStep(page, "who");
+    await expect(page.getByTestId("interview-back")).toHaveCount(0);
+  });
+
+  test("a crash-orphaned interview is offered on the index and resumes at its step", async ({ page }) => {
+    await mockInterviewApi(page, { orphanAtStep: "scope" });
+    await page.goto("/en/curricula");
+
+    // The chip names the orphaned course; clicking re-enters the wizard at
+    // whatever step the SERVER says it is on — no restart, nothing lost.
+    await expect(page.getByTestId("interview-resume")).toBeVisible();
+    await page.getByTestId("interview-resume").click();
+    await expect(page.getByTestId("interview-dialog")).toBeVisible();
+    await expect(page.getByTestId("interview-scope-brief")).toBeVisible();
+  });
+
+  test("dismissing the resume chip hides it and survives a reload", async ({ page }) => {
+    await mockInterviewApi(page, { orphanAtStep: "scope" });
+    await page.goto("/en/curricula");
+    await expect(page.getByTestId("interview-resume")).toBeVisible();
+    await page.getByTestId("interview-resume-dismiss").click();
+    await expect(page.getByTestId("interview-resume")).toHaveCount(0);
+    await page.reload();
+    await expect(page.getByTestId("curricula-generate-button")).toBeVisible();
+    await expect(page.getByTestId("interview-resume")).toHaveCount(0);
   });
 
   test("the live footer counts modules, lessons, words and dollars while he edits", async ({ page }) => {

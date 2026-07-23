@@ -273,6 +273,10 @@ async function mockCurriculaApi(
       await route.fulfill({ status: 204, headers: CORS_HEADERS });
       return;
     }
+    if (pathname === "/curricula/interview/open" && method === "GET") {
+      await route.fulfill({ status: 200, contentType: "application/json", headers: CORS_HEADERS, body: "null" });
+      return;
+    }
     if (pathname === "/curricula" && method === "GET") {
       calls.list++;
       await route.fulfill({
@@ -903,6 +907,10 @@ async function mockStudentDetailApi(
         headers: CORS_HEADERS,
         body: JSON.stringify(created),
       });
+      return;
+    }
+    if (pathname === "/curricula/interview/open" && method === "GET") {
+      await route.fulfill({ status: 200, contentType: "application/json", headers: CORS_HEADERS, body: "null" });
       return;
     }
     if (pathname === "/curricula" && method === "GET") {
