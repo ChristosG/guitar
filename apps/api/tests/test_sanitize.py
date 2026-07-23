@@ -2,10 +2,9 @@
 
 The contract cuts both ways and both halves are tested here: every shape of
 inline source/page reference the models have actually produced is removed, and
-the parenthetical text a lesson legitimately contains — exercise timings,
-tunings, years — is never touched. The second half is the dangerous one: a
-stripper that eats "(5 min)" would corrupt every exercise head
-`_render_section` builds, silently, on every draft.
+the parenthetical text a lesson legitimately contains — timings the model
+writes into prose, tunings, years — is never touched. A stripper that matched
+on "any parens with a number" would silently corrupt ordinary teaching text.
 """
 from app.curriculum.draft import _render_section
 from app.curriculum.sanitize import strip_inline_citations
@@ -67,7 +66,8 @@ def test_a_citation_alone_on_its_own_line_takes_its_line_with_it():
 # ---------------------------------------------------------------------------
 
 def test_exercise_timings_survive():
-    # `_render_section` writes "(5 min)" heads; eating them corrupts every draft.
+    # Rendered heads no longer print minutes (Chris, 2026-07-23), but a timing
+    # the model writes into PROSE is ordinary text — never the stripper's prey.
     assert strip_inline_citations("Χρωματική άσκηση (5 min)") == "Χρωματική άσκηση (5 min)"
 
 
@@ -96,7 +96,7 @@ def test_empty_and_none_are_safe():
 # The live seam: `_render_section` strips, and only where it should
 # ---------------------------------------------------------------------------
 
-def test_render_section_strips_markers_but_keeps_the_minutes_head():
+def test_render_section_strips_markers_and_prints_no_minutes_head():
     section = {
         "body": "Όπως εξηγεί το βιβλίο (S9, p.47), το ξύλο μετράει.",
         "items": [
@@ -108,7 +108,11 @@ def test_render_section_strips_markers_but_keeps_the_minutes_head():
     body = _render_section("theory", section)
     assert "(S9, p.47)" not in body
     assert "[p.12]" not in body
-    assert "(5 min)" in body
+    # `est_minutes` stays in the schema (the model budgets with it) but the
+    # page prints only the SECTION clock — three exercises stamped 10+10+8
+    # under a 3′ section header read as a contradiction (Chris, 2026-07-23).
+    assert "(5 min)" not in body
+    assert "Άσκηση καθαρού ήχου" in body
     assert "Όπως εξηγεί το βιβλίο, το ξύλο μετράει." in body
     # The STRUCTURED citations are not this function's business — untouched.
     assert section["citations"] == [{"source_id": "S9", "page": 47}]

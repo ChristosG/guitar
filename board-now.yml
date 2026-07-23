@@ -1,0 +1,77 @@
+- generic [active] [ref=f8e1]:
+  - generic [ref=f8e2]:
+    - complementary [ref=f8e3]:
+      - generic [ref=f8e4]: Βοηθός Δασκάλου Κιθάρας
+      - navigation [ref=f8e12]:
+        - link "Σήμερα" [ref=f8e13] [cursor=pointer]:
+          - /url: /el/today
+        - link "Μαθητές" [ref=f8e16] [cursor=pointer]:
+          - /url: /el/students
+        - link "Προγράμματα" [ref=f8e22] [cursor=pointer]:
+          - /url: /el/curricula
+        - link "Βιβλιοθήκη" [ref=f8e26] [cursor=pointer]:
+          - /url: /el/library
+        - link "Κανόνας" [ref=f8e29] [cursor=pointer]:
+          - /url: /el/canon
+        - link "Μαθήματα" [ref=f8e37] [cursor=pointer]:
+          - /url: /el/lessons
+        - link "Σημειώσεις" [ref=f8e41] [cursor=pointer]:
+          - /url: /el/notes
+        - link "Υλικό" [ref=f8e45] [cursor=pointer]:
+          - /url: /el/artifacts
+        - link "Συνομιλία" [ref=f8e51] [cursor=pointer]:
+          - /url: /el/chat
+      - generic [ref=f8e54]:
+        - group "Αλλαγή γλώσσας" [ref=f8e55]:
+          - link "EN" [ref=f8e56] [cursor=pointer]:
+            - /url: /en/curricula/31ed1bfa-922e-4b61-8b68-0a9504995a0e
+          - link "EL" [ref=f8e57] [cursor=pointer]:
+            - /url: /el/curricula/31ed1bfa-922e-4b61-8b68-0a9504995a0e
+        - generic [ref=f8e58]:
+          - button "Αποσύνδεση" [ref=f8e76]
+          - button "🌓" [ref=f8e59]
+    - generic [ref=f8e60]:
+      - banner [ref=f8e61]:
+        - heading "Προγράμματα" [level=1] [ref=f8e62]
+        - link "Ρυθμίσεις" [ref=f8e63] [cursor=pointer]:
+          - /url: /el/settings
+      - main [ref=f8e67]:
+        - generic [ref=f8e69]:
+          - generic [ref=f8e70]:
+            - link "Όλα τα curricula" [ref=f8e71] [cursor=pointer]:
+              - /url: /el/curricula
+            - button "Αναθεώρηση με AI" [ref=f8e77]
+          - generic [ref=f8e160]:
+            - heading "Guitar Tone latest version" [level=1] [ref=f8e161]
+            - button "Λήψη DOCX" [ref=f8e162]
+            - button "Ενέργειες προγράμματος" [ref=f8e163]
+          - generic [ref=f8e164]:
+            - generic [ref=f8e165]:
+              - generic [ref=f8e166]: Γράφτηκε από 10 πηγές της βιβλιοθήκης σου — 86.979 tokens, διαβάστηκαν ολόκληρες. · στόχος ~2.750 λέξεις ανά μάθημα
+              - generic [ref=f8e171]:
+                - generic [ref=f8e172]: 6 από 6 μαθήματα γραμμένα
+                - generic [ref=f8e174]: 0 γράφονται · 0 σε αναμονή · 0 απέτυχαν
+            - generic [ref=f8e177]:
+              - generic [ref=f8e178] [cursor=pointer]:
+                - button "Σύμπτυξη" [expanded] [ref=f8e179]
+                - generic [ref=f8e182]: Guitar Tone latest version
+                - generic [ref=f8e183]:
+                  - button "Χωρισμός σε συνεδρίες" [ref=f8e184]
+                  - button "Περισσότερες ενέργειες" [ref=f8e185]
+              - generic [ref=f8e188]:
+                - generic [ref=f8e191] [cursor=pointer]:
+                  - button "Ανάπτυξη" [ref=f8e192]
+                  - generic [ref=f8e195]: "Η κιθάρα ως πηγή του ήχου: ξύλο, μαγνήτες και κύκλωμα"
+                  - generic [ref=f8e196]: Η βιβλιοθήκη σου
+                  - generic [ref=f8e200]: 3 μαθήματα
+                  - button "Περισσότερες ενέργειες" [ref=f8e202]
+                - generic [ref=f8e205] [cursor=pointer]:
+                  - button "Ανάπτυξη" [ref=f8e206]
+                  - generic [ref=f8e209]: "Από το πετάλι στον ενισχυτή: αλυσίδα σήματος και τελικός ήχος"
+                  - generic [ref=f8e210]: Η βιβλιοθήκη σου
+                  - generic [ref=f8e214]: 3 μαθήματα
+                  - button "Περισσότερες ενέργειες" [ref=f8e216]
+            - generic [ref=f8e217]:
+              - button "Προσθήκη ενότητας" [ref=f8e218]
+              - button "Ξαναγράψιμο με τη σημερινή δομή" [ref=f8e219]
+  - alert [ref=f8e75]

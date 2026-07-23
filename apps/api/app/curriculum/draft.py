@@ -526,8 +526,14 @@ def _render_section(name: str, section: dict) -> str:
     single point where every draft path (first draft, deepen, modify re-draft)
     turns a section dict into the string that lands on `Block.body` — the
     structured citations array is untouched, it is the prose the markers must
-    never reach. The "(5 min)" heads built two lines up are safe by that
-    function's own contract: no page marker, no match.
+    never reach.
+
+    EXERCISE HEADS CARRY NO "(N min)" SUFFIX (Chris, 2026-07-23). The model
+    still budgets `est_minutes` per item — the schema keeps the field and the
+    model plans with it — but the number does not print: three exercises
+    stamped 10+10+8 under a section whose blueprint clock says 3′ read as a
+    contradiction on the page, and the tutor paces exercises himself. The
+    SECTION clock (`_section_minutes`) is the only time the page shows.
     """
     parts = [section.get("body") or ""]
     for item in section.get("items") or []:
@@ -536,11 +542,7 @@ def _render_section(name: str, section: dict) -> str:
         if "question" in item:
             parts.append(f"\nQ: {item.get('question', '')}\nA: {item.get('answer_key', '')}")
         else:
-            mins = item.get("est_minutes")
-            head = item.get("title", "")
-            if mins:
-                head = f"{head} ({mins} min)"
-            parts.append(f"\n{head}\n{item.get('instructions', '')}")
+            parts.append(f"\n{item.get('title', '')}\n{item.get('instructions', '')}")
     return strip_inline_citations("\n".join(p for p in parts if p.strip()))
 
 
