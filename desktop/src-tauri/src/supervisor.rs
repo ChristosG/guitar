@@ -191,6 +191,9 @@ impl Supervisor {
         .env("EMBED_BACKEND", "local-e5")
         .env("EMBED_MODEL_DIR", self.res.join("models/e5-small"))
         .env("HF_HUB_OFFLINE", "1")
+        // The backup endpoints shell out to pg_dump/pg_restore — point them
+        // at the bundled Postgres tree (routers/backup.py reads PG_BIN_DIR).
+        .env("PG_BIN_DIR", self.res.join("pg/bin"))
         .env("LLM_PROVIDER", "claude")
         .env("AUTH_ENABLED", "0")
         .env("APP_SECRET", &self.secrets.app_secret)

@@ -54,6 +54,22 @@ fn main() {
                 .build()?;
             let handle = app.handle().clone();
             std::thread::spawn(move || boot(handle));
+            // SIGTERM/SIGINT must run the same ordered teardown as Quit —
+            // otherwise a logout or `kill` orphans postgres/api/node, which
+            // then squat the frozen ports and block the next launch.
+            #[cfg(unix)]
+            {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    use signal_hook::consts::{SIGINT, SIGTERM};
+                    use signal_hook::iterator::Signals;
+                    let mut signals =
+                        Signals::new([SIGTERM, SIGINT]).expect("install signal handler");
+                    if signals.forever().next().is_some() {
+                        handle.exit(0); // -> RunEvent::ExitRequested -> sup.shutdown()
+                    }
+                });
+            }
             Ok(())
         })
         .build(tauri::generate_context!())

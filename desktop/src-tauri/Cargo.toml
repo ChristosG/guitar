@@ -23,6 +23,8 @@ ureq = { version = "2", default-features = false, features = ["json"] }
 getrandom = "0.2"
 # SIGTERM/SIGKILL for the supervised children (macOS + Linux only — no Windows).
 libc = "0.2"
+# Route SIGTERM/SIGINT on the shell itself into the ordered teardown.
+signal-hook = "0.3"
 
 [profile.release]
 # The bundle is dominated by resources/ (~1.5 GB); still, keep the shell small.
