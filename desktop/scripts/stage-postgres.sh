@@ -90,7 +90,9 @@ make -C "$PGV_SRC" install "${MAKE_VARS[@]}" >/dev/null
 
 PKGLIBDIR="$("$PG_OUT/bin/pg_config" --pkglibdir)"
 SHAREDIR="$("$PG_OUT/bin/pg_config" --sharedir)"
-[ -f "$PKGLIBDIR/vector.so" ] || die "vector.so did not land in $PKGLIBDIR"
+# Postgres loadable modules are .so on Linux and .dylib on macOS.
+case "$TARGET" in darwin-*) PGV_MOD="vector.dylib" ;; *) PGV_MOD="vector.so" ;; esac
+[ -f "$PKGLIBDIR/$PGV_MOD" ] || die "$PGV_MOD did not land in $PKGLIBDIR"
 [ -f "$SHAREDIR/extension/vector.control" ] || die "vector.control did not land in $SHAREDIR/extension"
 log "pgvector installed into the tree"
 
