@@ -129,19 +129,26 @@ test("restore: picking a file opens the destructive confirm, and accept fires th
   await expect(page.getByTestId("confirm-body")).toContainText("guitar-backup-2026-07-30.tar.gz");
   expect(calls.some((c) => c.pathname === "/backup/restore")).toBe(false); // not yet
 
+  // Arm the navigation watch BEFORE the click. Polling `page.evaluate` across
+  // the reload is what made this test flaky: an evaluate that lands mid-reload
+  // dies with "Execution context was destroyed" instead of returning a value.
+  // Waiting for the navigation asserts the same thing — that a reload happened
+  // — without ever reaching into a context that is being torn down.
+  const reloaded = page.waitForEvent("framenavigated", (f) => f === page.mainFrame());
+
   await page.getByTestId("confirm-accept").click();
 
   await expect
     .poll(() => calls.filter((c) => c.method === "POST" && c.pathname === "/backup/restore").length)
     .toBe(1);
 
-  // the success path reloads the whole app: the marker must be gone
-  await expect
-    .poll(() =>
-      page.evaluate(() => (window as unknown as { __not_reloaded?: number }).__not_reloaded),
-    )
-    .toBeUndefined();
+  // the success path reloads the whole app
+  await reloaded;
   await expect(page.getByTestId("backup-card")).toBeVisible();
+  // and the marker did not survive it — one evaluate, on a settled context
+  expect(
+    await page.evaluate(() => (window as unknown as { __not_reloaded?: number }).__not_reloaded),
+  ).toBeUndefined();
 });
 
 test("restore, cancelled at the confirm, sends nothing at all", async ({ page }) => {
