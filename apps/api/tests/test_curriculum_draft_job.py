@@ -162,10 +162,18 @@ def test_every_queued_lesson_is_drafted_and_the_job_finishes(db, _provider):
     assert job.progress["phase"] == "done"
 
 
-def test_lessons_are_drafted_in_teaching_order_so_module_one_finishes_first(db, _provider):
+def test_lessons_are_drafted_in_teaching_order_so_module_one_finishes_first(
+    db, _provider, monkeypatch
+):
     """He opens the board and reads module 1 while module 5 is still being written.
     Drafting in tree order is what makes the first thing he looks at the first thing
-    that arrives."""
+    that arrives.
+
+    The property under test is the SUBMISSION policy (tree order), so the pool is
+    pinned to one worker: at the production width of 6, which of the first six
+    submitted lessons reaches the fake provider first is thread-scheduling luck,
+    and this assertion flickered under a loaded suite."""
+    monkeypatch.setattr(fanout_mod.settings, "draft_concurrency_api", 1)
     root_id = _course(db)
     run_curriculum_draft_job(_job(db, root_id))
 
