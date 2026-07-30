@@ -1,8 +1,8 @@
 """Data shapes for tool-calling (function-calling) turns - the parsed view of
 an OpenAI-protocol tool-call response produced by `LLMProvider.chat_tools`
-(`base.py`'s abstractmethod, `qwen.py`'s implementation). Kept out of
-`base.py`/`qwen.py` so a caller that only needs these shapes (e.g. Task 2's
-ReAct loop) doesn't have to import the ABC or the vLLM client along with them
+(`base.py`'s abstractmethod, `claude.py`'s implementation). Kept out of
+`base.py`/`claude.py` so a caller that only needs these shapes (e.g. Task 2's
+ReAct loop) doesn't have to import the ABC or the SDK client along with them
 - same rationale as `errors.py` keeping `GuidedJSONError` out of `base.py`.
 """
 from dataclasses import dataclass
@@ -16,7 +16,7 @@ class ToolCall:
     `/mnt/nvme2TB/vllm_interract/examples/tool_calling_minimal.py`). `name`
     is the tool to invoke. `arguments` is already `json.loads`'d into a dict
     by `chat_tools` - never the raw JSON string (a malformed string raises
-    `ToolArgsError` at parse time instead; see `qwen.py`'s `chat_tools`).
+    `ToolArgsError` at parse time instead).
     Frozen: a parsed call is a value, not something a caller should mutate
     in place.
     """

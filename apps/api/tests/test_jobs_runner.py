@@ -21,8 +21,6 @@ committed row, not an in-process artifact of a shared/stale session.
 """
 import uuid
 
-import httpx
-import openai
 import pytest
 from sqlalchemy import text
 
@@ -159,20 +157,18 @@ def test_run_curriculum_job_guided_json_error_sets_failed_upstream(monkeypatch):
     assert got.result_root_id is None
 
 
-@pytest.mark.parametrize(
-    "exc",
-    [
-        openai.APIConnectionError(request=httpx.Request("POST", "http://example.invalid")),
-        httpx.ConnectError("connection refused"),
-        httpx.TimeoutException("timed out"),
-    ],
-    ids=["openai-connection-error", "httpx-connect-error", "httpx-timeout"],
-)
-def test_run_curriculum_job_transport_error_sets_failed_timeout(monkeypatch, exc):
+def test_run_curriculum_job_provider_timeout_sets_failed_timeout(monkeypatch):
+    """Transport failures reach the runner as `LLMError(kind="timeout")` — the
+    provider's `_mapped_errors` (llm/claude.py) maps every Anthropic
+    connection/timeout exception into the app's own taxonomy, which is what
+    replaced the old `except (openai.APIConnectionError, httpx.TransportError)`
+    era. The runner's job is to file it under its own kind, not "internal"."""
+    from app.llm.errors import LLMError
+
     job = _create_job()
 
     def _raise(*args, **kwargs):
-        raise exc
+        raise LLMError("timeout", "Could not reach Anthropic: timed out")
 
     monkeypatch.setattr(runner, "generate_curriculum", _raise)
 

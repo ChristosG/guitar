@@ -20,6 +20,24 @@ os.environ["DATABASE_URL"] = "postgresql+psycopg://guitar:guitar@localhost:5434/
 # gate ON explicitly, per test, with monkeypatch.
 os.environ["AUTH_ENABLED"] = "0"
 
+# `claude` is the only provider, and it REQUIRES a key (`resolve_llm_config`
+# raises `LLMNotConfigured` without one) — where the deleted qwen default needed
+# none, which is what ~40 TestClient modules that never touch Settings used to
+# lean on. The env fallback key keeps that steady state: `require_llm_configured`
+# passes, `get_provider()` builds a (lazy, never-dialled) ClaudeProvider, and no
+# test spends a token — every LLM call is stubbed at its call site. Tests about
+# the UNCONFIGURED state (test_settings_api.py) monkeypatch the key back to
+# "none" explicitly, exactly as they always did. Pinned as env vars (not
+# monkeypatch) for the same import-time reason as DATABASE_URL above.
+#
+# `setdefault`, not assignment, for the KEY: a developer who exports a REAL
+# `LLM_API_KEY` is opting the `integration`-marked tests into live calls (see
+# `_integration_needs_a_real_key` below); the fallback must not clobber that.
+# The PROVIDER is pinned unconditionally — there is only one.
+os.environ["LLM_PROVIDER"] = "claude"
+_FALLBACK_TEST_KEY = "sk-ant-test-suite-fallback-key"
+os.environ.setdefault("LLM_API_KEY", _FALLBACK_TEST_KEY)
+
 import pytest
 from sqlalchemy import text
 from fastapi.testclient import TestClient
@@ -155,6 +173,25 @@ def _fake_embedder(monkeypatch, request):
         "app.brain.reembed",
     ):
         monkeypatch.setattr(f"{module}.get_embedder", lambda: fake, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _integration_needs_a_real_key(request):
+    """`integration`-marked tests drive the REAL provider (they deliberately do
+    not stub `get_provider`) — under the qwen era that meant a live vLLM box;
+    under `claude` it means a real Anthropic key and real spend. On the
+    conftest fallback key every one of them can only fail with an auth 409,
+    which is an environmental fact, not a regression — so they SKIP, loudly
+    naming the opt-in, instead of painting the suite red. Export a real
+    `LLM_API_KEY` before pytest to run them live (which spends real tokens).
+    """
+    if not request.node.get_closest_marker("integration"):
+        return
+    if os.environ.get("LLM_API_KEY", _FALLBACK_TEST_KEY) == _FALLBACK_TEST_KEY:
+        pytest.skip(
+            "integration test needs a live model — export a real LLM_API_KEY "
+            "to run it (this spends real tokens)"
+        )
 
 
 @pytest.fixture(autouse=True)

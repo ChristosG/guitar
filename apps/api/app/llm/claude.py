@@ -70,9 +70,12 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         "web_search_tool": "web_search_20260209",
     },
     HAIKU: {
-        "thinking": False,         # adaptive is 4.6+; Haiku 4.5 400s on it
-        "effort": False,           # 400s on output_config.effort
-        "max_output": 8_192,
+        "thinking": False,         # adaptive is 4.6+; Haiku 4.5 genuinely 400s on it
+        "effort": False,           # ...and on output_config.effort — keep both False
+        # Haiku 4.5's real output cap is 64K (the old 8_192 here was stale — it
+        # silently clamped `draft`'s 32K budget to a quarter of the model's
+        # actual ceiling and truncated every long Greek lesson on Haiku).
+        "max_output": 64_000,
         "web_search_tool": "web_search_20250305",
     },
 }
@@ -107,6 +110,20 @@ _ROLES: dict[str, dict[str, Any]] = {
     # whole-book JSON output is exactly the truncation this role exists to avoid.
     "compile": {"thinking": False, "effort": "medium", "max_tokens": 32_000, "stream": True},
 }
+
+# Per-ROLE request timeouts, applied per call via `client.with_options(...)`.
+# The client's own 600s default is right for chat-sized calls and lethally
+# short for the long structured ones: a whole-book compile or a 32K-token Greek
+# lesson legitimately runs past 10 minutes, and an SDK timeout there does not
+# save money — the tokens are already being generated; it just throws the
+# result away and re-bills the retry. Ported from the CLI bridge's
+# `_GUIDED_TIMEOUT_S` intent when the bridge was deleted.
+_ROLE_TIMEOUT_S: dict[str, float] = {
+    "compile": 1800.0,   # a 388-page book read whole, in one structured call
+    "draft":   1200.0,   # a 32K-token Greek lesson
+    "plan":    1200.0,   # outline over the whole library
+}
+_DEFAULT_TIMEOUT_S = 600.0
 
 # Sonnet 5's real image ceiling is 2576px on the long edge (NOT the widely-cited
 # 1568px). We cap at 2000: comfortably inside the limit, and a deliberate
@@ -185,13 +202,23 @@ class ClaudeProvider(LLMProvider):
             self._client = anthropic.Anthropic(**kw)
         return self._client
 
+    def _client_for(self, role: str):
+        """The client, with THIS role's request timeout applied.
+
+        `with_options` is the SDK's per-request override: it returns a view of
+        the same client with only `timeout` changed — connection pool and the
+        configured `max_retries` are untouched, so a `compile` still gets the
+        4-retry backoff, just with 30 minutes per attempt instead of 10.
+        """
+        return self.client.with_options(timeout=_ROLE_TIMEOUT_S.get(role, _DEFAULT_TIMEOUT_S))
+
     # -- the ABC ------------------------------------------------------------
 
     def chat(self, messages, *, temperature: float = 0.3, enable_thinking: bool = False,
              role: str = "chat") -> str:
         system, msgs = to_anthropic(messages)
         with _mapped_errors():
-            resp = self.client.messages.create(
+            resp = self._client_for(role).messages.create(
                 system=system or anthropic_omit(), messages=msgs, **self._kwargs(role)
             )
         return "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
@@ -225,11 +252,16 @@ class ClaudeProvider(LLMProvider):
                 # 32,000-token Greek lesson is exactly that request. So `plan` and
                 # `draft` stream and we simply wait for the final message; `spec`
                 # and `chat` (4-8k) do not need to.
-                with self.client.messages.stream(**request) as stream:
+                with self._client_for(role).messages.stream(**request) as stream:
                     resp = stream.get_final_message()
             else:
-                resp = self.client.messages.create(**request)
-        self._record_usage(resp)
+                resp = self._client_for(role).messages.create(**request)
+        self._record_usage(
+            resp,
+            expects_cache_hit=any(
+                isinstance(m, dict) and m.get("cache") for m in messages
+            ),
+        )
 
         if resp.stop_reason == "max_tokens":
             raise GuidedJSONError(
@@ -252,7 +284,7 @@ class ClaudeProvider(LLMProvider):
                    temperature: float = 0.3, role: str = "chat") -> AssistantTurn:
         system, msgs = to_anthropic(messages)
         with _mapped_errors():
-            resp = self.client.messages.create(
+            resp = self._client_for(role).messages.create(
                 system=system or anthropic_omit(),
                 messages=msgs,
                 tools=to_anthropic_tools(tools),
@@ -268,7 +300,7 @@ class ClaudeProvider(LLMProvider):
         `agent/loop.py::stream_plain_turn` relies on (see `base.py`)."""
         system, msgs = to_anthropic(messages)
         with _mapped_errors():
-            with self.client.messages.stream(
+            with self._client_for(role).messages.stream(
                 system=system or anthropic_omit(),
                 messages=msgs,
                 tools=to_anthropic_tools(tools),
@@ -295,7 +327,7 @@ class ClaudeProvider(LLMProvider):
         """
         b64 = base64.b64encode(image_bytes).decode()
         with _mapped_errors():
-            resp = self.client.messages.create(
+            resp = self._client_for("ocr").messages.create(
                 messages=[{"role": "user", "content": [
                     {"type": "image",
                      "source": {"type": "base64", "media_type": media_type, "data": b64}},
@@ -327,7 +359,7 @@ class ClaudeProvider(LLMProvider):
             )
         return int(resp.input_tokens)
 
-    def _record_usage(self, resp: Any) -> None:
+    def _record_usage(self, resp: Any, *, expects_cache_hit: bool = False) -> None:
         usage = getattr(resp, "usage", None)
         if usage is None:
             return
@@ -338,6 +370,26 @@ class ClaudeProvider(LLMProvider):
                 "cache_creation_input_tokens", "cache_read_input_tokens",
             )
         }
+        # THE SILENT 10x-INVOICE GUARD. A request that carried a `cache: True`
+        # breakpoint (the corpus prefix — see corpus.py:40-43) is supposed to
+        # either WRITE the cache (first call of a fan-out) or READ it (every
+        # later call). Both counters at zero means the breakpoint did nothing:
+        # the "stable prefix" is not stable, every lesson re-bills the whole
+        # library at full price, and NOTHING ELSE LOOKS DIFFERENT — the
+        # curriculum still generates; the only other symptom is the invoice a
+        # month later. Cheap and non-fatal: one log line, never an exception.
+        if (
+            expects_cache_hit
+            and self.last_usage.get("cache_creation_input_tokens", 0) == 0
+            and self.last_usage.get("cache_read_input_tokens", 0) == 0
+        ):
+            log.warning(
+                "claude: a request carried a prompt-cache breakpoint but the "
+                "response reports zero cache writes AND zero cache reads — the "
+                "cached prefix is not caching. Every call in this fan-out is "
+                "re-billing the full library at 1x instead of 0.1x (the silent "
+                "10x-invoice failure mode; see app/curriculum/corpus.py)."
+            )
 
     def health(self) -> dict:
         """Zero-token probe. `models.retrieve` distinguishes a bad key (401) from
@@ -374,11 +426,10 @@ def _tool_choice(choice: str) -> dict:
 class _mapped_errors:
     """Anthropic exceptions -> this app's `LLMError` taxonomy.
 
-    Without this, `jobs/runner.py`'s `except (openai.APIConnectionError,
-    httpx.TransportError)` would not match anything Anthropic raises, and every
-    real transport failure would fall through to the generic `except Exception`
-    and be recorded as `internal` — "our bug" — when it was a timeout, a rate
-    limit, or an expired key.
+    This is what `jobs/runner.py`'s `except LLMError` branches are built on:
+    without it, every real transport failure would fall through to the generic
+    `except Exception` and be recorded as `internal` — "our bug" — when it was
+    a timeout, a rate limit, or an expired key.
     """
 
     def __enter__(self):

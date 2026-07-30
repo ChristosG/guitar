@@ -8,7 +8,7 @@ configured Anthropic key to run.
 from functools import lru_cache
 
 from app.config import settings
-from app.llm.embedder import EmbeddingProvider, LocalE5Embedder, QwenRemoteEmbedder
+from app.llm.embedder import EmbeddingProvider, LocalE5Embedder
 
 
 @lru_cache(maxsize=1)
@@ -25,8 +25,7 @@ def get_embedder() -> EmbeddingProvider:
     backend = settings.embed_backend
     if backend == "local-e5":
         return LocalE5Embedder()
-    if backend == "qwen":
-        return QwenRemoteEmbedder()
     raise ValueError(
-        f"Unknown EMBED_BACKEND: {backend!r} (expected 'local-e5' or 'qwen')"
+        f"Unknown EMBED_BACKEND: {backend!r} (the only supported backend is "
+        f"'local-e5' — the remote 'qwen' embedder was removed)"
     )

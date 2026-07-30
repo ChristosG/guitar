@@ -18,13 +18,11 @@ generate_artifact`), not `app.artifacts.generate.generate_artifact` —
 patching the origin module would not affect the router's already-bound
 reference (same precedent `test_curriculum_generate_errors.py` documents).
 """
-import httpx
-import openai
 import pytest
 from fastapi.testclient import TestClient
 
 import app.routers.artifacts as artifacts_router
-from app.llm.errors import GuidedJSONError
+from app.llm.errors import GuidedJSONError, LLMError
 from app.main import app
 
 client = TestClient(app)
@@ -45,15 +43,18 @@ def test_generate_endpoint_maps_guided_json_error_to_502(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "exc",
+    ("exc", "expected_status"),
     [
-        httpx.ConnectError("connection refused"),
-        httpx.TimeoutException("timed out"),
-        openai.APITimeoutError(request=httpx.Request("POST", "http://example.invalid")),
+        (LLMError("timeout", "request timed out"), 504),
+        (LLMError("upstream", "upstream 502"), 502),
+        (LLMError("rate_limit", "rate limited"), 502),
     ],
-    ids=["httpx-connect-error", "httpx-timeout", "openai-timeout"],
+    ids=["llm-timeout", "llm-upstream", "llm-rate-limit"],
 )
-def test_generate_endpoint_maps_transport_errors_to_504(monkeypatch, exc):
+def test_generate_endpoint_maps_llm_errors(monkeypatch, exc, expected_status):
+    """The provider seam raises `LLMError` with a `kind`; the router maps
+    `timeout` -> 504 and everything else upstream-shaped -> 502. (The
+    openai/httpx transport tuple this covered died with the vLLM era.)"""
     def _raise(*args, **kwargs):
         raise exc
 
@@ -61,8 +62,8 @@ def test_generate_endpoint_maps_transport_errors_to_504(monkeypatch, exc):
 
     r = client.post("/artifacts/generate", json=_PAYLOAD)
 
-    assert r.status_code == 504, r.text
-    assert "timed out" in r.json()["detail"].lower()
+    assert r.status_code == expected_status, r.text
+    assert "try again" in r.json()["detail"].lower()
 
 
 def test_generate_endpoint_maps_value_error_to_422(monkeypatch):

@@ -270,7 +270,7 @@ def draft_lesson_from_selection(
         text=text, page_from=page_from, page_to=page_to,
         source_title=source.title, language=language, source=db,
     )
-    tree = get_provider().guided_json(messages, LESSON_SCHEMA)
+    tree = get_provider().guided_json(messages, LESSON_SCHEMA, role="draft")
 
     # SCHEMA-VALID IS NOT SUBSTANTIVE. Structured outputs cannot enforce
     # minItems (`llm/schema.py` strips it before the call), so `{"title": ...,

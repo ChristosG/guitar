@@ -41,14 +41,14 @@ import path from "node:path";
  *      looked at). This test reads that back out of the Reader, in the browser,
  *      the same way he would.
  *
- * RUNTIME: ~40 minutes. 43 unread pages at ~40s each through `claude -p`. That
+ * RUNTIME: ~40 minutes. 43 unread pages at ~40s each through the vision model. That
  * is not a slow test; it is the actual price of reading the book, and there is
  * no honest way to make this assertion cheaper. Do not shorten the book, and do
  * not fake the wait.
  *
- * PREREQUISITES: `docker compose up -d` (web/api/postgres/claude-bridge), and a
- * bridge whose credentials are live (`GET /health` -> credentials.present, and
- * not expired). Run via `npm run test:e2e` — it needs `playwright.live.config.ts`
+ * PREREQUISITES: `docker compose up -d` (web/api/postgres), and a real Anthropic
+ * API key saved in Settings (the reading spends real tokens). Run via
+ * `npm run test:e2e` — it needs `playwright.live.config.ts`
  * (baseURL :8790, no webServer, no retries), NOT the default mocked config.
  */
 

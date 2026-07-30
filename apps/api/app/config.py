@@ -5,9 +5,21 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+psycopg://guitar:guitar@postgres:5432/guitar"
 
-    llm_provider: str = "qwen"
+    # `claude` — the Anthropic API — is the ONLY provider. The `claude_cli`
+    # bridge (Claude on the tutor's subscription via `claude -p`) and the local
+    # `qwen` vLLM box are gone; `llm/factory.py::_build` rejects anything else
+    # loudly. The API key does NOT live here in steady state: the tutor pastes
+    # it into Settings and it is stored encrypted (`settings_store.py`).
+    # `llm_api_key` is only the bootstrap/CI env fallback.
+    llm_provider: str = "claude"
     llm_api_key: str = "none"
-    llm_base_url: str = "http://qwen-vllm:6888/v1"   # QWEN ONLY — see below
+    # Legacy of the deleted qwen provider. `llm_base_url` is kept (truthy on
+    # purpose) as the standing regression guard that `ClaudeProvider` reads
+    # `anthropic_base_url` and never this — see the comment below and
+    # tests/test_claude_provider.py. `llm_model` is only the (never-valid-for-
+    # Claude) fallback in `ClaudeProvider.__init__`; the factory always passes
+    # the model explicitly.
+    llm_base_url: str = "http://qwen-vllm:6888/v1"
     llm_model: str = "/models/Qwen3.5-9B"
 
     # Claude's base URL is a SEPARATE setting from `llm_base_url`, and the
@@ -22,24 +34,6 @@ class Settings(BaseSettings):
     # point at a gateway that speaks the Anthropic Messages API.
     anthropic_base_url: str = ""
 
-    # ---- claude_cli provider: Claude on the SUBSCRIPTION, via `claude -p` ----
-    #
-    # A THIRD wallet, and the distinction is the whole point. `llm_api_key` buys
-    # Anthropic API tokens. A Claude Max subscription buys ZERO of those — it
-    # authenticates the Claude Code CLI, and nothing else. `LLM_PROVIDER=claude_cli`
-    # spends the subscription instead of the card (see app/llm/claude_cli.py).
-    #
-    # The CLI does not run in THIS container and its credentials are not mounted
-    # here. It runs in the sibling `claude-bridge` service (docker-compose.yml),
-    # which is the only container that ever sees ~/.claude — this one is the
-    # web-facing process and deliberately gets nothing. Plain compose DNS: the
-    # service name resolves on `appnet`.
-    claude_bridge_url: str = "http://claude-bridge:8799"
-    # Shared secret. The bridge binds a TCP port that SPENDS MONEY, so it refuses
-    # to start without one, and refuses any request that does not carry it. Must be
-    # byte-identical to the value the bridge was started with.
-    claude_bridge_token: str = ""
-
     # ---- Embeddings (a SEPARATE seam from the chat provider — Claude has no
     # embeddings endpoint; see app/llm/embedder.py's docstring) -------------
     #
@@ -49,16 +43,12 @@ class Settings(BaseSettings):
     # column changed would have handed a 384-dim query vector to a 2560-dim
     # column and failed every search at the DB.
     #
-    # `qwen` remains selectable, and it is now a FOOT-GUN, not a fallback: the
-    # column is 384 wide, so a Qwen backend fails at the first insert. It stays
-    # only so a future embedding swap has a second implementation to look at.
-    embed_backend: str = "local-e5"              # "local-e5" | "qwen"
-    embed_base_url: str = "http://qwen-emb-vllm:8090/v1"   # qwen backend only
-    embed_model: str = "qwen3-emb-4b"                      # qwen backend only
-    # qwen backend ONLY. The live column width is `app.models.knowledge.EMBED_DIM`,
-    # which is hardcoded — a column width is a fact about the bytes on disk, not a
-    # setting (see that constant's comment).
-    embed_dim: int = 2560
+    # `local-e5` is the ONLY backend — the remote `qwen` embedder was deleted
+    # with the qwen chat provider (its 2560-dim vectors could not land in the
+    # 384-wide column anyway). `embed_factory.py` rejects anything else loudly.
+    # (`extra="ignore"` above means an old .env still naming EMBED_BASE_URL /
+    # EMBED_MODEL / EMBED_DIM parses fine; those settings are simply gone.)
+    embed_backend: str = "local-e5"
     # local-e5 backend: weights are baked into the image at build time.
     embed_model_dir: str = "/opt/models/e5-small"
     embed_threads: int = 4
@@ -77,16 +67,11 @@ class Settings(BaseSettings):
 
     media_dir: str = "/media"     # page scans live here; mounted volume
 
-    # WHICH provider transcribes a page scan. `None` = "whatever chat uses",
-    # which is what every existing install gets — including the live one
-    # (`LLM_PROVIDER=claude_cli`, this unset).
-    #
-    # It exists because those two answers legitimately differ. Before this,
-    # `ocr.py` called `get_provider()` zero-arg, so one knob picked both — and
-    # the combination the tutor actually wants (chat on the subscription via
-    # `claude_cli`, which costs nothing per token; OCR on a real key, which is
-    # pennies for the whole library and does not burn a 5-hour rolling cap)
-    # was simply unreachable. See `llm/factory.py::get_ocr_provider`.
+    # WHICH provider transcribes a page scan. `None` = "whatever chat uses" —
+    # with `claude` the only provider left this is effectively always the same
+    # answer, but the seam stays: it is what lets `require_ocr_configured`
+    # (llm/factory.py) resolve the provider OCR's job will actually dispatch
+    # to, and it is where a future second provider would plug back in.
     ocr_provider: str | None = None
 
     # Pages ROUTED TO VISION are re-rendered from the source PDF at this DPI.
@@ -156,19 +141,16 @@ class Settings(BaseSettings):
     # `full_context_budget` would create a dead band that neither reads whole nor
     # routes to the canon; they are deliberately kept ordered.
     canon_threshold: int = 300_000
-    # Lesson drafts that run at once. TWO, deliberately: each is a 32K-output
-    # call, and a fresh Anthropic account's per-minute OUTPUT token limit is the
-    # binding constraint long before wall-clock is. A 429 puts a lesson back to
-    # `queued`, not `failed` — but the cheapest 429 is the one we never provoke.
+    # Legacy narrow cap from the bridge era (`claude_cli` serialized at 3 shared
+    # slots, so a wider pool only queued inside the bridge). Nothing reads it
+    # since the bridge was deleted; kept so an existing .env keeps parsing.
     draft_concurrency: int = 2
-    # ...and the wider cap the REAL API gets. `claude_cli` stays at 2 because
-    # the bridge serializes at 3 slots shared with chat/vision — a wider pool
-    # there just queues inside the bridge while the caller's read timeout runs.
-    # The API has no such shared choke point; the SDK's own retries (and the
+    # Lesson drafts that run at once on the Anthropic API. Each is a 32K-output
+    # call, and a fresh account's per-minute OUTPUT token limit is the binding
+    # constraint long before wall-clock is. The SDK's own retries (and the
     # queued-lesson backoff pass in `run_curriculum_draft_job`) absorb a 429
-    # burst if the account tier is low. Picked per-run in the draft job from
-    # the RESOLVED provider, not here, so flipping the Settings toggle is
-    # enough — no restart, no env edit.
+    # burst if the account tier is low — a 429 puts a lesson back to `queued`,
+    # not `failed`, but the cheapest 429 is the one we never provoke.
     draft_concurrency_api: int = 6
 
     # ---- Connection pool --------------------------------------------------

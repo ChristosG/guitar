@@ -34,7 +34,7 @@ export default defineConfig({
   testDir: "./e2e",
 
   // No `webServer`. The stack is expected to be UP already:
-  //   docker compose up -d   (web :8790, api :8791, postgres :5434, claude-bridge)
+  //   docker compose up -d   (web :8790, api :8791, postgres :5434)
   // Starting it here would mean this config could silently test a `next dev`
   // process instead of the image that actually ships, which is the one thing
   // this suite exists to avoid.

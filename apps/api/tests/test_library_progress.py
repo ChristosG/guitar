@@ -139,19 +139,16 @@ def test_retry_on_a_pdf_mid_ocr_joins_the_running_job_instead_of_racing_it(db, c
 # --- Final review, IMPORTANT 6 — the OCR routes guarded CHAT's provider -----
 
 def test_reocr_409s_when_OCRs_own_provider_is_the_unconfigured_one(db, client, monkeypatch):
-    """`require_llm_configured` resolves `settings.llm_provider` zero-arg — CHAT's
-    provider. But the job it is guarding dispatches through `get_ocr_provider()`,
-    which resolves `settings.ocr_provider`. With OCR_PROVIDER set-and-unconfigured
-    the guard passed on chat's healthy `claude_cli`, the job enqueued, and
-    `LLMNotConfigured` fired INSIDE the background job — defeating the
-    dependency's own stated contract ("No key means no job row at all") and
-    handing the tutor 888 failed pages instead of a 409 pointing at Settings.
-
-    Latent only because OCR_PROVIDER is unset today; Task 6 is what armed it."""
+    """`require_ocr_configured` must resolve the provider the OCR job will
+    actually dispatch to (`settings.ocr_provider`, via `get_ocr_provider()`) —
+    with it set and no key configured anywhere, the enqueue must 409 rather
+    than let `LLMNotConfigured` fire INSIDE the background job, which would
+    defeat the dependency's own stated contract ("No key means no job row at
+    all") and hand the tutor 888 failed pages instead of a 409 pointing at
+    Settings."""
     monkeypatch.setattr("app.routers.library.run_ocr_job", lambda job_id: None)
-    monkeypatch.setattr("app.config.settings.llm_provider", "claude_cli")   # chat: fine
-    monkeypatch.setattr("app.config.settings.ocr_provider", "claude")       # OCR: needs a key
-    monkeypatch.setattr("app.config.settings.llm_api_key", "")              # ...and has none
+    monkeypatch.setattr("app.config.settings.ocr_provider", "claude")   # OCR: needs a key
+    monkeypatch.setattr("app.config.settings.llm_api_key", "")          # ...and has none
     src = _book(db, pages=3)
 
     r = client.post(f"/knowledge/sources/{src.id}/reocr")
@@ -161,11 +158,11 @@ def test_reocr_409s_when_OCRs_own_provider_is_the_unconfigured_one(db, client, m
     assert db.query(GenerationJob).filter_by(kind="ocr").count() == 0, "no key means no job row at all"
 
 
-def test_reocr_is_allowed_when_only_OCRs_provider_is_configured(db, client, monkeypatch):
-    """The other direction, and the one that must not regress: OCR_PROVIDER unset
-    is every install today, and then the two resolutions are identical."""
+def test_reocr_is_allowed_when_OCRs_provider_is_configured(db, client, monkeypatch):
+    """The other direction, and the one that must not regress: OCR_PROVIDER
+    unset is every install today — the two resolutions are identical, and the
+    (conftest-pinned) env-fallback key configures both."""
     monkeypatch.setattr("app.routers.library.run_ocr_job", lambda job_id: None)
-    monkeypatch.setattr("app.config.settings.llm_provider", "claude_cli")
     monkeypatch.setattr("app.config.settings.ocr_provider", "")
     src = _book(db, pages=3)
 

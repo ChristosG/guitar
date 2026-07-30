@@ -374,7 +374,7 @@ def reconcile(db) -> list[Concept]:
                      for cluster in clusters]
     data = get_provider().guided_json(
         build_reconcile_messages(name_clusters, books_of_name, db),
-        RECONCILE_SCHEMA,
+        RECONCILE_SCHEMA, role="compile",
     )
 
     merged = _apply(db, data, concept_of_name, by_id, stats, sources_by_concept)

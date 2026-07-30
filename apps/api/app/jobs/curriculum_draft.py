@@ -74,20 +74,12 @@ RATE_LIMIT_BACKOFF_S: tuple[float, ...] = (30.0, 90.0)
 
 
 def _draft_workers() -> int:
-    """How many lessons draft at once — decided by the RESOLVED provider, not a
-    static setting. The bridge (`claude_cli`) chokes at 3 shared slots, so a
-    wider pool there only queues inside the bridge while the caller's read
-    timeout keeps running; the real API has no shared choke point and gets
-    `draft_concurrency_api`. Resolved fresh per call so flipping the Settings
-    provider toggle mid-day changes the very next run — no restart."""
-    try:
-        from app.settings_store import resolve_llm_config
-
-        if resolve_llm_config().provider == "claude":
-            return settings.draft_concurrency_api
-    except Exception:
-        log.warning("_draft_workers: could not resolve provider; using default", exc_info=True)
-    return settings.draft_concurrency
+    """How many lessons draft at once. The provider is always the Anthropic API
+    now (the `claude_cli` bridge — which choked at 3 shared slots and forced a
+    narrower pool — is gone), so this is simply `draft_concurrency_api`: the
+    SDK's own retries and the queued-lesson backoff passes absorb a 429 burst
+    if the account tier is low."""
+    return settings.draft_concurrency_api
 
 
 def _rate_limited_lesson_ids(db, root_id: uuid.UUID) -> list[uuid.UUID]:

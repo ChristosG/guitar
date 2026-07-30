@@ -778,28 +778,23 @@ def _measured_input_tokens(provider, fallback: int) -> int:
     falling back to our estimate when it does not offer one.
 
     SUM ALL THREE INPUT BUCKETS — and this is the bug the live compile of Powers
-    found, which this suite had happily agreed with. The `claude` CLI does its own
-    prompt caching, so a 40,206-token book comes back as
-    `cache_creation_input_tokens: 40206` with `input_tokens: 2`, and reading
-    `input_tokens` alone stamps `token_count = 2` on a 57-page book. Nothing
-    raises; the column that exists to answer "what did reading this book cost?"
-    just quietly answers "nothing", and the plan's ~$1.26/book estimate becomes
-    permanently uncheckable against reality.
+    found, which this suite had happily agreed with. Prompt caching means a
+    40,206-token book can come back as `cache_creation_input_tokens: 40206` with
+    `input_tokens: 2`, and reading `input_tokens` alone stamps `token_count = 2`
+    on a 57-page book. Nothing raises; the column that exists to answer "what
+    did reading this book cost?" just quietly answers "nothing", and the plan's
+    ~$1.26/book estimate becomes permanently uncheckable against reality.
 
-    Two shapes, because there are two providers: `ClaudeProvider.last_usage` is
-    flat (`{input_tokens: N, ...}`), `ClaudeCLIProvider.last_usage` nests the
-    CLI's own report under `usage` alongside `cost_usd`. Reading both here beats
-    making the canon care which provider the tutor picked.
+    One shape: `ClaudeProvider.last_usage` is flat (`{input_tokens: N, ...}`).
+    (The deleted CLI bridge used to nest its report under `usage`; that second
+    shape left with it.)
     """
     usage = getattr(provider, "last_usage", None) or {}
     if not isinstance(usage, dict):
         return fallback
-    inner = usage.get("usage") if isinstance(usage.get("usage"), dict) else usage
-    if not isinstance(inner, dict):
-        return fallback
     total = sum(
         v for f in _INPUT_FIELDS
-        if isinstance(v := inner.get(f), int) and not isinstance(v, bool) and v > 0
+        if isinstance(v := usage.get(f), int) and not isinstance(v, bool) and v > 0
     )
     return total or fallback
 
@@ -873,11 +868,11 @@ def compile_book(db, source_id: UUID, *, force: bool = False) -> BookCompile:
     provider = get_provider()
     try:
         # `role="compile"` is load-bearing, not decorative: this reads the WHOLE book
-        # in one call — the longest call type in the app — and both providers map the
-        # role to a book-length budget (a far larger timeout on the `claude -p` bridge,
-        # a streamed large-output request on the real API). Without it the largest
-        # book (Gallagher, 366K tokens) overruns the default 600s and dies with a
-        # ReadTimeout, and on the real API a 4k-capped `spec` output would truncate.
+        # in one call — the longest call type in the app — and the provider maps the
+        # role to a book-length budget (a streamed 32K-output request with a 30-minute
+        # per-request timeout). Without it the largest book (Gallagher, 366K tokens)
+        # overruns the default 600s and dies with a ReadTimeout, and a 4k-capped
+        # `spec` output would truncate the canon after the money was spent.
         data = provider.guided_json(build_compile_messages(ctx), CONCEPT_SCHEMA,
                                     role="compile")
     except Exception as e:

@@ -7,9 +7,6 @@
 #     vLLM box, and `docker compose up` HARD-FAILS on any machine where the
 #     network doesn't pre-exist.
 #   - NO `worker` service: it is a stub (all jobs run in-process in `api`).
-#   - NO `claude-bridge`: it bind-mounts the DEVELOPER's ~/.claude OAuth
-#     credentials. The client uses his own Anthropic API key via Settings
-#     (LLM_PROVIDER=claude), which is the only external service he needs.
 #   - `restart: unless-stopped` on EVERYTHING: after a power cut or a Docker
 #     restart the app must come back with nobody there to type commands.
 #     (Also enable Docker Desktop's "Start Docker Desktop when you sign in".)

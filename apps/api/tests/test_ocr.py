@@ -1162,11 +1162,12 @@ def test_both_prompts_forbid_invention():
         assert "invent" in prompt.lower()
 
 
-def test_both_prompts_ask_for_a_bare_reply_because_claude_p_narrates():
-    """`claude -p` returns chatty markdown around a transcription — it narrates
-    that it zoomed in, it adds headers. The bridge deliberately adds no
-    scrubbing (Task 4), so shaping the reply is this prompt's job. Regex-eating
-    a model's prose would eventually eat a line of a real page with it."""
+def test_both_prompts_ask_for_a_bare_reply_because_models_narrate():
+    """Left unshaped, a transcription arrives wrapped in chatty markdown — the
+    model narrates that it zoomed in, it adds headers. Nothing downstream
+    scrubs it, deliberately, so shaping the reply is this prompt's job.
+    Regex-eating a model's prose would eventually eat a line of a real page
+    with it."""
     for prompt in (OCR_PROMPT, FIGURE_PROMPT):
         assert "preamble" in prompt.lower()
 
@@ -1185,7 +1186,7 @@ def test_ocr_records_that_claude_wrote_the_text(db, tmp_path, monkeypatch):
     still carries someone else's Tesseract — which is the entire question this
     plan exists to answer."""
     src = _prep(db, monkeypatch, tmp_path)
-    monkeypatch.setattr("app.config.settings.llm_provider", "claude_cli")
+    monkeypatch.setattr("app.config.settings.llm_provider", "claude")
     fake = _Vision(["Use a ¼-inch instrument cable between the guitar and the amp head."])
     monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
@@ -1193,13 +1194,16 @@ def test_ocr_records_that_claude_wrote_the_text(db, tmp_path, monkeypatch):
     ocr_source(db, src.id)
 
     page = db.query(Page).filter_by(source_id=src.id).one()
-    assert page.text_source == "claude"       # `claude_cli` is Claude — a wallet, not a model
+    assert page.text_source == "claude"
 
 
-def test_ocr_records_that_qwen_wrote_the_text(db, tmp_path, monkeypatch):
+def test_an_unknown_provider_name_is_recorded_honestly_not_guessed(db, tmp_path, monkeypatch):
+    """A provider the map has never heard of (a stale `LLM_PROVIDER=qwen` in an
+    old .env, say) is a fact worth recording as itself: the column answers
+    "whose words are these", and a guess would be a lie in user data."""
     src = _prep(db, monkeypatch, tmp_path)
     monkeypatch.setattr("app.config.settings.llm_provider", "qwen")
-    fake = _Vision(["A page of text transcribed by the local model, long enough to chunk."])
+    fake = _Vision(["A page of text transcribed by some other model, long enough to chunk."])
     monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
 
@@ -1217,7 +1221,7 @@ def test_a_merged_page_credits_the_publisher_AND_the_model_not_just_one(
     content on the page at all, which is the question this column exists to
     answer."""
     src, page = _image_region_page(db, monkeypatch, tmp_path)
-    monkeypatch.setattr("app.config.settings.llm_provider", "claude_cli")
+    monkeypatch.setattr("app.config.settings.llm_provider", "claude")
     fake = _Vision(["A tab staff showing the first four bars."])
     monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
@@ -1235,7 +1239,7 @@ def test_an_image_region_page_with_no_picture_described_still_credits_the_publis
     """Nothing was added, so nothing may be claimed: the text on this page is
     the publisher's, exactly as it was before the model looked at it."""
     src, page = _image_region_page(db, monkeypatch, tmp_path)
-    monkeypatch.setattr("app.config.settings.llm_provider", "claude_cli")
+    monkeypatch.setattr("app.config.settings.llm_provider", "claude")
     fake = _Vision([""])
     monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)

@@ -46,11 +46,9 @@ import os
 import threading
 from abc import ABC, abstractmethod
 
-import httpx
 import numpy as np
 
 from app.config import settings
-from app.llm.embeddings import l2_normalize, query_instruct
 
 log = logging.getLogger(__name__)
 
@@ -189,55 +187,4 @@ class LocalE5Embedder(EmbeddingProvider):
             return len(self.embed(["ok"])[0]) == self.dim
         except Exception:
             log.warning("local embedder health probe failed", exc_info=True)
-            return False
-
-
-class QwenRemoteEmbedder(EmbeddingProvider):
-    """The incumbent: Qwen3-Embedding-4B (2560-dim) on the shared vLLM box.
-
-    Kept ALIVE, not deleted, and it is still the default — because the live
-    `chunk.embedding` column is `vector(2560)` and holds 408 Qwen vectors. The
-    switch to `LocalE5Embedder` is not a code change, it is a DATA migration
-    (`ALTER TYPE vector(384)` + a full re-embed); flipping `EMBED_BACKEND`
-    before that migration runs would hand a 384-dim query vector to a 2560-dim
-    column and fail every search at the DB.
-
-    So: this class is what makes Stage 1 shippable on its own. Stage 4 flips
-    the default in the same commit as the migration. Once that has run on prod,
-    this class and `EMBED_BASE_URL` can be deleted.
-    """
-
-    @property
-    def dim(self) -> int:
-        return settings.embed_dim
-
-    @property
-    def model_id(self) -> str:
-        return settings.embed_model
-
-    def embed(self, texts: list[str], *, is_query: bool = False) -> list[list[float]]:
-        inputs = [query_instruct(t) for t in texts] if is_query else list(texts)
-        vectors: list[list[float]] = []
-        for i in range(0, len(inputs), 16):
-            batch = inputs[i : i + 16]
-            r = httpx.post(
-                f"{settings.embed_base_url}/embeddings",
-                json={"model": settings.embed_model, "input": batch},
-                timeout=60,
-            )
-            r.raise_for_status()
-            # Pair by the response's `index`, not arrival order, so a reordered
-            # batch response can never silently mis-pair text -> vector.
-            ordered = sorted(r.json()["data"], key=lambda d: d["index"])
-            vectors.extend(l2_normalize(d["embedding"]) for d in ordered)
-        return vectors
-
-    def health(self) -> bool:
-        try:
-            httpx.get(f"{settings.embed_base_url}/models", timeout=5).raise_for_status()
-            return True
-        except Exception:
-            log.warning(
-                "embed health probe failed at %s", settings.embed_base_url, exc_info=True
-            )
             return False

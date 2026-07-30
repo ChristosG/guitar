@@ -1,11 +1,12 @@
-"""`get_ocr_provider()` — Task 6. `OCR_PROVIDER` is a knob that must change
-NOTHING when unset (every install today, including the live one:
-`LLM_PROVIDER=claude_cli`, `OCR_PROVIDER` absent) and must let OCR run on a
-DIFFERENT provider from chat when set — the whole point being "chat on the
-subscription (`claude_cli`, free per token), OCR on a real key (`claude`,
-pennies, no 5-hour cap)". Today's `ocr.py` calls `get_provider()` zero-arg, so
-one knob picks both and that combination is unreachable; these tests pin the
-fix at the factory seam.
+"""`llm/factory.py` — the claude-only era.
+
+`get_ocr_provider()` (Task 6) survives the bridge/qwen deletion as a SEAM:
+`OCR_PROVIDER` unset must change nothing (it resolves to exactly the chat
+provider), and set-but-unconfigured must fail with the same honest
+`LLMNotConfigured` chat would raise — never a silently broken client that 401s
+forty pages into a run. `_build` itself must reject anything that is not
+`claude` loudly: a stale `LLM_PROVIDER=qwen` in an old .env is a config bug to
+name, not a model to invent.
 """
 import pytest
 
@@ -13,25 +14,13 @@ import pytest
 def test_ocr_provider_defaults_to_the_chat_provider(monkeypatch):
     """Unset changes nothing for anyone. The knob exists to be ignored."""
     monkeypatch.setattr("app.config.settings.ocr_provider", None)
-    monkeypatch.setattr("app.config.settings.llm_provider", "qwen")
-    from app.llm.factory import get_ocr_provider, get_provider
-
-    assert type(get_ocr_provider()) is type(get_provider())
-
-
-def test_ocr_provider_can_differ_from_chat(monkeypatch):
-    """The whole point: chat on the subscription (claude_cli, free), OCR on a
-    real key (claude, pennies). Today `ocr.py` calls get_provider() zero-arg,
-    so one knob picks both and this combination is unreachable."""
-    monkeypatch.setattr("app.config.settings.llm_provider", "claude_cli")
-    monkeypatch.setattr("app.config.settings.ocr_provider", "claude")
+    monkeypatch.setattr("app.config.settings.llm_provider", "claude")
     monkeypatch.setattr("app.config.settings.llm_api_key", "sk-ant-test")
-    from app.llm.claude import ClaudeProvider
-    from app.llm.claude_cli import ClaudeCLIProvider
-    from app.llm.factory import get_ocr_provider, get_provider
+    from app.llm.factory import clear_provider_cache, get_ocr_provider, get_provider
 
-    assert isinstance(get_provider(), ClaudeCLIProvider)
-    assert isinstance(get_ocr_provider(), ClaudeProvider)
+    clear_provider_cache()
+    assert get_ocr_provider() is get_provider()
+    clear_provider_cache()
 
 
 def test_ocr_provider_claude_without_key_fails_honestly(monkeypatch):
@@ -40,22 +29,41 @@ def test_ocr_provider_claude_without_key_fails_honestly(monkeypatch):
     provider would — not silently fall back to an empty/broken key, which
     would surface 40 pages later as a cryptic auth failure instead of an
     honest "no key" at the moment OCR starts."""
-    monkeypatch.setattr("app.config.settings.llm_provider", "claude_cli")
+    monkeypatch.setattr("app.config.settings.llm_provider", "claude")
     monkeypatch.setattr("app.config.settings.ocr_provider", "claude")
     monkeypatch.setattr("app.config.settings.llm_api_key", "none")
     from app.llm.errors import LLMNotConfigured
-    from app.llm.factory import get_ocr_provider
+    from app.llm.factory import clear_provider_cache, get_ocr_provider
 
+    clear_provider_cache()
     with pytest.raises(LLMNotConfigured):
         get_ocr_provider()
+    clear_provider_cache()
 
 
 def test_ocr_provider_shares_cache_with_get_provider_when_same_config(monkeypatch):
     """`get_ocr_provider()` must reuse `get_provider()`'s content-keyed cache,
     not bolt on a second one — so a settings write's `clear_provider_cache()`
     invalidates both, and two identical configs never build two objects."""
-    monkeypatch.setattr("app.config.settings.llm_provider", "qwen")
-    monkeypatch.setattr("app.config.settings.ocr_provider", "qwen")
-    from app.llm.factory import get_ocr_provider, get_provider
+    monkeypatch.setattr("app.config.settings.llm_provider", "claude")
+    monkeypatch.setattr("app.config.settings.ocr_provider", "claude")
+    monkeypatch.setattr("app.config.settings.llm_api_key", "sk-ant-test")
+    from app.llm.factory import clear_provider_cache, get_ocr_provider, get_provider
 
+    clear_provider_cache()
     assert get_ocr_provider() is get_provider()
+    clear_provider_cache()
+
+
+def test_a_stale_provider_name_is_a_loud_valueerror_not_a_silent_model(monkeypatch):
+    """The bridge (`claude_cli`) and the local vLLM (`qwen`) are deleted. A
+    config that still names one must fail naming the fix, not quietly build
+    something else."""
+    monkeypatch.setattr("app.config.settings.llm_provider", "qwen")
+    monkeypatch.setattr("app.config.settings.llm_api_key", "sk-ant-test")
+    from app.llm.factory import clear_provider_cache, get_provider
+
+    clear_provider_cache()
+    with pytest.raises(ValueError, match="claude"):
+        get_provider()
+    clear_provider_cache()

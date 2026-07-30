@@ -3,9 +3,7 @@ from fastapi import HTTPException
 from app.config import settings
 from app.llm.base import LLMProvider
 from app.llm.claude import ClaudeProvider
-from app.llm.claude_cli import ClaudeCLIProvider
 from app.llm.errors import LLMNotConfigured
-from app.llm.qwen import QwenVLLM
 from app.settings_store import LLMConfig, resolve_llm_config
 
 # Fingerprint -> provider. NOT an `lru_cache(maxsize=1)`, and that change is the
@@ -28,17 +26,15 @@ _PROVIDERS: dict[tuple[str, str, str], LLMProvider] = {}
 
 
 def _build(cfg: LLMConfig) -> LLMProvider:
+    # `claude` is the ONLY provider. The `claude_cli` bridge and the local
+    # `qwen` vLLM box were deleted with the CLI-bridge era; a config that still
+    # names one of them is a stale .env, and the honest answer is a loud error
+    # naming the fix, not a silently different model.
     if cfg.provider == "claude":
         return ClaudeProvider(api_key=cfg.api_key, model=cfg.model)
-    if cfg.provider == "claude_cli":
-        # Claude on the tutor's SUBSCRIPTION, via the `claude` CLI on the host.
-        # No API key — a Max plan buys none. See `llm/claude_cli.py`.
-        return ClaudeCLIProvider(model=cfg.model)
-    if cfg.provider == "qwen":
-        return QwenVLLM()
     raise ValueError(
-        f"Unknown LLM_PROVIDER: {cfg.provider!r} "
-        f"(expected 'claude', 'claude_cli' or 'qwen')"
+        f"Unknown LLM_PROVIDER: {cfg.provider!r} (the only supported provider "
+        f"is 'claude' — the 'claude_cli' bridge and 'qwen' were removed)"
     )
 
 
@@ -76,19 +72,18 @@ def get_ocr_provider() -> LLMProvider:
     """The provider that transcribes a page scan. `brain/ocr.py` calls this in
     place of `get_provider()`.
 
-    `OCR_PROVIDER` UNSET (every install today, including the live one —
-    `LLM_PROVIDER=claude_cli`) returns exactly `get_provider()`: identical
-    object, identical cache entry, nothing changes for anyone until the knob is
-    touched.
+    `OCR_PROVIDER` UNSET (the default) returns exactly `get_provider()`:
+    identical object, identical cache entry, nothing changes for anyone until
+    the knob is touched.
 
     SET, it resolves a fresh `LLMConfig` for THAT provider via the same
-    `resolve_llm_config()` model/key logic chat uses — not by reusing chat's
-    already-resolved `LLMConfig` (which, when chat is `claude_cli`, carries an
-    empty `api_key` that would silently starve a `claude` OCR provider of the
-    real key it needs). This is what makes `OCR_PROVIDER=claude` fail with the
-    SAME honest `LLMNotConfigured` a bare `claude` chat provider raises when no
-    key is configured, instead of quietly building a broken client that 401s
-    forty pages into a run.
+    `resolve_llm_config()` model/key logic chat uses — so `OCR_PROVIDER=claude`
+    fails with the SAME honest `LLMNotConfigured` a bare `claude` chat provider
+    raises when no key is configured, instead of quietly building a broken
+    client that 401s forty pages into a run. With `claude` the only provider
+    left the knob is mostly a no-op, but the seam stays: it is the reason the
+    guard below (`require_ocr_configured`) can resolve the provider OCR will
+    actually use.
     """
     override = settings.ocr_provider
     if not override:
@@ -140,11 +135,12 @@ def require_ocr_configured() -> None:
 
     `require_llm_configured` resolves zero-arg — `settings.llm_provider`, chat's
     provider. The OCR routes' job does not dispatch there: it goes through
-    `get_ocr_provider()`, which resolves `settings.ocr_provider`. So with
-    `OCR_PROVIDER` set-and-unconfigured the guard passed on chat's healthy
-    `claude_cli`, the job enqueued anyway, and `LLMNotConfigured` fired INSIDE the
-    background job — the exact failure the dependency exists to prevent, and the
-    tutor gets 888 failed pages instead of a 409 pointing him at Settings.
+    `get_ocr_provider()`, which resolves `settings.ocr_provider`. With
+    `OCR_PROVIDER` set-and-unconfigured, a guard that only resolved chat's
+    provider would let the job enqueue anyway, and `LLMNotConfigured` would fire
+    INSIDE the background job — the exact failure the dependency exists to
+    prevent: the tutor gets 888 failed pages instead of a 409 pointing him at
+    Settings.
 
     A GUARD MUST RESOLVE THE PROVIDER ITS JOB WILL ACTUALLY USE. Mirrors
     `_current_text_source` (brain/ocr.py), which resolves `settings.ocr_provider`

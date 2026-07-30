@@ -420,25 +420,23 @@ def test_book_compile_records_the_model_and_the_token_count(db, monkeypatch):
 
 
 def test_token_count_counts_the_CACHED_input_too(db, monkeypatch):
-    """CAUGHT BY THE LIVE COMPILE OF POWERS, NOT BY THIS SUITE.
+    """CAUGHT BY A LIVE COMPILE OF POWERS, NOT BY THIS SUITE.
 
-    The `claude` CLI applies its own prompt caching, so the real 40,206-token book
-    came back as `cache_creation_input_tokens: 40206` and `input_tokens: 2` — and
-    reading `input_tokens` alone stamped **`token_count = 2`** on a 57-page book.
-    Nothing fails, nothing looks wrong, and the one column that exists to answer
-    "what did reading this book actually cost?" quietly answers "nothing" — which
-    also makes the plan's "~$1.26/book" estimate uncheckable against reality,
-    forever, on every book compiled from here on.
+    Prompt caching means the real 40,206-token book came back with the input
+    almost entirely under `cache_creation_input_tokens` and `input_tokens: 2` —
+    and reading `input_tokens` alone stamped **`token_count = 2`** on a 57-page
+    book. Nothing fails, nothing looks wrong, and the one column that exists to
+    answer "what did reading this book actually cost?" quietly answers
+    "nothing" — which also makes the plan's "~$1.26/book" estimate uncheckable
+    against reality, forever, on every book compiled from here on.
 
-    The payload below is the REAL one from that run, pasted verbatim.
+    The numbers are the REAL ones from that run, in `ClaudeProvider.last_usage`'s
+    flat shape (the only shape left — the CLI bridge's nested one died with it).
     """
     source = _book(db, {12: _PROSE})
     fake = _use(monkeypatch, _FakeProvider({"concepts": [_concept()]}))
-    fake.last_usage = {
-        "usage": {"input_tokens": 2, "cache_creation_input_tokens": 40206,
-                  "cache_read_input_tokens": 0, "output_tokens": 4630},
-        "cost_usd": 0.341349, "duration_ms": 46977,
-    }
+    fake.last_usage = {"input_tokens": 2, "cache_creation_input_tokens": 40206,
+                       "cache_read_input_tokens": 0, "output_tokens": 4630}
 
     record = compile_book(db, source.id)
 
@@ -446,8 +444,7 @@ def test_token_count_counts_the_CACHED_input_too(db, monkeypatch):
 
 
 def test_token_count_reads_the_flat_shape_claude_py_reports(db, monkeypatch):
-    """`ClaudeProvider.last_usage` is flat; `ClaudeCLIProvider`'s nests under
-    `usage`. The canon must not care which provider the tutor picked."""
+    """All three input buckets summed, none double-counted."""
     source = _book(db, {12: _PROSE})
     fake = _use(monkeypatch, _FakeProvider({"concepts": [_concept()]}))
     fake.last_usage = {"input_tokens": 1_000, "cache_creation_input_tokens": 30_000,

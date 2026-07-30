@@ -9,9 +9,11 @@ class _FakeProvider:
     """guided_json is schema-constrained, so a fake returns a valid tree."""
     def __init__(self):
         self.messages = None
+        self.role = None
 
-    def guided_json(self, messages, schema, *, temperature=0.2):
+    def guided_json(self, messages, schema, *, temperature=0.2, role="spec", **kw):
         self.messages = messages
+        self.role = role
         return {
             "title": "Pick Thickness and Tone",
             "sessions": [
@@ -43,6 +45,9 @@ def test_drafts_a_lesson_with_sessions_and_items(db, monkeypatch):
     assert lesson.kind == "lesson"
     assert lesson.title == "Pick Thickness and Tone"
     assert lesson.plane == "content"
+    # The call must run under the `draft` role — without it, it lands on the
+    # `spec` role's 4,096-token budget and a long Greek lesson truncates.
+    assert fake.role == "draft"
 
     sessions = db.query(Block).filter_by(parent_id=lesson.id).order_by(Block.order).all()
     assert [s.kind for s in sessions] == ["session", "session"]

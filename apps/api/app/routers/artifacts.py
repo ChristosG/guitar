@@ -9,8 +9,6 @@ authorize against anybody else.
 """
 from uuid import UUID
 
-import httpx
-import openai
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -19,7 +17,7 @@ from app.artifacts.generate import TITLE_MAX_LEN, derive_title, generate_artifac
 from app.artifacts.specs import validate_spec
 from app.db import get_db
 from app.i18n import locale_dep
-from app.llm.errors import GuidedJSONError
+from app.llm.errors import GuidedJSONError, LLMError
 from app.models.artifact import Artifact
 from app.models.block import Block
 from app.schemas.artifacts import ArtifactCreate, ArtifactGenerateRequest, ArtifactOut
@@ -131,10 +129,12 @@ def generate_artifact_endpoint(
             status_code=502,
             detail="Artifact generation failed (model returned invalid/truncated output). Try again.",
         ) from e
-    except (openai.APIConnectionError, httpx.TransportError) as e:
+    except LLMError as e:
+        # `timeout`/`upstream`/`rate_limit` from the provider seam — the
+        # openai/httpx transport tuple this replaced died with the vLLM era.
         raise HTTPException(
-            status_code=504,
-            detail="Artifact generation timed out. Try again.",
+            status_code=504 if e.kind == "timeout" else 502,
+            detail="Artifact generation failed upstream. Try again.",
         ) from e
     except ValueError as e:
         raise HTTPException(

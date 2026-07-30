@@ -27,9 +27,10 @@ FAKE_KEY = "sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFF-7f2a"
 
 @pytest.fixture
 def claude(monkeypatch):
-    """Today's default provider is still `qwen` (the embedding column is
-    2560-dim until Stage 4's migration). Settings only means anything in the
-    Claude era, so every test here flips the provider explicitly."""
+    """The suite's conftest pins an ENV-FALLBACK key so the other ~40 modules run
+    "configured" without touching Settings. These tests are ABOUT the
+    unconfigured/DB-key states, so the env fallback is explicitly disarmed —
+    what remains configured here is only what each test itself saved."""
     monkeypatch.setattr(env, "llm_provider", "claude")
     monkeypatch.setattr(env, "llm_api_key", "none")   # no env-key fallback
     clear_provider_cache()
@@ -162,15 +163,6 @@ def test_model_switch_rebuilds_the_provider(client, claude):
 def test_get_provider_without_a_key_raises_not_configured(claude):
     with pytest.raises(LLMNotConfigured):
         get_provider()
-
-
-def test_qwen_needs_no_key(monkeypatch):
-    """The Qwen era is untouched by any of this: a local vLLM server has no key,
-    and ~40 existing tests depend on `get_provider()` never raising."""
-    monkeypatch.setattr(env, "llm_provider", "qwen")
-    clear_provider_cache()
-    assert settings_store.is_configured() is True
-    clear_provider_cache()
 
 
 # --- LLMNotConfigured is a 409, everywhere ---------------------------------

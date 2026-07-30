@@ -47,6 +47,19 @@ APP_DATABASE_URL = os.environ.get(
     "APP_DATABASE_URL", "postgresql+psycopg://guitar:guitar@localhost:5434/guitar"
 )
 
+# Module-level, because the expensive call happens in a MODULE-scoped fixture
+# (`drafted_lesson`) — which is instantiated before conftest's function-scoped
+# `_integration_needs_a_real_key` guard could skip anything, so without this
+# the module ERRORs in fixture setup instead of skipping. Same rule as that
+# guard: the conftest fallback key can only produce an auth failure, and a
+# real key means real spend the operator must opt into.
+if os.environ.get("LLM_API_KEY", "") in ("", "none", "sk-ant-test-suite-fallback-key"):
+    pytest.skip(
+        "live-model acceptance test — export a real LLM_API_KEY to run it "
+        "(this drafts a real lesson and spends real tokens)",
+        allow_module_level=True,
+    )
+
 BOOK_TITLE = "Getting Great Guitar Sounds"
 
 # Page.page_no=21 of the real app DB's copy of this book — the PRINTED header

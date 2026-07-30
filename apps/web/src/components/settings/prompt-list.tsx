@@ -43,7 +43,7 @@ import { cn } from "@/lib/utils";
  *    the real thing.
  *  - **Collapsed by default, twice.** 31 prompts is a wall. Flow groups shut,
  *    prompts inside them shut, and `GET /prompts/{id}` fires only when he opens
- *    one — `tools.system_claude_cli` alone is ~14,000 characters, and the list
+ *    one — the longest prompts run to thousands of characters, and the list
  *    route omits `text` precisely so this page can exist.
  *  - **An interpolated variable is a chip, not a hole.** He must see WHERE his
  *    student brief goes and what it looks like when it lands there. The chip's
@@ -73,9 +73,9 @@ import { cn } from "@/lib/utils";
  * footnote to be empty.
  *
  * So, now:
- *  - **30 of 32 prompts have a textarea holding their whole text.** The two that do
- *    not are GENERATED (`tools.*` — the tool list, serialised), and they say so. A
- *    textarea that silently does nothing is worse than no textarea.
+ *  - **All but one prompt have a textarea holding their whole text.** The one that
+ *    does not is GENERATED (`tools.descriptions` — the tool list, serialised), and
+ *    it says so. A textarea that silently does nothing is worse than no textarea.
  *  - **Restore asks first** (`ui/confirm.tsx`, the app's one dialog). When every
  *    prompt is editable, Restore is the only button that can destroy a paragraph he
  *    wrote and cannot retype.
@@ -84,7 +84,11 @@ import { cn } from "@/lib/utils";
  *  - **A course-language prompt says where its language comes from.** The preview used
  *    to claim Greek while the model was told English; see `LanguageOrigin`.
  */
-export function PromptList({ provider }: { provider: string | null }) {
+/** `provider` is accepted (the settings page still passes it) but no longer
+ * filters anything: with the Anthropic API the only provider, every registered
+ * prompt is one the app actually sends — the `claude_cli`-only entry that this
+ * component used to drop is gone from the registry itself. */
+export function PromptList(_props: { provider?: string | null }) {
   const t = useTranslations("prompts");
   const searchParams = useSearchParams();
   const [prompts, setPrompts] = useState<PromptSummary[] | null>(null);
@@ -110,33 +114,26 @@ export function PromptList({ provider }: { provider: string | null }) {
   }, [prompts, searchParams]);
 
   /** The C1 subset (`curriculum_group=True` — exactly ten of them), IN
-   * REGISTRATION ORDER, same provider-drop rule as the flow groups below: a
-   * prompt only the inactive provider sends must not appear here either. This is
-   * a SHORTCUT into the groups below, not a second copy of the mechanism — the
-   * same `PromptRow` renders it, against the same `/prompts/{id}` route. */
+   * REGISTRATION ORDER. This is a SHORTCUT into the groups below, not a second
+   * copy of the mechanism — the same `PromptRow` renders it, against the same
+   * `/prompts/{id}` route. */
   const curriculumItems = useMemo(
-    () => (prompts ?? []).filter((p) => p.curriculum_group && (!p.provider || p.provider === provider)),
-    [prompts, provider],
+    () => (prompts ?? []).filter((p) => p.curriculum_group),
+    [prompts],
   );
 
   /** Grouped in REGISTRATION ORDER (`registry.by_flow` — chat first, because it
    * is the thing he uses every day), never sorted alphabetically: the order the
-   * API sends is a decision, not an accident.
-   *
-   * A prompt only one provider sends is DROPPED when that provider is not the
-   * active one. The viewer must show what the app actually sends today; a card
-   * for `tools.system_claude_cli` while the app talks to the real API would be
-   * exactly the drift this whole feature exists to prevent. */
+   * API sends is a decision, not an accident. */
   const groups = useMemo(() => {
     const out: { flow: string; items: PromptSummary[] }[] = [];
     for (const p of prompts ?? []) {
-      if (p.provider && p.provider !== provider) continue;
       const group = out.find((g) => g.flow === p.flow);
       if (group) group.items.push(p);
       else out.push({ flow: p.flow, items: [p] });
     }
     return out;
-  }, [prompts, provider]);
+  }, [prompts]);
 
   const flowLabel = useCallback(
     (flow: string) => (t.has(`flows.${flow}`) ? t(`flows.${flow}`) : t("flows.other")),

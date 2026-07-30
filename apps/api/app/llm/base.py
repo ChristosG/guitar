@@ -34,7 +34,7 @@ class LLMProvider(ABC):
         `{"type": "content", "text": ...}` for each content delta as the
         model writes it, then exactly one terminal `{"type": "done",
         "content": str | None, "tool_calls": list[ToolCall]}` once the
-        response is complete — see `qwen.py`'s implementation for the exact
+        response is complete — see `claude.py`'s implementation for the exact
         contract `app.agent.loop.stream_plain_turn` (the only caller) relies
         on.
 

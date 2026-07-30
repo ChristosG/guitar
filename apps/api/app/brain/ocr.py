@@ -176,11 +176,11 @@ def _figure_markup_is_closed(text: str) -> bool:
 # correctly, because there is no *text* on that page to speak of. A page that
 # reads as blank is a page the curriculum cannot teach from.
 #
-# Point 3 is the answer to `claude -p`, which returns chatty markdown around a
-# transcription: it narrates that it zoomed in, it adds its own headers. The
-# bridge deliberately scrubs none of it (Task 4) — and it should not, because a
-# regex aimed at a model's prose eventually eats a line of a real page with it.
-# Instructing the shape is the only fix that cannot corrupt the content.
+# Point 3 exists because models narrate: left unshaped, a transcription arrives
+# wrapped in chatty markdown ("I zoomed in...", its own headers). Nothing
+# downstream scrubs it — deliberately, because a regex aimed at a model's prose
+# eventually eats a line of a real page with it. Instructing the shape is the
+# only fix that cannot corrupt the content.
 OCR_PROMPT = (
     "You are reading one page of a printed guitar instruction book, for a "
     "library the book's own words will be quoted from. Reply with the page's "
@@ -248,19 +248,18 @@ FIGURE_PROMPT = (
 
 _MAX_ATTEMPTS = 2       # initial + one retry
 
-# vision()'s max_tokens=4000 (app/llm/qwen.py) bounds output length, but
-# vision() does not surface finish_reason (see its docstring) — so a response
-# cut off mid-generation is, at this seam, indistinguishable from a complete
-# one that just happens to be long. Left unguarded, a truncated page would be
-# committed as `ready` and silently corrupt the citation store (a citation
-# that looks verbatim but stops mid-sentence is worse than one flagged
-# `failed`, since nothing downstream has a way to know to distrust it).
+# vision()'s max_tokens (the `ocr` role in app/llm/claude.py) bounds output
+# length, but vision() does not surface finish_reason (see its docstring) — so
+# a response cut off mid-generation is, at this seam, indistinguishable from a
+# complete one that just happens to be long. Left unguarded, a truncated page
+# would be committed as `ready` and silently corrupt the citation store (a
+# citation that looks verbatim but stops mid-sentence is worse than one
+# flagged `failed`, since nothing downstream has a way to know to distrust it).
 #
 # Heuristic: ~4 chars/token is a reasonable average for English prose, so a
 # genuinely complete transcription of a single printed page essentially never
-# reaches 4000 tokens' worth of characters (~1127 prompt tokens/page at
-# 110dpi per qwen.py's own measurement, and output text is rendered from the
-# same page, not generated de novo). 12,000 chars (~3000 tokens, 75% of the
+# reaches 4000 tokens' worth of characters (output text is rendered from the
+# page itself, not generated de novo). 12,000 chars (~3000 tokens, 75% of the
 # ceiling) is comfortably past any normal page while still catching a
 # response that ran into the wall. False positives cost one extra retry;
 # false negatives are the status quo this guard exists to reduce, not
@@ -579,12 +578,9 @@ TEXT_LAYER_SOURCE = "text_layer"
 # `Page.text_source`, by configured provider. Derived from the CONFIG rather than
 # sniffed off the provider object, because the column answers "whose words are
 # these" and the only thing that knows is the config that chose the model.
-#
-# `claude_cli` and `claude` both map to "claude": they are the same model bought
-# from two different wallets (a subscription via the CLI bridge vs. API tokens —
-# see `config.py`). The tutor is asking which MODEL read his book; "claude_cli"
-# would be answering a question about billing.
-_TEXT_SOURCE_BY_PROVIDER = {"claude": "claude", "claude_cli": "claude", "qwen": "qwen"}
+# (`claude` is the only provider today; historical rows may still carry "qwen",
+# and `_current_text_source` falls back to the raw name for anything unknown.)
+_TEXT_SOURCE_BY_PROVIDER = {"claude": "claude"}
 
 
 def _current_text_source() -> str:

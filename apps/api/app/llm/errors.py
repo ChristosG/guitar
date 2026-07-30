@@ -9,14 +9,15 @@ class LLMError(Exception):
     classification the caller actually branches on.
 
     Before Plan 13 the catch sites named the VENDOR: `except
-    (openai.APIConnectionError, httpx.TransportError)`, in five places, with
-    `import openai` at the top of `jobs/runner.py` and `routers/artifacts.py` —
-    i.e. two modules far above the LLM seam knew which SDK was underneath. That
-    is exactly the coupling `LLMProvider` exists to prevent, and it means adding
-    Claude would otherwise mean adding `anthropic.APIConnectionError` to five
-    tuples and hoping none was missed. A missed one is not a crash: it falls to
-    the generic `except Exception` and the job is recorded as `internal`, i.e.
-    "our bug", when it was really "your key expired".
+    (openai.APIConnectionError, httpx.TransportError)`, in five places — i.e.
+    modules far above the LLM seam knew which SDK was underneath. That is
+    exactly the coupling `LLMProvider` exists to prevent: adding Claude would
+    otherwise have meant adding `anthropic.APIConnectionError` to five tuples
+    and hoping none was missed. A missed one is not a crash: it falls to the
+    generic `except Exception` and the job is recorded as `internal`, i.e.
+    "our bug", when it was really "your key expired". `jobs/runner.py` now
+    catches only this taxonomy; the provider's `_mapped_errors` (llm/claude.py)
+    is the single place vendor exceptions are translated.
 
     `kind` is the whole point:
 
@@ -81,10 +82,10 @@ class GuidedJSONError(LLMError):
     distinct from an actual unhandled 500.
 
     Subclasses `LLMError` with `kind="upstream"` and keeps its single-argument
-    `(message)` signature, so the two existing `raise GuidedJSONError("...")`
-    sites in `qwen.py` — and every `except GuidedJSONError` in `jobs/runner.py`,
-    `routers/artifacts.py` and `routers/curriculum.py` — continue to mean
-    exactly what they meant before. The taxonomy is additive, not a rewrite.
+    `(message)` signature, so every `except GuidedJSONError` in
+    `jobs/runner.py`, `routers/artifacts.py` and `routers/curriculum.py`
+    continues to mean exactly what it meant before. The taxonomy is additive,
+    not a rewrite.
 
     TRUNCATION IS THE ONE TO WATCH under Claude. Greek costs ~2-3x the tokens of
     English per word, and Sonnet 5's tokenizer emits more of them than its

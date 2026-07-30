@@ -10,7 +10,6 @@ dependencies = [
   "psycopg[binary]>=3.2",
   "alembic>=1.13",
   "pgvector>=0.3",
-  "openai>=1.54",
   "anthropic>=0.69",
   "httpx>=0.27",
   "pymupdf>=1.24",

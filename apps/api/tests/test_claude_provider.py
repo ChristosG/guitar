@@ -54,6 +54,14 @@ class _SpyMessages:
 class _SpyClient:
     def __init__(self, resp):
         self.messages = _SpyMessages(resp)
+        # Every per-request override the provider applied (`with_options`).
+        # The real SDK returns a view of the same client; returning `self`
+        # mirrors that closely enough for the seam under test.
+        self.option_calls: list[dict] = []
+
+    def with_options(self, **kw):
+        self.option_calls.append(kw)
+        return self
 
 
 def _provider(model=SONNET, resp=None):
@@ -123,11 +131,18 @@ def test_the_chat_role_never_enables_thinking_even_on_sonnet():
 
 
 def test_max_tokens_is_clamped_to_what_the_model_can_actually_emit():
-    """`draft` asks for 32k. Haiku tops out at 8,192 — asking for more is a 400,
-    not a truncation."""
+    """The clamp is `min(role budget, model ceiling)`. Haiku 4.5's real output
+    cap is 64K (the stale 8,192 that used to sit in `_CAPABILITIES` silently
+    quartered `draft`'s budget and truncated every long Greek lesson on Haiku),
+    so `draft`'s 32k passes through intact on BOTH models — while a role asking
+    for more than 64k on Haiku would still be clamped, not 400."""
     p = _provider(model=HAIKU)
     p.chat([{"role": "user", "content": "hi"}], role="draft")
-    assert p._client.messages.calls[0]["max_tokens"] == 8_192
+    assert p._client.messages.calls[0]["max_tokens"] == 32_000
+
+    p = _provider(model=HAIKU)
+    p.chat([{"role": "user", "content": "hi"}], role="draft")
+    assert p._kwargs("draft", max_tokens=100_000)["max_tokens"] == 64_000
 
     p = _provider(model=SONNET)
     p.chat([{"role": "user", "content": "hi"}], role="draft")
@@ -232,3 +247,93 @@ def test_a_missing_key_is_an_auth_error_not_a_crash():
         _ = p.client
     assert exc.value.kind == "auth"
     assert "Settings" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# 5. Per-role request timeouts — every request goes out with ITS role's budget.
+# ---------------------------------------------------------------------------
+
+def test_each_role_gets_its_own_request_timeout():
+    """The client's 600s default is right for chat and lethally short for the
+    long structured calls: a whole-book compile or a 32K-token Greek lesson
+    legitimately runs past 10 minutes, and an SDK timeout there throws away
+    tokens that were already billed. The mapping is applied per request via
+    `with_options`, so `max_retries` stays as configured on the client."""
+    expected = {"compile": 1800.0, "draft": 1200.0, "plan": 1200.0,
+                "chat": 600.0, "spec": 600.0, "ocr": 600.0,
+                "default": 600.0, "a-role-nobody-defined": 600.0}
+    for role, timeout in expected.items():
+        p = _provider(model=SONNET)
+        p.chat([{"role": "user", "content": "hi"}], role=role)
+        assert p._client.option_calls == [{"timeout": timeout}], (
+            f"role {role!r} should carry timeout={timeout}"
+        )
+
+
+def test_guided_json_and_chat_tools_apply_the_role_timeout_too():
+    p = _provider(resp=_Resp([_Block(type="text", text='{"ok": true}')]))
+    p.guided_json([{"role": "user", "content": "x"}], {"type": "object"}, role="spec")
+    assert p._client.option_calls == [{"timeout": 600.0}]
+
+    p = _provider(resp=_Resp([_Block(type="text", text="ok")]))
+    p.chat_tools([{"role": "user", "content": "hi"}], [], role="chat")
+    assert p._client.option_calls == [{"timeout": 600.0}]
+
+
+def test_vision_uses_the_ocr_timeout():
+    p = _provider(resp=_Resp([_Block(type="text", text="page text")]))
+    p.vision(b"\xff\xd8jpeg", "Transcribe this page.")
+    assert p._client.option_calls == [{"timeout": 600.0}]
+
+
+# ---------------------------------------------------------------------------
+# 6. The silent 10x-invoice guard: a cache breakpoint that neither wrote nor
+#    read the cache must be SAID, because nothing else looks different.
+# ---------------------------------------------------------------------------
+
+class _Usage:
+    def __init__(self, **kw):
+        self.input_tokens = kw.get("input_tokens", 0)
+        self.output_tokens = kw.get("output_tokens", 0)
+        self.cache_creation_input_tokens = kw.get("cache_creation_input_tokens", 0)
+        self.cache_read_input_tokens = kw.get("cache_read_input_tokens", 0)
+
+
+def _guided(p, messages):
+    return p.guided_json(messages, {"type": "object"}, role="spec")
+
+
+def test_a_dead_cache_breakpoint_logs_a_warning(caplog):
+    resp = _Resp([_Block(type="text", text="{}")])
+    resp.usage = _Usage(input_tokens=90_000)   # both cache counters zero
+    p = _provider(resp=resp)
+    with caplog.at_level("WARNING", logger="app.llm.claude"):
+        _guided(p, [{"role": "user", "content": "the library", "cache": True},
+                    {"role": "user", "content": "the task"}])
+    assert any("cache" in r.message and "10x" in r.message for r in caplog.records), (
+        "a request that carried a cache breakpoint but neither wrote nor read "
+        "the cache is the silent 10x-invoice failure mode — it must be logged"
+    )
+
+
+def test_a_working_cache_stays_silent(caplog):
+    for usage in (_Usage(cache_creation_input_tokens=90_000),   # 1st call: writes
+                  _Usage(cache_read_input_tokens=90_000)):      # later calls: read
+        resp = _Resp([_Block(type="text", text="{}")])
+        resp.usage = usage
+        p = _provider(resp=resp)
+        with caplog.at_level("WARNING", logger="app.llm.claude"):
+            _guided(p, [{"role": "user", "content": "the library", "cache": True}])
+        assert not caplog.records
+        caplog.clear()
+
+
+def test_a_request_with_no_breakpoint_never_warns(caplog):
+    """Chat-sized calls carry no cache breakpoint; zero cache counters there are
+    normal, not a failure mode — the guard must not cry wolf."""
+    resp = _Resp([_Block(type="text", text="{}")])
+    resp.usage = _Usage(input_tokens=500)
+    p = _provider(resp=resp)
+    with caplog.at_level("WARNING", logger="app.llm.claude"):
+        _guided(p, [{"role": "user", "content": "a small question"}])
+    assert not caplog.records

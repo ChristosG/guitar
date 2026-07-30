@@ -19,9 +19,9 @@ Error classification mirrors `generate_curriculum_endpoint`'s exact mapping
 (same exception types, same user-facing copy) so a polled `GenerationJob.
 error`/`error_kind` reads the same as the synchronous endpoint's old 502/504
 detail would have:
-    `GuidedJSONError`                                  -> "upstream"
-    `(openai.APIConnectionError, httpx.TransportError)` -> "timeout"
-    anything else                                       -> "internal"
+    `GuidedJSONError`                    -> "upstream"
+    `LLMError` (auth/rate_limit/timeout) -> its own kind, via `_record_llm_failure`
+    anything else                        -> "internal"
 
 That last `except Exception` is deliberately broad — it's the job layer's
 swallow-and-record boundary (the same role `app.brain.ingest.ingest_source`
@@ -37,9 +37,6 @@ can't re-strand the job by making the recovery throw.
 """
 import logging
 import uuid
-
-import httpx
-import openai
 
 from app.brain.ingest import IngestPayload, ingest_source
 from app.brain.ocr import ocr_source
@@ -194,21 +191,6 @@ def run_curriculum_job(job_id: uuid.UUID) -> None:
                 "Curriculum generation failed (model returned invalid/truncated output). Try again."
             )
             db.commit()
-        except (openai.APIConnectionError, httpx.TransportError):
-            # Same rollback-before-recording reasoning as the GuidedJSONError
-            # branch just above — a transport error on module N's draft call
-            # can equally strand modules 1..N-1's already-flushed writes in
-            # this Session's pending transaction.
-            db.rollback()
-            job = db.get(GenerationJob, job_id)
-            if job is None:
-                log.warning(
-                    "run_curriculum_job: job_id=%s gone during failure recovery", job_id)
-                return
-            job.status = "failed"
-            job.error_kind = "timeout"
-            job.error = "Curriculum generation timed out. Try again."
-            db.commit()
         except LLMError as e:
             log.warning("run_curriculum_job: job_id=%s failed at the provider (%s)",
                         job_id, e.kind)
@@ -346,15 +328,6 @@ def run_outline_job(job_id: uuid.UUID) -> None:
                 "Outline generation failed (model returned invalid/truncated output). Try again."
             )
             db.commit()
-        except (openai.APIConnectionError, httpx.TransportError):
-            db.rollback()
-            job = db.get(GenerationJob, job_id)
-            if job is None:
-                return
-            job.status = "failed"
-            job.error_kind = "timeout"
-            job.error = "Outline generation timed out. Try again."
-            db.commit()
         except LLMError as e:
             log.warning("run_outline_job: job_id=%s failed at the provider (%s)",
                         job_id, e.kind)
@@ -456,11 +429,6 @@ def run_lesson_job(job_id: uuid.UUID) -> None:
             job.error = (
                 "Lesson drafting failed (model returned invalid/truncated output). Try again."
             )
-            db.commit()
-        except (openai.APIConnectionError, httpx.TransportError):
-            job.status = "failed"
-            job.error_kind = "timeout"
-            job.error = "Lesson drafting timed out. Try again."
             db.commit()
         except LLMError as e:
             log.warning("run_lesson_job: job_id=%s failed at the provider (%s)",
