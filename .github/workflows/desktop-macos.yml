@@ -132,8 +132,14 @@ jobs:
           mkdir -p "$STAGE"
           cp -R "$APP" "$STAGE/"
           cp desktop/INSTALL.txt "$STAGE/"
-          hdiutil create -volname GuitarTutor -srcfolder "$STAGE" -ov -format UDZO \
-            "GuitarTutor-macos-arm64.dmg"
+          # XProtect/Spotlight scan the freshly-signed .app and hdiutil then
+          # flakes with "Resource busy" — retry a few times before giving up.
+          for attempt in 1 2 3 4; do
+            if hdiutil create -volname GuitarTutor -srcfolder "$STAGE" -ov -format UDZO \
+              "GuitarTutor-macos-arm64.dmg"; then break; fi
+            echo "hdiutil attempt $attempt failed; retrying in 15s"; sleep 15
+            [ "$attempt" = 4 ] && exit 1
+          done
 
       - uses: actions/upload-artifact@v4
         with:
