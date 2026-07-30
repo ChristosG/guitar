@@ -6,7 +6,7 @@ together the ReAct loop (Task 2), the suspend-on-mutation HITL models
 (Task 3), and Plan 8's enqueue/poll pattern for the one async mutation
 (`generate_curriculum`).
 
-DB-touching (real Postgres, real `Student`/`GenerationJob`/chat-model rows)
+DB-touching (real Postgres, real `Block`/`GenerationJob`/chat-model rows)
 but NO live LLM anywhere — the provider is a scripted fake, monkeypatched
 into `app.agent.loop.get_provider` exactly like `test_agent_hitl.py`/
 `test_agent_loop.py` (duplicated here rather than cross-imported, per this
@@ -32,9 +32,9 @@ from app.agent.tools import TOOLS, ToolEntry
 from app.db import Base, SessionLocal, engine
 from app.llm.tools_types import AssistantTurn, ToolCall
 from app.main import app
+from app.models.block import Block
 from app.models.chat import ApprovalRequest, Message
 from app.models.generation_job import GenerationJob
-from app.models.student import Student
 
 # Skip cleanly (not error) when no DB is reachable — mirrors test_curriculum_generate_enqueue.py.
 try:
@@ -110,6 +110,20 @@ def _db_messages(session_id) -> list[Message]:
         db.close()
 
 
+def _seed_block(title="Old Title") -> str:
+    """A real Block row for the sync-mutation (`update_block`) approve tests —
+    the surviving cheap sync mutation now that the desktop build removed the
+    student/note tools this suite used to exercise the approve path with."""
+    db = SessionLocal()
+    try:
+        block = Block(kind="lesson", title=title, language="en")
+        db.add(block)
+        db.commit()
+        return str(block.id)
+    finally:
+        db.close()
+
+
 # ---------------------------------------------------------------------------
 # POST /chat — session creation
 # ---------------------------------------------------------------------------
@@ -173,22 +187,22 @@ def test_post_message_mutation_intent_returns_awaiting_approval_and_does_not_cal
         calls_made.append(kwargs)
         raise AssertionError("mutation fn must not be called before approval")
 
-    _stub_tool(monkeypatch, "create_student", _spy)
+    _stub_tool(monkeypatch, "update_block", _spy)
     _use_provider(monkeypatch, [
         AssistantTurn(
-            content="I'll add that student.",
-            tool_calls=[ToolCall(id="call_1", name="create_student", arguments={"name": "New Kid"})],
+            content="I'll rename that lesson.",
+            tool_calls=[ToolCall(id="call_1", name="update_block", arguments={"block_id": "b1", "title": "New Title"})],
         ),
     ])
     session_id = _create_session()
 
-    r = client.post(f"/chat/{session_id}/messages", json={"content": "add a student named New Kid"})
+    r = client.post(f"/chat/{session_id}/messages", json={"content": "rename that lesson to New Title"})
 
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["status"] == "awaiting_approval"
-    assert body["tool_name"] == "create_student"
-    assert body["tool_args"] == {"name": "New Kid"}
+    assert body["tool_name"] == "update_block"
+    assert body["tool_args"] == {"block_id": "b1", "title": "New Title"}
     assert body["approval_id"]
     assert body["description"]  # non-empty
     assert calls_made == []  # never invoked
@@ -196,8 +210,8 @@ def test_post_message_mutation_intent_returns_awaiting_approval_and_does_not_cal
     approval = _db_approval(body["approval_id"])
     assert approval is not None
     assert approval.status == "pending"
-    assert approval.tool_name == "create_student"
-    assert approval.tool_args == {"name": "New Kid"}
+    assert approval.tool_name == "update_block"
+    assert approval.tool_args == {"block_id": "b1", "title": "New Title"}
     assert approval.tool_call_id == "call_1"
 
     pending = client.get(f"/chat/{session_id}/pending")
@@ -254,12 +268,12 @@ def test_resolve_approval_belonging_to_a_different_session_404s(monkeypatch):
     """
     _use_provider(monkeypatch, [
         AssistantTurn(
-            content="I'll add that student.",
-            tool_calls=[ToolCall(id="call_1", name="create_student", arguments={"name": "New Kid"})],
+            content="I'll rename that lesson.",
+            tool_calls=[ToolCall(id="call_1", name="update_block", arguments={"block_id": "b1", "title": "New"})],
         ),
     ])
     owning_session_id = _create_session()
-    propose = client.post(f"/chat/{owning_session_id}/messages", json={"content": "add New Kid"})
+    propose = client.post(f"/chat/{owning_session_id}/messages", json={"content": "rename that lesson"})
     approval_id = propose.json()["approval_id"]
 
     other_session_id = _create_session()
@@ -275,20 +289,21 @@ def test_resolve_approval_belonging_to_a_different_session_404s(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# resolve approve — SYNC mutation (create_student, real fn)
+# resolve approve — SYNC mutation (update_block, real fn)
 # ---------------------------------------------------------------------------
 
 def test_resolve_approve_sync_mutation_runs_the_real_fn_and_resumes(monkeypatch):
+    block_id = _seed_block(title="Old Title")
     fake_provider = _use_provider(monkeypatch, [
         AssistantTurn(
-            content="I'll add that student.",
-            tool_calls=[ToolCall(id="call_1", name="create_student", arguments={"name": "New Kid"})],
+            content="I'll rename that lesson.",
+            tool_calls=[ToolCall(id="call_1", name="update_block", arguments={"block_id": block_id, "title": "Renamed Lesson"})],
         ),
-        AssistantTurn(content="Added New Kid to your roster.", tool_calls=[]),
+        AssistantTurn(content="Renamed it to Renamed Lesson.", tool_calls=[]),
     ])
     session_id = _create_session()
 
-    propose = client.post(f"/chat/{session_id}/messages", json={"content": "add New Kid"})
+    propose = client.post(f"/chat/{session_id}/messages", json={"content": "rename that lesson"})
     approval_id = propose.json()["approval_id"]
 
     r = client.post(
@@ -298,21 +313,19 @@ def test_resolve_approve_sync_mutation_runs_the_real_fn_and_resumes(monkeypatch)
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["status"] == "answer"
-    assert body["content"] == "Added New Kid to your roster."
+    assert body["content"] == "Renamed it to Renamed Lesson."
     assert len(fake_provider.calls) == 2  # the loop genuinely resumed
 
-    # The REAL fn ran: a Student row now exists.
+    # The REAL fn ran: the Block row is renamed.
     db = SessionLocal()
     try:
-        students = db.query(Student).filter(Student.name == "New Kid").all()
-        assert len(students) == 1
-        created_student_id = str(students[0].id)
+        assert db.get(Block, uuid.UUID(block_id)).title == "Renamed Lesson"
     finally:
         db.close()
 
     approval = _db_approval(approval_id)
     assert approval.status == "approved"
-    assert approval.result_ref == created_student_id
+    assert approval.result_ref == block_id
     assert approval.resolved_at is not None
 
     # A tool message answering the pending call_id is now in history.
@@ -320,39 +333,39 @@ def test_resolve_approve_sync_mutation_runs_the_real_fn_and_resumes(monkeypatch)
     tool_msgs = [m for m in rows if m.role == "tool"]
     assert len(tool_msgs) == 1
     assert tool_msgs[0].tool_call_id == "call_1"
-    assert created_student_id in tool_msgs[0].content
+    assert block_id in tool_msgs[0].content
 
     # No longer pending.
     assert client.get(f"/chat/{session_id}/pending").json() is None
 
 
 def test_resolve_approve_uses_edited_args_when_given(monkeypatch):
+    block_id = _seed_block(title="Old Title")
     _use_provider(monkeypatch, [
         AssistantTurn(
-            content="I'll add that student.",
-            tool_calls=[ToolCall(id="call_1", name="create_student", arguments={"name": "Wrong Name"})],
+            content="I'll rename that lesson.",
+            tool_calls=[ToolCall(id="call_1", name="update_block", arguments={"block_id": block_id, "title": "Wrong Name"})],
         ),
-        AssistantTurn(content="Added Right Name to your roster.", tool_calls=[]),
+        AssistantTurn(content="Renamed it to Right Name.", tool_calls=[]),
     ])
     session_id = _create_session()
-    propose = client.post(f"/chat/{session_id}/messages", json={"content": "add Wrong Name"})
+    propose = client.post(f"/chat/{session_id}/messages", json={"content": "rename to Wrong Name"})
     approval_id = propose.json()["approval_id"]
 
     r = client.post(
         f"/chat/{session_id}/approvals/{approval_id}/resolve",
-        json={"decision": "approve", "edited_args": {"name": "Right Name"}},
+        json={"decision": "approve", "edited_args": {"block_id": block_id, "title": "Right Name"}},
     )
 
     assert r.status_code == 200, r.text
     db = SessionLocal()
     try:
-        assert db.query(Student).filter(Student.name == "Right Name").count() == 1
-        assert db.query(Student).filter(Student.name == "Wrong Name").count() == 0
+        assert db.get(Block, uuid.UUID(block_id)).title == "Right Name"
     finally:
         db.close()
 
     approval = _db_approval(approval_id)
-    assert approval.edited_args == {"name": "Right Name"}
+    assert approval.edited_args == {"block_id": block_id, "title": "Right Name"}
 
 
 # ---------------------------------------------------------------------------
@@ -363,16 +376,16 @@ def test_resolve_approve_when_fn_raises_records_error_and_narrates_gracefully(mo
     def _boom(db, **kwargs):
         raise ValueError("boom: something went wrong")
 
-    _stub_tool(monkeypatch, "create_student", _boom)
+    _stub_tool(monkeypatch, "update_block", _boom)
     _use_provider(monkeypatch, [
         AssistantTurn(
-            content="I'll add that student.",
-            tool_calls=[ToolCall(id="call_1", name="create_student", arguments={"name": "New Kid"})],
+            content="I'll rename that lesson.",
+            tool_calls=[ToolCall(id="call_1", name="update_block", arguments={"block_id": "b1", "title": "New"})],
         ),
-        AssistantTurn(content="Sorry, I couldn't add that student.", tool_calls=[]),
+        AssistantTurn(content="Sorry, I couldn't rename that lesson.", tool_calls=[]),
     ])
     session_id = _create_session()
-    propose = client.post(f"/chat/{session_id}/messages", json={"content": "add New Kid"})
+    propose = client.post(f"/chat/{session_id}/messages", json={"content": "rename that lesson"})
     approval_id = propose.json()["approval_id"]
 
     r = client.post(
@@ -383,7 +396,7 @@ def test_resolve_approve_when_fn_raises_records_error_and_narrates_gracefully(mo
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["status"] == "answer"
-    assert body["content"] == "Sorry, I couldn't add that student."
+    assert body["content"] == "Sorry, I couldn't rename that lesson."
 
     approval = _db_approval(approval_id)
     assert approval.status == "error"
@@ -407,16 +420,16 @@ def test_resolve_reject_marks_rejected_and_resumes(monkeypatch):
         calls_made.append(kwargs)
         raise AssertionError("rejected mutation fn must never be called")
 
-    _stub_tool(monkeypatch, "create_student", _spy)
+    _stub_tool(monkeypatch, "update_block", _spy)
     fake_provider = _use_provider(monkeypatch, [
         AssistantTurn(
-            content="I'll add that student.",
-            tool_calls=[ToolCall(id="call_1", name="create_student", arguments={"name": "New Kid"})],
+            content="I'll rename that lesson.",
+            tool_calls=[ToolCall(id="call_1", name="update_block", arguments={"block_id": "b1", "title": "New"})],
         ),
-        AssistantTurn(content="No problem, I won't add them.", tool_calls=[]),
+        AssistantTurn(content="No problem, I won't rename it.", tool_calls=[]),
     ])
     session_id = _create_session()
-    propose = client.post(f"/chat/{session_id}/messages", json={"content": "add New Kid"})
+    propose = client.post(f"/chat/{session_id}/messages", json={"content": "rename that lesson"})
     approval_id = propose.json()["approval_id"]
 
     r = client.post(
@@ -426,7 +439,7 @@ def test_resolve_reject_marks_rejected_and_resumes(monkeypatch):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["status"] == "answer"
-    assert body["content"] == "No problem, I won't add them."
+    assert body["content"] == "No problem, I won't rename it."
     assert calls_made == []
     assert len(fake_provider.calls) == 2  # resumed
 
@@ -448,13 +461,13 @@ def test_resolve_reject_marks_rejected_and_resumes(monkeypatch):
 def test_resolve_already_resolved_approval_409s(monkeypatch):
     _use_provider(monkeypatch, [
         AssistantTurn(
-            content="I'll add that student.",
-            tool_calls=[ToolCall(id="call_1", name="create_student", arguments={"name": "New Kid"})],
+            content="I'll rename that lesson.",
+            tool_calls=[ToolCall(id="call_1", name="update_block", arguments={"block_id": "b1", "title": "New"})],
         ),
         AssistantTurn(content="No problem.", tool_calls=[]),
     ])
     session_id = _create_session()
-    propose = client.post(f"/chat/{session_id}/messages", json={"content": "add New Kid"})
+    propose = client.post(f"/chat/{session_id}/messages", json={"content": "rename that lesson"})
     approval_id = propose.json()["approval_id"]
 
     first = client.post(
@@ -642,17 +655,17 @@ def test_post_message_while_an_approval_is_pending_409s_then_ok_after_resolve(mo
     def _spy(db, **kwargs):
         raise AssertionError("mutation fn must not be called")
 
-    _stub_tool(monkeypatch, "create_student", _spy)
+    _stub_tool(monkeypatch, "update_block", _spy)
     _use_provider(monkeypatch, [
         AssistantTurn(
-            content="I'll add that student.",
-            tool_calls=[ToolCall(id="call_1", name="create_student", arguments={"name": "New Kid"})],
+            content="I'll rename that lesson.",
+            tool_calls=[ToolCall(id="call_1", name="update_block", arguments={"block_id": "b1", "title": "New"})],
         ),
-        AssistantTurn(content="Okay, I won't add them.", tool_calls=[]),
+        AssistantTurn(content="Okay, I won't rename it.", tool_calls=[]),
     ])
     session_id = _create_session()
 
-    first = client.post(f"/chat/{session_id}/messages", json={"content": "add New Kid"})
+    first = client.post(f"/chat/{session_id}/messages", json={"content": "rename that lesson"})
     assert first.json()["status"] == "awaiting_approval"
     approval_id = first.json()["approval_id"]
 
@@ -689,21 +702,21 @@ def test_resolve_approve_when_fn_returns_error_dict_records_error_status(monkeyp
     so the model narrates it.
     """
     def _returns_error(db, **kwargs):
-        return {"error": "student not found"}
+        return {"error": "block not found"}
 
-    _stub_tool(monkeypatch, "update_student", _returns_error)
+    _stub_tool(monkeypatch, "update_block", _returns_error)
     _use_provider(monkeypatch, [
         AssistantTurn(
-            content="I'll update that student.",
+            content="I'll update that lesson.",
             tool_calls=[ToolCall(
-                id="call_1", name="update_student",
-                arguments={"student_id": "00000000-0000-0000-0000-000000000000", "level": "advanced"},
+                id="call_1", name="update_block",
+                arguments={"block_id": "00000000-0000-0000-0000-000000000000", "title": "New"},
             )],
         ),
-        AssistantTurn(content="I couldn't find that student.", tool_calls=[]),
+        AssistantTurn(content="I couldn't find that lesson.", tool_calls=[]),
     ])
     session_id = _create_session()
-    propose = client.post(f"/chat/{session_id}/messages", json={"content": "update that student"})
+    propose = client.post(f"/chat/{session_id}/messages", json={"content": "update that lesson"})
     approval_id = propose.json()["approval_id"]
 
     r = client.post(
@@ -721,7 +734,7 @@ def test_resolve_approve_when_fn_returns_error_dict_records_error_status(monkeyp
     tool_msgs = [m for m in rows if m.role == "tool"]
     assert len(tool_msgs) == 1
     assert tool_msgs[0].tool_call_id == "call_1"
-    assert "student not found" in tool_msgs[0].content  # model sees + narrates it
+    assert "block not found" in tool_msgs[0].content  # model sees + narrates it
 
 
 # ---------------------------------------------------------------------------
@@ -737,20 +750,20 @@ def test_resolve_approve_when_fn_flushes_then_raises_rolls_back_partial_writes(m
     must still land afterward (proving the post-rollback re-fetch works).
     """
     def _flush_then_raise(db, **kwargs):
-        db.add(Student(name="Partial Ghost"))
+        db.add(Block(kind="lesson", title="Partial Ghost", language="en"))
         db.flush()  # partial, uncommitted write now in the session
         raise ValueError("boom after flush")
 
-    _stub_tool(monkeypatch, "create_student", _flush_then_raise)
+    _stub_tool(monkeypatch, "update_block", _flush_then_raise)
     _use_provider(monkeypatch, [
         AssistantTurn(
-            content="I'll add that student.",
-            tool_calls=[ToolCall(id="call_1", name="create_student", arguments={"name": "Partial Ghost"})],
+            content="I'll update that lesson.",
+            tool_calls=[ToolCall(id="call_1", name="update_block", arguments={"block_id": "b1", "title": "Partial Ghost"})],
         ),
         AssistantTurn(content="Sorry, that failed.", tool_calls=[]),
     ])
     session_id = _create_session()
-    propose = client.post(f"/chat/{session_id}/messages", json={"content": "add Partial Ghost"})
+    propose = client.post(f"/chat/{session_id}/messages", json={"content": "update that lesson"})
     approval_id = propose.json()["approval_id"]
 
     r = client.post(
@@ -760,10 +773,10 @@ def test_resolve_approve_when_fn_flushes_then_raises_rolls_back_partial_writes(m
     assert r.status_code == 200, r.text
     assert r.json()["status"] == "answer"
 
-    # The flushed-but-uncommitted Student was rolled back — not leaked.
+    # The flushed-but-uncommitted Block was rolled back — not leaked.
     db = SessionLocal()
     try:
-        assert db.query(Student).filter(Student.name == "Partial Ghost").count() == 0
+        assert db.query(Block).filter(Block.title == "Partial Ghost").count() == 0
     finally:
         db.close()
 
@@ -784,10 +797,11 @@ def test_resume_after_approve_can_propose_a_second_mutation_creating_a_new_pendi
     FRESH `ApprovalRequest`, so the second mutation is trackable/resolvable
     via `GET .../pending` rather than left as an orphan unanswered tool_call.
     """
+    block_id = _seed_block(title="Chained Lesson")
     _use_provider(monkeypatch, [
         AssistantTurn(
-            content="I'll add that student.",
-            tool_calls=[ToolCall(id="call_1", name="create_student", arguments={"name": "Chained Kid"})],
+            content="I'll rename that lesson.",
+            tool_calls=[ToolCall(id="call_1", name="update_block", arguments={"block_id": block_id, "title": "Chained Kid"})],
         ),
         AssistantTurn(
             content="Now I'll segment that block.",
@@ -798,7 +812,7 @@ def test_resume_after_approve_can_propose_a_second_mutation_creating_a_new_pendi
         ),
     ])
     session_id = _create_session()
-    propose = client.post(f"/chat/{session_id}/messages", json={"content": "add Chained Kid then segment"})
+    propose = client.post(f"/chat/{session_id}/messages", json={"content": "rename that lesson then segment"})
     first_approval_id = propose.json()["approval_id"]
 
     r = client.post(
@@ -812,11 +826,11 @@ def test_resume_after_approve_can_propose_a_second_mutation_creating_a_new_pendi
     second_approval_id = body["approval_id"]
     assert second_approval_id != first_approval_id
 
-    # First approved (its real fn ran — a Student now exists); second pending.
+    # First approved (its real fn ran — the Block is renamed); second pending.
     assert _db_approval(first_approval_id).status == "approved"
     db = SessionLocal()
     try:
-        assert db.query(Student).filter(Student.name == "Chained Kid").count() == 1
+        assert db.get(Block, uuid.UUID(block_id)).title == "Chained Kid"
     finally:
         db.close()
 

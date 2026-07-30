@@ -32,6 +32,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.agent.guards import CURRICULUM_CONTEXT_SENTINEL, PLANNING_CONTEXT_SENTINEL
+from app.agent.handoff import FIRST_TURN_HANDOFF
 from app.agent.loop import AgentResult, run_agent_turn, stream_plain_turn
 from app.agent.tools import TOOLS, with_locale
 from app.agent.transcript import messages_to_wire, persist_new_messages, window_wire
@@ -698,6 +699,13 @@ def post_message(session_id: UUID, payload: ChatMessageIn, db: Session = Depends
     # Checked BEFORE persisting the user message, so a refused message never
     # lands in history at all.
     if _open_pending_approval(db, session_id) is not None:
+        # A refused turn also invalidates any stashed streamed first response
+        # for this session (CORE_DECISIONS.md §3 handoff): the designed
+        # protocol is stream-fallback → IMMEDIATE resend, so an approval
+        # appearing in between means the transcript moved and whatever was
+        # stashed is contextually stale — it must not survive to replay
+        # against a transcript it was never computed for.
+        FIRST_TURN_HANDOFF.discard(session_id)
         raise HTTPException(
             status_code=409,
             detail="an approval is pending — resolve it before sending a new message",
@@ -710,8 +718,23 @@ def post_message(session_id: UUID, payload: ChatMessageIn, db: Session = Depends
     wire = window_wire(messages_to_wire(_ordered_messages(db, session_id)))
     wire = _inject_curriculum_context(db, session, wire)
     wire = _inject_interview_context(db, session, wire)
+    # CORE_DECISIONS.md §3 (the tool-turn double-billing fix): if this very
+    # turn already ran its first model call on the STREAMING endpoint and fell
+    # back here, claim that response and let the loop consume it instead of
+    # re-billing the identical call. `claim` is atomic and single-use, and
+    # returns None unless this session's stash is unexpired AND was produced
+    # by exactly this `content` — every miss simply pays for a fresh call,
+    # which is yesterday's (correct) behavior. One documented edge stays: if
+    # a LATER hop of this turn dies (e.g. a 429 below), the claimed first
+    # response is already consumed, so the tutor's retry pays for a fresh
+    # first call — acceptable, because re-stashing on failure would risk
+    # replaying against a transcript the failed attempt half-advanced.
+    precomputed = FIRST_TURN_HANDOFF.claim(session_id, payload.content)
     try:
-        result = run_agent_turn(db, wire, locale=session.locale, raw_user_text=payload.content)
+        result = run_agent_turn(
+            db, wire, locale=session.locale, raw_user_text=payload.content,
+            precomputed_first=precomputed,
+        )
     except LLMError as e:
         # A provider failure mid-turn used to escape as a raw 500 — "Internal
         # Server Error" in a non-technical user's browser for a 429 he only
@@ -779,6 +802,16 @@ def post_message_stream(session_id: UUID, payload: ChatMessageIn, db: Session = 
                 if event["event"] == "delta":
                     yield f"event: delta\ndata: {json.dumps({'text': event['text']})}\n\n"
                 elif event["event"] == "fallback":
+                    # CORE_DECISIONS.md §3: a "tool_call"/"tablature" fallback
+                    # carries the complete, ALREADY-BILLED first response
+                    # (`event["turn"]`, server-internal — see
+                    # `stream_plain_turn`'s docstring). Stash it so the REST
+                    # resend the client is about to make can consume it
+                    # instead of re-billing the identical model call. The SSE
+                    # payload the browser sees is unchanged: `{"reason"}`
+                    # only, exactly as before.
+                    if event.get("turn") is not None:
+                        FIRST_TURN_HANDOFF.stash(session_id, payload.content, event["turn"])
                     yield f"event: fallback\ndata: {json.dumps({'reason': event['reason']})}\n\n"
                     return
                 elif event["event"] == "done":
@@ -794,6 +827,11 @@ def post_message_stream(session_id: UUID, payload: ChatMessageIn, db: Session = 
                         [user_wire, event["messages"][-1]],
                         citations=event["citations"] or None,
                     )
+                    # A completed streamed turn moves the transcript on — any
+                    # stashed first response from an EARLIER fallback the
+                    # client never resent is stale now; drop it rather than
+                    # let it linger until TTL (§3 handoff hygiene).
+                    FIRST_TURN_HANDOFF.discard(session_id)
                     yield f"event: done\ndata: {json.dumps({'citations': event['citations']})}\n\n"
                     return
         except Exception:

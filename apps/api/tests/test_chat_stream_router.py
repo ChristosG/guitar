@@ -244,13 +244,13 @@ def test_stream_falls_back_and_persists_nothing_when_a_tool_call_is_proposed(mon
         {
             "type": "done",
             "content": "Sure, ",
-            "tool_calls": [ToolCall(id="call_1", name="create_student", arguments={"name": "Maria"})],
+            "tool_calls": [ToolCall(id="call_1", name="update_block", arguments={"block_id": "b1", "title": "Maria"})],
         },
     ])
     monkeypatch.setattr(agent_loop, "search", lambda db_, q, k=5: [])
     session_id = _create_session()
 
-    r = client.post(f"/chat/{session_id}/messages/stream", json={"content": "add a student named Maria"})
+    r = client.post(f"/chat/{session_id}/messages/stream", json={"content": "rename that lesson to Maria"})
 
     assert r.status_code == 200, r.text
     events = _parse_sse(r.text)
@@ -309,9 +309,9 @@ def test_stream_unknown_session_404s():
 def test_stream_409s_while_an_approval_is_pending(monkeypatch):
     from app.agent.tools import TOOLS, ToolEntry
 
-    original = TOOLS["create_student"]
+    original = TOOLS["update_block"]
     monkeypatch.setitem(
-        TOOLS, "create_student",
+        TOOLS, "update_block",
         ToolEntry(schema=original.schema, fn=lambda db, **kw: {"id": str(uuid.uuid4())},
                   kind=original.kind, async_job=original.async_job),
     )
@@ -320,15 +320,15 @@ def test_stream_409s_while_an_approval_is_pending(monkeypatch):
         def chat_tools(self, messages, tools, *, tool_choice="auto", temperature=0.3):
             from app.llm.tools_types import AssistantTurn
             return AssistantTurn(
-                content="I'll add that student.",
-                tool_calls=[ToolCall(id="call_1", name="create_student", arguments={"name": "Maria"})],
+                content="I'll rename that lesson.",
+                tool_calls=[ToolCall(id="call_1", name="update_block", arguments={"block_id": "b1", "title": "Maria"})],
             )
 
     monkeypatch.setattr(agent_loop, "get_provider", lambda: _MutationProvider())
     monkeypatch.setattr(agent_loop, "search", lambda db_, q, k=5: [])
     session_id = _create_session()
 
-    r = client.post(f"/chat/{session_id}/messages", json={"content": "add a student named Maria"})
+    r = client.post(f"/chat/{session_id}/messages", json={"content": "rename that lesson to Maria"})
     assert r.status_code == 200, r.text
     assert r.json()["status"] == "awaiting_approval"
 

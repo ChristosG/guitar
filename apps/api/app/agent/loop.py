@@ -115,7 +115,7 @@ from app.brain.retrieve import search
 from app.i18n import DEFAULT_LOCALE, answer_in, language_directive
 from app.llm.errors import ToolArgsError
 from app.llm.factory import get_provider
-from app.llm.tools_types import ToolCall
+from app.llm.tools_types import AssistantTurn, ToolCall
 from app.prompts.overrides import resolve
 from app.text.normalize import fold, has_greek
 
@@ -599,6 +599,7 @@ def _first_mutation_index(tool_calls: list[ToolCall]) -> int | None:
 def run_agent_turn(
     db, messages: list[dict], *, locale: str = DEFAULT_LOCALE, max_steps: int = 6,
     raw_user_text: str | None = None,
+    precomputed_first: AssistantTurn | None = None,
 ) -> AgentResult:
     """`locale` is the SESSION's language (`ChatSession.locale`, set from the
     browser's `X-App-Locale` at session creation) — `app/routers/chat.py`
@@ -608,6 +609,18 @@ def run_agent_turn(
     so the wire transcript, the approval card the tutor sees, and the params of
     the job that eventually runs all carry the same locale. Defaults to `el`
     (the app's default), never `en`.
+
+    `precomputed_first` (CORE_DECISIONS.md §3 — the tool-turn double-billing
+    fix) is an `AssistantTurn` the STREAMING endpoint already paid a full
+    model call for before falling back to REST (see `app.agent.handoff`).
+    When given, the loop's FIRST iteration consumes it in place of calling
+    `provider.chat_tools` — everything downstream of that call (locale
+    injection, read dispatch, the HITL mutation suspend, the C3 tablature
+    re-prompt, and every SUBSEQUENT provider call) runs exactly as if the
+    model had just returned it, so the turn's semantics are identical to a
+    fresh run minus the duplicate first bill. Single-use by construction
+    (cleared the moment it is consumed); None — the default and every
+    pre-existing call site — changes nothing.
     """
     messages = _ensure_system_prompt(list(messages), locale, db)
     tools = _tool_schemas()
@@ -692,25 +705,35 @@ def run_agent_turn(
         )
 
     for _ in range(max_steps):
-        try:
-            turn = provider.chat_tools(messages, tools, tool_choice="auto")
-        except ToolArgsError:
-            repair_attempts += 1
-            if repair_attempts >= _MAX_REPAIR_ATTEMPTS:
-                log.warning("chat_tools: giving up after %d consecutive ToolArgsErrors", repair_attempts)
-                # Append the giveup reply to history too, not just return it as
-                # `content`: `AgentResult.messages` is documented as the full
-                # transcript, and Task 4's router persists `messages` while
-                # showing `content` to the user — without this append the
-                # "couldn't complete" reply silently drops out of history and
-                # the model has no memory of it next turn.
-                messages.append({"role": "assistant", "content": _GIVEUP_MESSAGE})
-                return AgentResult(status="answer", content=_GIVEUP_MESSAGE, messages=messages, citations=citations)
-            # The broken turn is NOT added to history (no assistant message,
-            # no dangling tool_call) — just a corrective user turn, so the
-            # model gets a clean shot at a valid call next time.
-            messages.append({"role": "user", "content": _REPAIR_MESSAGE})
-            continue
+        if precomputed_first is not None:
+            # CORE_DECISIONS.md §3: the streaming endpoint ALREADY BILLED this
+            # turn's first model call before falling back to REST — consume
+            # that response instead of paying for the identical call again.
+            # Already parsed (it came out of a successful `chat_tools_stream`),
+            # so the ToolArgsError repair below can't apply to it. Cleared
+            # immediately: only ever the FIRST call's stand-in, never a later
+            # hop's.
+            turn, precomputed_first = precomputed_first, None
+        else:
+            try:
+                turn = provider.chat_tools(messages, tools, tool_choice="auto")
+            except ToolArgsError:
+                repair_attempts += 1
+                if repair_attempts >= _MAX_REPAIR_ATTEMPTS:
+                    log.warning("chat_tools: giving up after %d consecutive ToolArgsErrors", repair_attempts)
+                    # Append the giveup reply to history too, not just return it as
+                    # `content`: `AgentResult.messages` is documented as the full
+                    # transcript, and Task 4's router persists `messages` while
+                    # showing `content` to the user — without this append the
+                    # "couldn't complete" reply silently drops out of history and
+                    # the model has no memory of it next turn.
+                    messages.append({"role": "assistant", "content": _GIVEUP_MESSAGE})
+                    return AgentResult(status="answer", content=_GIVEUP_MESSAGE, messages=messages, citations=citations)
+                # The broken turn is NOT added to history (no assistant message,
+                # no dangling tool_call) — just a corrective user turn, so the
+                # model gets a clean shot at a valid call next time.
+                messages.append({"role": "user", "content": _REPAIR_MESSAGE})
+                continue
 
         repair_attempts = 0  # a successful call resets the CONSECUTIVE-failure streak
         last_content = turn.content
@@ -874,7 +897,15 @@ def stream_plain_turn(
         - `{"event": "fallback", "reason": "tool_call" | "tablature" |
            "error"}` — see this module's own comment block above for what
           each reason means and what the caller must do (never persist;
-          resend via the REST turn endpoint instead).
+          resend via the REST turn endpoint instead). The "tool_call" and
+          "tablature" fallbacks ALSO carry `"turn"`: the complete, already-
+          billed `AssistantTurn` this stream call produced (CORE_DECISIONS.md
+          §3) — the router stashes it (`app.agent.handoff`) so the REST
+          resend can consume it via `run_agent_turn(precomputed_first=...)`
+          instead of re-billing the identical first call. The "error"
+          fallback carries no turn (the stream died before a complete
+          response existed). `"turn"` is server-internal: the SSE event the
+          router emits to the browser still carries only `{"reason"}`.
 
     `locale`: same session language `run_agent_turn` takes, same system-prompt
     and GROUNDING-tail treatment — a streamed answer must not be in a different
@@ -953,8 +984,14 @@ def stream_plain_turn(
         # A tool/mutation call was proposed — including possibly a genuine
         # mutation that would need the HITL gate. NEVER dispatched here (see
         # this module's comment block above for why); the REST endpoint's
-        # full `run_agent_turn` is what may act on it.
-        yield {"event": "fallback", "reason": "tool_call"}
+        # full `run_agent_turn` is what may act on it. The response itself
+        # was already BILLED though, so it rides the fallback event for the
+        # router to stash (CORE_DECISIONS.md §3) — discarding it here is what
+        # used to make every tool-calling turn cost double.
+        yield {
+            "event": "fallback", "reason": "tool_call",
+            "turn": AssistantTurn(content=final_content, tool_calls=tool_calls),
+        }
         return
 
     if final_content and looks_like_tablature(final_content):
@@ -964,8 +1001,16 @@ def stream_plain_turn(
         # itself makes another model call, which would need to stream too,
         # compounding exactly the complexity this function exists to avoid);
         # it simply refuses to emit the bluff and defers to the REST path,
-        # which already re-prompts correctly.
-        yield {"event": "fallback", "reason": "tablature"}
+        # which already re-prompts correctly. Carrying the billed turn along
+        # (same §3 handoff as the tool_call branch) does not weaken that
+        # guard: `run_agent_turn`'s own C3 branch treats the precomputed
+        # bluff exactly as a fresh model response — never appended, never
+        # shown — and its bounded re-prompt becomes the turn's SECOND call
+        # instead of its third.
+        yield {
+            "event": "fallback", "reason": "tablature",
+            "turn": AssistantTurn(content=final_content, tool_calls=[]),
+        }
         return
 
     messages.append(_wire_assistant_message(final_content, []))

@@ -150,36 +150,36 @@ def test_run_agent_turn_dispatches_all_calls_in_a_parallel_tool_turn(monkeypatch
     """
     calls_seen = []
 
-    def _fake_list_students(db, **kwargs):
-        calls_seen.append("list_students")
-        return [{"id": "s1", "name": "Alex"}]
+    def _fake_list_artifacts(db, **kwargs):
+        calls_seen.append("list_artifacts")
+        return [{"id": "a1", "title": "G major"}]
 
     def _fake_list_curricula(db, **kwargs):
         calls_seen.append("list_curricula")
         return [{"id": "c1", "title": "Rhythm"}]
 
-    _stub_tool(monkeypatch, "list_students", _fake_list_students)
+    _stub_tool(monkeypatch, "list_artifacts", _fake_list_artifacts)
     _stub_tool(monkeypatch, "list_curricula", _fake_list_curricula)
 
     parallel = AssistantTurn(content=None, tool_calls=[
-        ToolCall(id="call_a", name="list_students", arguments={}),
+        ToolCall(id="call_a", name="list_artifacts", arguments={}),
         ToolCall(id="call_b", name="list_curricula", arguments={}),
     ])
     turn2 = AssistantTurn(content="Here they are.", tool_calls=[])
     fake_provider = _FakeProvider([parallel, turn2])
     monkeypatch.setattr(agent_loop, "get_provider", lambda: fake_provider)
 
-    result = run_agent_turn(None, [{"role": "user", "content": "list students and curricula"}])
+    result = run_agent_turn(None, [{"role": "user", "content": "list artifacts and curricula"}])
 
     assert result.content == "Here they are."
-    assert calls_seen == ["list_students", "list_curricula"]  # both dispatched, in order
+    assert calls_seen == ["list_artifacts", "list_curricula"]  # both dispatched, in order
 
     # The reconstructed assistant message carries BOTH calls in wire shape.
     assistant_tool_msgs = [m for m in result.messages if m["role"] == "assistant" and m.get("tool_calls")]
     assert len(assistant_tool_msgs) == 1
     assert [tc["id"] for tc in assistant_tool_msgs[0]["tool_calls"]] == ["call_a", "call_b"]
     assert [tc["function"]["name"] for tc in assistant_tool_msgs[0]["tool_calls"]] == [
-        "list_students", "list_curricula",
+        "list_artifacts", "list_curricula",
     ]
 
     # BOTH get a paired tool result with matching ids.

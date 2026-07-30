@@ -197,7 +197,6 @@ from app.lessons.draft import (
     SELECTION_USER_SLICE_ID,
 )
 from app.lessons.draft import _build_messages as _selection_messages
-from app.llm.claude_cli import _tool_system_prompt
 from app.models.chat import ChatSession, Message
 from app.models.note import Note
 from app.models.student import Student
@@ -1290,14 +1289,6 @@ def _build_tools_descriptions(locale: str, db, course_language=None) -> _Built:
     return [RenderedMessage(role="system", content=schemas)], []
 
 
-def _build_tools_system_claude_cli(locale: str, db, course_language=None) -> _Built:
-    # `tool_choice="auto"` is what BOTH live call sites pass (`loop.py:671`,
-    # `loop.py:905`); the "required"/"none" branches have no caller today.
-    return [RenderedMessage(
-        role="system", content=_tool_system_prompt(_tool_schemas(), "auto"),
-    )], []
-
-
 # ---------------------------------------------------------------------------
 # The registry
 # ---------------------------------------------------------------------------
@@ -1323,7 +1314,7 @@ _ENTRIES = [
         when_it_runs_el="Σε κάθε μήνυμα που γράφεις στη συνομιλία.",
         source_of_truth=lambda: SYSTEM_PROMPT,
         build=_build_chat_system,
-        call_sites=("agent/loop.py:696", "agent/loop.py:935"),
+        call_sites=("agent/loop.py:719", "agent/loop.py:966"),
         slices=(
             Slice(
                 id=SYSTEM_SLICE_ID,
@@ -1413,7 +1404,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: SUGGESTIONS_SYSTEM,
         build=_build_chat_suggestions,
-        call_sites=("routers/chat.py:1050",),
+        call_sites=("routers/chat.py:1088",),
         slices=(
             Slice(
                 id=SUGGESTIONS_SLICE_ID,
@@ -1443,33 +1434,8 @@ _ENTRIES = [
         when_it_runs_el="Σε κάθε μήνυμα που γράφεις στη συνομιλία.",
         source_of_truth=lambda: TOOLS,
         build=_build_tools_descriptions,
-        call_sites=("agent/loop.py:696", "agent/loop.py:935"),
+        call_sites=("agent/loop.py:719", "agent/loop.py:966"),
     ),
-    PromptEntry(
-        id="tools.system_claude_cli",
-        flow="tools",
-        kind="prompt",
-        source_ref="app/llm/claude_cli.py:583",
-        title_el="Τα εργαλεία, γραμμένα σαν οδηγίες (τρέχουσα σύνδεση)",
-        what_it_does_el=(
-            "Με τη σύνδεση που χρησιμοποιείς αυτή τη στιγμή, τα εργαλεία δεν "
-            "μπορούν να σταλούν σαν κανονική λίστα — γράφονται σε απλό κείμενο "
-            "και στέλνονται σαν οδηγία. Αυτό είναι το πιο μεγάλο κείμενο που "
-            "φεύγει σε κάθε μήνυμα (περίπου 14.000 χαρακτήρες) και δεν το "
-            "γράψαμε εμείς πρόταση-πρόταση: παράγεται αυτόματα από τον κατάλογο "
-            "των εργαλείων. Αν κάποτε βάλεις κανονικό κλειδί, αυτό εξαφανίζεται "
-            "εντελώς."
-        ),
-        when_it_runs_el=(
-            "Σε κάθε μήνυμα στη συνομιλία, όσο η εφαρμογή μιλάει στο μοντέλο "
-            "μέσω της τοπικής γέφυρας (η τρέχουσα ρύθμιση)."
-        ),
-        source_of_truth=lambda: _tool_system_prompt,
-        build=_build_tools_system_claude_cli,
-        call_sites=("agent/loop.py:696", "agent/loop.py:935"),
-        provider="claude_cli",
-    ),
-
     # ---- curriculum ----
     PromptEntry(
         id="curriculum.system",
@@ -2296,7 +2262,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: build_compile_messages,
         build=_build_canon_compile,
-        call_sites=("canon/compile.py:881",),
+        call_sites=("canon/compile.py:876",),
         slices=(
             Slice(
                 id=COMPILE_SYSTEM_SLICE_ID,
@@ -2385,7 +2351,7 @@ _ENTRIES = [
         when_it_runs_el="Μία φορά για κάθε σελίδα, όταν ανεβάζεις ένα βιβλίο.",
         source_of_truth=lambda: OCR_PROMPT,
         build=_vision_prompt(OCR_SLICE_ID, OCR_PROMPT),
-        call_sites=("brain/ocr.py:1080",),
+        call_sites=("brain/ocr.py:1076",),
         slices=(
             Slice(
                 id=OCR_SLICE_ID,
@@ -2414,7 +2380,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: FIGURE_PROMPT,
         build=_vision_prompt(FIGURE_SLICE_ID, FIGURE_PROMPT),
-        call_sites=("brain/ocr.py:1080",),
+        call_sites=("brain/ocr.py:1076",),
         slices=(
             Slice(
                 id=FIGURE_SLICE_ID,
