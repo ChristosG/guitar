@@ -97,6 +97,37 @@ struct Meta {
     web_port: Option<u16>,
     #[serde(default)]
     api_port: Option<u16>,
+    /// The api and web children that were RUNNING when this file was last
+    /// written, so the next launch can clean up after a force quit. `None`
+    /// once they have been stopped in an orderly way — and `None` in every
+    /// meta.json written by an earlier build. See `ChildPids`.
+    #[serde(default)]
+    api_pid: Option<i32>,
+    #[serde(default)]
+    web_pid: Option<i32>,
+}
+
+/// The PIDs of the two children the shell supervises directly: uvicorn and
+/// node. (postgres is deliberately absent — it is not our child at all, pg_ctl
+/// daemonizes it, and `instance.rs` finds it through `pg_ctl status` instead,
+/// which validates the pid file in ways a bare number cannot.)
+///
+/// Recorded in `meta.json` and nowhere else, because meta.json is exactly the
+/// right KIND of file for this: a convenience whose loss is harmless. A torn
+/// or missing record costs one force-quit's worth of orphaned children —
+/// two squatted ports the scan rolls past — and nothing else. It must never go
+/// into `install-state.json`, which is the authority for a decision that can
+/// displace the tutor's database and has to stay minimal enough to reason
+/// about.
+///
+/// Nothing here is TRUSTED. A PID is a small integer that the operating system
+/// reuses, so by the next launch it may name a completely different process;
+/// the record only says where to LOOK, and `instance::reapable` proves
+/// ownership from the process's own command line before anything is signalled.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ChildPids {
+    pub api: Option<i32>,
+    pub web: Option<i32>,
 }
 
 // ---- durable writes ---------------------------------------------------------
@@ -3609,12 +3640,76 @@ pub fn write_meta(dirs: &Dirs, port: u16, ports: AppPorts) -> Result<(), String>
         pg_port: port,
         web_port: Some(ports.web),
         api_port: Some(ports.api),
+        // Written a few lines BEFORE the two spawns, so at this instant there
+        // genuinely are no children: `record_child_pids` fills these in as each
+        // one starts. Writing them as `None` here also clears whatever a
+        // force-quit predecessor left behind — by which point `instance.rs` has
+        // long since read it and dealt with it.
+        api_pid: None,
+        web_pid: None,
     };
     fs::write(
         dirs.data.join("meta.json"),
         serde_json::to_string_pretty(&meta).expect("serialize meta"),
     )
     .map_err(|e| e.to_string())
+}
+
+/// Note which children are running right now, preserving everything else in
+/// meta.json — above all the port pair, which is the file's other job.
+///
+/// Read-modify-write rather than a fresh `Meta`: this is called from the
+/// supervisor, which knows the PIDs and has no business restating the app
+/// version or the postgres major. A meta.json that cannot be read or parsed is
+/// an error the caller LOGS and moves on from — the same rule the whole file
+/// lives under. Losing the record costs orphan cleanup after a force quit, and
+/// nothing that touches the tutor's data.
+pub fn record_child_pids(dirs: &Dirs, pids: ChildPids) -> Result<(), String> {
+    let path = dirs.data.join("meta.json");
+    let existing = fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Meta>(&raw).ok());
+    let Some(mut meta) = existing else {
+        // There is no file to amend. CLEARING a record that was never written —
+        // a boot that died before `write_meta`, whose ordered shutdown then
+        // stops children it never had — is already true, so it is neither a
+        // failure nor worth a line in the tutor's log. Recording a live PID
+        // into nothing is a genuine miss, and says so.
+        return if pids == ChildPids::default() {
+            Ok(())
+        } else {
+            Err(format!("{} is missing or unreadable", path.display()))
+        };
+    };
+    meta.api_pid = pids.api;
+    meta.web_pid = pids.web;
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&meta).expect("serialize meta"),
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// What the last launch was running when it last managed to say. Missing file,
+/// garbage file, older build, clean shutdown — all of them mean "nothing to
+/// look at", which is the ordinary answer on every launch that is not preceded
+/// by a force quit.
+///
+/// 0, 1 and negatives are dropped HERE, at the edge, and that is not
+/// housekeeping: `kill(0, sig)` signals this process's whole group and
+/// `kill(-1, sig)` signals every process the user owns. A hand-edited or
+/// corrupt meta.json must not be able to spell either of those.
+pub fn remembered_child_pids(dirs: &Dirs) -> ChildPids {
+    let Ok(raw) = fs::read_to_string(dirs.data.join("meta.json")) else {
+        return ChildPids::default();
+    };
+    let Ok(meta) = serde_json::from_str::<Meta>(&raw) else {
+        return ChildPids::default();
+    };
+    ChildPids {
+        api: meta.api_pid.filter(|p| *p > 1),
+        web: meta.web_pid.filter(|p| *p > 1),
+    }
 }
 
 /// The pair the previous launch used, if meta.json records one.
@@ -6452,6 +6547,85 @@ mod tests {
 
         fs::write(data.join("meta.json"), "{ not json").expect("write junk");
         assert_eq!(remembered_app_ports(&dirs), None);
+        let _ = fs::remove_dir_all(&data);
+    }
+
+    /// The other half of meta.json's memory: which children were running when
+    /// the last launch was killed. It has to round-trip, it has to survive
+    /// alongside the port pair (they are read back by different callers on the
+    /// same launch), and every way the file can be absent, old or corrupt has to
+    /// mean "nothing to look at" rather than a PID the reaper would go hunting.
+    #[test]
+    fn meta_round_trips_the_child_pids_without_losing_the_ports() {
+        let dirs = tmp_dirs("childpids");
+        let data = dirs.data.clone();
+        let ports = AppPorts { web: 8792, api: 8793 };
+
+        // No file at all — the ordinary state of a machine that has never run
+        // the app, and the state a lost meta.json leaves behind.
+        assert_eq!(remembered_child_pids(&dirs), ChildPids::default());
+        assert!(
+            record_child_pids(&dirs, ChildPids { api: Some(8073), web: None }).is_err(),
+            "with no meta.json to amend this fails — and the caller only logs it"
+        );
+        assert!(
+            record_child_pids(&dirs, ChildPids::default()).is_ok(),
+            "CLEARING a record that was never written is already true: a boot that dies \
+             before meta.json exists still runs the ordered shutdown, and that must not \
+             put an error in the tutor's log"
+        );
+
+        // What boot does: ports first, then each child as it comes up.
+        write_meta(&dirs, 5434, ports).expect("write meta");
+        assert_eq!(
+            remembered_child_pids(&dirs),
+            ChildPids::default(),
+            "a fresh meta.json records no children: the spawns have not happened yet"
+        );
+        record_child_pids(&dirs, ChildPids { api: Some(8101), web: None }).expect("api up");
+        record_child_pids(&dirs, ChildPids { api: Some(8101), web: Some(8102) }).expect("web up");
+        assert_eq!(
+            remembered_child_pids(&dirs),
+            ChildPids { api: Some(8101), web: Some(8102) }
+        );
+        // …and the port pair, which lives in the same file and is read by a
+        // different caller, is untouched by all of that.
+        assert_eq!(remembered_app_ports(&dirs), Some(ports));
+
+        // The ordered shutdown clears it, so the next launch has nothing to
+        // reap and never signals anything.
+        record_child_pids(&dirs, ChildPids::default()).expect("clean shutdown");
+        assert_eq!(remembered_child_pids(&dirs), ChildPids::default());
+        assert_eq!(remembered_app_ports(&dirs), Some(ports), "still remembered");
+
+        // A meta.json from an earlier build carries no PIDs at all.
+        fs::write(
+            data.join("meta.json"),
+            r#"{"app_version":"0.1.0","pg_major":16,"pg_port":5434,"web_port":8790,"api_port":8791}"#,
+        )
+        .expect("legacy meta");
+        assert_eq!(remembered_child_pids(&dirs), ChildPids::default());
+
+        // Junk, and — the one that matters — the numbers that are not PIDs at
+        // all. `kill(0, …)` signals our own process group and `kill(-1, …)`
+        // signals everything the tutor owns; a corrupt or hand-edited file must
+        // never be able to name either.
+        fs::write(data.join("meta.json"), "{ not json").expect("junk");
+        assert_eq!(remembered_child_pids(&dirs), ChildPids::default());
+        for bad in ["0", "1", "-1", "-1000"] {
+            fs::write(
+                data.join("meta.json"),
+                format!(
+                    r#"{{"app_version":"0.1.0","pg_major":16,"pg_port":5434,"api_pid":{bad},"web_pid":{bad}}}"#
+                ),
+            )
+            .expect("write");
+            assert_eq!(
+                remembered_child_pids(&dirs),
+                ChildPids::default(),
+                "{bad} must never reach a kill()"
+            );
+        }
         let _ = fs::remove_dir_all(&data);
     }
 }

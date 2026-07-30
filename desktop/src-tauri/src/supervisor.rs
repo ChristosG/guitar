@@ -9,10 +9,27 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use crate::firstrun::{port_free, AppPorts, Secrets};
-use crate::paths::Dirs;
+use crate::firstrun::{port_free, AppPorts, ChildPids, Secrets};
+use crate::paths::{app_log, Dirs};
 
 const LOG_TRUNCATE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// The bundled interpreter that runs alembic and uvicorn — i.e. `argv[0]` of
+/// the api child, exactly as the kernel will report it.
+///
+/// A free function, and public, for one reason: `instance::reap_orphan_children`
+/// has to recognise this process on the NEXT launch from its command line, and a
+/// second spelling of this path would be a second thing to get wrong. If the
+/// bundle layout ever moves, both the spawn and the recognition move with it.
+pub fn api_binary(res: &Path) -> PathBuf {
+    res.join("python/bin/python3.12")
+}
+
+/// The same, for the web child: the bundled node that runs the Next standalone
+/// server.
+pub fn web_binary(res: &Path) -> PathBuf {
+    res.join("node/bin/node")
+}
 
 /// libpq reads all of these from the environment, and every one of them can
 /// point a bundled binary somewhere we did not intend.
@@ -370,7 +387,7 @@ impl Supervisor {
     // ---- api + node ---------------------------------------------------------
 
     fn python(&self) -> PathBuf {
-        self.res.join("python/bin/python3.12")
+        api_binary(&self.res)
     }
 
     /// Env for every python invocation — the exact names `app/config.py` reads.
@@ -439,6 +456,11 @@ impl Supervisor {
             .map_err(|e| format!("failed to spawn {:?}: {e}", cmd.get_program()))?;
         let pid = child.id() as i32;
         *pid_slot.lock().unwrap() = Some(pid);
+        // Before the monitor thread, and on every spawn including a Restart
+        // Backend's: from the instant this process exists, a force quit can
+        // orphan it, and the only thing that will ever find it again is the
+        // number written here. See `record_children`.
+        self.record_children();
         std::thread::spawn(move || {
             let _ = child.wait(); // reap, whatever the outcome
             if !sup.expected_exit() {
@@ -448,11 +470,38 @@ impl Supervisor {
         Ok(())
     }
 
-    pub fn start_api<F: Fn() + Send + 'static>(
-        self: &std::sync::Arc<Self>,
-        on_died: F,
-    ) -> Result<(), String> {
-        let ports = self.ports().ok_or(NO_PORTS_YET)?;
+    /// Publish the current child PIDs to meta.json.
+    ///
+    /// This is the note the NEXT launch reads after a force quit — a SIGKILL of
+    /// the shell (the beachball, then Cmd+Opt+Esc) runs no teardown at all, so
+    /// uvicorn and node survive it, keep their ports, and push every subsequent
+    /// launch further up the scan. Called on every spawn and once more at the
+    /// end of the ordered shutdown, where it writes `None` and the note is
+    /// retracted.
+    ///
+    /// Best effort by design, and logged rather than surfaced: the file is a
+    /// convenience (see `firstrun::ChildPids`), and a boot must not fail because
+    /// a disk was full while we were writing a hint.
+    fn record_children(&self) {
+        let pids = ChildPids {
+            api: *self.api_pid.lock().unwrap(),
+            web: *self.node_pid.lock().unwrap(),
+        };
+        if let Err(e) = crate::firstrun::record_child_pids(&self.dirs, pids) {
+            app_log(&format!(
+                "could not record the child PIDs in meta.json ({e}) — this launch works \
+                 normally; only the cleanup after a force quit is affected, and the port \
+                 scan already copes with that by rolling"
+            ));
+        }
+    }
+
+    /// The uvicorn invocation. Split from the spawn so a test can look at the
+    /// program it names WITHOUT starting a python: `argv[0]` is the whole basis
+    /// on which the next launch decides an orphan of this process is safe to
+    /// kill, so "we spawn what the reaper looks for" has to be pinned by
+    /// something other than two people spelling a path the same way.
+    fn api_command(&self, ports: AppPorts) -> Command {
         let mut cmd = Command::new(self.python());
         cmd.arg("-m")
             .arg("uvicorn")
@@ -462,6 +511,26 @@ impl Supervisor {
             .arg("--port")
             .arg(ports.api.to_string());
         self.api_env(&mut cmd);
+        cmd
+    }
+
+    /// The node invocation, split out for the same reason.
+    fn node_command(&self, ports: AppPorts) -> Command {
+        let mut cmd = Command::new(web_binary(&self.res));
+        cmd.arg("server.js")
+            .current_dir(self.res.join("web"))
+            .env("PORT", ports.web.to_string())
+            .env("HOSTNAME", "127.0.0.1")
+            .env("NODE_ENV", "production");
+        cmd
+    }
+
+    pub fn start_api<F: Fn() + Send + 'static>(
+        self: &std::sync::Arc<Self>,
+        on_died: F,
+    ) -> Result<(), String> {
+        let ports = self.ports().ok_or(NO_PORTS_YET)?;
+        let cmd = self.api_command(ports);
         let log = self.dirs.logs.join("api.log");
         self.spawn_monitored(cmd, &self.api_pid, &log, on_died, self.clone())
     }
@@ -471,12 +540,7 @@ impl Supervisor {
         on_died: F,
     ) -> Result<(), String> {
         let ports = self.ports().ok_or(NO_PORTS_YET)?;
-        let mut cmd = Command::new(self.res.join("node/bin/node"));
-        cmd.arg("server.js")
-            .current_dir(self.res.join("web"))
-            .env("PORT", ports.web.to_string())
-            .env("HOSTNAME", "127.0.0.1")
-            .env("NODE_ENV", "production");
+        let cmd = self.node_command(ports);
         let log = self.dirs.logs.join("web.log");
         self.spawn_monitored(cmd, &self.node_pid, &log, on_died, self.clone())
     }
@@ -570,6 +634,15 @@ impl Supervisor {
         if let Some(pid) = self.api_pid.lock().unwrap().take() {
             Self::term_and_reap(pid, Duration::from_secs(10));
         }
+        // Both slots are empty now, so this RETRACTS the note the next launch
+        // would act on. Here rather than only in `shutdown` because Restart
+        // Backend comes through this too: between the kill and the respawn the
+        // recorded PIDs name processes that no longer exist, and a number that
+        // names nothing is a number the operating system may hand to somebody
+        // else. (Even then nothing could go wrong — the next launch proves
+        // ownership from the command line before it signals — but the shortest
+        // honest record is the one to keep.)
+        self.record_children();
     }
 
     /// Ordered full shutdown: node → uvicorn → `pg_ctl stop -m fast`.
@@ -578,6 +651,9 @@ impl Supervisor {
         if self.shutting_down.swap(true, Ordering::SeqCst) {
             return;
         }
+        // `stop_api_and_node` clears the recorded PIDs as part of stopping them,
+        // so an ordered exit leaves nothing behind for the next launch to reap —
+        // which is the whole difference between this path and a force quit.
         self.stop_api_and_node();
         self.stop_postgres();
     }
@@ -883,6 +959,41 @@ mod tests {
         // What the watcher thread's `FlagLatch` does when it returns.
         sup.pg_watch.store(false, Ordering::SeqCst);
         assert!(sup.claim_pg_watch(), "must be re-armable after the watcher returns");
+    }
+
+    /// What we SPAWN has to be what the next launch LOOKS FOR.
+    ///
+    /// `instance::reap_orphan_children` proves an orphan is ours by matching
+    /// `argv[0]` — the program named here — against `api_binary`/`web_binary`.
+    /// If a spawn ever names the interpreter by a different route (a `python3`
+    /// symlink, a versionless path, a different bundle layout) the match stops
+    /// being exact, and the reaper silently stops reaping: no error, no log, just
+    /// two ports quietly consumed by every force quit again. The two spellings
+    /// must be one spelling, and this is the test that says so.
+    #[test]
+    fn the_children_we_spawn_are_the_ones_the_reaper_recognises() {
+        let sup = unbooted();
+        let ports = AppPorts { web: 8790, api: 8791 };
+        assert_eq!(
+            sup.api_command(ports).get_program(),
+            api_binary(&sup.res).as_os_str(),
+            "the api child's argv[0] must be exactly what the reaper matches"
+        );
+        assert_eq!(
+            sup.node_command(ports).get_program(),
+            web_binary(&sup.res).as_os_str(),
+            "…and the web child's"
+        );
+        // Absolute, and inside this install's resource root — the reaper refuses
+        // to act on a relative path, because prefix-matching one against a
+        // command line proves nothing.
+        for bin in [api_binary(&sup.res), web_binary(&sup.res)] {
+            assert!(bin.is_absolute(), "{}", bin.display());
+            assert!(bin.starts_with(&sup.res), "{}", bin.display());
+        }
+        // The two children are never the same binary; a PID recorded as the api
+        // can therefore never be reaped by matching the node's path.
+        assert_ne!(api_binary(&sup.res), web_binary(&sup.res));
     }
 
     /// A port we are holding never comes free inside the grace window, and the

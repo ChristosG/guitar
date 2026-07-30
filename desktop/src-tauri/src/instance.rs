@@ -12,11 +12,31 @@
 //!    mutual exclusion primitive.
 //!
 //! 2. The app's OWN orphans. A force quit — the beachball, then Cmd+Opt+Esc —
-//!    SIGKILLs the shell without running the ordered teardown, so its postgres
-//!    keeps running. Under the old frozen ports the next launch bounced off the
-//!    busy port with a clear message. With rolling ports it rolls PAST its own
-//!    leftovers and then dies inside pg_ctl, showing the tutor a raw English
-//!    lock-file dump.
+//!    SIGKILLs the shell without running the ordered teardown, so ALL THREE of
+//!    its children keep running: postgres, uvicorn and node. Under the old
+//!    frozen ports the next launch bounced off the busy port with a clear
+//!    message. With rolling ports it rolls PAST its own leftovers and then dies
+//!    inside pg_ctl, showing the tutor a raw English lock-file dump.
+//!
+//!    The postgres half of that was fixed first, and it left the other two
+//!    behind: an orphaned uvicorn and node are harmless in themselves (their
+//!    database has been stopped) and die at logout, but they keep holding their
+//!    TCP ports, so every force quit permanently consumes two more candidates
+//!    out of a window of about twenty. Ten force quits without a reboot and the
+//!    app reaches "no free application port" — precisely the failure this whole
+//!    module exists to prevent. So they are reaped here too, by the same rules,
+//!    which are worth stating because a wrong kill is unforgivable in a way a
+//!    squatted port is not:
+//!
+//!      * a PID is only a place to LOOK. The operating system reuses PIDs, so
+//!        the number a dead launch wrote down may name anything by now; before
+//!        we signal, the process's own command line must name the interpreter
+//!        inside THIS install (`<res>/python/bin/python3.12`,
+//!        `<res>/node/bin/node`) as its `argv[0]`. Anything else — a foreign
+//!        process, a system python, an empty command line, no such process — is
+//!        left strictly alone, and there is no second, weaker test it can fall
+//!        back to;
+//!      * and the same flock gate as the cluster: no lock, no signal.
 //!
 //! These are handled in COMPLETELY different ways, and the difference is the
 //! point of this module:
@@ -63,11 +83,13 @@
 use std::fs::{File, OpenOptions};
 use std::io::ErrorKind;
 use std::os::unix::io::AsRawFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
+use crate::firstrun::remembered_child_pids;
 use crate::paths::{app_log, Dirs};
-use crate::supervisor::pg_command;
+use crate::supervisor::{api_binary, pg_command, web_binary};
 
 /// The locked file, parked for the whole process lifetime. An flock lives on
 /// the OPEN FILE DESCRIPTION, so closing this `File` — explicitly in
@@ -241,6 +263,13 @@ pub fn acquire(res: &Path, dirs: &Dirs) -> Result<(), Blocked> {
     // tutor, mid-lesson. A running cluster we cannot prove is ours is left
     // strictly alone.
     let holding = lock == LockState::Held;
+    // The api and node halves of the same force quit, and FIRST — before
+    // anything can fail and take us out of this function, and long before
+    // `pick_app_ports` runs. Order matters in one direction only: freeing a port
+    // after the scan has already rolled past it would be pointless, so the reap
+    // has to come first. Nothing here can fail the boot; the worst case is the
+    // status quo, which is a port the scan rolls past.
+    reap_orphan_children(res, dirs, holding);
     match cluster_status(res, dirs) {
         ClusterStatus::Stopped => Ok(()),
         ClusterStatus::Unknown(why) => {
@@ -421,6 +450,287 @@ fn recorded_pid(pgdata: &Path) -> Option<i32> {
     let pid: i32 = raw.lines().next()?.trim().parse().ok()?;
     // 0/1/negative are never a postmaster worth naming.
     (pid > 1).then_some(pid)
+}
+
+// ---- the api/node half of the same force quit -------------------------------
+
+/// One child the previous launch recorded in meta.json, and the bundled binary
+/// its command line has to name before we will signal it.
+#[derive(Debug, PartialEq, Eq)]
+struct Recorded {
+    /// What it is, in the tutor's log. Not an identifier — a noun.
+    role: &'static str,
+    pid: i32,
+    binary: PathBuf,
+}
+
+/// How long the leftovers get to exit on SIGTERM before they are SIGKILLed.
+///
+/// Both are signalled TOGETHER and waited on together, so this is the entire
+/// cost of a reap, not the cost per child — and it is only ever paid on a launch
+/// that follows a force quit. Two seconds is generous for a uvicorn and a node
+/// whose only remaining work is closing a listening socket, and short enough
+/// that nobody watching the splash notices.
+const REAP_GRACE: Duration = Duration::from_secs(2);
+
+/// Stop the api/node children a force-quit predecessor left running.
+///
+/// Everything that makes this safe is in `reapable`; this is the part that talks
+/// to the machine, and it is deliberately incapable of failing the boot.
+fn reap_orphan_children(res: &Path, dirs: &Dirs, holding: bool) {
+    let pids = remembered_child_pids(dirs);
+    let recorded: Vec<Recorded> = [
+        ("API server", pids.api, api_binary(res)),
+        ("web server", pids.web, web_binary(res)),
+    ]
+    .into_iter()
+    .filter_map(|(role, pid, binary)| pid.map(|pid| Recorded { role, pid, binary }))
+    .collect();
+    if recorded.is_empty() {
+        return; // the ordinary launch: the last one shut down in order
+    }
+    let ours = reapable(recorded, holding, command_line_of);
+    if ours.is_empty() {
+        return;
+    }
+    for child in &ours {
+        // Same shape as the cluster line below, and for the same reason: it has
+        // to say what was found, why acting on it was safe, and that the boot
+        // carried on. Every PID is named BEFORE anything is signalled, so even a
+        // wrong guess leaves evidence.
+        app_log(&format!(
+            "a previous GuitarTutor did not shut down cleanly: its {} is still running \
+             (PID {}), its command line is the {} inside this install and we hold the \
+             instance lock, so it is ours. Stopping it and continuing.",
+            child.role,
+            child.pid,
+            child
+                .binary
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "runtime".into()),
+        ));
+    }
+    let pids: Vec<i32> = ours.iter().map(|c| c.pid).collect();
+    for (child, how) in ours.iter().zip(stop_orphans(&pids)) {
+        match how {
+            Some(how) => app_log(&format!(
+                "leftover {} stopped ({how}); the port it was holding is free again and \
+                 boot continues normally",
+                child.role
+            )),
+            None => app_log(&format!(
+                "could not stop the leftover {} (PID {}) — it is still there after SIGKILL. \
+                 Boot continues anyway: the port scan simply rolls past it, exactly as it \
+                 did before.",
+                child.role, child.pid
+            )),
+        }
+    }
+}
+
+/// Which recorded children may be signalled — the whole decision, with the two
+/// things that touch the machine (reading a command line, sending a signal)
+/// kept out of it.
+///
+/// Two gates, and neither is a formality:
+///
+///   * `holding` is the SAME gate the cluster auto-stop is under, and it is
+///     checked first and on its own. Without the flock we have no evidence that
+///     a first copy is not alive right now, and its api and node are exactly the
+///     processes this function would otherwise go and kill — mid-lesson, from a
+///     second launch, out of a NAS home directory. When we are not holding it we
+///     do not even LOOK, because there is no answer a command line could give
+///     that would make signalling somebody else's live children acceptable;
+///   * the command line, which is the answer to PID reuse. The number came out
+///     of a file written by a process that is long dead; the only thing that can
+///     turn it back into an identity is asking the operating system what is
+///     running under it NOW. `argv[0]` must be the interpreter inside THIS
+///     install — see `command_line_is_ours`.
+fn reapable<F>(recorded: Vec<Recorded>, holding: bool, command_line: F) -> Vec<Recorded>
+where
+    F: Fn(i32) -> Option<String>,
+{
+    if !holding {
+        app_log(
+            "a previous GuitarTutor recorded child processes, but flock is unavailable here \
+             so we cannot prove no other copy is running them right now. Leaving them \
+             strictly alone — the port scan will roll past anything still holding a port.",
+        );
+        return Vec::new();
+    }
+    recorded
+        .into_iter()
+        .filter(|child| match command_line(child.pid) {
+            Some(line) if command_line_is_ours(&line, &child.binary) => true,
+            // The process exists and is somebody else's. This is PID reuse
+            // caught in the act, and the one case worth a line of its own: it is
+            // the difference between the app being careful and the app being
+            // lucky.
+            Some(line) => {
+                app_log(&format!(
+                    "PID {} was our {} in an earlier session, but the process running under \
+                     that number now is not ours ({line}) — the operating system reuses PIDs. \
+                     Leaving it strictly alone.",
+                    child.pid, child.role
+                ));
+                false
+            }
+            // No such process: it already died, at a logout or a reboot. The
+            // ordinary outcome, and nothing to say about it.
+            None => false,
+        })
+        .collect()
+}
+
+/// Does this command line prove the process is one of OUR children?
+///
+/// The test is `argv[0]`, and nothing weaker. A substring search would accept
+/// any process that merely MENTIONS the path — `grep`, an editor, a helper
+/// script, the tutor's own terminal — and "it was probably ours" is not a
+/// standard anything gets killed on. `Command::new` was given this exact
+/// absolute path, so the kernel reports this exact absolute path, and prefix
+/// equality is both the strictest and the most faithful check available.
+///
+/// The prefix must be followed by a space or by nothing at all, so a sibling
+/// binary (`…/python3.12-config`) cannot pass; and the path must be absolute,
+/// so a relative resource root — a dev tree, a bundle we could not resolve —
+/// cannot produce a match that means nothing.
+///
+/// A consequence worth naming: an orphan spawned from a DIFFERENT copy of the
+/// install (the app was dragged from Downloads to Applications between the two
+/// launches) does not match, and is left running. That is the right way round.
+/// It keeps its port, the scan rolls past it, and it dies at logout.
+fn command_line_is_ours(command_line: &str, binary: &Path) -> bool {
+    let Some(bin) = binary.to_str() else {
+        return false;
+    };
+    if bin.is_empty() || !binary.is_absolute() {
+        return false;
+    }
+    match command_line.trim_start().strip_prefix(bin) {
+        Some(rest) => rest.is_empty() || rest.starts_with(' '),
+        None => false,
+    }
+}
+
+/// The command line of a running process, or `None` when there is no such
+/// process. Two implementations because there is no portable one.
+///
+/// Linux: `/proc/<pid>/cmdline`, whose arguments are NUL-separated. A process
+/// that exists but has an empty command line — a kernel thread, a zombie — comes
+/// back as an empty string, which matches nothing and is therefore left alone.
+#[cfg(target_os = "linux")]
+fn command_line_of(pid: i32) -> Option<String> {
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    Some(
+        String::from_utf8_lossy(&raw)
+            .replace('\0', " ")
+            .trim()
+            .to_string(),
+    )
+}
+
+/// macOS has no `/proc`. `ps -o command=` prints the argument vector and, with
+/// the `=` suffixing the format, no header line; `-ww` stops BSD ps truncating
+/// it. A pid nothing is running under exits non-zero and prints nothing.
+///
+/// `LC_ALL=C` for the same reason every other invocation in this module sets it:
+/// whatever ends up in app.log has to be the string whoever is helping over the
+/// phone can search for.
+#[cfg(not(target_os = "linux"))]
+fn command_line_of(pid: i32) -> Option<String> {
+    let out = std::process::Command::new("/bin/ps")
+        .env("LC_ALL", "C")
+        .arg("-ww")
+        .arg("-o")
+        .arg("command=")
+        .arg("-p")
+        .arg(pid.to_string())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!line.is_empty()).then_some(line)
+}
+
+/// SIGTERM everything, wait ONCE, then SIGKILL whatever is still there. Returns
+/// one answer per pid, in the order given: the signal that worked, or `None` if
+/// it survived both — which is not a boot failure, it is the situation we were
+/// already in.
+///
+/// Signalling the whole set together, rather than a child at a time, is what
+/// keeps the cost of a reap at one grace period instead of one per orphan. The
+/// splash is on screen while this runs.
+///
+/// The wait is a `kill(pid, 0)` poll rather than a `wait()`: an orphan is not
+/// our child (init or launchd adopted it when its parent was killed), so there
+/// is no status for us to reap, and whoever adopted it is who will make it
+/// vanish from the process table.
+fn stop_orphans(pids: &[i32]) -> Vec<Option<&'static str>> {
+    let mut outcome: Vec<Option<&'static str>> = vec![None; pids.len()];
+    for pid in pids {
+        unsafe { libc::kill(*pid, libc::SIGTERM) };
+    }
+    wait_for_all(pids, &mut outcome, "SIGTERM", REAP_GRACE);
+
+    let survivors: Vec<i32> = pids
+        .iter()
+        .zip(&outcome)
+        .filter_map(|(pid, done)| done.is_none().then_some(*pid))
+        .collect();
+    if survivors.is_empty() {
+        return outcome;
+    }
+    for pid in &survivors {
+        unsafe { libc::kill(*pid, libc::SIGKILL) };
+    }
+    // SIGKILL cannot be caught or ignored, so the only thing left to wait for is
+    // the kernel tearing the process down and its adopter reaping it. Short on
+    // purpose: this is a confirmation, not a negotiation, and it is the
+    // difference between a log line that is true and one that is hopeful.
+    wait_for_all(pids, &mut outcome, "SIGKILL", Duration::from_millis(500));
+    outcome
+}
+
+/// Poll until every pid still marked unfinished has gone, or `grace` runs out,
+/// filling in `how` for each one that goes.
+fn wait_for_all(
+    pids: &[i32],
+    outcome: &mut [Option<&'static str>],
+    how: &'static str,
+    grace: Duration,
+) {
+    let deadline = Instant::now() + grace;
+    loop {
+        let mut waiting = false;
+        for (pid, done) in pids.iter().zip(outcome.iter_mut()) {
+            if done.is_some() {
+                continue;
+            }
+            if alive(*pid) {
+                waiting = true;
+            } else {
+                *done = Some(how);
+            }
+        }
+        if !waiting || Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Signal 0: existence only, no signal delivered. `EPERM` is an existence
+/// answer too — the process is there and belongs to another user — and reading
+/// it as "gone" would let us log that we stopped something we did not.
+fn alive(pid: i32) -> bool {
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 #[cfg(test)]
@@ -627,6 +937,294 @@ mod tests {
         // Never claim a PID we do not have.
         let anon = Blocked::UnprovableCluster { pid: None }.message();
         assert!(!anon.contains("PID"), "no PID to name, so name none: {anon}");
+    }
+
+    /// A resource root shaped like the real one, so the command lines the
+    /// ownership test is fed in these tests look exactly like the ones the
+    /// kernel reports on the tutor's machine.
+    fn res_root(tag: &str) -> PathBuf {
+        std::path::PathBuf::from(format!(
+            "/Applications/GuitarTutor-{tag}.app/Contents/Resources/resources"
+        ))
+    }
+
+    /// What our api child's command line actually is, spelled the way
+    /// `supervisor::start_api` spells it.
+    fn our_api_command_line(res: &Path) -> String {
+        format!(
+            "{} -m uvicorn app.main:app --host 127.0.0.1 --port 8791",
+            api_binary(res).display()
+        )
+    }
+
+    /// THE trap this whole path is built around: PID reuse. The number was
+    /// written down by a process that is dead; whatever is running under it now
+    /// is a stranger until it proves otherwise, and the proof is `argv[0]`.
+    #[test]
+    fn ownership_is_argv_zero_inside_this_install_and_nothing_weaker() {
+        let res = res_root("live");
+        let python = api_binary(&res);
+        let node = web_binary(&res);
+
+        // Ours: the exact binary this install spawns, with its arguments.
+        assert!(command_line_is_ours(&our_api_command_line(&res), &python));
+        assert!(command_line_is_ours(
+            &format!("{} server.js", node.display()),
+            &node
+        ));
+        // Bare, no arguments at all.
+        assert!(command_line_is_ours(&python.display().to_string(), &python));
+
+        // Not ours, in every way a real machine produces:
+        for foreign in [
+            // A system interpreter. The commonest process on the box.
+            "/usr/bin/python3.12 -m uvicorn app.main:app --host 127.0.0.1 --port 8791",
+            "/opt/homebrew/bin/node server.js",
+            // ANOTHER install of this very app — a second copy in ~/Downloads.
+            // Its children are not ours to kill.
+            "/Applications/GuitarTutor-other.app/Contents/Resources/resources/python/bin/python3.12 -m uvicorn",
+            // Merely NAMING our path. This is what a substring test would have
+            // killed: a helper's grep, an editor, a tail on the log.
+            "grep -r /Applications/GuitarTutor-live.app/Contents/Resources/resources/python/bin/python3.12 .",
+            "/bin/sh -c /Applications/GuitarTutor-live.app/Contents/Resources/resources/node/bin/node",
+            // A sibling binary that shares our prefix.
+            "/Applications/GuitarTutor-live.app/Contents/Resources/resources/python/bin/python3.12-config --libs",
+            // A zombie or a kernel thread: exists, says nothing.
+            "",
+            "   ",
+        ] {
+            assert!(
+                !command_line_is_ours(foreign, &python) && !command_line_is_ours(foreign, &node),
+                "must not be treated as ours: {foreign:?}"
+            );
+        }
+
+        // The api PID must match the API binary and the web PID the node one:
+        // recording which is which is not decoration.
+        assert!(!command_line_is_ours(&our_api_command_line(&res), &node));
+
+        // A relative resource root — a dev tree, or a bundle whose path we could
+        // not resolve — can never authorise a kill: prefix-matching a relative
+        // path against a command line is a coincidence, not evidence.
+        let relative = Path::new("resources/python/bin/python3.12");
+        assert!(!command_line_is_ours(
+            "resources/python/bin/python3.12 -m uvicorn",
+            relative
+        ));
+
+        // And the case this whole path was written for, in the words the
+        // operating system actually used: these two lines are copied verbatim
+        // out of `ps` on the machine where an E2E force-quit left them behind,
+        // with the .deb's resource root rather than the .app's.
+        let deb = Path::new("/usr/lib/GuitarTutor/resources");
+        assert!(command_line_is_ours(
+            "/usr/lib/GuitarTutor/resources/python/bin/python3.12 -m uvicorn app.main:app \
+             --host 127.0.0.1 --port 8793",
+            &api_binary(deb)
+        ));
+        assert!(command_line_is_ours(
+            "/usr/lib/GuitarTutor/resources/node/bin/node server.js",
+            &web_binary(deb)
+        ));
+        // The postgres left by the same force quit is NOT one of these. It is
+        // not our child, it is not signalled here, and `pg_ctl` deals with it.
+        assert!(!command_line_is_ours(
+            "/usr/lib/GuitarTutor/resources/pg/bin/postgres -D /home/tester/.local/share/\
+             guitar-tutor/pgdata -p 5434",
+            &api_binary(deb)
+        ));
+    }
+
+    /// The filter, over the three answers the operating system can give about a
+    /// recorded PID. Only the first one may ever be signalled.
+    #[test]
+    fn only_a_process_that_proves_it_is_ours_is_reaped() {
+        let res = res_root("live");
+        let recorded = || {
+            vec![
+                Recorded { role: "API server", pid: 8101, binary: api_binary(&res) },
+                Recorded { role: "web server", pid: 8102, binary: web_binary(&res) },
+            ]
+        };
+
+        // 1. Both are ours: both are reaped.
+        let ours = reapable(recorded(), true, |pid| match pid {
+            8101 => Some(our_api_command_line(&res)),
+            8102 => Some(format!("{} server.js", web_binary(&res).display())),
+            _ => None,
+        });
+        assert_eq!(
+            ours.iter().map(|c| c.pid).collect::<Vec<_>>(),
+            vec![8101, 8102]
+        );
+
+        // 2. The PID was recycled: something else entirely is running under it.
+        // Nothing is signalled — this is the case where a mistake would be
+        // inexcusable.
+        let stranger = reapable(recorded(), true, |_| {
+            Some("/usr/lib/firefox/firefox --contentproc".to_string())
+        });
+        assert!(stranger.is_empty(), "a recycled PID must never be signalled");
+
+        // 3. No such process: it died at the last logout. A no-op, and the
+        // ordinary outcome of a force quit followed by a reboot.
+        assert!(reapable(recorded(), true, |_| None).is_empty());
+
+        // …and the mixed case, which is what a real machine hands over: one
+        // orphan still there, one already gone.
+        let mixed = reapable(recorded(), true, |pid| {
+            (pid == 8102).then(|| format!("{} server.js", web_binary(&res).display()))
+        });
+        assert_eq!(mixed.iter().map(|c| c.pid).collect::<Vec<_>>(), vec![8102]);
+    }
+
+    /// The same gate as the cluster auto-stop, and for a sharper reason: without
+    /// the flock, a genuinely LIVE first copy may be running right now, and its
+    /// uvicorn and node are precisely the processes named in the file we just
+    /// read. Killing them takes the app away from the tutor mid-lesson.
+    ///
+    /// Not holding the lock does not merely mean "signal nothing" — we do not
+    /// even ASK what the PIDs are running, because there is no answer that could
+    /// make it acceptable.
+    #[test]
+    fn no_lock_means_no_signal_and_not_even_a_look() {
+        let res = res_root("live");
+        let recorded = vec![
+            Recorded { role: "API server", pid: 8101, binary: api_binary(&res) },
+            Recorded { role: "web server", pid: 8102, binary: web_binary(&res) },
+        ];
+        let looked = std::cell::Cell::new(0);
+        let left_alone = reapable(recorded, false, |_| {
+            looked.set(looked.get() + 1);
+            // Even a command line that IS ours must not get anything killed
+            // here: on a filesystem without flock it is exactly what a live
+            // first copy's child looks like.
+            Some(our_api_command_line(&res))
+        });
+        assert!(left_alone.is_empty(), "nothing may be signalled without the lock");
+        assert_eq!(looked.get(), 0, "we do not even inspect them");
+
+        // The rule, stated the same way the cluster's is: only `Held`.
+        let may_reap = |s: LockState| s == LockState::Held;
+        assert!(may_reap(LockState::Held));
+        assert!(!may_reap(LockState::Unavailable));
+        assert!(!may_reap(LockState::TakenByAnother));
+    }
+
+    /// The real reader, against the two processes a test can be certain about:
+    /// this one, and one that cannot exist.
+    #[test]
+    fn reading_a_command_line_is_honest_about_dead_pids() {
+        // Above every `pid_max` any Unix uses (Linux caps at 2^22, macOS far
+        // lower), so nothing can ever be running here.
+        assert_eq!(command_line_of(i32::MAX), None, "a pid that cannot exist");
+
+        // And the process we are certain about: ourselves. It exists, so a
+        // command line comes back — and it is emphatically NOT one of our
+        // bundled children, which is the answer that keeps the reaper's hands
+        // off the test runner.
+        let mine = command_line_of(std::process::id() as i32).expect("our own command line");
+        assert!(!mine.trim().is_empty());
+        let res = res_root("live");
+        assert!(!command_line_is_ours(&mine, &api_binary(&res)));
+        assert!(!command_line_is_ours(&mine, &web_binary(&res)));
+
+        // And the signalling half, on that same impossible pid: `kill` answers
+        // ESRCH, so it reads as already gone and costs the splash NO wall clock
+        // at all. A launch after a reboot — where the orphans died with the
+        // machine — must not sit through a grace period for nothing.
+        let started = Instant::now();
+        assert_eq!(stop_orphans(&[i32::MAX]), vec![Some("SIGTERM")]);
+        assert!(started.elapsed() < REAP_GRACE, "a dead pid is not waited on");
+        assert!(stop_orphans(&[]).is_empty());
+    }
+
+    /// End to end, against processes that genuinely exist: the record in
+    /// meta.json, the command line the operating system really reports, the
+    /// signal, and the survival of everything that is not ours.
+    ///
+    /// The stand-in for each bundled runtime is a SYMLINK to `/bin/sleep` placed
+    /// where that runtime lives in the bundle. `argv[0]` is whatever was handed
+    /// to `exec`, not the resolved target, so the kernel reports exactly the path
+    /// the reaper is looking for — while the thing actually executed is a system
+    /// binary, so nothing here depends on being able to run a copied one.
+    #[test]
+    fn a_real_orphan_is_stopped_and_a_process_from_another_install_is_not() {
+        use crate::firstrun::{record_child_pids, write_meta, AppPorts, ChildPids};
+        use std::process::Command;
+
+        let root = tmpdir("reaplive");
+        let stand_in = |res: &Path, rel: &str| -> PathBuf {
+            let path = res.join(rel);
+            std::fs::create_dir_all(path.parent().expect("bin dir")).expect("mkdir");
+            std::os::unix::fs::symlink("/bin/sleep", &path).expect("symlink");
+            path
+        };
+
+        // THIS install, and a second copy of the app somewhere else — the exact
+        // situation in which a PID from meta.json must not be trusted on its
+        // number alone.
+        let res = root.join("GuitarTutor.app/Contents/Resources/resources");
+        let other = root.join("Downloads/GuitarTutor.app/Contents/Resources/resources");
+        let node = stand_in(&res, "node/bin/node");
+        let their_python = stand_in(&other, "python/bin/python3.12");
+
+        // Our orphaned web server: spawned from THIS install's node.
+        let mut orphan = Command::new(&node).arg("300").spawn().expect("orphan");
+        let orphan_pid = orphan.id() as i32;
+        // Stands in for init/launchd. An orphan is adopted when its parent is
+        // killed, and it is the ADOPTER that reaps it — which is what makes the
+        // process vanish from the table after a signal, and therefore what
+        // `stop_orphans` is polling for. Without something playing that part a
+        // signalled child would linger as a zombie, which is a property of this
+        // test being its own parent and not of the code under test.
+        let adopter = std::thread::spawn(move || {
+            let _ = orphan.wait();
+        });
+
+        // The other copy's api child. Recorded under OUR api PID — i.e. the PID
+        // was recycled, or meta.json was copied between installs — so the only
+        // thing standing between it and a kill is the command-line check.
+        let mut stranger = Command::new(&their_python).arg("300").spawn().expect("stranger");
+        let stranger_pid = stranger.id() as i32;
+
+        let dirs = Dirs {
+            pgdata: root.join("pgdata"),
+            media: root.join("media"),
+            secrets: root.join("secrets"),
+            logs: root.join("logs"),
+            data: root.clone(),
+        };
+        write_meta(&dirs, 5434, AppPorts { web: 8790, api: 8791 }).expect("meta");
+        record_child_pids(
+            &dirs,
+            ChildPids { api: Some(stranger_pid), web: Some(orphan_pid) },
+        )
+        .expect("record");
+
+        assert!(alive(orphan_pid) && alive(stranger_pid), "both are running");
+        reap_orphan_children(&res, &dirs, true);
+        adopter.join().expect("adopter");
+
+        assert!(!alive(orphan_pid), "our own leftover web server must be stopped");
+        assert!(
+            alive(stranger_pid),
+            "a process from ANOTHER install must be left strictly alone, whatever \
+             meta.json says its PID is"
+        );
+
+        // …and with the lock unproven, the same orphan would have survived.
+        let mut second = Command::new(&node).arg("300").spawn().expect("second orphan");
+        let second_pid = second.id() as i32;
+        record_child_pids(&dirs, ChildPids { api: None, web: Some(second_pid) }).expect("record");
+        reap_orphan_children(&res, &dirs, false);
+        assert!(alive(second_pid), "no lock, no signal — even for a process that IS ours");
+
+        let _ = second.kill();
+        let _ = second.wait();
+        let _ = stranger.kill();
+        let _ = stranger.wait();
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The orphan dialog is the last resort, so what it says has to be true and
