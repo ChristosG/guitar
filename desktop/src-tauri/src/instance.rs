@@ -727,10 +727,49 @@ fn wait_for_all(
 /// answer too — the process is there and belongs to another user — and reading
 /// it as "gone" would let us log that we stopped something we did not.
 fn alive(pid: i32) -> bool {
+    // A ZOMBIE is not alive. It has exited and released every port and file it
+    // held; all that remains is an exit status its parent has not collected. On
+    // a Mac launchd reaps orphans at once so this is rarely observed — but when
+    // whatever inherited our children does NOT reap (a container whose PID 1 is
+    // not an init, a wedged shell), `kill(pid, 0)` keeps succeeding forever and
+    // a reap that actually worked reports "could not stop it" instead. Seen in
+    // the E2E; the boot was fine, the log was alarming for no reason.
+    if is_zombie(pid) {
+        return false;
+    }
     if unsafe { libc::kill(pid, 0) } == 0 {
         return true;
     }
     std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// `true` only when the process is provably in the zombie state. Anything we
+/// cannot read (permission, a platform whose output we do not recognise) is
+/// reported as NOT a zombie, so an unreadable process is still treated as
+/// alive and left alone.
+fn is_zombie(pid: i32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        // /proc/<pid>/stat: "<pid> (comm) <state> ...". `comm` can itself hold
+        // spaces and parentheses, so the state is the field after the LAST ')'.
+        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            if let Some(rest) = stat.rsplit_once(')') {
+                return rest.1.trim_start().starts_with('Z');
+            }
+        }
+        false
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::process::Command::new("/bin/ps")
+            .args(["-o", "state=", "-p", &pid.to_string()])
+            .env("LC_ALL", "C")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim_start().starts_with('Z'))
+            .unwrap_or(false)
+    }
 }
 
 #[cfg(test)]
@@ -1242,4 +1281,34 @@ mod tests {
         let anon = Blocked::OrphanStuck { pid: None }.message();
         assert!(!anon.contains("PID"), "no PID to name, so name none: {anon}");
     }
+
+    /// A process that has exited but whose parent has not collected it still
+    /// answers `kill(pid, 0)`. Treating it as alive made a reap that worked
+    /// report failure (seen in the container E2E, where PID 1 never reaps).
+    #[test]
+    fn a_zombie_is_not_alive() {
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn");
+        let pid = child.id() as i32;
+        // Do NOT wait(): the child stays a zombie for as long as we hold it.
+        for _ in 0..200 {
+            if is_zombie(pid) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(is_zombie(pid), "the exited child should be a zombie");
+        assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "a zombie still answers kill(pid,0)");
+        assert!(!alive(pid), "and alive() must nonetheless report it as gone");
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn a_live_process_is_not_mistaken_for_a_zombie() {
+        assert!(!is_zombie(std::process::id() as i32));
+        assert!(alive(std::process::id() as i32));
+    }
+
 }
