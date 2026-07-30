@@ -301,6 +301,11 @@ except Exception:
     _DB_UP = False
 
 if _DB_UP:
+    # Collection-time DDL runs before conftest's session fixture, so this
+    # module must bootstrap pgvector itself (a fresh CI service DB has the
+    # extension available but not created; the local guitar_test already has it).
+    with engine.begin() as _c:
+        _c.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
     Base.metadata.create_all(engine)
     from app.main import app
     from app.models.chat import Message
