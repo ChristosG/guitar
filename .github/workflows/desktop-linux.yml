@@ -156,9 +156,21 @@ jobs:
         working-directory: desktop/src-tauri
         run: cargo tauri build --bundles deb,appimage
 
-      - name: Smoke test the staged resources
-        # Same tree the bundles embed (bundle.resources copies resources/*).
-        run: bash desktop/scripts/smoke.sh desktop/src-tauri/resources
+      - name: Smoke test the resources embedded in the AppImage
+        # The staged tree passing smoke says nothing about what tauri COPIED
+        # into the bundle (a bad resources glob once shipped an empty app), so
+        # extract the AppImage and boot THAT tree: probe the heavy pieces for a
+        # fast clear failure, then run the full pg->alembic->uvicorn smoke.
+        run: |
+          ./desktop/src-tauri/target/release/bundle/appimage/*.AppImage --appimage-extract >/dev/null
+          RES=$(find squashfs-root -type d -name resources | head -1)
+          test -n "$RES" || { echo "no resources dir in AppImage"; exit 1; }
+          for probe in models/e5-small/model.onnx pg/bin/postgres python/bin/python3.12 web/server.js api/alembic.ini; do
+            test -e "$RES/$probe" || { echo "MISSING from bundle: $probe"; exit 1; }
+          done
+          du -sh "$RES"
+          bash desktop/scripts/smoke.sh "$RES"
+          rm -rf squashfs-root
 
       - name: Collect bundles
         run: |
