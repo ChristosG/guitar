@@ -75,7 +75,9 @@ if [ ! -d "$PGV_SRC" ]; then
   git clone --depth 1 --branch "$PGVECTOR_TAG" https://github.com/pgvector/pgvector.git "$PGV_SRC"
 fi
 log "building pgvector against the bundled pg_config (portable: OPTFLAGS='')"
-make -C "$PGV_SRC" clean >/dev/null
+# PG_CONFIG on `clean` too: pgvector's Makefile resolves PGXS via pg_config
+# even for clean, and a mac runner has no host pg_config to fall back on.
+make -C "$PGV_SRC" clean PG_CONFIG="$PG_OUT/bin/pg_config" >/dev/null
 make -C "$PGV_SRC" -j"$(getconf _NPROCESSORS_ONLN)" \
   PG_CONFIG="$PG_OUT/bin/pg_config" OPTFLAGS=""
 make -C "$PGV_SRC" install PG_CONFIG="$PG_OUT/bin/pg_config" OPTFLAGS="" >/dev/null
