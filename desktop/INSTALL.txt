@@ -1,0 +1,50 @@
+GuitarTutor — Οδηγίες εγκατάστασης / Installation guide
+========================================================
+
+ΕΛΛΗΝΙΚΑ
+--------
+
+1. Σύρετε το GuitarTutor.app στον φάκελο "Εφαρμογές" (Applications).
+
+2. Πρώτο άνοιγμα σε macOS 15 ή νεότερο: η εφαρμογή δεν είναι υπογεγραμμένη
+   από την Apple, οπότε το πρώτο διπλό κλικ θα εμφανίσει μήνυμα αποκλεισμού.
+   Πηγαίνετε: Ρυθμίσεις Συστήματος → Απόρρητο & Ασφάλεια → κάτω-κάτω πατήστε
+   «Άνοιγμα ούτως ή άλλως» (Open Anyway) και επιβεβαιώστε.
+
+   Αν το κουμπί δεν εμφανίζεται, ανοίξτε το Terminal και εκτελέστε:
+
+       xattr -dr com.apple.quarantine /Applications/GuitarTutor.app
+
+   και ανοίξτε ξανά την εφαρμογή.
+
+3. Την πρώτη φορά η εκκίνηση αργεί λίγο (δημιουργείται η βάση δεδομένων).
+   Μετά, ανοίξτε τις Ρυθμίσεις μέσα στην εφαρμογή και επικολλήστε το κλειδί
+   Anthropic API σας.
+
+4. Τα δεδομένα σας (βιβλία, μαθήματα, συνομιλίες) ζουν στο:
+       ~/Library/Application Support/GuitarTutor
+   και ΔΕΝ χάνονται όταν ενημερώνετε την εφαρμογή — απλώς σύρετε τη νέα
+   έκδοση πάνω στην παλιά στον φάκελο "Εφαρμογές" και αντικαταστήστε την.
+
+ENGLISH
+-------
+
+1. Drag GuitarTutor.app into the Applications folder.
+
+2. First launch on macOS 15 or newer: the app is not Apple-notarized, so the
+   first double-click shows a "blocked" dialog. Go to: System Settings →
+   Privacy & Security → scroll to the bottom → click "Open Anyway" and confirm.
+
+   If the button does not appear, open Terminal and run:
+
+       xattr -dr com.apple.quarantine /Applications/GuitarTutor.app
+
+   then open the app again.
+
+3. The very first start takes a little longer (the database is being created).
+   Afterwards, open Settings inside the app and paste your Anthropic API key.
+
+4. Your data (books, lessons, chats) lives in:
+       ~/Library/Application Support/GuitarTutor
+   and SURVIVES updates — just drag the new version over the old one in
+   Applications and replace it.

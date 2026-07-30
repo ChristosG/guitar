@@ -1,0 +1,54 @@
+<!doctype html>
+<!-- The ONE non-localhost page the app ever shows: bundled as a Tauri asset and
+     served from the app's own asset protocol. The shell drives it by calling
+     window.setStatus('<key>') via webview eval between boot steps. -->
+<html lang="el">
+<head>
+<meta charset="utf-8">
+<title>GuitarTutor</title>
+<style>
+  html, body { margin: 0; height: 100%; }
+  body {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 18px; background: #1f2233; color: #dee0eb;
+    font-family: -apple-system, "Segoe UI", Ubuntu, Cantarell, sans-serif;
+    -webkit-user-select: none; user-select: none; cursor: default; overflow: hidden;
+  }
+  .logo { width: 72px; height: 72px; border-radius: 16px; background: #161826;
+          display: flex; align-items: center; justify-content: center; }
+  .ring { width: 40px; height: 40px; border-radius: 50%; border: 7px solid #e8a33d; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0; letter-spacing: .4px; }
+  .spinner { width: 22px; height: 22px; border: 3px solid #3a3f5c; border-top-color: #e8a33d;
+             border-radius: 50%; animation: spin 0.9s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .status { text-align: center; line-height: 1.5; min-height: 3em; }
+  .status .el { font-size: 14px; }
+  .status .en { font-size: 12px; color: #8b90ad; }
+</style>
+</head>
+<body>
+  <div class="logo"><div class="ring"></div></div>
+  <h1>GuitarTutor</h1>
+  <div class="spinner"></div>
+  <div class="status"><div class="el" id="el">Εκκίνηση…</div><div class="en" id="en">Starting…</div></div>
+<script>
+  const STATES = {
+    checking: ["Έλεγχος συστήματος…",                    "Checking the system…"],
+    firstrun: ["Πρώτη εκκίνηση — δημιουργία βάσης δεδομένων…", "First run — creating the database…"],
+    db:       ["Εκκίνηση βάσης δεδομένων…",              "Starting the database…"],
+    seeding:  ["Εγκατάσταση αρχικών δεδομένων…",         "Installing starter data…"],
+    migrate:  ["Ενημέρωση της βάσης δεδομένων…",         "Updating the database…"],
+    api:      ["Εκκίνηση του διακομιστή της εφαρμογής…", "Starting the app server…"],
+    web:      ["Εκκίνηση του περιβάλλοντος…",            "Starting the interface…"],
+    waiting:  ["Σχεδόν έτοιμο…",                         "Almost ready…"],
+    restart:  ["Επανεκκίνηση του backend…",              "Restarting the backend…"],
+  };
+  window.setStatus = function (key) {
+    const s = STATES[key];
+    if (!s) return;
+    document.getElementById("el").textContent = s[0];
+    document.getElementById("en").textContent = s[1];
+  };
+</script>
+</body>
+</html>

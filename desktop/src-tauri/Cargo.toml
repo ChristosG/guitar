@@ -1,0 +1,31 @@
+[package]
+name = "guitartutor"
+version = "0.1.0"
+description = "GuitarTutor desktop shell — supervises the bundled Postgres, Python API and Next.js runtimes"
+edition = "2021"
+rust-version = "1.77"
+license = "UNLICENSED"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Health polls only ever hit 127.0.0.1 over plain http, so no TLS stack.
+ureq = { version = "2", default-features = false, features = ["json"] }
+# APP_SECRET / ENCRYPTION_SECRET generation (64 hex chars from the OS CSPRNG).
+getrandom = "0.2"
+# SIGTERM/SIGKILL for the supervised children (macOS + Linux only — no Windows).
+libc = "0.2"
+
+[profile.release]
+# The bundle is dominated by resources/ (~1.5 GB); still, keep the shell small.
+strip = true
+lto = true
+codegen-units = 1

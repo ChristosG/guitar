@@ -1,0 +1,5 @@
+src-tauri/target/
+src-tauri/resources/*
+!src-tauri/resources/.gitkeep
+.cache/
+seed.tar.gz
