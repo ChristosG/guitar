@@ -29,6 +29,7 @@ import pytest
 
 import app.routers.backup as backup
 from app.models.generation_job import GenerationJob
+from app.routers.backup import SUPERSEDED_ARCNAME, SUPERSEDED_MEDIA_PREFIX
 
 # --------------------------------------------------------------------------
 # helpers
@@ -64,6 +65,7 @@ def make_archive(
     db_dump: bytes | None = b"PGDMP fake",
     manifest: dict | None = None,
     media: dict[str, bytes] | None = None,
+    superseded: dict[str, dict[str, bytes]] | None = None,
     extra_member: str | None = None,
 ) -> bytes:
     """A small in-memory archive in exactly make-seed.sh's shape."""
@@ -87,6 +89,9 @@ def make_archive(
         tar.addfile(dir_info)
         for name, data in (media or {}).items():
             add(f"media/{name}", data)
+        for folder, files in (superseded or {}).items():
+            for name, data in files.items():
+                add(f"superseded/{folder}/{name}", data)
         if extra_member is not None:
             add(extra_member, b"evil")
     return buf.getvalue()
@@ -142,7 +147,14 @@ def test_export_builds_the_seed_format_archive(client, media_dir, monkeypatch):
         assert tar.extractfile("media/0001.jpg").read() == b"old-scan"
         assert tar.extractfile("db.dump").read() == b"PGDMP fake dump bytes"
         manifest = json.load(tar.extractfile("manifest.json"))
-    assert set(manifest) == {"created", "app_commit", "pg_major", "schema"}
+    assert set(manifest) == {
+        "created", "app_commit", "pg_major", "schema", "superseded_media",
+    }
+    # Present and empty on a healthy install — the field's ABSENCE means "an
+    # older build wrote this archive", never "there were none".
+    assert manifest["superseded_media"] == []
+    assert SUPERSEDED_ARCNAME not in " ".join(names), \
+        "nothing to carry, so no superseded/ folder is invented"
     assert manifest["app_commit"] == "deadbeef"
     assert manifest["pg_major"] == 16      # the real test server
     assert manifest["schema"] is None      # create_all test DB has no alembic_version
@@ -174,6 +186,99 @@ def test_export_pg_dump_failure_reports_stderr(client, media_dir, monkeypatch):
     detail = res.json()["detail"]
     assert detail["code"] == "export_failed"
     assert "boom" in detail["message"]
+
+
+# --------------------------------------------------------------------------
+# the displaced-library case
+# --------------------------------------------------------------------------
+
+def _displace(media_dir, stamp: str, books: dict[str, bytes]) -> Path:
+    """What the desktop shell leaves behind when it sets a library aside: a
+    SIBLING of media_dir named media_superseded_<stamp>. It never deletes."""
+    d = media_dir.parent / f"{SUPERSEDED_MEDIA_PREFIX}{stamp}"
+    d.mkdir()
+    for name, data in books.items():
+        (d / name).parent.mkdir(parents=True, exist_ok=True)
+        (d / name).write_bytes(data)
+    return d
+
+
+def test_export_carries_a_displaced_library_and_says_so(client, media_dir, monkeypatch):
+    """THE BUG: `media_dir` held the STARTER library and his five books were in
+    a `media_superseded_*` SIBLING, which the export did not look at. A backup
+    taken after a bad reseed therefore contained the wrong library, silently,
+    at the exact moment he most needed one that worked.
+    """
+    monkeypatch.setattr(backup, "_run", FakeRun())
+    _displace(media_dir, "20260730T142530Z",
+              {"aaaa/source.pdf": b"HIS ONLY COPY", "aaaa/0001.jpg": b"his page"})
+
+    res = client.get("/backup/export")
+    assert res.status_code == 200
+    with tarfile.open(fileobj=io.BytesIO(res.content), mode="r:gz") as tar:
+        names = tar.getnames()
+        # His books are in the archive…
+        member = f"{SUPERSEDED_ARCNAME}/{SUPERSEDED_MEDIA_PREFIX}20260730T142530Z/aaaa/source.pdf"
+        assert member in names, names
+        assert tar.extractfile(member).read() == b"HIS ONLY COPY"
+        # …NOT merged into media/, which is what a restore installs over the
+        # live tree and which this db.dump does not index.
+        assert not any(n.startswith("media/aaaa") for n in names), names
+        assert "media/0001.jpg" in names, "the live tree is still exported as media/"
+        # …and the archive describes itself, so nobody has to infer any of this.
+        manifest = json.load(tar.extractfile("manifest.json"))
+        assert manifest["superseded_media"] == [
+            {"name": f"{SUPERSEDED_MEDIA_PREFIX}20260730T142530Z",
+             "bytes": len(b"HIS ONLY COPY") + len(b"his page")}
+        ]
+        note = tar.extractfile("READ-ME-superseded.txt").read().decode("utf-8")
+    assert "does not ignore" not in note.lower()
+    assert any("\u0370" <= c <= "\u03ff" for c in note), "Greek half"
+    assert "DOES NOT INDEX" in note
+
+
+def test_a_restore_puts_a_displaced_library_back_and_never_overwrites_one(
+    client, media_dir, monkeypatch
+):
+    """The other half. Extracting `superseded/` into a temp dir and throwing it
+    away with the temp dir would turn "restore my backup" into a silent delete
+    of the very library the export went out of its way to carry.
+    """
+    monkeypatch.setattr(backup, "_run", FakeRun())
+    monkeypatch.setattr(backup, "_run_alembic_upgrade", lambda: None)
+    name = f"{SUPERSEDED_MEDIA_PREFIX}20260730T142530Z"
+    mine = _displace(media_dir, "20260101T000000Z", {"keep.pdf": b"ALREADY HERE"})
+
+    archive = make_archive(
+        media={"0002.jpg": b"restored-scan"},
+        superseded={
+            name: {"aaaa/source.pdf": b"HIS ONLY COPY"},
+            # A folder of the SAME name as one already on this machine. The one
+            # on disk is his data and this app did not put it there in this
+            # request; it must survive untouched.
+            mine.name: {"keep.pdf": b"FROM THE ARCHIVE"},
+        },
+    )
+    assert post_restore(client, archive).status_code == 200
+
+    back = media_dir.parent / name
+    assert (back / "aaaa/source.pdf").read_bytes() == b"HIS ONLY COPY"
+    assert (mine / "keep.pdf").read_bytes() == b"ALREADY HERE", "never overwritten"
+    assert (media_dir / "0002.jpg").read_bytes() == b"restored-scan"
+
+
+def test_restore_ignores_a_superseded_entry_it_did_not_write(
+    client, media_dir, monkeypatch
+):
+    """`_restore_superseded` turns an archive entry into a path OUTSIDE the
+    extraction directory, so it gets its own name check on top of the
+    archive-wide one."""
+    monkeypatch.setattr(backup, "_run", FakeRun())
+    monkeypatch.setattr(backup, "_run_alembic_upgrade", lambda: None)
+
+    archive = make_archive(superseded={"not-ours": {"x.txt": b"nope"}})
+    assert post_restore(client, archive).status_code == 200
+    assert not (media_dir.parent / "not-ours").exists()
 
 
 # --------------------------------------------------------------------------

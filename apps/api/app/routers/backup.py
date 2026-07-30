@@ -7,7 +7,45 @@ seed = backup = restore are a single format and a single restore path:
     guitar-backup-YYYY-MM-DD.tar.gz
     ├── db.dump         pg_dump -Fc of the whole database (custom format)
     ├── media/          settings.media_dir, whole (page scans)
-    └── manifest.json   {created, app_commit, pg_major, schema}
+    ├── superseded/     <data>/media_superseded_* — ONLY when they exist; see below
+    └── manifest.json   {created, app_commit, pg_major, schema, superseded_media}
+
+THE DISPLACED-LIBRARY CASE, and why `superseded/` is in the archive at all.
+The desktop shell never deletes the tutor's data: when it has to get a database
+out of the way it renames it, and it renames `<data>/media` alongside it as
+`<data>/media_superseded_<stamp>` (`desktop/src-tauri/src/firstrun.rs`). Those
+folders are SIBLINGS of `settings.media_dir`, not children, so a backup that
+tarred only `media_dir` captured the STARTER library and not his — silently,
+confidently, and at the exact moment he most needs a backup that works.
+
+Two ways to close that, and this file takes the second:
+
+  * REFUSE while any of them exist. Rejected. `GET /backup/export` is reached
+    from a plain `<a href>` download in the settings page (see
+    `apps/web/src/components/settings/backup-card.tsx`), so a 409 renders as a
+    raw JSON body in the webview — an incomprehensible failure, traded for a
+    silently wrong one, at the worst possible moment.
+  * EXPORT THEM, under `superseded/<name>/`, and say so in the manifest. That is
+    what happens.
+
+Why NOT merged into `media/`: `media/` is what restore installs over
+`settings.media_dir`, and the `db.dump` in the same archive does not index these
+files. Merging them would make every restore re-orphan the lot on the next boot
+sweep. `superseded/` keeps them recoverable by a human without letting an
+automated restore invent a pairing — and restore puts them back beside
+`media_dir` exactly where it found them, never overwriting one that is already
+there.
+
+Size, which is the real objection. The tutor's Mac has 8GB of RAM and not much
+spare disk, and a `media_superseded_*` folder is a whole library. Three things
+make it acceptable: the archive is built on disk and streamed from disk
+(`FileResponse`), so RAM is not the constraint at any size; a displaced library
+is the SAME library `media/` would have held on a healthy install, so the
+archive is its normal size plus a starter library rather than double; and the
+shell's displacement path closes permanently once one first run completes, so
+"several of them at once" is a crash-loop artefact and not a steady state. A
+backup that is large is a solvable problem. A backup that quietly contains the
+wrong library is not a problem anyone will notice until it is too late.
 
 `manifest.schema` is the alembic revision the database was at when the backup
 was taken (read from its `alembic_version` table; null when that table does not
@@ -129,6 +167,70 @@ def _run(argv: list[str], env: dict[str, str]) -> subprocess.CompletedProcess:
     return subprocess.run(argv, env=env, capture_output=True, text=True)
 
 
+# The desktop shell's prefix for a media tree it renamed out of the way. Kept in
+# step with `SUPERSEDED_MEDIA_PREFIX` in `desktop/src-tauri/src/firstrun.rs` —
+# the two are one contract and the shell's recovery note names this shape.
+SUPERSEDED_MEDIA_PREFIX = "media_superseded_"
+
+# What the archive carries them as. Deliberately NOT `media/`: see the module
+# docstring.
+SUPERSEDED_ARCNAME = "superseded"
+
+_SUPERSEDED_NOTE = "READ-ME-superseded.txt"
+
+_SUPERSEDED_NOTE_TEXT = """\
+ΜΗΝ ΑΓΝΟΗΣΕΤΕ ΑΥΤΟΝ ΤΟΝ ΦΑΚΕΛΟ — DO NOT IGNORE THIS FOLDER
+
+Αυτό το αντίγραφο ασφαλείας περιέχει ΚΑΙ αρχεία που το GuitarTutor είχε βάλει
+στην άκρη (φάκελος "superseded"). Δεν χάθηκε τίποτα — αλλά σημαίνει ότι κάποια
+στιγμή η βάση δεδομένων και τα αρχεία σας είχαν χωριστεί. Δείξτε αυτό το αρχείο
+σε όποιον σας υποστηρίζει.
+
+---
+
+This backup contains a "superseded/" folder as well as "media/".
+
+That means the machine it was taken from had one or more
+"media_superseded_<timestamp>" folders beside its live media folder: the desktop
+app had set a library aside (it never deletes) and had not been given it back.
+THE db.dump IN THIS ARCHIVE DOES NOT INDEX THE FILES IN "superseded/" — that is
+precisely why they are not in "media/", and why restoring this archive will not
+put them into service on its own.
+
+Restoring this archive puts each "superseded/<name>" back beside the live media
+folder under its own name, exactly where it was found, and never overwrites one
+that is already there. Pairing it back up with the database it belongs to is a
+human decision: read "READ-ME-superseded-data.txt" in the app's data folder,
+which records what was set aside, when, and what it goes with.
+"""
+
+
+def _displaced_media_dirs() -> list[Path]:
+    """`<media_dir>/../media_superseded_*` — the libraries the desktop shell has
+    renamed out of the way and not yet been given back.
+
+    Siblings, not children, which is the whole reason they were being missed.
+    Symlinks are skipped: this list is fed to `tar.add`, and following a link
+    out of the data folder is not something an export gets to do.
+    """
+    media_dir = Path(settings.media_dir)
+    parent = media_dir.parent
+    if not parent.is_dir():
+        return []
+    found = [
+        p
+        for p in parent.iterdir()
+        if p.name.startswith(SUPERSEDED_MEDIA_PREFIX)
+        and p.is_dir()
+        and not p.is_symlink()
+    ]
+    return sorted(found, key=lambda p: p.name)
+
+
+def _tree_bytes(root: Path) -> int:
+    return sum(f.stat().st_size for f in root.rglob("*") if f.is_file())
+
+
 # --------------------------------------------------------------------------
 # EXPORT
 # --------------------------------------------------------------------------
@@ -166,6 +268,11 @@ def export_backup(db: Session = Depends(get_db)) -> FileResponse:
         if proc.returncode != 0:
             raise _err(409, "export_failed", f"pg_dump failed: {proc.stderr[-2000:]}")
 
+        # The libraries the desktop shell has set aside and not been given back.
+        # Enumerated BEFORE the manifest so the archive can describe itself: a
+        # backup that carries these is not an ordinary backup, and the one thing
+        # it must never be is quiet about it.
+        displaced = _displaced_media_dirs()
         manifest = {
             "created": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             # Best effort, never a `git` subprocess: the deployed containers and
@@ -173,7 +280,23 @@ def export_backup(db: Session = Depends(get_db)) -> FileResponse:
             "app_commit": os.environ.get("APP_COMMIT", "unknown"),
             "pg_major": _server_pg_major(db),
             "schema": _db_schema_rev(db),
+            # Empty list on every healthy install, which is also every docker
+            # deployment. Present either way so the field's absence means "an
+            # older build wrote this", not "there were none".
+            "superseded_media": [
+                {"name": d.name, "bytes": _tree_bytes(d)} for d in displaced
+            ],
         }
+        if displaced:
+            log.warning(
+                "backup: this install has %d set-aside media folder(s) (%s) — "
+                "including them in the archive under %s/. The db.dump does NOT "
+                "index them; see the archive's %s.",
+                len(displaced),
+                ", ".join(d.name for d in displaced),
+                SUPERSEDED_ARCNAME,
+                _SUPERSEDED_NOTE,
+            )
 
         archive_path = Path(tmpdir) / "backup.tar.gz"
         with tarfile.open(archive_path, "w:gz") as tar:
@@ -187,6 +310,16 @@ def export_backup(db: Session = Depends(get_db)) -> FileResponse:
                 info.type = tarfile.DIRTYPE
                 info.mode = 0o755
                 tar.addfile(info)
+            # …and everything that was displaced away from it, under its own
+            # name, NOT merged into `media/`. Merging would hand a restore a
+            # library its `db.dump` cannot name, which the next boot sweep would
+            # quarantine straight back out again.
+            for d in displaced:
+                tar.add(d, arcname=f"{SUPERSEDED_ARCNAME}/{d.name}")
+            if displaced:
+                note_path = Path(tmpdir) / _SUPERSEDED_NOTE
+                note_path.write_text(_SUPERSEDED_NOTE_TEXT, encoding="utf-8")
+                tar.add(note_path, arcname=_SUPERSEDED_NOTE)
             manifest_path = Path(tmpdir) / "manifest.json"
             manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
             tar.add(manifest_path, arcname="manifest.json")
@@ -343,6 +476,12 @@ def restore_backup(file: UploadFile = File(...), db: Session = Depends(get_db)) 
 
             # ---- (c) media swap ------------------------------------------
             _swap_media(extract_dir / "media")
+            # …and (d) put back anything the archive carried under
+            # `superseded/`. Without this the restore would silently DELETE a
+            # displaced library — it would be extracted into the temp dir and
+            # thrown away with it — which is the same failure as the export bug
+            # this section exists to fix, one step further along.
+            _restore_superseded(extract_dir / SUPERSEDED_ARCNAME)
 
         # The BM25 index self-heals: its staleness fingerprint no longer matches
         # the restored corpus, so the next search rebuilds it. Nothing to do.
@@ -350,6 +489,47 @@ def restore_backup(file: UploadFile = File(...), db: Session = Depends(get_db)) 
         return {"ok": True, "restored_manifest": manifest}
     finally:
         _LOCK.release()
+
+
+def _restore_superseded(staged: Path) -> None:
+    """Put each `superseded/<name>` back beside `settings.media_dir` under its
+    own name.
+
+    NEVER OVERWRITES. A `media_superseded_*` folder already on this machine is
+    the tutor's data that this app did not put there in this request, and the
+    one thing a restore may not do is replace it with a same-named folder out of
+    an archive. Colliding entries are left in place and logged; the archive can
+    be unpacked by hand.
+
+    Names are checked here as well as by `_validate_member_name`: this one turns
+    an archive entry into a path OUTSIDE the extraction directory, so it gets
+    its own belt. Only `media_superseded_*`, only a single path component.
+    """
+    if not staged.is_dir():
+        return
+    dest_parent = Path(settings.media_dir).parent
+    dest_parent.mkdir(parents=True, exist_ok=True)
+    for entry in sorted(staged.iterdir()):
+        name = entry.name
+        if (
+            not entry.is_dir()
+            or entry.is_symlink()
+            or not name.startswith(SUPERSEDED_MEDIA_PREFIX)
+            or name != Path(name).name
+            or name in (".", "..")
+        ):
+            log.warning("restore: ignoring unexpected %s/%s", SUPERSEDED_ARCNAME, name)
+            continue
+        target = dest_parent / name
+        if target.exists():
+            log.warning(
+                "restore: %s already exists — left exactly as it is, and the copy "
+                "in the archive was NOT unpacked over it",
+                target,
+            )
+            continue
+        shutil.move(str(entry), str(target))
+        log.info("restore: put the set-aside media folder %s back", target)
 
 
 def _swap_media(new_media: Path) -> None:

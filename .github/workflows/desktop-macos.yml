@@ -1,9 +1,16 @@
 # GuitarTutor desktop — macOS (Apple Silicon) bundle.
 #
-# NOTE: no pytest gate in this workflow. apps/api/tests/conftest.py hardcodes
-# DATABASE_URL to postgres at localhost:5434 and rebuilds the schema per run —
-# the suite HARD-REQUIRES a pgvector Postgres, and macOS runners have no Docker.
-# The gate lives in desktop-linux.yml with a pgvector/pgvector:pg16 service.
+# NOTE: the only test in this workflow is the bundle smoke test, which HAS to
+# run per-platform. Every other gate lives in desktop-linux.yml, which this job
+# does not wait for (the two workflows are independent; a red gate there blocks
+# the Linux artifact and is meant to be read as "this commit is broken", macOS
+# .dmg included).
+#   - pytest: apps/api/tests/conftest.py hardcodes DATABASE_URL to postgres at
+#     localhost:5434 and rebuilds the schema per run — it HARD-REQUIRES a
+#     pgvector Postgres, and macOS runners have no Docker.
+#   - cargo test, the `__GT_API_BASE__` Rust<->TypeScript contract gate and the
+#     hermetic Playwright suite are all platform-independent; running them a
+#     second time here would only double the failure surface.
 name: desktop-macos
 
 on:
@@ -124,6 +131,10 @@ jobs:
           echo "APP=$APP" >> "$GITHUB_ENV"
 
       - name: Smoke test the bundled resources
+        # Boots what the bundler actually copied, not the staged tree. It needs
+        # no app port: smoke scans its own high ranges (pg 54410-54430, api
+        # 18791-18811), so the pair the shell derives at boot — whatever it
+        # turns out to be — is never involved.
         run: bash desktop/scripts/smoke.sh "$APP/Contents/Resources/resources"
 
       - name: Package dmg

@@ -29,18 +29,132 @@
  *
  * `NEXT_PUBLIC_API_BASE` still wins if set — it is the escape hatch for a
  * deployment whose API is not at `guitar-api.<domain>`.
+ *
+ * AND THE PORT IS A RUNTIME FACT TOO — that is what the DESKTOP build added.
+ *
+ * The Tauri shell ships this same bundle, but it cannot ship the same PORTS:
+ * :8790/:8791 belong to whoever grabbed them first on the tutor's laptop, so
+ * the shell picks two FREE ports at launch and only then knows where its own
+ * API child is listening. The origin rule below would answer `:8791` with
+ * total confidence — a port with nothing behind it, or worse, someone else's
+ * server. Same lesson as above, one step further: don't guess a fact, read it.
+ * The shell states it as `window.__GT_API_BASE__ = "http://localhost:<port>"`
+ * via `initialization_script`, which runs BEFORE any page script — which is
+ * also why reading it once into the module-level `API_BASE` below is correct
+ * rather than lucky.
+ *
+ * Three rules, highest precedence first:
+ *   1. `window.__GT_API_BASE__` — desktop only; the shell is the only thing
+ *      that can know which ports it won. ONLY HONOURED ON A LOCAL ORIGIN
+ *      (see `isLoopbackHost`).
+ *   2. `NEXT_PUBLIC_API_BASE`   — the escape hatch above, baked into the client
+ *      bundle at build time (on the SERVER the same read is a runtime one —
+ *      `envApiBase` explains where that difference bites).
+ *   3. the page's own origin    — localhost -> :8791, `guitar.X` ->
+ *      `guitar-api.X`. Unchanged; this is still what the webapp uses.
+ *
+ * A malformed injection (absent, empty, not a string) falls THROUGH to 2/3
+ * instead of being trusted: degrading to today's behaviour produces a
+ * comprehensible bug report, whereas `undefined/knowledge/sources` produces a
+ * mystery.
+ *
+ * NOTHING HERE MAY BE RENDERED INTO SERVER HTML. All three rules are runtime
+ * facts, and two of them need a `window` the server does not have — so a server
+ * render can only ever produce rule 2's value or the `:8791` default. React does
+ * NOT repair a mismatched attribute during hydration (it says so itself: "some
+ * attributes of the server rendered HTML didn't match the client properties.
+ * This won't be patched up."), so an `API_BASE`-derived URL baked into JSX keeps
+ * the SERVER's guess forever. That is not hypothetical: `backup-card.tsx`'s
+ * export anchor did exactly this, which pointed the deployed site's only backup
+ * button at each VISITOR's own `http://localhost:8791` and the desktop app's at
+ * a port it does not own. See `serverBackupExportUrl` for the shape a rendered
+ * URL has to take instead.
  */
+
+/** Trailing slashes off, because every caller builds `${API_BASE}${path}` and
+ * `//knowledge/sources` is a different, 404-ing path to FastAPI. Applied to
+ * rule 1 AND rule 2 — a hand-typed `NEXT_PUBLIC_API_BASE=https://host/` is at
+ * least as likely to carry one as the shell's injection is. */
+function normalizeBase(value: string): string {
+  return value.trim().replace(/\/+$/, "");
+}
+
+/** Rule 2 alone, normalized; `null` when unset or blank so callers can fall
+ * through to rule 3.
+ *
+ * The two halves of the app read this from two different places, which matters
+ * exactly once (see `serverBackupExportUrl`). In the BROWSER there is no
+ * `process.env` to read at all — Next bakes the value into the client bundle at
+ * BUILD time, which is why changing it there means a rebuild. On the SERVER the
+ * same expression stays a live `process.env` lookup, answered per request out of
+ * the node process's own environment: a production `next start` whose env
+ * exports `NEXT_PUBLIC_API_BASE`, on a bundle built WITHOUT it, renders that
+ * runtime value into the SSR HTML.
+ *
+ * They agree in every shape this repo ships, but by arrangement rather than by
+ * language rule: `docker-compose.yml` feeds both halves from the same root
+ * `.env` (build ARG for the client bundle, `env_file` for the server), and
+ * `desktop/scripts/stage-web.sh` unsets it deliberately so neither half has one.
+ * Editing `.env` and restarting WITHOUT rebuilding `web` is what pulls them
+ * apart — the same caveat docker-compose.yml already spells out. */
+function envApiBase(): string | null {
+  const raw = process.env.NEXT_PUBLIC_API_BASE;
+  if (typeof raw !== "string") return null;
+  return normalizeBase(raw) || null;
+}
+
+/** Is this page served from the tutor's own machine? The desktop shell always
+ * loads `http://localhost:<web port>` — literal `localhost`, which
+ * `desktop/src-tauri/src/main.rs` calls out as load-bearing for the session
+ * cookie — so this gate never costs the desktop anything.
+ *
+ * It is the same test rule 3 uses to pick `:8791`, deliberately: one definition
+ * of "local", so the two rules can never disagree about where they are. */
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "127.0.0.1";
+}
+
+/** The base a SERVER render can know: no `window`, so rules 1 and 3 are both
+ * unavailable and only the `NEXT_PUBLIC_API_BASE` escape hatch — read from the
+ * server's own environment at request time, see `envApiBase` — plus the dev
+ * default remains. Used by the SSR branch below AND by `serverBackupExportUrl`,
+ * so the two are the same string BY CONSTRUCTION rather than by a comment asking
+ * someone to keep them in sync. */
+function serverApiBase(): string {
+  return envApiBase() ?? "http://localhost:8791";
+}
 
 function resolveApiBase(): string {
   // SSR/build: there is no `window`. next-intl renders these pages on the
   // server, so this branch is real, not defensive.
   if (typeof window === "undefined") {
-    return process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8791";
+    return serverApiBase();
   }
-  if (process.env.NEXT_PUBLIC_API_BASE) return process.env.NEXT_PUBLIC_API_BASE;
 
+  // Rule 1 — the desktop shell's runtime truth, GATED ON A LOCAL ORIGIN.
+  //
+  // The gate is the security half of this rule. One bundle ships to both the
+  // Tauri shell and `guitar.cgrigoriadis.online`, and `API_BASE` is where every
+  // credentialed request goes — including the login POST. Ungated, any script
+  // that ran for a moment on the public site (an injected tag, a bad dependency,
+  // a stored-XSS sink) could set one global before this module evaluates and
+  // silently redirect the tutor's password and session to its own host, with no
+  // navigation and nothing visible to see. A local origin is the only place the
+  // global can legitimately come from — the shell is the thing that serves the
+  // page there — so honouring it anywhere else buys nothing and costs that.
+  const injected = window.__GT_API_BASE__;
+  if (typeof injected === "string" && isLoopbackHost(window.location.hostname)) {
+    const base = normalizeBase(injected);
+    if (base !== "") return base;
+  }
+
+  // Rule 2 — the build-time escape hatch.
+  const fromEnv = envApiBase();
+  if (fromEnv) return fromEnv;
+
+  // Rule 3 — the page's own origin.
   const { protocol, hostname } = window.location;
-  if (hostname === "localhost" || hostname === "127.0.0.1") {
+  if (isLoopbackHost(hostname)) {
     // Cookies ignore the PORT, so a host-only cookie set by the API on :8791 is
     // sent to the app on :8790. Same site, no CORS credential problem.
     return `${protocol}//${hostname}:8791`;
@@ -2452,6 +2566,46 @@ export interface RestoreBackupOut {
  * which is exactly what `gt_session` is. */
 export function backupExportUrl(): string {
   return `${API_BASE}/backup/export`;
+}
+
+/** The same URL as a SERVER render produces it — and the ONLY thing that may be
+ * put in the anchor's `href` on the first client render.
+ *
+ * This exists because a rendered URL and a fetched URL are not the same kind of
+ * fact. A fetch happens in the browser, where `API_BASE` is right. An `href` is
+ * decided while the HTML is being produced, and the first render happens on the
+ * SERVER, where there is no `window`: rules 1 and 3 cannot run, so the server
+ * cannot see the shell's injected base OR the origin the page will be served
+ * under. React then refuses to patch a hydration attribute mismatch — so
+ * whatever the server guessed is what the tutor clicks, forever.
+ *
+ * NOT, as this comment used to claim, because `NEXT_PUBLIC_API_BASE` is a
+ * build-time constant on both sides. IT IS NOT: on the server it is a live
+ * `process.env` read (`envApiBase` has the details), and a production
+ * `next start` with the variable exported at run time renders that runtime value
+ * straight into this href. The premise was false; the function is still right,
+ * for a plainer reason.
+ *
+ * That reason: BOTH SIDES CALL THIS SAME FUNCTION for the one render hydration
+ * compares. The server renders it, and the client's first render returns it too
+ * (`backup-card.tsx` feeds it to `useSyncExternalStore` as the server snapshot),
+ * so the markup matches by construction — and the anchor is a real, focusable,
+ * right-clickable link from the first paint rather than an href-less stub. Only
+ * once hydration is done does the client read `backupExportUrl()` and update the
+ * attribute for real, which React DOES apply, because by then it is reconciling
+ * against its own previous render rather than against server HTML.
+ *
+ * The one way the two sides can still disagree falls out of the same asymmetry:
+ * a deployment that sets `NEXT_PUBLIC_API_BASE` at RUN time on a bundle built
+ * without it renders one base and hydrates another, which costs one React
+ * hydration warning on this attribute — and then the post-hydration swap lands
+ * on the right URL anyway.
+ *
+ * `backup-card.tsx` is the one caller; the pre-hydration window this leaves open
+ * — a click before hydration follows the SERVER's base — is argued out in full
+ * on `exportUrl` there, including why nothing can close it. */
+export function serverBackupExportUrl(): string {
+  return `${serverApiBase()}/backup/export`;
 }
 
 /** Upload a backup archive and REPLACE ALL DATA with its contents. The server

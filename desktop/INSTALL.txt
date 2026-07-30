@@ -18,8 +18,12 @@ GuitarTutor — Οδηγίες εγκατάστασης / Installation guide
    και ανοίξτε ξανά την εφαρμογή.
 
 3. Την πρώτη φορά η εκκίνηση αργεί λίγο (δημιουργείται η βάση δεδομένων).
-   Μετά, ανοίξτε τις Ρυθμίσεις μέσα στην εφαρμογή και επικολλήστε το κλειδί
-   Anthropic API σας.
+   Συνήθως ξεκινά κανονικά ακόμη κι αν έχετε ανοιχτά άλλα προγράμματα —
+   προσαρμόζεται μόνο του σε ό,τι ήδη τρέχει στον υπολογιστή. Αν κάποια φορά
+   σας πει ότι δεν μπορεί να ξεκινήσει, κλείστε τελείως το GuitarTutor αν
+   είναι ήδη ανοιχτό (Command-Q) ή κάντε επανεκκίνηση του Mac, και
+   δοκιμάστε ξανά. Μετά, ανοίξτε τις Ρυθμίσεις μέσα στην εφαρμογή και
+   επικολλήστε το κλειδί Anthropic API σας.
 
 4. Τα δεδομένα σας (βιβλία, μαθήματα, συνομιλίες) ζουν στο:
        ~/Library/Application Support/GuitarTutor
@@ -42,7 +46,11 @@ ENGLISH
    then open the app again.
 
 3. The very first start takes a little longer (the database is being created).
-   Afterwards, open Settings inside the app and paste your Anthropic API key.
+   It normally starts fine with your other programs open — it adapts itself to
+   whatever is already running on the computer. If it ever says it cannot
+   start, fully quit any GuitarTutor that may already be open (Command-Q) or
+   restart the Mac, then try again. Afterwards, open Settings inside the app
+   and paste your Anthropic API key.
 
 4. Your data (books, lessons, chats) lives in:
        ~/Library/Application Support/GuitarTutor

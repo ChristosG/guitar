@@ -59,12 +59,24 @@ async def lifespan(app: FastAPI):
        slow the first time and nobody can reproduce it" bug. `warm_index` never
        raises: a cold index is a slow first search, not a dead app.
 
-    3. Delete page scans whose `KnowledgeSource` no longer exists (Stage 7.3,
+    3. SET ASIDE page scans whose `KnowledgeSource` no longer exists (Stage 7.3,
        `app.brain.media.sweep_orphaned_media`). Every DELETE this app served
        before that module existed leaked its book's JPEGs — ~25MB per copy of
        the tutor's 77-page scan — and this boot pass is the only thing that can
        ever collect them. Cheap (one `listdir` of a directory with a handful of
        entries) and idempotent, so it costs nothing on the boots that find none.
+
+       It RENAMES rather than deletes, into `<media_dir>/_superseded/<stamp>/`,
+       and reaps a batch thirty days later. That is not fussiness about a leaked
+       JPEG: this is the only destructive path in the app driven by an inference
+       ("no row refers to it") instead of an instruction, the inference is made
+       against WHATEVER DATABASE THIS PROCESS IS CONNECTED TO, and a database
+       that was replaced, restored or renamed makes every book the tutor owns an
+       orphan at once — including each one's `source.pdf`, which is the original
+       he uploaded and not a regenerable render. The desktop shell now moves
+       `<data>/media` aside together with any database it displaces, so the two
+       can no longer drift apart on a first run; this is the same guarantee for
+       every drift nobody has thought of. See `app.brain.media`'s docstring.
 
     Opens and closes its own short-lived `SessionLocal()` (same "own session"
     reasoning as `run_curriculum_job`): this runs before any request could exist,

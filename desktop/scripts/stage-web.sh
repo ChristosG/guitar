@@ -6,8 +6,16 @@
 #   public              →  resources/web/public
 #
 # NEXT_PUBLIC_AUTH_ENABLED=0: the desktop app is single-user on localhost; the
-# API runs with AUTH_ENABLED=0 too. NEXT_PUBLIC_API_BASE stays UNSET — lib/api.ts
-# derives localhost:8791 from the browser origin (the bundle topology).
+# API runs with AUTH_ENABLED=0 too.
+#
+# NEXT_PUBLIC_API_BASE stays UNSET, and MUST stay unset: the API port is no
+# longer fixed — the shell picks a free one at every start — so baking a base
+# in at build time would nail the bundle to a port it may not get. At runtime
+# the Tauri shell injects, before any page script runs,
+#     window.__GT_API_BASE__ = "http://localhost:<apiport>"
+# and lib/api.ts prefers that global. Deriving <origin-host>:8791 from the
+# browser origin is only the FALLBACK now (it is what the compose/browser
+# deployment keeps using, and what a bare `node server.js` sees).
 #
 # Usage: TARGET=darwin-arm64 ./stage-web.sh   (TARGET accepted for symmetry;
 # the web build is platform-neutral.)

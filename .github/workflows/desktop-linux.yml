@@ -1,8 +1,13 @@
-# GuitarTutor desktop — Linux x64 (deb + AppImage), plus the API pytest gate.
+# GuitarTutor desktop — Linux x64 (.deb), plus every test gate this repo has.
 #
-# The pytest gate lives HERE (not in desktop-macos.yml): apps/api/tests/conftest.py
-# hardcodes DATABASE_URL to localhost:5434 and needs a pgvector Postgres — a
-# service container provides exactly that, mapped to host port 5434.
+# The gates live HERE, not in desktop-macos.yml:
+#   test-api  apps/api/tests/conftest.py hardcodes DATABASE_URL to
+#             localhost:5434 and needs a pgvector Postgres — a service
+#             container provides exactly that. macOS runners have no Docker.
+#   test-web  the Rust<->TypeScript API-base contract gate + the hermetic
+#             Playwright suite. Platform-independent, so it runs once, here.
+#   build     `cargo test` for the shell before the heavy staging.
+# Duplicating any of them on macOS would only double the failure surface.
 name: desktop-linux
 
 on:
@@ -57,8 +62,71 @@ jobs:
           HF_HUB_OFFLINE: '1'
         run: pytest -q -m "not integration"
 
+  test-web:
+    # The web half of the desktop port design, on its OWN runner on purpose:
+    # apps/web/playwright.config.ts boots `next dev` on port 3100 with
+    # reuseExistingServer:false, and this job has no service containers and
+    # starts no other server (every API call in that suite is page.route-mocked
+    # — no database, no API, no network), so 3100 cannot collide with anything.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Contract gate — window.__GT_API_BASE__ exists on BOTH sides
+        # The desktop shell picks free ports at boot, so the page can no longer
+        # derive the API port from its own origin: main.rs injects the base as
+        # `window.__GT_API_BASE__` (initialization_script, before any page
+        # script) and api.ts reads it. That name is a string contract across
+        # two languages and NOTHING type-checks it — renaming one side alone
+        # compiles, ships, and silently falls back to :8791. So: grep both.
+        run: |
+          set -euo pipefail
+          symbol='__GT_API_BASE__'
+          rust='desktop/src-tauri/src/main.rs'
+          web='apps/web/src/lib/api.ts'
+          missing=0
+          for f in "$rust" "$web"; do
+            test -f "$f" || { echo "::error::$f does not exist"; missing=1; continue; }
+            grep -qF -- "$symbol" "$f" || { echo "::error file=$f::$symbol not found in $f"; missing=1; }
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "BROKEN CONTRACT: the desktop API base is passed BY NAME, not by type." >&2
+            echo "  $rust  must inject window.$symbol before any page script runs" >&2
+            echo "  $web   must prefer it over deriving the API port from the origin" >&2
+            echo "The desktop shell picks FREE ports at boot, so the page origin no" >&2
+            echo "longer implies the API port. With one side renamed or removed the" >&2
+            echo "build still succeeds and the app silently talks to :8791 — a port it" >&2
+            echo "does not own. Rename BOTH sides together (and apps/web/tests/api-base.spec.ts)." >&2
+            exit 1
+          fi
+          echo "contract ok: $symbol present in $rust and $web"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install web deps
+        working-directory: apps/web
+        run: npm ci
+
+      - name: Install Playwright browser
+        # chromium only: playwright.config.ts declares no `projects`, so the
+        # suite runs on the default browser and nothing else is downloaded.
+        working-directory: apps/web
+        run: npx playwright install --with-deps chromium
+
+      - name: Playwright (hermetic suite — mocked API, self-booted next dev)
+        # Includes tests/api-base.spec.ts: the behavioural half of the contract
+        # gate above (injected global wins / absent falls back to :8791 /
+        # malformed falls back rather than fetching `undefined/...`).
+        working-directory: apps/web
+        run: npm test
+
   build:
-    needs: test-api
+    needs: [test-api, test-web]
     runs-on: ubuntu-22.04
     timeout-minutes: 120
     steps:
@@ -82,6 +150,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: desktop/src-tauri
+
+      - name: Unit-test the shell (cargo test)
+        # Runs BEFORE the ~40 minutes of staging: the port scan, the literal
+        # `localhost` origin spelling and the CORS_ORIGINS string are pure
+        # logic with unit tests in firstrun.rs, and a regression there should
+        # cost seconds, not a full bundle build. Dev profile deliberately —
+        # the release profile is fat-LTO'd for the shipped binary. Needs no
+        # staged resources (resources/.gitkeep and desktop/ui/splash.html are
+        # committed, which is all the tauri build script reads at compile time)
+        # but does need the webkit2gtk deps installed above.
+        working-directory: desktop/src-tauri
+        run: cargo test
 
       - name: Install tauri-cli
         # rust-cache caches ~/.cargo/bin, so this is a no-op after the first run.
@@ -164,6 +244,10 @@ jobs:
         # into the bundle (a bad resources glob once shipped an empty app), so
         # extract the deb and boot THAT tree: probe the heavy pieces for a
         # fast clear failure, then run the full pg->alembic->uvicorn smoke.
+        # No app port is assumed anywhere here: smoke scans its own high ranges
+        # (pg 54410-54430, api 18791-18811) and boots its own postgres, so it
+        # collides with nothing on this runner — and it stays correct however
+        # the shell's own derived pair lands on the tutor's machine.
         run: |
           dpkg-deb -x desktop/src-tauri/target/release/bundle/deb/*.deb debtree
           RES=$(find debtree -type d -name resources | grep -v icons | head -1)

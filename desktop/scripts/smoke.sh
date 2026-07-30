@@ -4,6 +4,15 @@
 # /health/ready until db AND embed are true, then shut everything down cleanly.
 # Exits nonzero on any miss. CI runs this against the built bundle's resources.
 #
+# SCOPE: the API tier only — bundled postgres + bundled python + apps/api + the
+# embed model. It does NOT boot node/web and it does NOT stand in for the Tauri
+# shell's runtime wiring (the shell picks two free ports at start, injects
+# window.__GT_API_BASE__ into the webview and passes the api child a
+# CORS_ORIGINS naming the chosen web origin). No browser is involved here, so
+# none of that is observable from this script; it lives in desktop/src-tauri.
+# What this proves is narrower and still the thing CI needs: the bundled tree,
+# as shipped, boots and reaches a ready database + embedder.
+#
 # NOTE the LLM_API_KEY: with LLM_PROVIDER=claude and NO key at all, the API
 # answers /health/ready with 409 llm_not_configured INSTEAD of the JSON body
 # (get_provider() raises before the probe dict is built — see app/main.py's
@@ -47,6 +56,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Both ports are SCANNED, never fixed, and both ranges sit deliberately far
+# from anything the product uses: the app's own web/api pair is itself chosen at
+# runtime from 8790/8791 upwards, and a dev compose stack holds 5434/8790/8791.
+# So a smoke run can neither collide with a running app nor accidentally probe
+# one. Nothing below may hardcode 8791 — this script proves that the STAGED
+# TREE boots, not which port any particular shell run happened to get.
 PG_PORT="$(free_port 54410 54430)" || die "no free postgres port"
 API_PORT="$(free_port 18791 18811)" || die "no free api port"
 log "pg on :$PG_PORT, api on :$API_PORT"
