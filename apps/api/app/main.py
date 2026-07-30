@@ -22,6 +22,7 @@ from app.llm.errors import LLMNotConfigured
 from app.routers import (
     artifacts,
     auth,
+    backup,
     blueprint,
     canon,
     chat,
@@ -162,3 +163,4 @@ app.include_router(lessons.router)
 app.include_router(prompts.router)
 app.include_router(blueprint.router)
 app.include_router(canon.router)
+app.include_router(backup.router)
