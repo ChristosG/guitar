@@ -152,31 +152,33 @@ jobs:
             echo "suffix=-noseed" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build deb + AppImage
+      - name: Build deb
+        # deb only: linuxdeploy (the AppImage packer) chokes opaquely on the
+        # 1.3GB runtime payload, and the Linux artifact exists for local
+        # testing — dpkg-deb -x installs it anywhere without root.
         working-directory: desktop/src-tauri
-        run: cargo tauri build --bundles deb,appimage
+        run: cargo tauri build --bundles deb
 
-      - name: Smoke test the resources embedded in the AppImage
+      - name: Smoke test the resources embedded in the deb
         # The staged tree passing smoke says nothing about what tauri COPIED
         # into the bundle (a bad resources glob once shipped an empty app), so
-        # extract the AppImage and boot THAT tree: probe the heavy pieces for a
+        # extract the deb and boot THAT tree: probe the heavy pieces for a
         # fast clear failure, then run the full pg->alembic->uvicorn smoke.
         run: |
-          ./desktop/src-tauri/target/release/bundle/appimage/*.AppImage --appimage-extract >/dev/null
-          RES=$(find squashfs-root -type d -name resources | head -1)
-          test -n "$RES" || { echo "no resources dir in AppImage"; exit 1; }
+          dpkg-deb -x desktop/src-tauri/target/release/bundle/deb/*.deb debtree
+          RES=$(find debtree -type d -name resources | grep -v icons | head -1)
+          test -n "$RES" || { echo "no resources dir in deb"; exit 1; }
           for probe in models/e5-small/model.onnx pg/bin/postgres python/bin/python3.12 web/server.js api/alembic.ini; do
             test -e "$RES/$probe" || { echo "MISSING from bundle: $probe"; exit 1; }
           done
           du -sh "$RES"
           bash desktop/scripts/smoke.sh "$RES"
-          rm -rf squashfs-root
+          rm -rf debtree
 
       - name: Collect bundles
         run: |
           mkdir -p dist
           cp desktop/src-tauri/target/release/bundle/deb/*.deb dist/
-          cp desktop/src-tauri/target/release/bundle/appimage/*.AppImage dist/
           ls -lh dist/
 
       - uses: actions/upload-artifact@v4

@@ -77,10 +77,16 @@ fi
 log "building pgvector against the bundled pg_config (portable: OPTFLAGS='')"
 # PG_CONFIG on `clean` too: pgvector's Makefile resolves PGXS via pg_config
 # even for clean, and a mac runner has no host pg_config to fall back on.
-make -C "$PGV_SRC" clean PG_CONFIG="$PG_OUT/bin/pg_config" >/dev/null
-make -C "$PGV_SRC" -j"$(getconf _NPROCESSORS_ONLN)" \
-  PG_CONFIG="$PG_OUT/bin/pg_config" OPTFLAGS=""
-make -C "$PGV_SRC" install PG_CONFIG="$PG_OUT/bin/pg_config" OPTFLAGS="" >/dev/null
+# On darwin the theseus tree's Makefile.global bakes the -isysroot of the SDK
+# it was BUILT with (e.g. MacOSX15.4.sdk) — override with the SDK that is
+# actually on this machine, or every compile dies on 'stdio.h' not found.
+MAKE_VARS=(PG_CONFIG="$PG_OUT/bin/pg_config" OPTFLAGS="")
+case "$TARGET" in
+  darwin-*) MAKE_VARS+=(PG_SYSROOT="$(xcrun --show-sdk-path)") ;;
+esac
+make -C "$PGV_SRC" clean "${MAKE_VARS[@]}" >/dev/null
+make -C "$PGV_SRC" -j"$(getconf _NPROCESSORS_ONLN)" "${MAKE_VARS[@]}"
+make -C "$PGV_SRC" install "${MAKE_VARS[@]}" >/dev/null
 
 PKGLIBDIR="$("$PG_OUT/bin/pg_config" --pkglibdir)"
 SHAREDIR="$("$PG_OUT/bin/pg_config" --sharedir)"
