@@ -17,6 +17,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PromptList } from "@/components/settings/prompt-list";
 import { BlueprintDefaultCard } from "@/components/settings/blueprint-default-card";
+import { BackupCard } from "@/components/settings/backup-card";
 import { cn } from "@/lib/utils";
 
 const CONSOLE_URL = "https://console.anthropic.com/settings/keys";
@@ -306,6 +307,12 @@ export default function SettingsPage() {
        * what every NEW curriculum is seeded with. Editing it never touches a
        * course that already exists (spec invariant #3); the card says so. */}
       <BlueprintDefaultCard />
+
+      {/* --- backup / restore ---------------------------------------------
+       * Everything (database + page scans) as one downloadable archive, and
+       * the way back from it — the same format the desktop seed bundle uses
+       * (workstream A3, `app/routers/backup.py`). */}
+      <BackupCard />
     </div>
   );
 }

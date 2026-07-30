@@ -5,7 +5,6 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
 import {
-  Calendar,
   Combine,
   GraduationCap,
   Guitar,
@@ -16,9 +15,7 @@ import {
   Menu,
   MessageCircle,
   Settings,
-  StickyNote,
   TriangleAlert,
-  Users,
   X,
 } from "lucide-react";
 import { getAuthState, getSettings, logout } from "@/lib/api";
@@ -28,13 +25,10 @@ import { LocaleToggle } from "@/components/locale-toggle";
 import { cn } from "@/lib/utils";
 
 const NAV_ITEMS = [
-  { segment: "today", icon: Calendar },
-  { segment: "students", icon: Users },
   { segment: "curricula", icon: GraduationCap },
   { segment: "library", icon: Library },
   { segment: "canon", icon: Combine },
   { segment: "lessons", icon: ListTree },
-  { segment: "notes", icon: StickyNote },
   { segment: "artifacts", icon: LayoutGrid },
   { segment: "chat", icon: MessageCircle },
 ] as const;
@@ -78,8 +72,8 @@ export function AppShell({ children }: { children: ReactNode }) {
   }, [pathname]);
 
   const segments = pathname.split("/").filter(Boolean);
-  const activeSegment = segments[1] ?? "today";
-  const pageTitle = t.has(activeSegment) ? t(activeSegment) : t("today");
+  const activeSegment = segments[1] ?? "curricula";
+  const pageTitle = t.has(activeSegment) ? t(activeSegment) : t("curricula");
 
   async function onSignOut() {
     try {

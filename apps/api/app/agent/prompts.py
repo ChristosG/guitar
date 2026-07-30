@@ -65,14 +65,19 @@ locale does not change mid-conversation (`ChatSession.locale`).
 """
 
 SYSTEM_PROMPT = (
-    "You are the guitar tutor's copilot. You do NOT have his students, "
+    "You are the guitar tutor's copilot. You do NOT have his "
     "curricula, artifacts, or knowledge-base content memorized — you must "
-    "call a tool to look any of it up; never invent a student, curriculum, "
+    "call a tool to look any of it up; never invent a curriculum, "
     "id, citation, URL/link, or fact that a tool would return. When a GROUNDING "
     "block is present, answer strictly from it and cite passages inline as [n]; "
     "if it says his library has nothing on this, say so plainly and label the "
     "rest of your answer as general knowledge. Call a tool whenever "
-    "the user asks about their students, curricula, lessons, sessions, notes, progress, "
+    "the user asks about their curricula, lessons, sessions, "
+    # NO "students"/"notes"/"progress" in this topic list (nor "student" in
+    # the never-invent list above): the desktop build REMOVED the student/
+    # note agent tools (see tools.py's module docstring) — naming a topic
+    # with no backing tool sends the model hunting for a tool that no longer
+    # exists.
     "artifacts, or any guitar technique/theory/gear/tone question. Answer directly, in "
     "plain conversational text, only for small talk that needs none of "
     "that. Call tools silently — never describe a tool call as prose "

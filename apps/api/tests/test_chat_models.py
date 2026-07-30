@@ -269,8 +269,8 @@ def test_approval_request_persists_tool_call_id():
         db.commit()
         approval = ApprovalRequest(
             session_id=session.id,
-            tool_name="create_student",
-            tool_args={"name": "New Kid"},
+            tool_name="update_block",
+            tool_args={"block_id": "b1", "title": "New Title"},
             tool_call_id="call_xyz",
         )
         db.add(approval)
@@ -314,8 +314,8 @@ def test_approval_request_persists_a_resolved_approve_decision():
         db.add(session)
         db.commit()
         approval = ApprovalRequest(
-            session_id=session.id, tool_name="update_student",
-            tool_args={"student_id": "x", "level": "advanced"},
+            session_id=session.id, tool_name="update_block",
+            tool_args={"block_id": "x", "title": "advanced"},
         )
         db.add(approval)
         db.commit()
@@ -324,13 +324,13 @@ def test_approval_request_persists_a_resolved_approve_decision():
         db.close()
 
     resolved_at = datetime.now(timezone.utc)
-    edited_args = {"student_id": "x", "level": "intermediate"}
+    edited_args = {"block_id": "x", "title": "intermediate"}
     db2 = SessionLocal()
     try:
         approval = db2.get(ApprovalRequest, approval_id)
         approval.status = "approved"
         approval.edited_args = edited_args
-        approval.result_ref = "some-student-id"
+        approval.result_ref = "some-block-id"
         approval.resolved_at = resolved_at
         db2.commit()
     finally:
@@ -341,7 +341,7 @@ def test_approval_request_persists_a_resolved_approve_decision():
         got = db3.get(ApprovalRequest, approval_id)
         assert got.status == "approved"
         assert got.edited_args == edited_args
-        assert got.result_ref == "some-student-id"
+        assert got.result_ref == "some-block-id"
         assert got.resolved_at is not None
     finally:
         db3.close()

@@ -227,8 +227,8 @@ def test_delete_cascades_messages_and_approvals():
     db = SessionLocal()
     try:
         db.add(ApprovalRequest(
-            session_id=uuid.UUID(session_id), tool_name="create_student",
-            tool_args={"name": "Nikos"}, tool_call_id="call_1", status="pending",
+            session_id=uuid.UUID(session_id), tool_name="update_block",
+            tool_args={"block_id": "b1", "title": "Nikos"}, tool_call_id="call_1", status="pending",
         ))
         db.commit()
     finally:
@@ -266,28 +266,28 @@ def test_a_pending_approval_is_fully_reconstructible_from_the_read_endpoints(mon
     """
     _use_provider(monkeypatch, [
         AssistantTurn(
-            content="I'll add Nikos as a beginner.",
-            tool_calls=[ToolCall(id="call_1", name="create_student",
-                                 arguments={"name": "Nikos", "level": "beginner"})],
+            content="I'll rename that lesson to Nikos.",
+            tool_calls=[ToolCall(id="call_1", name="update_block",
+                                 arguments={"block_id": "b1", "title": "Nikos"})],
         ),
     ])
-    _stub_tool(monkeypatch, "create_student", lambda db, **kw: {"id": str(uuid.uuid4())})
+    _stub_tool(monkeypatch, "update_block", lambda db, **kw: {"id": str(uuid.uuid4())})
     session_id = _create_session()
 
-    turn = client.post(f"/chat/{session_id}/messages", json={"content": "add Nikos"}).json()
+    turn = client.post(f"/chat/{session_id}/messages", json={"content": "rename that lesson"}).json()
     assert turn["status"] == "awaiting_approval"
 
     # --- a reload: only the session id survives ---
     pending = client.get(f"/chat/{session_id}/pending")
     assert pending.status_code == 200, pending.text
-    assert pending.json()["tool_name"] == "create_student"
-    assert pending.json()["tool_args"] == {"name": "Nikos", "level": "beginner"}
+    assert pending.json()["tool_name"] == "update_block"
+    assert pending.json()["tool_args"] == {"block_id": "b1", "title": "Nikos"}
 
     history = client.get(f"/chat/{session_id}")
     assert history.status_code == 200, history.text  # no ResponseValidationError
     rows = history.json()
     assert rows[-1]["role"] == "assistant"
-    assert rows[-1]["content"] == turn["description"] == "I'll add Nikos as a beginner."
+    assert rows[-1]["content"] == turn["description"] == "I'll rename that lesson to Nikos."
 
     # ...and the resumed session still completes its turn.
     resolved = client.post(

@@ -3,13 +3,10 @@
     "title": "Guitar Tutor Copilot"
   },
   "nav": {
-    "today": "Today",
-    "students": "Students",
     "curricula": "Curricula",
     "library": "Library",
     "canon": "Canon",
     "lessons": "Lessons",
-    "notes": "Notes",
     "artifacts": "Artifacts",
     "chat": "Chat",
     "openMenu": "Open menu",
@@ -21,149 +18,6 @@
     "en": "EN",
     "el": "EL",
     "switchTo": "Switch language"
-  },
-  "today": {
-    "heading": "Today",
-    "subheading": "Your lessons at a glance.",
-    "previewBadge": "Preview",
-    "card1Title": "Next lesson",
-    "card2Title": "Following lesson",
-    "placeholderStudent": "Student — to be scheduled",
-    "placeholderTime": "Time — to be scheduled",
-    "placeholderNote": "Lesson prep will appear here once scheduling is live."
-  },
-  "notes": {
-    "heading": "Notes",
-    "subheading": "Session notes and practice logs.",
-    "emptyTitle": "No notes yet",
-    "emptyBody": "Notes you take during and between lessons will show up here.",
-    "loading": "Loading notes…",
-    "error": "Could not load notes.",
-    "deleteError": "Could not delete the note.",
-    "edit": "Edit note",
-    "delete": "Delete note",
-    "promote": "Promote to Knowledge",
-    "promoting": "Promoting…",
-    "promoted": "Promoted to Knowledge",
-    "promoteError": "Could not promote this note.",
-    "form": {
-      "heading": "Add a note",
-      "editHeading": "Edit note",
-      "titleLabel": "Title",
-      "titlePlaceholder": "e.g. Barre chord tip",
-      "bodyLabel": "Note",
-      "bodyPlaceholder": "What happened, what to remember, what to try next…",
-      "tagsLabel": "Tags",
-      "tagsPlaceholder": "technique, chords… (comma-separated)",
-      "studentLabel": "Student",
-      "studentUnassigned": "No student (general note)",
-      "submit": "Add note",
-      "submitting": "Adding…",
-      "save": "Save",
-      "cancel": "Cancel",
-      "error": "Could not add the note.",
-      "editError": "Could not save the note."
-    },
-    "confirmDelete": {
-      "title": "Delete “{title}”?",
-      "body": "This note will be permanently deleted. This cannot be undone.",
-      "promotedNote": "The copy you already promoted to the library stays there — only the note goes.",
-      "confirm": "Delete note"
-    }
-  },
-  "students": {
-    "heading": "Students",
-    "subheading": "Your roster.",
-    "addButton": "Add student",
-    "empty": "No students yet — add your first one to get started.",
-    "loading": "Loading students…",
-    "error": "Could not load students.",
-    "level": "Level",
-    "instrument": "Instrument",
-    "language": "Language",
-    "unset": "—",
-    "delete": "Delete",
-    "deleting": "Deleting…",
-    "deleteError": "Could not delete the student.",
-    "addDialog": {
-      "trigger": "Add student",
-      "heading": "Add student",
-      "description": "Add a student to your roster.",
-      "name": "Name",
-      "namePlaceholder": "e.g. Nikos Papadopoulos",
-      "level": "Level",
-      "levelPlaceholder": "beginner, intermediate, advanced…",
-      "instrument": "Instrument",
-      "instrumentPlaceholder": "guitar, bass, ukulele…",
-      "language": "Language",
-      "languagePlaceholder": "en, el…",
-      "cancel": "Cancel",
-      "submit": "Add student",
-      "submitting": "Adding…",
-      "error": "Could not add the student."
-    },
-    "detail": {
-      "back": "Back to students",
-      "loading": "Loading student…",
-      "error": "Could not load this student.",
-      "assignments": {
-        "heading": "Assignments",
-        "empty": "No curricula assigned yet.",
-        "viewBoard": "View board"
-      },
-      "progress": {
-        "heading": "Progress",
-        "empty": "No progress tracked yet.",
-        "statusLabel": "Status",
-        "updateError": "Could not update this status.",
-        "status": {
-          "not_started": "Not started",
-          "introduced": "Introduced",
-          "practicing": "Practicing",
-          "mastered": "Mastered"
-        }
-      },
-      "lessons": {
-        "heading": "Recent lessons",
-        "empty": "No lessons logged yet.",
-        "taught": "Taught",
-        "notTaught": "Not taught",
-        "homeworkLabel": "Homework"
-      },
-      "assignDialog": {
-        "trigger": "Assign curriculum",
-        "heading": "Assign a curriculum",
-        "description": "Clone a curriculum template for this student to follow.",
-        "pickLabel": "Curriculum",
-        "loading": "Loading curricula…",
-        "empty": "No curricula yet — generate one on the Curricula page first.",
-        "loadError": "Could not load curricula.",
-        "cancel": "Cancel",
-        "submit": "Assign",
-        "assigning": "Assigning…",
-        "error": "Could not assign this curriculum."
-      },
-      "logLessonForm": {
-        "heading": "Log a lesson",
-        "blockIdLabel": "Session/block ID",
-        "blockIdPlaceholder": "Paste a block ID from the curriculum board",
-        "dateLabel": "Date",
-        "taughtOn": "Taught",
-        "taughtOff": "Not taught",
-        "notesLabel": "Notes",
-        "notesPlaceholder": "What happened in this session…",
-        "homeworkLabel": "Homework",
-        "homeworkPlaceholder": "What to practice before next time…",
-        "submit": "Log lesson",
-        "submitting": "Logging…",
-        "error": "Could not log this lesson."
-      }
-    },
-    "confirmDelete": {
-      "title": "Delete {name}?",
-      "body": "{name}, their progress, their assignments and their lesson logs are permanently deleted. Notes about them stay in Notes but lose the link. This cannot be undone.",
-      "confirm": "Delete student"
-    }
   },
   "curricula": {
     "heading": "Curricula",
@@ -1054,6 +908,26 @@
     "budgetRemaining": "{left}% left to assign",
     "budgetOver": "{over}% over — shares will be scaled down proportionally",
     "previewMinutesLabel": "for a lesson of"
+  },
+  "backup": {
+    "title": "Backups",
+    "help": "Download everything the app holds into one file — books, page scans, curricula, students and settings — or bring it all back from such a file. The same file also works on another installation of the app.",
+    "export": "Download a backup",
+    "restore": "Restore from a file",
+    "restoring": "Restoring…",
+    "restoreConfirm": "Restore",
+    "restoreConfirmTitle": "Restore from a backup?",
+    "restoreConfirmBody": "ALL of the app's current data will be replaced with what's inside “{name}” — books, page scans, curricula, students and settings. Anything not in the backup is lost and does not come back. When it finishes, the app reloads on its own.",
+    "errors": {
+      "not_a_backup": "That file isn't a backup of this app. Pick a file you downloaded with the “Download a backup” button.",
+      "pg_major_mismatch": "This backup was made on a different version of the database and can't be restored here.",
+      "pg_tools_missing": "The database tools are missing from the server — backups aren't available on this installation.",
+      "restore_failed": "The restore didn't finish. Try again — if it keeps failing, keep the file and ask for help.",
+      "jobs_running": "The app is writing something right now. Wait for the generation to finish and try again.",
+      "backup_busy": "A backup download or restore is already running. Wait for it to finish.",
+      "export_failed": "The backup couldn't be created. Try again.",
+      "network": "Couldn't reach the server. Check your connection."
+    }
   },
   "confirm": {
     "cancel": "Cancel",

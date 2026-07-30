@@ -1,5 +1,5 @@
 """Unit tests for `app.agent.tools.TOOLS` — the read-only tool registry
-(Plan 5 Task 2). `list_students`/`list_curricula`/`list_artifacts`/
+(Plan 5 Task 2). `list_curricula`/`list_artifacts`/
 `get_curriculum` are plain DB queries with no LLM/embed call anywhere (same
 precedent `test_students_api.py` states for why it isn't marked
 `@pytest.mark.integration`) — seeded directly via ORM rows (mirrors
@@ -22,7 +22,6 @@ from app.brain.retrieve import Answer, Hit
 from app.db import Base, SessionLocal, engine
 from app.models.artifact import Artifact
 from app.models.block import Block
-from app.models.student import Student
 
 # Skip cleanly (not error) when no DB is reachable — mirrors test_students_api.py.
 try:
@@ -55,7 +54,7 @@ def test_registry_has_exactly_the_read_tools_registered_so_far():
     read_names = {name for name, entry in TOOLS.items() if entry.kind == "read"}
     assert read_names == {
         "search_knowledge", "explain_concept", "search_concepts",
-        "list_students", "list_curricula", "list_artifacts", "get_curriculum",
+        "list_curricula", "list_artifacts", "get_curriculum",
         "find_lesson", "propose_curriculum_revision",
     }
     for name in read_names:
@@ -65,33 +64,6 @@ def test_registry_has_exactly_the_read_tools_registered_so_far():
         assert fn_schema["name"] == name
         assert fn_schema["description"]  # non-empty — the model reads this
         assert fn_schema["parameters"]["type"] == "object"
-
-
-# ---------------------------------------------------------------------------
-# list_students
-# ---------------------------------------------------------------------------
-
-def test_list_students_returns_compact_rows_newest_first():
-    db = SessionLocal()
-    try:
-        s1 = Student(name="Alex Doe", level="beginner", instrument="guitar")
-        db.add(s1)
-        db.commit()
-        s2 = Student(name="Blair Roe", level="advanced", instrument="bass")
-        db.add(s2)
-        db.commit()
-
-        rows = TOOLS["list_students"].fn(db)
-    finally:
-        db.close()
-
-    ids = [r["id"] for r in rows]
-    assert ids.index(s2.id) < ids.index(s1.id)  # newest first
-    row = next(r for r in rows if r["id"] == s1.id)
-    assert row == {
-        "id": s1.id, "name": "Alex Doe", "level": "beginner",
-        "instrument": "guitar", "status": "active",
-    }
 
 
 # ---------------------------------------------------------------------------

@@ -515,7 +515,9 @@ test.describe("artifacts gallery (mocked API)", () => {
 
   test("the Artifacts nav link routes to the gallery", async ({ page }) => {
     await mockArtifactsApi(page);
-    await page.goto("/en/today");
+    // /en/library as the starting point: Today is gone from the desktop
+    // build, and the point here is only that the nav LINK routes correctly.
+    await page.goto("/en/library");
     await page.getByTestId("nav-artifacts").click();
     await expect(page).toHaveURL(/\/en\/artifacts$/);
     await expect(page.getByTestId("artifacts-heading")).toBeVisible();

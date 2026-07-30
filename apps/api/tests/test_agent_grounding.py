@@ -275,19 +275,20 @@ def test_hitl_still_suspends_on_a_mutation(db, monkeypatch):
     def _spy(db_, **kwargs):
         raise AssertionError("mutation fn must never be called by run_agent_turn")
 
-    _stub_tool(monkeypatch, "create_student", _spy)
+    _stub_tool(monkeypatch, "update_block", _spy)
 
-    call = ToolCall(id="call_1", name="create_student", arguments={"name": "Ada"})
-    turn = AssistantTurn(content="I'll add that student.", tool_calls=[call])
+    call = ToolCall(id="call_1", name="update_block", arguments={"block_id": "b1", "title": "Ada"})
+    turn = AssistantTurn(content="I'll rename that lesson.", tool_calls=[call])
     fake_provider = _FakeProvider([turn])
     monkeypatch.setattr(agent_loop, "get_provider", lambda: fake_provider)
 
-    result = run_agent_turn(db, [{"role": "user", "content": "add a student named Ada"}])
+    result = run_agent_turn(db, [{"role": "user", "content": "rename that lesson to Ada"}])
 
     assert isinstance(result, AgentResult)
     assert result.status == "awaiting_approval"
     assert result.pending_tool == {
-        "tool_call_id": "call_1", "name": "create_student", "arguments": {"name": "Ada"},
+        "tool_call_id": "call_1", "name": "update_block",
+        "arguments": {"block_id": "b1", "title": "Ada"},
     }
     assert not any(m["role"] == "tool" for m in result.messages)
 
@@ -307,25 +308,28 @@ def test_hitl_still_suspends_when_the_same_turn_is_also_content_bearing(db, monk
     def _spy(db_, **kwargs):
         raise AssertionError("mutation fn must never be called by run_agent_turn")
 
-    _stub_tool(monkeypatch, "log_progress", _spy)
+    _stub_tool(monkeypatch, "update_block", _spy)
 
     call = ToolCall(
-        id="call_1", name="log_progress",
-        arguments={"student_id": "s1", "block_id": "b1", "status": "practicing"},
+        id="call_1", name="update_block",
+        arguments={"block_id": "b1", "body": "A capo raises pitch without retuning."},
     )
     turn = AssistantTurn(
-        content="A capo raises pitch without retuning — I'll log that we covered it.",
+        content="A capo raises pitch without retuning — I'll save that for you.",
         tool_calls=[call],
     )
     fake_provider = _FakeProvider([turn])
     monkeypatch.setattr(agent_loop, "get_provider", lambda: fake_provider)
 
+    # Phrasing deliberately avoids `_ENTITY_OR_ARTIFACT_RE`'s entity words
+    # (lesson/session/note/...) so the turn stays content-bearing and the
+    # forced retrieval genuinely runs alongside the proposed mutation.
     result = run_agent_turn(
-        db, [{"role": "user", "content": "what does a capo do to my tone? log that we covered it"}],
+        db, [{"role": "user", "content": "what does a capo do to my tone? save that for me"}],
     )
 
     assert result.status == "awaiting_approval"
-    assert result.pending_tool["name"] == "log_progress"
+    assert result.pending_tool["name"] == "update_block"
     assert not any(m["role"] == "tool" for m in result.messages)
     assert result.citations and result.citations[0]["page_no"] == 5
 

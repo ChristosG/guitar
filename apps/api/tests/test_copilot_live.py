@@ -10,9 +10,11 @@ this one exists to run all FOUR acceptance cases from the spec
 as one coherent acceptance run — including the ONE case (case 3, "admits what
 it doesn't know") that had NO live coverage anywhere in the suite before this
 task. Case 4 (HITL) already has live coverage in `test_chat_live_llm.py`
-(against `guitar_test` with a seeded student) — this module re-runs the exact
-phrasing from the brief against the REAL app DB's REAL student for full-depth
-proof, not to replace that earlier test.
+(against `guitar_test`) — this module re-runs the same suspend proof against
+the REAL app DB for full-depth proof, not to replace that earlier test.
+(The desktop build removed the student/note agent tools, so case 4's original
+add-a-note phrasing was retargeted at `generate_artifact` — still a mutation,
+still gated.)
 
 Read-only by contract, same posture as `test_library_live.py` / `test_agent_
 grounding.py`'s own live section: opens its OWN engine against the REAL app
@@ -42,7 +44,6 @@ from sqlalchemy.orm import sessionmaker
 from app.agent.guards import looks_like_tablature
 from app.agent.loop import run_agent_turn
 from app.models.knowledge import KnowledgeSource
-from app.models.student import Student
 
 APP_DATABASE_URL = os.environ.get(
     "APP_DATABASE_URL", "postgresql+psycopg://guitar:guitar@localhost:5434/guitar",
@@ -250,10 +251,7 @@ def test_case3_out_of_scope_question_admits_the_gap_and_labels_general_knowledge
 # ---------------------------------------------------------------------------
 @pytest.mark.integration
 def test_case4_hitl_mutation_still_suspends_for_approval(app_db):
-    maria = app_db.query(Student).filter(Student.name.ilike("%Maria%")).first()
-    assert maria is not None, "expected the real student Maria Ioannou to exist in the app DB"
-
-    question = "add a note that Maria struggled with barre chords"
+    question = "create a tone recipe artifact for a warm blues lead sound"
     result = run_agent_turn(app_db, [{"role": "user", "content": question}])
     _print_transcript("case4", question, result)
 
@@ -262,18 +260,19 @@ def test_case4_hitl_mutation_still_suspends_for_approval(app_db):
         f"content={result.content!r} — HITL gate may have regressed"
     )
     assert result.pending_tool is not None
-    assert result.pending_tool["name"] == "add_note", (
-        f"model proposed the wrong tool for a make-a-note request: {result.pending_tool}"
+    assert result.pending_tool["name"] == "generate_artifact", (
+        f"model proposed the wrong tool for an artifact request: {result.pending_tool}"
     )
     args_blob = " ".join(str(v) for v in result.pending_tool["arguments"].values()).lower()
-    assert "maria" in args_blob, f"proposed add_note args don't mention Maria: {result.pending_tool['arguments']}"
-    assert "barre" in args_blob, f"proposed add_note args don't mention barre chords: {result.pending_tool['arguments']}"
+    assert "tone" in args_blob or "blues" in args_blob, (
+        f"proposed generate_artifact args don't plausibly match the request: {result.pending_tool['arguments']}"
+    )
 
     # Suspend-before-execute is the entire point. Unlike test_chat_live_llm.
-    # py's guitar_test-based mutation tests (which can safely assert "zero
-    # Note rows exist" because that DB is truncated per-test), this module
-    # runs against the REAL app DB, which may already contain real Note rows
-    # from Chris's own prior usage — a bare row-count check would race his
+    # py's guitar_test-based mutation test (which can safely count Artifact
+    # rows because that DB is test-owned), this module runs against the REAL
+    # app DB, which may already contain real Artifact rows from Chris's own
+    # prior usage — a bare row-count check would race his
     # real data and prove nothing. The suspend-not-executed contract is
     # instead proven structurally: `run_agent_turn` (see its own module
     # docstring) never calls a mutation tool's `fn` — only `_dispatch_read_

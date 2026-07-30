@@ -10,11 +10,11 @@ dispatches the two kinds differently: a "read" executes inline, same turn; a
 "mutation" SUSPENDS the turn instead of executing (see `loop.py`'s own module
 docstring for the suspend design).
 
-Six reads (Task 2), each a thin wrapper over an existing read path:
+The reads (Task 2), each a thin wrapper over an existing read path:
   - `search_knowledge` / `explain_concept` -> `app.brain.retrieve.search` /
     `.answer` directly (already exactly the right shape).
-  - `list_students` / `list_curricula` / `list_artifacts` / `get_curriculum`
-    -> the SAME queries `routers/students.py` / `routers/curriculum.py` /
+  - `list_curricula` / `list_artifacts` / `get_curriculum`
+    -> the SAME queries `routers/curriculum.py` /
     `routers/artifacts.py`'s own GET routes run, reimplemented here as thin,
     router-independent queries returning plain dicts (never the routers'
     Pydantic response models, and never imported from the router modules
@@ -34,35 +34,25 @@ MEASURED failure (Plan 10's live run needed three guesses to find the right
 session id with no lookup tool available) — see `_find_lesson`'s own
 docstring further down for the full justification.
 
-Seven mutations (Task 3), each wrapping a real mutation service the exact
+The Task 3 mutations, each wrapping a real mutation service the exact
 same "thin, router-independent" way the reads above wrap their GET routes —
 see each `_`-prefixed fn's own docstring for its specific service:
-`create_student`, `update_student`, `segment_block`, `update_block`,
-`assign_curriculum`, `generate_artifact`, `generate_curriculum`.
-`assign_curriculum`'s deep-clone is NOT duplicated — it and the HTTP endpoint
-both call the SHARED framework-free `app.curriculum.assign.
-clone_content_subtree` (extracted in Task 3 review precisely so the two can
-never drift). NONE of these fns are actually
+`segment_block`, `update_block`, `generate_artifact`, `generate_curriculum`.
+NONE of these fns are actually
 CALLED by this task's own loop change — a mutation `ToolCall` is always
 suspended before `entry.fn` would ever run (see `loop.py`); they're
 registered now so Task 4's approval-resolve step has a real, working
 `fn(db, **args)` to call for each. `generate_curriculum` alone is marked
 `async_job=True` (see `ToolEntry` below) since it's a 49-179s/call blocking
 LLM generation (`app.curriculum.generate`'s own docstring) that Task 4 must
-enqueue as a `GenerationJob` rather than call inline — the other six are
+enqueue as a `GenerationJob` rather than call inline — the others are
 cheap enough to call synchronously at resolve time.
 
-Three more mutations (Plan 6 Task 6), wired in the SAME "thin wrapper,
-registered but never called by the loop itself" way, once their backing
-services existed: `add_note` (wraps Plan 6 Task 1's `routers/notes.py`
-`create_note`), `promote_note_to_knowledge` (wraps Task 1's `app.notes.
-promote.promote_note`), and `log_progress` (wraps Task 3's `app.curriculum.
-progress.upsert_progress`). These three were deferred out of Plan 5 for
-exactly this reason — Plan 5's own recon (`.superpowers/sdd/progress.md`)
-notes they had "NO backing model/service yet" until Plan 6 built the Note
-model and the Progress/LessonLog services. None is `async_job` (all three
-are cheap, single-row DB writes, same cost class as `create_student`/
-`update_block`).
+(The desktop build REMOVED the student/note tools that used to live here —
+`list_students`, `create_student`, `update_student`, `assign_curriculum`,
+`add_note`, `promote_note_to_knowledge`, `log_progress` — along with the
+Today/Students/Notes screens. The backing models/routers stay; only the
+agent surface is gone.)
 
 Four more mutations (Plan 10 Task 3, "Lesson Authoring") — the payoff of
 "an agent that actually checks his lectures... and does stuff for them, e.g.
@@ -105,9 +95,7 @@ from sqlalchemy import select
 from app.artifacts.generate import generate_artifact as _generate_artifact_service
 from app.brain.retrieve import answer, search
 from app.canon.search import search_concepts as _search_concepts_service
-from app.curriculum.assign import clone_content_subtree
 from app.curriculum.generate import generate_curriculum as _generate_curriculum_service
-from app.curriculum.progress import upsert_progress as _upsert_progress_service
 from app.curriculum.revise import apply_revision as _apply_revision_service
 from app.curriculum.revise import plan_revision as _plan_revision_service
 from app.curriculum.segment import segment_block as _segment_block_service
@@ -118,13 +106,8 @@ from app.lessons.edit import merge_sessions as _merge_sessions_service
 from app.lessons.edit import split_session as _split_session_service
 from app.models.artifact import Artifact
 from app.models.block import Block
-from app.models.curriculum import Assignment, Progress
-from app.models.note import Note
 from app.models.student import Student
-from app.notes.promote import promote_note as _promote_note_service
 from app.schemas.curriculum import BlockUpdate
-from app.schemas.notes import NoteCreate
-from app.schemas.students import StudentCreate, StudentUpdate
 from app.text.normalize import fold
 
 
@@ -318,19 +301,8 @@ def _search_concepts(db, *, query: str, k: int = 6) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Roster / curriculum / artifact reads — thin, router-independent queries
+# Curriculum / artifact reads — thin, router-independent queries
 # ---------------------------------------------------------------------------
-
-def _list_students(db) -> list[dict]:
-    students = db.scalars(select(Student).order_by(Student.created_at.desc())).all()
-    return [
-        {
-            "id": s.id, "name": s.name, "level": s.level,
-            "instrument": s.instrument, "status": s.status,
-        }
-        for s in students
-    ]
-
 
 def _list_curricula(db) -> list[dict]:
     roots = db.scalars(
@@ -479,63 +451,6 @@ def _lesson_rows(db, lessons: list[Block]) -> list[dict]:
 # router-independent" way the reads above wrap their GET routes.
 # ---------------------------------------------------------------------------
 
-def _create_student(
-    db, *, name: str, birthdate: str | None = None, level: str | None = None,
-    instrument: str | None = None, preferred_language: str = "el",
-) -> dict:
-    """Wraps `routers/students.py`'s `create_student` (`POST /students`).
-    Routed through `StudentCreate` (not constructed by hand) so a bad
-    `birthdate` string or any future validation rule on that schema applies
-    here too, instead of drifting out of sync with the HTTP boundary's own
-    rules; `StudentCreate` also owns `preferred_language`'s "el" default, so
-    a tool call that omits it gets the identical default the HTTP route
-    would give it.
-    """
-    payload = StudentCreate(
-        name=name, birthdate=birthdate, level=level,
-        instrument=instrument, preferred_language=preferred_language,
-    )
-    student = Student(
-        name=payload.name, birthdate=payload.birthdate, level=payload.level,
-        instrument=payload.instrument, preferred_language=payload.preferred_language,
-    )
-    db.add(student)
-    db.commit()
-    return {
-        "id": student.id, "name": student.name, "birthdate": student.birthdate,
-        "level": student.level, "instrument": student.instrument,
-        "preferred_language": student.preferred_language, "status": student.status,
-    }
-
-
-def _update_student(db, *, student_id: str, **fields) -> dict:
-    """Wraps `routers/students.py`'s `update_student` (`PATCH
-    /students/{id}`) — PATCH semantics: only the fields the caller actually
-    passed in `fields` are applied (`StudentUpdate(**fields).model_dump(
-    exclude_unset=True)`, exactly mirroring the router's own
-    `payload.model_dump(exclude_unset=True)`), so an omitted field leaves the
-    stored value untouched while an explicit `null` still clears a nullable
-    one — forwarding the raw `**fields` (rather than naming every field with
-    a `None` default) is what preserves that "was this key present at all"
-    distinction through to `model_dump`.
-    """
-    parsed_id = _parse_uuid(student_id)
-    if parsed_id is None:
-        return {"error": f"invalid student_id: {student_id!r}"}
-    student = db.get(Student, parsed_id)
-    if student is None:
-        return {"error": "student not found"}
-    payload = StudentUpdate(**fields)
-    for field, value in payload.model_dump(exclude_unset=True).items():
-        setattr(student, field, value)
-    db.commit()
-    return {
-        "id": student.id, "name": student.name, "birthdate": student.birthdate,
-        "level": student.level, "instrument": student.instrument,
-        "preferred_language": student.preferred_language, "status": student.status,
-    }
-
-
 def _segment_block(
     db, *, block_id: str, session_minutes: int, cadence_per_week: int = 1,
     student_id: str | None = None,
@@ -594,38 +509,6 @@ def _update_block(db, *, block_id: str, **fields) -> dict:
         "id": block.id, "kind": block.kind, "title": block.title,
         "body": block.body, "est_minutes": block.est_minutes,
     }
-
-
-def _assign_curriculum(db, *, root_id: str, student_id: str) -> dict:
-    """Wraps `routers/curriculum.py`'s `assign_curriculum` (`POST
-    /curricula/{root_id}/assign`): deep-clones the template's content
-    subtree for `student_id` (via the SHARED `app.curriculum.assign.
-    clone_content_subtree` this tool and that endpoint both call — extracted
-    in Task 3 review so the two never drift) and records an `Assignment`
-    audit row.
-    """
-    parsed_root_id = _parse_uuid(root_id)
-    if parsed_root_id is None:
-        return {"error": f"invalid root_id: {root_id!r}"}
-    parsed_student_id = _parse_uuid(student_id)
-    if parsed_student_id is None:
-        return {"error": f"invalid student_id: {student_id!r}"}
-
-    template_root = db.get(Block, parsed_root_id)
-    if template_root is None:
-        return {"error": "curriculum not found"}
-    student = db.get(Student, parsed_student_id)
-    if student is None:
-        return {"error": "student not found"}
-
-    new_root = clone_content_subtree(db, template_root, parent_id=None, student_id=parsed_student_id)
-    # curriculum_block_id references the TEMPLATE block, mirroring the
-    # router's own Assignment row — see routers/curriculum.py's identical
-    # comment for why (the audit link is "this student was assigned this
-    # template", not the new clone's own id).
-    db.add(Assignment(student_id=parsed_student_id, curriculum_block_id=template_root.id))
-    db.commit()
-    return _block_tree(new_root)
 
 
 def _generate_artifact(
@@ -746,162 +629,6 @@ def _apply_curriculum_revision(db, *, root_id: str, plan: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Mutations (Plan 6 Task 6) — wired the same way once their backing services
-# existed: `add_note`/`promote_note_to_knowledge` wrap Plan 6 Task 1's Note
-# create + promote logic; `log_progress` wraps Task 3's `app.curriculum.
-# progress.upsert_progress`. Same "never called by loop.py itself, registered
-# for the resolve step to dispatch once approved" treatment as the seven
-# mutations above — nothing about the suspend mechanism changes for these
-# (`loop.py`'s `_first_mutation_index` is generic over `kind == "mutation"`).
-# ---------------------------------------------------------------------------
-
-_ALLOWED_PROGRESS_STATUSES = {"not_started", "introduced", "practicing", "mastered"}
-
-
-def _add_note(
-    db, *, title: str, body: str, tags: list[str] | None = None, student_id: str | None = None,
-) -> dict:
-    """Wraps `routers/notes.py`'s `create_note` (`POST /notes`). Routed
-    through `NoteCreate` (not constructed by hand) — same reasoning
-    `_create_student` states for `StudentCreate`: a future validation rule on
-    that schema (e.g. `title`'s `max_length=300`) applies here too instead of
-    drifting out of sync with the HTTP boundary's own rules. Pydantic has no
-    opinion on an empty-but-present title or a dangling `student_id`, so both
-    of the router's own guards are reimplemented here, graceful-dict style,
-    exactly like every other tool fn in this registry.
-    """
-    parsed_student_id = None
-    if student_id is not None:
-        parsed_student_id = _parse_uuid(student_id)
-        if parsed_student_id is None:
-            return {"error": f"invalid student_id: {student_id!r}"}
-        if db.get(Student, parsed_student_id) is None:
-            return {"error": "student not found"}
-
-    payload = NoteCreate(title=title, body=body, tags=tags or [], student_id=parsed_student_id)
-    if payload.title == "":
-        return {"error": "title cannot be empty"}
-
-    note = Note(
-        title=payload.title, body=payload.body, tags=payload.tags,
-        student_id=payload.student_id,
-    )
-    db.add(note)
-    db.commit()
-    return {"note_id": note.id, "title": note.title}
-
-
-def _promote_note_to_knowledge(db, *, note_id: str) -> dict:
-    """Wraps `app.notes.promote.promote_note` (also `POST
-    /notes/{id}/promote`'s service): creates a `kind="text"` KnowledgeSource
-    from the note's title/body and flips `promoted_to_knowledge`. Mirrors
-    `routers/notes.py`'s `promote_note_endpoint`'s three precondition guards
-    (missing note, already-promoted, empty body) as graceful `{"error": ...}`
-    dicts instead of that endpoint's 404/409/422 `HTTPException`s — same
-    "guard, don't crash" spirit as every other tool fn in this registry.
-
-    `promote_note` itself also raises `ValueError` when ingestion didn't
-    complete (source status != "ready" — the flag is deliberately NOT
-    flipped in that case, see its docstring / whole-plan review Important 2);
-    caught here into a graceful dict too, same as `_segment_block` catches
-    `segment_block`'s `ValueError`. The note's `promoted_to_knowledge` stays
-    False, so a retry stays possible.
-    """
-    parsed_id = _parse_uuid(note_id)
-    if parsed_id is None:
-        return {"error": f"invalid note_id: {note_id!r}"}
-    note = db.get(Note, parsed_id)
-    if note is None:
-        return {"error": "note not found"}
-    if note.promoted_to_knowledge:
-        return {"error": "note already promoted to knowledge"}
-    if not note.body or not note.body.strip():
-        return {"error": "cannot promote a note with an empty body"}
-
-    try:
-        source = _promote_note_service(db, note)
-    except ValueError as e:
-        return {"error": str(e)}
-    return {"note_id": note.id, "title": note.title, "source_id": source.id}
-
-
-def _log_progress(
-    db, *, student_id: str, block_id: str, status: str, notes: str | None = None,
-) -> dict:
-    """Wraps `app.curriculum.progress.upsert_progress` (also `POST
-    /students/{id}/progress`'s service) — insert-or-update the single
-    Progress row for (student_id, block_id); see that function's own
-    docstring for the upsert/overwrite semantics (a fresh call always states
-    the row's new status/notes wholesale, never merges).
-
-    `status` is checked against `_ALLOWED_PROGRESS_STATUSES` here even though
-    `Progress.status` is itself a soft, unconstrained string column (`app.
-    models.curriculum.Progress`'s own comment: "soft, relabelable") — the
-    HTTP route trusts its caller (a fixed-choice UI control) to only ever
-    send one of the four values, but a chat model has no such fixed picker
-    and could otherwise persist an invented status string, so this tool
-    layer adds the guard the HTTP boundary doesn't need.
-
-    `notes` is PRESERVE-BY-DEFAULT here, unlike the HTTP route (whole-plan
-    review, Important 1): `upsert_progress` overwrites notes WHOLESALE (its
-    own docstring — an omitted `notes` clears the row's prior note). The web
-    UI copes by resending the existing `notes` unchanged on every status
-    click (`progress-row.tsx`), but the AGENT structurally CAN'T — there is
-    no read tool exposing a student's Progress rows, so a plain "mark barre
-    chords as mastered for Maria" makes the model call this with `notes`
-    OMITTED (-> None), which would silently NULL a previously-recorded note,
-    and the approval card (proposed args only) can't even show the loss. So
-    when `notes is None` AND a Progress row already exists for this
-    (student, block), its current `notes` is carried through to the service
-    rather than None. An explicitly-provided `notes` (the model restating
-    the note) still applies, and a brand-new row with no `notes` still
-    stores None — only the "omitted on an existing row" case is preserved.
-    Deliberately scoped to THIS wrapper (not `upsert_progress`/`ProgressIn`/
-    the HTTP route, all left untouched): the UI's wholesale-overwrite
-    contract is correct for the UI; only this one structurally-blind caller
-    needs the guard.
-
-    Student/block existence is checked here, BEFORE calling the service, for
-    the same reason `routers/students.py`'s `upsert_student_progress` checks
-    first (`upsert_progress`'s own docstring: "student/block existence is the
-    CALLER's responsibility" — an unchecked bad id would otherwise reach
-    `Progress(...)`'s insert and fail as a raw FK IntegrityError/500 instead
-    of a clean graceful dict).
-    """
-    parsed_student_id = _parse_uuid(student_id)
-    if parsed_student_id is None:
-        return {"error": f"invalid student_id: {student_id!r}"}
-    parsed_block_id = _parse_uuid(block_id)
-    if parsed_block_id is None:
-        return {"error": f"invalid block_id: {block_id!r}"}
-    if status not in _ALLOWED_PROGRESS_STATUSES:
-        return {
-            "error": f"invalid status: {status!r}; must be one of {sorted(_ALLOWED_PROGRESS_STATUSES)}",
-        }
-    if db.get(Student, parsed_student_id) is None:
-        return {"error": "student not found"}
-    if db.get(Block, parsed_block_id) is None:
-        return {"error": "block not found"}
-
-    notes_to_apply = notes
-    if notes_to_apply is None:
-        existing = db.scalars(
-            select(Progress).where(
-                Progress.student_id == parsed_student_id,
-                Progress.block_id == parsed_block_id,
-            )
-        ).first()
-        if existing is not None:
-            notes_to_apply = existing.notes  # preserve, don't clobber (see docstring)
-
-    progress = _upsert_progress_service(
-        db, student_id=parsed_student_id, block_id=parsed_block_id,
-        status=status, notes=notes_to_apply,
-    )
-    return {"status": progress.status, "block_id": progress.block_id}
-
-
-# ---------------------------------------------------------------------------
 # Mutations (Plan 10 Task 3) — "Lesson Authoring" agent tools: wire the
 # agent up to Plan 10 Tasks 1-2's lesson drafting/editing services, the
 # SAME "thin wrapper, registered but never called by loop.py itself" way
@@ -989,7 +716,7 @@ def _merge_sessions(db, *, session_ids: list[str]) -> dict:
 
     Every id is parsed BEFORE the service is ever called, so one malformed/
     hallucinated id among several well-formed ones still short-circuits
-    cleanly (mirrors `_assign_curriculum`'s "parse every id first" order).
+    cleanly ("parse every id first", before any work happens).
     """
     parsed_ids = []
     for sid in session_ids:
@@ -1138,23 +865,6 @@ TOOLS: dict[str, ToolEntry] = {
         fn=_search_concepts,
         kind="read",
     ),
-    "list_students": ToolEntry(
-        schema={
-            "type": "function",
-            "function": {
-                "name": "list_students",
-                "description": (
-                    "List every student on the roster (id, name, level, "
-                    "instrument, status). Use this to look up a student's id "
-                    "before calling a tool that needs one, or to answer 'who "
-                    "are my students' type questions."
-                ),
-                "parameters": {"type": "object", "properties": {}, "required": []},
-            },
-        },
-        fn=_list_students,
-        kind="read",
-    ),
     "list_curricula": ToolEntry(
         schema={
             "type": "function",
@@ -1296,78 +1006,6 @@ TOOLS: dict[str, ToolEntry] = {
         fn=_find_lesson,
         kind="read",
     ),
-    "create_student": ToolEntry(
-        schema={
-            "type": "function",
-            "function": {
-                "name": "create_student",
-                "description": (
-                    "Add a new student to the roster. This is a MUTATION — "
-                    "it requires the tutor's explicit approval before the "
-                    "student is actually created."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string", "description": "the student's full name"},
-                        "birthdate": {
-                            "type": "string",
-                            "description": "optional: birthdate as YYYY-MM-DD",
-                        },
-                        "level": {
-                            "type": "string",
-                            "description": "optional: skill level, e.g. 'beginner', 'intermediate', 'advanced'",
-                        },
-                        "instrument": {
-                            "type": "string",
-                            "description": "optional: main instrument, e.g. 'guitar', 'bass'",
-                        },
-                        "preferred_language": {
-                            "type": "string",
-                            "description": "optional: 2-letter preferred language, e.g. 'en'/'el' (default 'el')",
-                        },
-                    },
-                    "required": ["name"],
-                },
-            },
-        },
-        fn=_create_student,
-        kind="mutation",
-    ),
-    "update_student": ToolEntry(
-        schema={
-            "type": "function",
-            "function": {
-                "name": "update_student",
-                "description": (
-                    "Update fields on an existing student — a partial "
-                    "update, only the fields you provide are changed. This "
-                    "is a MUTATION — it requires the tutor's explicit "
-                    "approval before it's actually applied."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "student_id": {
-                            "type": "string",
-                            "description": "the student's id (UUID), from list_students",
-                        },
-                        "name": {"type": "string", "description": "optional: new name"},
-                        "birthdate": {"type": "string", "description": "optional: new birthdate, YYYY-MM-DD"},
-                        "level": {"type": "string", "description": "optional: new skill level"},
-                        "instrument": {"type": "string", "description": "optional: new main instrument"},
-                        "preferred_language": {
-                            "type": "string",
-                            "description": "optional: new preferred language, e.g. 'en'/'el'",
-                        },
-                    },
-                    "required": ["student_id"],
-                },
-            },
-        },
-        fn=_update_student,
-        kind="mutation",
-    ),
     "segment_block": ToolEntry(
         schema={
             "type": "function",
@@ -1437,37 +1075,6 @@ TOOLS: dict[str, ToolEntry] = {
             },
         },
         fn=_update_block,
-        kind="mutation",
-    ),
-    "assign_curriculum": ToolEntry(
-        schema={
-            "type": "function",
-            "function": {
-                "name": "assign_curriculum",
-                "description": (
-                    "Assign a curriculum template to a student: deep-clones "
-                    "the template's content tree for that student and "
-                    "records the assignment. This is a MUTATION — it "
-                    "requires the tutor's explicit approval before it's "
-                    "actually applied."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "root_id": {
-                            "type": "string",
-                            "description": "the curriculum template's root block id (UUID), from list_curricula",
-                        },
-                        "student_id": {
-                            "type": "string",
-                            "description": "the student id (UUID) to assign it to, from list_students",
-                        },
-                    },
-                    "required": ["root_id", "student_id"],
-                },
-            },
-        },
-        fn=_assign_curriculum,
         kind="mutation",
     ),
     "generate_artifact": ToolEntry(
@@ -1607,114 +1214,6 @@ TOOLS: dict[str, ToolEntry] = {
         kind="mutation",
         async_job=True,
         job_kind="curriculum_revise",
-    ),
-    "add_note": ToolEntry(
-        schema={
-            "type": "function",
-            "function": {
-                "name": "add_note",
-                "description": (
-                    "Add a free-form teaching note — e.g. an observation "
-                    "about a student's progress, a technique they struggled "
-                    "with, or a reminder for next lesson. This is a "
-                    "MUTATION — it requires the tutor's explicit approval "
-                    "before it's actually saved."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "title": {"type": "string", "description": "a short title for the note"},
-                        "body": {"type": "string", "description": "the note's content"},
-                        "tags": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "optional: free-form tags, e.g. ['technique', 'chords']",
-                        },
-                        "student_id": {
-                            "type": "string",
-                            "description": (
-                                "optional: the student id (UUID) this note is about, "
-                                "from list_students"
-                            ),
-                        },
-                    },
-                    "required": ["title", "body"],
-                },
-            },
-        },
-        fn=_add_note,
-        kind="mutation",
-    ),
-    "promote_note_to_knowledge": ToolEntry(
-        schema={
-            "type": "function",
-            "function": {
-                "name": "promote_note_to_knowledge",
-                "description": (
-                    "Promote an existing note into the knowledge base, so "
-                    "its content can ground future search/curriculum/"
-                    "artifact generation. This is a MUTATION — it requires "
-                    "the tutor's explicit approval before it's actually "
-                    "applied."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "note_id": {
-                            "type": "string",
-                            "description": "the note id (UUID) to promote, from list_students/context",
-                        },
-                    },
-                    "required": ["note_id"],
-                },
-            },
-        },
-        fn=_promote_note_to_knowledge,
-        kind="mutation",
-    ),
-    "log_progress": ToolEntry(
-        schema={
-            "type": "function",
-            "function": {
-                "name": "log_progress",
-                "description": (
-                    "Record or update a student's mastery status against a "
-                    "curriculum block — upserts, so calling this again for "
-                    "the same student+block replaces the prior status. This "
-                    "is a MUTATION — it requires the tutor's explicit "
-                    "approval before it's actually applied."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "student_id": {
-                            "type": "string",
-                            "description": "the student id (UUID), from list_students",
-                        },
-                        "block_id": {
-                            "type": "string",
-                            "description": (
-                                "the curriculum block id (UUID), from "
-                                "list_curricula/get_curriculum"
-                            ),
-                        },
-                        "status": {
-                            "type": "string",
-                            "description": (
-                                "one of: not_started, introduced, practicing, mastered"
-                            ),
-                        },
-                        "notes": {
-                            "type": "string",
-                            "description": "optional: free-text notes about this progress update",
-                        },
-                    },
-                    "required": ["student_id", "block_id", "status"],
-                },
-            },
-        },
-        fn=_log_progress,
-        kind="mutation",
     ),
     "draft_lesson_from_selection": ToolEntry(
         schema={

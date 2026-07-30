@@ -11,10 +11,10 @@ import { test, expect, type Page, type Route } from "@playwright/test";
 // itself (that's Plan 5 Tasks 2-4's own tests on the API side).
 //
 // Anchored to `API_ORIGIN` with two `page.route` calls (a bare `/chat` +
-// `/chat/**`) — same convention `cockpit.spec.ts` settled on for `/students`,
+// `/chat/**`) — same origin-anchored convention `cockpit.spec.ts` settled on,
 // and for the same reason both `cockpit.spec.ts` and `artifacts.spec.ts`
 // document explicitly: a bare suffix glob like `**/chat/**` would ALSO match
-// this app's own same-origin `/en/chat` page URL, and (unlike `/students`)
+// this app's own same-origin `/en/chat` page URL, and
 // `**/chat/**` specifically would never even match the bare `POST /chat`
 // session-create call in the first place — that URL has no "/chat/"
 // substring for the glob's trailing `/**` to anchor on. Anchoring on origin
@@ -397,8 +397,9 @@ test.describe("chat cockpit (mocked API)", () => {
     const mock = await mockChatApi(page);
 
     // Reach the page via the nav (not `page.goto`) so this also proves the
-    // "add chat to nav" requirement, not just the page's own route.
-    await page.goto("/en/today");
+    // "add chat to nav" requirement, not just the page's own route. Starts
+    // from /en/library (Today is gone from the desktop build).
+    await page.goto("/en/library");
     await page.getByTestId("nav-chat").click();
     // `/en/chat` is a redirector now (Stage 5.6): with nothing to resume it
     // creates a session and replaces the URL with the conversation's own.

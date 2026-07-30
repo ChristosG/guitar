@@ -7,7 +7,7 @@ import { routing } from "./i18n/routing";
 // guide). This app targets 16.2.x, so we use the current convention.
 const intl = createMiddleware(routing);
 
-// The cockpit has no real "home": `/{locale}` redirects to `/{locale}/today`
+// The cockpit has no real "home": `/{locale}` redirects to `/{locale}/curricula`
 // (also implemented, per the brief, as a plain `redirect()` in
 // `app/[locale]/page.tsx`). Handling it here FIRST is load-bearing, not
 // redundant: empirically verified via `curl -I /en` that a Server Component
@@ -28,7 +28,7 @@ function localeRootRedirect(request: NextRequest): NextResponse | null {
   const match = request.nextUrl.pathname.match(/^\/(en|el)\/?$/);
   if (!match) return null;
   const url = request.nextUrl.clone();
-  url.pathname = `/${match[1]}/today`;
+  url.pathname = `/${match[1]}/curricula`;
   return NextResponse.redirect(url);
 }
 

@@ -489,62 +489,12 @@ export function compileSource(id: string, opts?: { force?: boolean }): Promise<C
 }
 
 /**
- * Typed fetch helpers for the Students + Curriculum APIs (`/students`,
- * `/curricula`, `/blocks`). Same direct-from-browser convention as the
- * Knowledge helpers above (see this file's top docstring) — the cockpit
- * pages call these straight from client components so Playwright's
- * `page.route` interception sees every request.
+ * Typed fetch helpers for the Curriculum APIs (`/curricula`, `/blocks`).
+ * Same direct-from-browser convention as the Knowledge helpers above (see
+ * this file's top docstring) — the cockpit pages call these straight from
+ * client components so Playwright's `page.route` interception sees every
+ * request.
  */
-
-export interface StudentOut {
-  id: string;
-  name: string;
-  birthdate: string | null;
-  level: string | null;
-  instrument: string | null;
-  preferred_language: string;
-  status: string;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface CreateStudentInput {
-  name: string;
-  birthdate?: string | null;
-  level?: string | null;
-  instrument?: string | null;
-  preferred_language?: string;
-}
-
-export interface UpdateStudentInput {
-  name?: string;
-  birthdate?: string | null;
-  level?: string | null;
-  instrument?: string | null;
-  preferred_language?: string;
-}
-
-export function listStudents(): Promise<StudentOut[]> {
-  return request<StudentOut[]>("/students");
-}
-
-export function createStudent(input: CreateStudentInput): Promise<StudentOut> {
-  return request<StudentOut>("/students", {
-    method: "POST",
-    body: JSON.stringify(input),
-  });
-}
-
-export function updateStudent(id: string, input: UpdateStudentInput): Promise<StudentOut> {
-  return request<StudentOut>(`/students/${id}`, {
-    method: "PATCH",
-    body: JSON.stringify(input),
-  });
-}
-
-export function deleteStudent(id: string): Promise<void> {
-  return request<void>(`/students/${id}`, { method: "DELETE" });
-}
 
 /** Recursive Block tree shape returned by every `/curricula/*` and
  * `/blocks/*` route (`routers.curriculum.block_to_tree` on the API side):
@@ -1169,126 +1119,6 @@ export function segmentBlock(id: string, input: SegmentBlockInput): Promise<Bloc
   });
 }
 
-export function assignCurriculum(rootId: string, studentId: string): Promise<BlockNode> {
-  return request<BlockNode>(`/curricula/${rootId}/assign`, {
-    method: "POST",
-    body: JSON.stringify({ student_id: studentId }),
-  });
-}
-
-/**
- * Progress / LessonLog / student-detail types (Plan 6 Task 4) — mirrors
- * `apps/api/app/schemas/students.py`'s `ProgressOut`/`LessonLogOut`/
- * `AssignmentSummary`/`StudentDetailOut` field-for-field. `status` on
- * `ProgressOut`/`ProgressInput` is the same soft, relabelable plain `string`
- * (not a union) as `BlockNode.kind`/`JobOut.status` above, for the identical
- * reason: this app's 4 known values (not_started/introduced/practicing/
- * mastered — see `components/students/progress-row.tsx`) are a UI picker's
- * concern, not this layer's.
- */
-
-export interface ProgressOut {
-  id: string;
-  student_id: string;
-  block_id: string;
-  status: string;
-  notes: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-/** `blockId` is camelCase here for the same reason `CreateArtifactInput.
- * blockId` is below (see this file's Artifacts-section docstring): callers
- * read/destructure it more naturally than `block_id`. `notes` is passed
- * straight through to `POST /students/{id}/progress`'s wholesale-overwrite
- * `notes` field (see `upsertProgress` below) — callers changing ONLY
- * `status` MUST still resend the row's current `notes`, or the API clears
- * it (mirrors `app.curriculum.progress.upsert_progress`'s own docstring:
- * "OVERWRITTEN wholesale ... not merged in PATCH-fashion"). */
-export interface ProgressInput {
-  blockId: string;
-  status: string;
-  notes?: string | null;
-}
-
-export interface LessonLogOut {
-  id: string;
-  student_id: string;
-  session_block_id: string;
-  date: string | null;
-  taught: boolean;
-  notes: string | null;
-  homework: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-/** Same camelCase-input convention as `ProgressInput` above (`sessionBlockId`
- * for the wire's `session_block_id`). Unlike `ProgressInput`, this always
- * CREATES a new row (`POST /students/{id}/lessons` never upserts — see
- * `LessonLogIn`'s own docstring), so there's no overwrite footgun to
- * document here. */
-export interface LessonLogInput {
-  sessionBlockId: string;
-  date?: string | null;
-  taught?: boolean;
-  notes?: string | null;
-  homework?: string | null;
-}
-
-/** One row of `StudentDetailOut.assignments` — `curriculum_block_id` is the
- * TEMPLATE block's id, NOT a student-specific clone (see `AssignmentSummary`'s
- * own docstring on the API side: the clone's id is never recorded anywhere).
- * `assignCurriculum` above is what actually creates one of these server-side;
- * its `BlockNode` response is the clone, not this summary row. */
-export interface AssignmentSummary {
-  assignment_id: string;
-  curriculum_block_id: string;
-  title: string;
-}
-
-/** `GET /students/{id}/detail`'s aggregate response — everything the
- * student-detail cockpit page (`app/[locale]/(cockpit)/students/[id]/
- * page.tsx`) needs in one round trip. */
-export interface StudentDetailOut {
-  student: StudentOut;
-  assignments: AssignmentSummary[];
-  progress: ProgressOut[];
-  recent_lessons: LessonLogOut[];
-}
-
-export function getStudentDetail(id: string): Promise<StudentDetailOut> {
-  return request<StudentDetailOut>(`/students/${id}/detail`);
-}
-
-/** Upserts the student's Progress row for `input.blockId` — see
- * `ProgressInput`'s own docstring above for the "must resend `notes`"
- * caveat this call is NOT responsible for enforcing (the caller is). */
-export function upsertProgress(studentId: string, input: ProgressInput): Promise<ProgressOut> {
-  return request<ProgressOut>(`/students/${studentId}/progress`, {
-    method: "POST",
-    body: JSON.stringify({
-      block_id: input.blockId,
-      status: input.status,
-      notes: input.notes ?? null,
-    }),
-  });
-}
-
-/** Always creates a new LessonLog row — see `LessonLogInput`'s own docstring. */
-export function logLesson(studentId: string, input: LessonLogInput): Promise<LessonLogOut> {
-  return request<LessonLogOut>(`/students/${studentId}/lessons`, {
-    method: "POST",
-    body: JSON.stringify({
-      session_block_id: input.sessionBlockId,
-      date: input.date ?? null,
-      taught: input.taught ?? false,
-      notes: input.notes ?? null,
-      homework: input.homework ?? null,
-    }),
-  });
-}
-
 /**
  * Typed fetch helpers for the Artifacts API (`/artifacts/*`). Same direct-
  * from-browser convention as the Knowledge/Curriculum helpers above (see this
@@ -1909,90 +1739,6 @@ export function getChatSuggestions(sessionId: string): Promise<ChatSuggestionsOu
  * no tutor turns yet). Nothing is planned or applied by this call. */
 export function distillChatInstruction(sessionId: string): Promise<{ instruction: string }> {
   return request<{ instruction: string }>(`/chat/${sessionId}/distill`, { method: "POST" });
-}
-
-/**
- * Typed fetch helpers for the Notes API (`/notes/*`) — Plan 6's free-form
- * teaching notes with an optional promote-to-Brain action. Same direct-
- * from-browser convention as every other section of this file (see this
- * file's top docstring); mirrors `apps/api/app/schemas/notes.py` field-for-
- * field (`NoteCreate`/`NoteUpdate`/`NoteOut`/`NotePromoteOut`).
- */
-
-export interface NoteOut {
-  id: string;
-  title: string;
-  body: string;
-  tags: string[];
-  student_id: string | null;
-  promoted_to_knowledge: boolean;
-  created_at: string;
-  updated_at: string;
-}
-
-/** `POST /notes/{id}/promote`'s response — the updated Note plus the id of
- * the `KnowledgeSource` the call just created (mirrors `NotePromoteOut` on
- * the API side). Structurally a superset of `NoteOut`, so a value of this
- * type is assignable anywhere a `NoteOut` is expected — e.g. swapping a
- * promoted note straight into a `NoteOut[]` list without re-shaping it. */
-export interface NotePromoteOut extends NoteOut {
-  source_id: string;
-}
-
-export interface NoteCreateInput {
-  title: string;
-  body: string;
-  tags?: string[];
-  student_id?: string | null;
-}
-
-/** All fields optional — PATCH semantics, mirrors `NoteUpdate`. Same caveat
- * that schema's docstring documents: the router drops every `null`-valued
- * field uniformly (`exclude_unset=True, exclude_none=True`), so sending
- * `student_id: null` to clear an existing link is a no-op, not a clear —
- * this app's edit form doesn't attempt to work around that (a fresh
- * unlinked note is the workaround if ever needed). */
-export interface NoteUpdateInput {
-  title?: string;
-  body?: string;
-  tags?: string[];
-  student_id?: string | null;
-}
-
-export function listNotes(studentId?: string | null): Promise<NoteOut[]> {
-  const params = new URLSearchParams();
-  if (studentId) params.set("student_id", studentId);
-  const qs = params.toString();
-  return request<NoteOut[]>(`/notes${qs ? `?${qs}` : ""}`);
-}
-
-export function createNote(input: NoteCreateInput): Promise<NoteOut> {
-  return request<NoteOut>("/notes", {
-    method: "POST",
-    body: JSON.stringify(input),
-  });
-}
-
-export function updateNote(id: string, input: NoteUpdateInput): Promise<NoteOut> {
-  return request<NoteOut>(`/notes/${id}`, {
-    method: "PATCH",
-    body: JSON.stringify(input),
-  });
-}
-
-export function deleteNote(id: string): Promise<void> {
-  return request<void>(`/notes/${id}`, { method: "DELETE" });
-}
-
-/** Idempotent-as-409 on the API (a note already promoted refuses a second
- * promote outright — see `routers/notes.py`'s docstring). This app's UI
- * only ever calls this once per note (`NoteCard` hides/disables the action
- * once `promoted_to_knowledge` is true), so a 409 here would mean this
- * client's own guard has a bug, not an expected response to design around —
- * same posture this file's `sendChatMessage` docstring takes for the
- * analogous chat 409. */
-export function promoteNote(id: string): Promise<NotePromoteOut> {
-  return request<NotePromoteOut>(`/notes/${id}/promote`, { method: "POST" });
 }
 
 /**
@@ -2683,4 +2429,40 @@ export function saveBlueprintDefault(blueprint: BlueprintShape): Promise<Bluepri
  * "re-draft" button is the only path that rewrites lessons). */
 export function resetBlueprintDefault(): Promise<BlueprintDefaultOut> {
   return request<BlueprintDefaultOut>("/blueprint/default", { method: "DELETE" });
+}
+
+/**
+ * BACKUP / RESTORE (`app/routers/backup.py`) — the whole deployment (database +
+ * page scans) as one `guitar-backup-YYYY-MM-DD.tar.gz`, the same format the
+ * desktop seed bundle uses (`desktop/scripts/make-seed.sh`).
+ */
+
+/** The manifest that rode inside a restored archive — `{created, app_commit,
+ * pg_major, schema}`, echoed back by a successful restore. */
+export interface RestoreBackupOut {
+  ok: boolean;
+  restored_manifest: Record<string, unknown>;
+}
+
+/** The export URL for a plain anchor / `window.location` GET — NOT a `fetch`.
+ * Unlike the DOCX export above (a blob small enough to buffer), a backup can be
+ * hundreds of MB of page scans, and the browser/webview's own download path
+ * streams it to disk with a progress UI we don't have to build. The session
+ * cookie rides along: a top-level navigation GET sends SameSite=Lax cookies,
+ * which is exactly what `gt_session` is. */
+export function backupExportUrl(): string {
+  return `${API_BASE}/backup/export`;
+}
+
+/** Upload a backup archive and REPLACE ALL DATA with its contents. The server
+ * answers 4xx + `code` (`not_a_backup`, `pg_major_mismatch`, `pg_tools_missing`,
+ * `restore_failed`, `jobs_running`, `backup_busy`) — the card maps each to one
+ * Greek sentence under `backup.errors.*`. Multipart via `request()`, which
+ * deliberately does NOT set Content-Type on FormData bodies (the browser must
+ * write the boundary itself). On success the caller reloads the app: every
+ * screen is stale by definition after a restore. */
+export function restoreBackup(file: File): Promise<RestoreBackupOut> {
+  const form = new FormData();
+  form.append("file", file);
+  return request<RestoreBackupOut>("/backup/restore", { method: "POST", body: form });
 }

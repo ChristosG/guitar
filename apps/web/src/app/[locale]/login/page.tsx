@@ -55,7 +55,7 @@ export default function LoginPage() {
       // followed (an open redirect on a login page is the classic way to make a
       // phishing link look legitimate).
       const next = new URLSearchParams(window.location.search).get("next");
-      const dest = next?.startsWith("/") && !next.startsWith("//") ? next : `/${locale}/today`;
+      const dest = next?.startsWith("/") && !next.startsWith("//") ? next : `/${locale}/curricula`;
       router.push(dest);
       router.refresh();
     } catch {

@@ -93,29 +93,6 @@ function removeBlock(node: FixtureBlock, id: string): FixtureBlock {
   return { ...node, children: node.children.filter((c) => c.id !== id).map((c) => removeBlock(c, id)) };
 }
 
-const NOTE = {
-  id: "note-1",
-  title: "Practice reminder",
-  body: "Alternate picking, 10 minutes daily.",
-  tags: [] as string[],
-  student_id: null as string | null,
-  promoted_to_knowledge: false,
-  created_at: NOW,
-  updated_at: NOW,
-};
-
-const STUDENT = {
-  id: "student-1",
-  name: "Maria Ioannou",
-  birthdate: null,
-  level: "intermediate",
-  instrument: "guitar",
-  preferred_language: "el",
-  status: "active",
-  created_at: NOW,
-  updated_at: NOW,
-};
-
 const ARTIFACT = {
   id: "artifact-1",
   kind: "signal_chain",
@@ -178,8 +155,6 @@ async function mockApi(page: Page) {
     }
 
     if (method === "GET") {
-      if (pathname === "/notes") return json([NOTE]);
-      if (pathname === "/students") return json([STUDENT]);
       if (pathname === "/artifacts") return json([ARTIFACT]);
       if (pathname === "/knowledge/sources") return json([SOURCE]);
       if (pathname === "/library/collections") return json([COLLECTION]);
@@ -214,8 +189,6 @@ async function mockApi(page: Page) {
         return;
       }
       if (
-        /^\/notes\/[^/]+$/.test(pathname) ||
-        /^\/students\/[^/]+$/.test(pathname) ||
         /^\/artifacts\/[^/]+$/.test(pathname) ||
         /^\/knowledge\/sources\/[^/]+$/.test(pathname) ||
         /^\/library\/collections\/[^/]+$/.test(pathname)
@@ -273,32 +246,9 @@ async function expectGuarded(
 }
 
 test.describe("destructive actions are confirm-guarded (mocked API)", () => {
-  test("note delete", async ({ page }) => {
-    const mock = await mockApi(page);
-    await page.goto("/en/notes");
-    const row = page.getByTestId("note-item").filter({ hasText: NOTE.title });
-    await expect(row).toBeVisible();
-
-    await expectGuarded(page, mock, row.getByTestId("note-delete"), `DELETE /notes/${NOTE.id}`, /permanently deleted/i);
-    expect(mock.unexpected).toEqual([]);
-  });
-
-  test("student delete names the progress/assignments/logs it cascades", async ({ page }) => {
-    const mock = await mockApi(page);
-    await page.goto("/en/students");
-    const card = page.getByTestId("student-item").filter({ hasText: STUDENT.name });
-    await expect(card).toBeVisible();
-
-    await expectGuarded(
-      page,
-      mock,
-      card.getByTestId("student-delete"),
-      `DELETE /students/${STUDENT.id}`,
-      /progress.*assignments.*lesson logs/i,
-    );
-    expect(mock.unexpected).toEqual([]);
-  });
-
+  // The Notes and Students pages are GONE from the desktop build, so their
+  // confirm-guard cases went with them — the surviving guarded surfaces
+  // (artifacts, library, curricula, lessons) keep the full three-state proof.
   test("artifact delete", async ({ page }) => {
     const mock = await mockApi(page);
     await page.goto("/en/artifacts");
@@ -452,8 +402,8 @@ test.describe("destructive actions are confirm-guarded (mocked API)", () => {
 
   test("Escape closes the dialog without sending anything", async ({ page }) => {
     const mock = await mockApi(page);
-    await page.goto("/en/notes");
-    await page.getByTestId("note-delete").click();
+    await page.goto("/en/artifacts");
+    await page.getByTestId("artifact-delete").click();
     await expect(page.getByTestId("confirm-dialog")).toBeVisible();
 
     await page.keyboard.press("Escape");
@@ -463,13 +413,13 @@ test.describe("destructive actions are confirm-guarded (mocked API)", () => {
 
     // And the row is not left stuck in a "deleting" spinner — i.e. the promise
     // really settled rather than hanging on the un-accepted dialog.
-    await expect(page.getByTestId("note-delete")).toBeEnabled();
+    await expect(page.getByTestId("artifact-delete")).toBeEnabled();
   });
 
   test("the dialog is Greek in the Greek locale (the default one)", async ({ page }) => {
     const mock = await mockApi(page);
-    await page.goto("/el/notes");
-    await page.getByTestId("note-delete").click();
+    await page.goto("/el/artifacts");
+    await page.getByTestId("artifact-delete").click();
 
     await expect(page.getByTestId("confirm-title")).toContainText("Διαγραφή");
     await expect(page.getByTestId("confirm-body")).toContainText("δεν αναιρείται");

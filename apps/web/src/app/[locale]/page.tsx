@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 
-/** The cockpit has no real "home" — `/[locale]` just lands you on Today,
- * the daily-agenda page. In normal operation `proxy.ts`'s own
+/** The cockpit has no real "home" — `/[locale]` just lands you on
+ * Curricula, the app's primary screen. In normal operation `proxy.ts`'s own
  * `localeRootRedirect` intercepts this exact path first (see its docstring
  * for why: a `no-store`-correctness fix, not a style choice) and this
  * component never actually runs — it's kept anyway as the literal route
@@ -13,5 +13,5 @@ export default async function RootLocalePage({
   params: Promise<{ locale: string }>;
 }) {
   const { locale } = await params;
-  redirect(`/${locale}/today`);
+  redirect(`/${locale}/curricula`);
 }

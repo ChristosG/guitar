@@ -172,7 +172,7 @@ def test_persist_new_messages_persists_an_assistant_message_with_tool_calls():
     session = _make_session()
     tool_calls = [{
         "id": "call_9", "type": "function",
-        "function": {"name": "list_students", "arguments": "{}"},
+        "function": {"name": "list_curricula", "arguments": "{}"},
     }]
     db = SessionLocal()
     persist_new_messages(

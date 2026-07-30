@@ -40,20 +40,17 @@ Two turns, mirroring the brief exactly:
     question) with genuinely on-topic content; separately inspects the
     persisted transcript to REPORT (not gate on) which tool, if any, the
     model actually called — the brief's own "either/or" allows either path.
-  - a MUTATION intent ("add a new student named Maria Ioannou, beginner
-    level") — hard-asserts the turn suspends: `status == "awaiting_approval"`,
-    `tool_name == "create_student"`, and plausible `tool_args` (the proposed
-    name substring-matches both name parts). Also asserts the mutation fn
-    was NEVER actually invoked (no Student row exists) — suspend-before-
-    execute is the entire point of the HITL gate this task re-verifies.
+  - a MUTATION intent ("make me a chord diagram artifact for the G major
+    open chord") — hard-asserts the turn suspends:
+    `status == "awaiting_approval"`, `tool_name == "generate_artifact"`, and
+    plausible `tool_args`. Also asserts the mutation fn was NEVER actually
+    invoked (no new Artifact row exists) — suspend-before-execute is the
+    entire point of the HITL gate this task re-verifies.
 
-A third turn (Plan 6 Task 6's own brief) re-runs the identical proof for one
-of the THREE tools this task wired into the very same registry the two turns
-above already drive the full roster of: "make a note that Maria struggled
-with barre chords today" -> `status == "awaiting_approval"`,
-`tool_name == "add_note"`, plausible `tool_args` (title/body plausibly
-mention Maria/barre chords), and — same suspend-before-execute proof as the
-`create_student` turn — no `Note` row exists yet.
+(The desktop build REMOVED the student/note agent tools, so the original
+`create_student`/`add_note` mutation-intent turns were retargeted at
+`generate_artifact` — the surviving mutation with the most natural
+one-sentence chat intent.)
 """
 import uuid
 
@@ -64,11 +61,10 @@ from sqlalchemy import select, text
 from app.brain.ingest import IngestPayload, ingest_source
 from app.db import Base, SessionLocal, engine
 from app.main import app
+from app.models.artifact import Artifact
 from app.models.block import Block
 from app.models.chat import ApprovalRequest, Message
 from app.models.knowledge import KnowledgeSource
-from app.models.note import Note
-from app.models.student import Student
 
 # Skip cleanly (not error) when no DB is reachable — mirrors test_curriculum_api.py.
 try:
@@ -184,12 +180,18 @@ def test_mutation_intent_suspends_for_approval_with_the_right_tool():
     and the router actually suspends rather than executing — approve-before-
     execute's whole reason to exist. Never resolves the approval (this test
     is about the PROPOSE+SUSPEND behavior only); separately confirms the
-    mutation fn was genuinely never invoked (no Student row exists).
+    mutation fn was genuinely never invoked (no new Artifact row exists).
     """
+    db = SessionLocal()
+    try:
+        artifact_count_before = db.query(Artifact).count()
+    finally:
+        db.close()
+
     session_id = _create_session()
     r = client.post(
         f"/chat/{session_id}/messages",
-        json={"content": "Add a new student named Maria Ioannou, beginner level"},
+        json={"content": "Make me a chord diagram artifact for the G major open chord"},
     )
     assert r.status_code == 200, r.text
     body = r.json()
@@ -203,81 +205,29 @@ def test_mutation_intent_suspends_for_approval_with_the_right_tool():
     assert body["status"] == "awaiting_approval", (
         f"expected the turn to suspend for approval, got: {body}"
     )
-    assert body["tool_name"] == "create_student", (
-        f"model proposed the wrong tool for a roster-add request: {body['tool_name']!r}"
+    assert body["tool_name"] == "generate_artifact", (
+        f"model proposed the wrong tool for an artifact request: {body['tool_name']!r}"
     )
     assert body["approval_id"]
 
     tool_args = body["tool_args"]
-    name_arg = str(tool_args.get("name", "")).lower()
-    assert "maria" in name_arg and "ioannou" in name_arg, (
-        f"proposed create_student args don't plausibly match the request: {tool_args}"
+    args_blob = " ".join(str(v) for v in tool_args.values()).lower()
+    assert "chord" in args_blob or "g major" in args_blob, (
+        f"proposed generate_artifact args don't plausibly match the request: {tool_args}"
     )
 
-    # Suspended, not executed: the ApprovalRequest is pending, and no Student
-    # row exists yet — proving the router gated the mutation rather than
+    # Suspended, not executed: the ApprovalRequest is pending, and no new
+    # Artifact row exists — proving the router gated the mutation rather than
     # running it inline.
     db = SessionLocal()
     try:
         approval = db.get(ApprovalRequest, uuid.UUID(body["approval_id"]))
         assert approval is not None
         assert approval.status == "pending"
-        assert approval.tool_name == "create_student"
+        assert approval.tool_name == "generate_artifact"
 
-        maria_rows = db.query(Student).filter(Student.name.ilike("%Maria%")).all()
-        assert maria_rows == [], (
-            f"create_student fn must NOT run before approval, but found: {maria_rows}"
-        )
-    finally:
-        db.close()
-
-
-@pytest.mark.integration
-def test_note_intent_suspends_for_approval_with_the_right_tool():
-    """Plan 6 Task 6's own live-LLM proof: same shape as the `create_student`
-    turn above, for one of the three tools this task added into the SAME
-    ~16-tool roster (6 read + 10 mutation) — confirming the registry's growth
-    since Task 6 of Plan 5 didn't suppress tool-calling for a NEW tool either.
-    """
-    session_id = _create_session()
-    r = client.post(
-        f"/chat/{session_id}/messages",
-        json={"content": "Make a note that Maria struggled with barre chords today"},
-    )
-    assert r.status_code == 200, r.text
-    body = r.json()
-
-    print(
-        f"\n[live-llm note-intent] status={body['status']!r} "
-        f"tool_name={body.get('tool_name')!r} tool_args={body.get('tool_args')!r} "
-        f"description={body.get('description')!r}"
-    )
-
-    assert body["status"] == "awaiting_approval", (
-        f"expected the turn to suspend for approval, got: {body}"
-    )
-    assert body["tool_name"] == "add_note", (
-        f"model proposed the wrong tool for a make-a-note request: {body['tool_name']!r}"
-    )
-    assert body["approval_id"]
-
-    tool_args = body["tool_args"]
-    text_blob = " ".join(str(v) for v in tool_args.values()).lower()
-    assert "maria" in text_blob, f"proposed add_note args don't mention Maria: {tool_args}"
-    assert "barre" in text_blob, f"proposed add_note args don't mention barre chords: {tool_args}"
-
-    # Suspended, not executed: the ApprovalRequest is pending, and no Note row
-    # exists yet — proving the router gated the mutation rather than running it.
-    db = SessionLocal()
-    try:
-        approval = db.get(ApprovalRequest, uuid.UUID(body["approval_id"]))
-        assert approval is not None
-        assert approval.status == "pending"
-        assert approval.tool_name == "add_note"
-
-        note_rows = db.query(Note).all()
-        assert note_rows == [], (
-            f"add_note fn must NOT run before approval, but found: {note_rows}"
+        assert db.query(Artifact).count() == artifact_count_before, (
+            "generate_artifact fn must NOT run before approval, but an Artifact row appeared"
         )
     finally:
         db.close()
