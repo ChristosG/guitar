@@ -1,6 +1,6 @@
-# GuitarTutor desktop shell
+# Angel OS desktop shell
 
-A Tauri 2.x macOS/Linux app that bundles the entire GuitarTutor stack — no
+A Tauri 2.x macOS/Linux app that bundles the entire Angel OS stack — no
 Docker, no installs, no network beyond `api.anthropic.com` (the tutor's own
 Claude API key, pasted in Settings). The shell supervises four bundled
 runtimes and shows the web app in a native window.
@@ -8,7 +8,7 @@ runtimes and shows the web app in a native window.
 ## Architecture
 
 ```
-GuitarTutor.app / .deb / .AppImage
+Angel OS.app / .deb / .AppImage
 └── resources/
     ├── pg/            Postgres 16.9 (theseus-rs full distribution) + pgvector 0.8.0
     ├── python/        CPython 3.12 (python-build-standalone) with apps/api
@@ -77,7 +77,7 @@ minutes. A lost race surfaces as a child that exits immediately, which the
 supervisor already reports as "the backend stopped"; it is not silently retried.
 This is also why INSTALL.txt promises the tutor only that the app "normally"
 starts alongside other programs, and tells him to quit any other copy of
-GuitarTutor if it ever says it cannot start — that (plus a truly exhausted
+Angel OS if it ever says it cannot start — that (plus a truly exhausted
 range) is the surviving failure path, and the one action that fixes it.
 
 ### Which ports did this launch actually pick?
@@ -101,7 +101,7 @@ the last launch / the usual pair / the usual pair was taken.)
 
 | | path |
 |---|---|
-| macOS | `~/Library/Logs/GuitarTutor/app.log` |
+| macOS | `~/Library/Logs/AngelOS/app.log` |
 | Linux | `${XDG_STATE_HOME:-~/.local/state}/guitar-tutor/log/app.log` |
 
 It is append-only and never truncated (unlike the three child logs), so the LAST
@@ -114,7 +114,7 @@ Logs** in the menu bar opens the containing folder in Finder / the file manager.
 
 | | path |
 |---|---|
-| macOS | `~/Library/Application Support/GuitarTutor/meta.json` |
+| macOS | `~/Library/Application Support/AngelOS/meta.json` |
 | Linux | `${XDG_DATA_HOME:-~/.local/share}/guitar-tutor/meta.json` |
 
 `paths::app_log` does still mirror every line to stderr, so launching the binary
@@ -190,8 +190,8 @@ was created, and only a full relaunch can tell it a different one.
 
 | what | macOS | Linux |
 |---|---|---|
-| data (pgdata/, media/, secrets/, meta.json) | `~/Library/Application Support/GuitarTutor` | `${XDG_DATA_HOME:-~/.local/share}/guitar-tutor` |
-| logs (app.log, postgres.log, api.log, web.log) | `~/Library/Logs/GuitarTutor` | `${XDG_STATE_HOME:-~/.local/state}/guitar-tutor/log` |
+| data (pgdata/, media/, secrets/, meta.json) | `~/Library/Application Support/AngelOS` | `${XDG_DATA_HOME:-~/.local/share}/guitar-tutor` |
+| logs (app.log, postgres.log, api.log, web.log) | `~/Library/Logs/AngelOS` | `${XDG_STATE_HOME:-~/.local/state}/guitar-tutor/log` |
 
 `secrets/secrets.json` (chmod 600) holds APP_SECRET + ENCRYPTION_SECRET,
 generated once and **never regenerated** — ENCRYPTION_SECRET encrypts the

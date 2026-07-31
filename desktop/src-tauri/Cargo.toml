@@ -1,7 +1,7 @@
 [package]
 name = "guitartutor"
 version = "0.1.0"
-description = "GuitarTutor desktop shell — supervises the bundled Postgres, Python API and Next.js runtimes"
+description = "Angel OS desktop shell — supervises the bundled Postgres, Python API and Next.js runtimes"
 edition = "2021"
 rust-version = "1.77"
 license = "UNLICENSED"
