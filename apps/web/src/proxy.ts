@@ -24,12 +24,39 @@ const intl = createMiddleware(routing);
 // dynamic-API path, so this file's own `no-store` (set below) is
 // guaranteed to be the final word on it. `page.tsx`'s `redirect()` still
 // covers any request this matcher doesn't.
+//
+// IT ALSO HANDLES THE BARE ORIGIN (`/`), which is what the desktop shell loads,
+// and that half exists because `routing.ts` had to switch `localeDetection`
+// off. See the argument there: with detection on, WebKit's `Accept-Language`
+// — which is just the system `LANG` — outranked `defaultLocale`, and an
+// English-installed OS silently handed the tutor an English app. With detection
+// off, next-intl can no longer read the COOKIE either, so an explicit EN/EL
+// choice would stop sticking. Reading it here restores exactly that one signal
+// and nothing else: a locale the user PICKED wins, the operating system never
+// does, and Greek is what is left.
+//
+// Folding `/` into the same redirect also collapses a hop — `/` used to go to
+// `/{locale}` and only then to `/{locale}/curricula`.
 function localeRootRedirect(request: NextRequest): NextResponse | null {
-  const match = request.nextUrl.pathname.match(/^\/(en|el)\/?$/);
+  const match = request.nextUrl.pathname.match(/^\/(?:(en|el)\/?)?$/);
   if (!match) return null;
   const url = request.nextUrl.clone();
-  url.pathname = `/${match[1]}/curricula`;
+  url.pathname = `/${match[1] ?? rememberedLocale(request)}/curricula`;
   return NextResponse.redirect(url);
+}
+
+// The locale the user last chose, or Greek. `NEXT_LOCALE` is next-intl's own
+// cookie and it is still written on every locale-prefixed navigation
+// (`syncCookie` is gated on `localeCookie`, not on `localeDetection`), so the
+// EN/EL toggle keeps setting it exactly as before — this only reads it.
+// Validated against `routing.locales` rather than trusted: it is a plain
+// client-writable cookie, and an unvalidated value would land straight in a
+// redirect path.
+function rememberedLocale(request: NextRequest): string {
+  const picked = request.cookies.get("NEXT_LOCALE")?.value;
+  return picked && (routing.locales as readonly string[]).includes(picked)
+    ? picked
+    : routing.defaultLocale;
 }
 
 // THE API IS THE REAL GATE. This is UX.

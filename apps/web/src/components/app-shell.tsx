@@ -223,7 +223,20 @@ export function AppShell({ children }: { children: ReactNode }) {
         )}
 
         <main className="flex-1 overflow-y-auto">
-          <div className="mx-auto w-full max-w-6xl p-4 md:p-8">{children}</div>
+          {/* THE CAP IS FOR READABILITY, NOT FOR LAYOUT, and it was set for a
+              laptop. `max-w-6xl` is 1152px: on the tutor's maximised window the
+              cockpit used 45% of the screen and the other 55% was empty
+              background, and nothing about resizing the window changed
+              anything — which is exactly what it looked like, a component that
+              ignores its container.
+
+              Widened rather than removed. A line of Greek prose spanning 2500px
+              is unreadable in a different way, so there is still a bound; it is
+              now far enough out that ordinary and maximised windows both use
+              the space they have. The pages that genuinely need narrow measure
+              already say so themselves (`settings` max-w-2xl, `canon`
+              max-w-prose), so this was always a belt over existing braces. */}
+          <div className="mx-auto w-full max-w-[120rem] p-4 md:p-8">{children}</div>
         </main>
       </div>
     </div>

@@ -981,7 +981,16 @@ export async function downloadCurriculumDocx(rootId: string): Promise<void> {
   const a = document.createElement("a");
   a.href = url;
   a.download = filename;
+  // IN THE DOCUMENT BEFORE THE CLICK. A detached anchor's `click()` dispatches
+  // the event, but WebKit does not start a download from it — the export
+  // therefore did nothing at all inside the desktop shell: the API served the
+  // .docx (200, right bytes), the blob was built, `click()` returned, and no
+  // file was ever written and no error was shown. Chromium is more forgiving,
+  // which is why this survived in the browser deployment.
+  a.style.display = "none";
+  document.body.appendChild(a);
   a.click();
+  a.remove();
   // Deferred, not synchronous: revoking the object URL right after `.click()`
   // races the browser's own handling of that click on some engines (the
   // download can start reading the blob URL after it's already been

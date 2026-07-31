@@ -764,10 +764,10 @@ fn wait_port_free(port: u16, grace: Duration) -> bool {
 /// still starting — the splash is up, the backend it would replace does not
 /// exist yet. Nothing is wrong, so this says nothing is wrong: wait.
 pub fn still_starting_message() -> String {
-    "Το GuitarTutor ξεκινάει ακόμη.\n\
+    "Το Angel OS ξεκινάει ακόμη.\n\
      Περιμένετε να ανοίξει το κύριο παράθυρο και δοκιμάστε ξανά — δεν υπάρχει \
      ακόμη backend για επανεκκίνηση.\n\n\
-     GuitarTutor is still starting.\n\
+     Angel OS is still starting.\n\
      Wait for the main window to open and try again — there is no backend to \
      restart yet."
         .to_string()
@@ -778,13 +778,13 @@ pub fn still_starting_message() -> String {
 /// in place of the raw bind/`ureq` error this replaces.
 fn port_taken_message(port: u16) -> String {
     format!(
-        "Η θύρα {port}, που χρησιμοποιεί το GuitarTutor, δεν είναι πλέον διαθέσιμη \
+        "Η θύρα {port}, που χρησιμοποιεί το Angel OS, δεν είναι πλέον διαθέσιμη \
          — την πήρε άλλο πρόγραμμα.\n\
-         Κλείστε εντελώς το GuitarTutor και ανοίξτε το ξανά· μόνο κατά την \
+         Κλείστε εντελώς το Angel OS και ανοίξτε το ξανά· μόνο κατά την \
          εκκίνηση μπορεί να επιλέξει νέες θύρες.\n\n\
-         Port {port}, which GuitarTutor is using, is no longer available — \
+         Port {port}, which Angel OS is using, is no longer available — \
          another program took it.\n\
-         Quit GuitarTutor completely and open it again; it can only pick new \
+         Quit Angel OS completely and open it again; it can only pick new \
          ports while starting up."
     )
 }

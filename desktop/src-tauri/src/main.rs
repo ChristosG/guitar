@@ -1,4 +1,4 @@
-//! GuitarTutor desktop shell.
+//! Angel OS desktop shell.
 //!
 //! Boot: splash → dirs → instance guard (which STOPS a leftover cluster of our
 //! own — when the instance lock PROVES it is ours — rather than refusing to
@@ -76,13 +76,14 @@ mod instance;
 mod paths;
 mod supervisor;
 
+use std::ffi::OsString;
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use tauri::menu::{MenuBuilder, MenuItem, MenuItemBuilder, SubmenuBuilder};
-use tauri::webview::DownloadEvent;
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, Wry};
+use tauri::webview::{DownloadEvent, NewWindowResponse};
+use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder, Wry};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
 
@@ -99,7 +100,392 @@ static SUPERVISOR: OnceLock<Arc<Supervisor>> = OnceLock::new();
 /// underneath — this is the half the tutor can see.
 static RESTART_ITEM: OnceLock<MenuItem<Wry>> = OnceLock::new();
 
+/// What `steer_webkit_renderer` decided, logged by `boot` AFTER the launch
+/// banner rather than at the moment it happens. The decision has to be made
+/// before `main` does anything else at all, and a line that lands above
+/// `--- Angel OS … starting ---` reads as part of the PREVIOUS launch — while
+/// the first thing anyone debugging a blank window does is find the last banner
+/// and read down from there. Empty on macOS, where nothing is decided.
+static RENDERER_NOTE: OnceLock<String> = OnceLock::new();
+
+// ---- linux: which renderer WebKitGTK composites through ---------------------
+
+/// WebKitGTK ≥ 2.42 composites through a DMA-BUF renderer, and on the NVIDIA
+/// userspace stack the buffer it exports cannot be imported again. The result is
+/// the worst shape a failure can take: the web process is ALIVE — scripts run,
+/// `fetch` succeeds, the API answers, the native menu bar works — and it paints
+/// nothing. What the tutor sees is the GTK window background, which is
+/// indistinguishable from "this app is broken", and there is nothing wrong in
+/// any log to report, because nothing IS wrong: the boot genuinely succeeded.
+///
+/// Two properties make this worth a workaround rather than a note in a README.
+/// It is undiagnosable from inside the app (there is no error, no exit code, no
+/// failed request), and it is unreportable from outside it (a screenshot of a
+/// dark rectangle). The tutor cannot get past it and cannot describe it.
+///
+/// Scoped as narrowly as the evidence allows, because the OPPOSITE mistake is
+/// silent too: disabling this on hardware where it works costs compositing and
+/// produces no symptom to notice. So it is applied only where the broken stack
+/// is actually present, and never over a decision somebody has already made.
+#[cfg(target_os = "linux")]
+const DMABUF_VAR: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
+
+/// The file the NVIDIA kernel module creates, and the reason this check is not
+/// "is there NVIDIA hardware". Nouveau drives the same cards through a Mesa
+/// userspace and is unaffected; it does not create this file. Both the
+/// proprietary driver and NVIDIA's open kernel module DO — and they ship the
+/// same userspace EGL/GBM stack, which is where the bug actually lives.
+#[cfg(target_os = "linux")]
+const NVIDIA_PROC: &str = "/proc/driver/nvidia/version";
+
+#[cfg(target_os = "linux")]
+enum Dmabuf {
+    /// Leave the environment exactly as it is; the reason, for app.log.
+    LeaveAlone(&'static str),
+    /// Set `DMABUF_VAR=1`; the reason, for app.log.
+    Disable(&'static str),
+}
+
+/// The decision, as a pure function of the two facts it turns on, so the truth
+/// table can be pinned by a test on a machine with no GPU at all.
+#[cfg(target_os = "linux")]
+fn dmabuf_workaround(preset: Option<&std::ffi::OsStr>, nvidia_userspace: bool) -> Dmabuf {
+    // PRESENCE, not value — WebKitGTK itself only tests whether the variable
+    // exists, so `=0` and `=` are both already decisions in force. Overriding
+    // either would take away the only way to turn the fast path back on when a
+    // future driver or WebKit fixes this, and would say nothing about why.
+    if preset.is_some() {
+        return Dmabuf::LeaveAlone(
+            "an explicit setting was already in the environment, and this app does \
+             not overrule one",
+        );
+    }
+    if nvidia_userspace {
+        return Dmabuf::Disable(
+            "the NVIDIA userspace stack is loaded, and WebKitGTK's DMA-BUF renderer \
+             paints nothing on it — a live, working, invisible window",
+        );
+    }
+    Dmabuf::LeaveAlone("no NVIDIA userspace stack, so the DMA-BUF renderer is left on")
+}
+
+/// Apply that decision. Called as the FIRST statement of `main`: the variable is
+/// read when the web content process is launched, and — the reason for the
+/// placement rather than merely early — `set_var` is only sound while this
+/// program is still single-threaded. Nothing above it has spawned a thread,
+/// and GTK and WebKit have not initialised.
+#[cfg(target_os = "linux")]
+fn steer_webkit_renderer() {
+    let preset = std::env::var_os(DMABUF_VAR);
+    let nvidia = std::path::Path::new(NVIDIA_PROC).exists();
+    let note = match dmabuf_workaround(preset.as_deref(), nvidia) {
+        Dmabuf::Disable(why) => {
+            std::env::set_var(DMABUF_VAR, "1");
+            format!("renderer: {DMABUF_VAR}=1 — {why}")
+        }
+        Dmabuf::LeaveAlone(why) => format!("renderer: {DMABUF_VAR} untouched — {why}"),
+    };
+    let _ = RENDERER_NOTE.set(note);
+}
+
+// ---- zoom ------------------------------------------------------------------
+
+/// Page zoom, injected into the tutor's window before any page script runs.
+///
+/// IN THE PAGE RATHER THAN IN RUST, and that is a measured decision, not a
+/// shortcut. Tauri's `zoom_hotkeys_enabled` is WINDOWS-ONLY — in wry 0.55 the
+/// flag is read by the webview2 backend and by nothing else, so on WebKitGTK
+/// and WKWebView (the two this app actually ships) it does nothing at all.
+/// `Webview::set_zoom` does work on both, but only Rust can call it, and Rust
+/// cannot see a `wheel` event or a trackpad pinch. Routing those back would
+/// mean opening IPC to a REMOTE origin — this window loads `http://localhost`,
+/// not `tauri://` — which is a capability grant and a much wider blast radius
+/// than a zoom control is worth.
+///
+/// The obvious objection to doing it in CSS is that `zoom` is not browser zoom
+/// and would break a viewport-sized layout: the shell is `h-dvh`, and if `dvh`
+/// resolved against the UNZOOMED viewport the whole app would overflow its own
+/// window at any zoom above 1. That was checked rather than assumed — built,
+/// run, and photographed at `zoom: 1.5` in the real WebKitGTK build: the
+/// sidebar still ends exactly at the window bottom. WebKit resolves viewport
+/// units against the EFFECTIVE zoom, so the objection does not apply. WKWebView
+/// is the same engine family.
+///
+/// PINCH COMES FREE. WebKit delivers a trackpad pinch as a `wheel` event with
+/// `ctrlKey` set — the same shape as Ctrl+wheel — so the one listener covers
+/// the macOS gesture and the Linux mouse without a line of platform code.
+///
+/// The level persists in `localStorage`, which is exactly why boot goes to the
+/// trouble of REMEMBERING the port pair: localStorage is partitioned by origin
+/// including the port, so a stable origin is what lets a zoom set today still
+/// be there tomorrow.
+const ZOOM_JS: &str = r#"
+(function () {
+  var KEY = "angelos.zoom";
+  // Discrete stops rather than a continuous factor: a trackpad emits dozens of
+  // wheel events per gesture, and multiplying by a ratio each time overshoots
+  // wildly and lands on values like 1.0700000000000003.
+  var STEPS = [0.5, 0.67, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3];
+  var current = 1;
+
+  function load() {
+    try {
+      var v = parseFloat(localStorage.getItem(KEY));
+      return isFinite(v) && v >= STEPS[0] && v <= STEPS[STEPS.length - 1] ? v : 1;
+    } catch (e) { return 1; }  // private mode / storage disabled
+  }
+  function save() { try { localStorage.setItem(KEY, String(current)); } catch (e) {} }
+
+  // `documentElement` may not exist yet: this runs at document-start, before
+  // the parser has produced <html>. Both callers are guarded and the
+  // DOMContentLoaded pass below is what actually paints on a cold load.
+  function paint() {
+    var el = document.documentElement;
+    if (!el) return;
+    el.style.zoom = current === 1 ? "" : String(current);
+  }
+  function step(dir) {
+    var best = 0, dist = Infinity;
+    for (var i = 0; i < STEPS.length; i++) {
+      var d = Math.abs(STEPS[i] - current);
+      if (d < dist) { dist = d; best = i; }
+    }
+    var next = best + dir;
+    if (next < 0 || next >= STEPS.length) return;   // already at an end stop
+    current = STEPS[next]; paint(); save();
+  }
+  function reset() { current = 1; paint(); save(); }
+
+  current = load();
+  paint();
+  document.addEventListener("DOMContentLoaded", paint);
+
+  // What the View menu drives. One implementation, two ways in.
+  window.__angelZoom = { zoomIn: function () { step(1); },
+                         zoomOut: function () { step(-1); },
+                         reset: reset };
+
+  // `capture: true` so the app never sees the event first, and
+  // `passive: false` because preventDefault on a wheel listener is ignored
+  // otherwise — without it the page scrolls WHILE it zooms.
+  window.addEventListener("wheel", function (e) {
+    if (!e.ctrlKey && !e.metaKey) return;
+    e.preventDefault();
+    step(e.deltaY < 0 ? 1 : -1);
+  }, { passive: false, capture: true });
+
+  window.addEventListener("keydown", function (e) {
+    if (!e.ctrlKey && !e.metaKey) return;
+    // "+" and "=" are the same physical key; Shift decides which one arrives,
+    // so accepting both is what makes Ctrl+Shift+= and Ctrl++ the same gesture.
+    if (e.key === "+" || e.key === "=") { e.preventDefault(); step(1); }
+    else if (e.key === "-" || e.key === "_") { e.preventDefault(); step(-1); }
+    else if (e.key === "0") { e.preventDefault(); reset(); }
+  }, true);
+})();
+"#;
+
+/// Turn a click on an outbound link into an ordinary navigation, because on
+/// WebKitGTK that is the ONLY shape the shell can actually see.
+///
+/// `on_new_window` below is the obvious home for this and it is not enough —
+/// verified by reading wry 0.55's GTK backend after the handler silently never
+/// fired. Both routes are closed:
+///
+///   * `on_new_window` is driven by WebKitGTK's `create` signal, which is only
+///     emitted when popups are permitted. wry never calls
+///     `set_javascript_can_open_windows_automatically`, so the WebKitGTK
+///     default (off) stands and `create` never comes.
+///   * `on_navigation` is wired to `decide-policy`, but only for
+///     `PolicyDecisionType::NavigationAction`. A `target="_blank"` click raises
+///     `NewWindowAction`, and wry's match arm for that is a bare
+///     `_ => return false`.
+///
+/// So the settings page's `<a target="_blank">` to the Anthropic console fell
+/// between the two and did nothing whatsoever — which is exactly the bug as the
+/// tutor experienced it: a link that says "get a key here" and ignores him.
+///
+/// Rewriting the click into `location.href` moves it onto `NavigationAction`,
+/// which IS routed, where `goes_to_the_browser` sends it to the real browser
+/// and returns false — so the navigation is ignored and the cockpit never moves.
+/// One path on both platforms, and it lives here in the SHELL rather than in
+/// the web app, so the hosted deployment keeps its ordinary `target="_blank"`
+/// behaviour where tabs actually exist.
+const EXTERNAL_LINKS_JS: &str = r#"
+(function () {
+  document.addEventListener("click", function (e) {
+    // Leave modified clicks alone — they mean something else everywhere else,
+    // and a handler that swallows them is worse than no handler.
+    if (e.defaultPrevented || e.button !== 0) return;
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    var a = e.target && e.target.closest ? e.target.closest("a[href]") : null;
+    if (!a) return;
+    var url;
+    try { url = new URL(a.href, location.href); } catch (err) { return; }
+    // Only the open web. blob:/data:/mailto: and our own origin are somebody
+    // else's job — see `goes_to_the_browser`, which decides this again on the
+    // Rust side and is the half that actually enforces it.
+    if (url.protocol !== "http:" && url.protocol !== "https:") return;
+    if (url.hostname === location.hostname) return;
+    e.preventDefault();
+    location.href = url.href;
+  }, true);
+})();
+"#;
+
+/// Run one of `ZOOM_JS`'s entry points in the tutor's window.
+fn zoom_command(handle: &AppHandle, func: &str) {
+    if let Some(w) = handle.get_webview_window("main") {
+        // Guarded on the JS side too: a menu click can arrive before the page
+        // has run the injected script (the window exists first).
+        let _ = w.eval(format!("window.__angelZoom && window.__angelZoom.{func}()"));
+    }
+}
+
+// ---- where a link is allowed to go -----------------------------------------
+
+/// Does this URL belong in the tutor's BROWSER rather than inside the app?
+///
+/// The app frame is for the app. A link to `console.anthropic.com` opened in it
+/// would replace the cockpit with a web page and leave no way back — there is
+/// no address bar, no Back button and no tab strip in this window. Worse is
+/// what happened before: the settings page marks that link `target="_blank"`,
+/// and a webview has no tabs to open, so the click did NOTHING AT ALL. The
+/// tutor was told "get a key at console.anthropic.com" and given a link that
+/// silently ignored him.
+///
+/// Deliberately narrow. Only `http`/`https` to a host that is not this machine
+/// is treated as the open internet; `blob:`, `data:` and `about:` are how the
+/// page does its own work — a DOCX export IS a blob navigation, and sending
+/// that to Firefox would break the very feature the save dialog exists for.
+///
+/// Host, not port. Everything the app links to is either its own origin or the
+/// public internet, so pinning the port would buy nothing and would break the
+/// moment the port scan rolls to a different pair.
+fn goes_to_the_browser(url: &Url) -> bool {
+    matches!(url.scheme(), "http" | "https")
+        && !matches!(url.host_str(), Some("localhost") | Some("127.0.0.1") | Some("::1"))
+}
+
+/// Hand a URL to whatever the tutor uses to browse, and log it. Never fatal:
+/// failing to open a browser is a disappointment, not a reason to lose the app.
+fn open_in_browser(handle: &AppHandle, url: &Url) {
+    paths::app_log(&format!("opening in the default browser: {url}"));
+    if let Err(e) = handle.opener().open_url(url.as_str(), None::<&str>) {
+        paths::app_log(&format!("could not open {url} in a browser: {e}"));
+    }
+}
+
+// ---- downloads -------------------------------------------------------------
+
+/// A download that has been STAGED and not yet given a home.
+struct Staged {
+    url: String,
+    staged_at: PathBuf,
+    suggested: OsString,
+}
+
+/// THE TWO-STEP EXISTS BECAUSE OF WHICH THREAD WE ARE ON.
+///
+/// `DownloadEvent::Requested` is where the destination can be chosen, and it is
+/// the one place a save dialog would be natural. It is also raised on the GTK
+/// main thread, and `blocking_save_file` is documented — in the plugin itself —
+/// as "should *NOT* be used when running on the main thread". Asking there is a
+/// deadlock, i.e. a frozen app holding a half-finished export.
+///
+/// So the download is staged into the OS temp directory, and the question is
+/// asked on `Finished`, from a thread of our own. The temp directory rather
+/// than the data folder is the point of the design: a cancelled export needs no
+/// cleanup path of ours, so this feature adds no code anywhere near the tutor's
+/// files. Nothing is ever deleted by us — the OS reaps its own temp.
+///
+/// KEYED BY URL, NOT BY THE REPORTED PATH. `Finished.path` is documented as
+/// ALWAYS `None` on macOS, so a design that read it would have worked in every
+/// Linux test and shipped broken to the one platform nobody here can try. The
+/// URL is always present, and `Requested` is where we chose the path anyway.
+static STAGED_DOWNLOADS: Mutex<Vec<Staged>> = Mutex::new(Vec::new());
+
+/// Where to stage `name` while the tutor decides. `<tmp>/angelos-downloads/`,
+/// created on demand; the pid keeps two copies of the app from colliding.
+fn staging_path(name: &std::ffi::OsStr) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("angelos-downloads-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    unique_path(&dir, name)
+}
+
+/// Ask where a finished download should live, then put it there.
+///
+/// `from` is wherever the download actually landed, and it has TWO sources
+/// because the two platforms raise different halves of the event — measured,
+/// not assumed:
+///
+///   * WebKitGTK does not raise `Requested` for a `blob:` download at all (the
+///     DOCX export is one), so nothing is staged and the file has already been
+///     written to the downloads folder. `Finished` carries its path, and that
+///     is what we move.
+///   * macOS raises `Requested`, so the file is staged by us — and there
+///     `Finished.path` is documented as ALWAYS `None`, which is exactly why the
+///     staged path is remembered instead of read back off the event.
+///
+/// A design that trusted either half alone would have worked perfectly on the
+/// platform it was written on and done nothing on the other.
+///
+/// Runs on its own thread: `blocking_save_file` says, in the plugin's own
+/// documentation, that it must not run on the main thread, and the download
+/// callbacks all arrive there.
+fn place_finished_download(handle: AppHandle, from: PathBuf, suggested: OsString) {
+    let chosen = handle
+        .dialog()
+        .file()
+        .set_title("Angel OS")
+        .set_file_name(suggested.to_string_lossy())
+        .set_directory(paths::downloads_dir())
+        .blocking_save_file();
+
+    let Some(target) = chosen.and_then(|p| p.into_path().ok()) else {
+        // NOT AN ERROR, AND NOTHING IS REMOVED. The file is already written —
+        // in the downloads folder on Linux, in the OS temp directory on macOS
+        // — so a dismissed dialog costs the tutor an export he asked for
+        // nowhere. Deleting it here to be tidy would be the one way this
+        // feature could lose work.
+        paths::app_log(&format!(
+            "the save dialog was dismissed; the download is left where it landed: {}",
+            from.display()
+        ));
+        return;
+    };
+    if target == from {
+        paths::app_log(&format!("saved to {} (already there)", target.display()));
+        return;
+    }
+
+    // `rename` first: same-filesystem is the ordinary case and it is atomic.
+    // A cross-device move (temp on tmpfs, ~/Downloads on disk — the DEFAULT
+    // arrangement on most Linux desktops) fails with EXDEV, and a rename-only
+    // implementation would have failed there every single time.
+    let moved = std::fs::rename(&from, &target).or_else(|_| {
+        std::fs::copy(&from, &target).map(|_| {
+            let _ = std::fs::remove_file(&from); // the copy we just made ourselves
+        })
+    });
+    match moved {
+        Ok(()) => paths::app_log(&format!("saved to {}", target.display())),
+        Err(e) => {
+            let msg = format!(
+                "Δεν ήταν δυνατή η αποθήκευση του αρχείου εκεί.\n\
+                 The file could not be saved there.\n\n{e}"
+            );
+            paths::app_log(&format!("FAILED to save to {}: {e}", target.display()));
+            notice(&handle, &msg);
+        }
+    }
+}
+
 fn main() {
+    // FIRST — see `steer_webkit_renderer`: still single-threaded, and before
+    // anything can initialise GTK or WebKit.
+    #[cfg(target_os = "linux")]
+    steer_webkit_renderer();
     install_panic_logger();
     tauri::Builder::default()
         // Must be the FIRST plugin: a second launch focuses the running window.
@@ -117,7 +503,7 @@ fn main() {
         .setup(|app| {
             build_menu(app)?;
             WebviewWindowBuilder::new(app, "splash", WebviewUrl::App("splash.html".into()))
-                .title("GuitarTutor")
+                .title("Angel OS")
                 .inner_size(460.0, 320.0)
                 .resizable(false)
                 .maximizable(false)
@@ -157,7 +543,7 @@ fn main() {
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("error while building GuitarTutor")
+        .expect("error while building Angel OS")
         .run(|_handle, event| {
             // Fires on Cmd+Q, last-window-close and app.exit() alike — which
             // means every deliberate exit path, `fatal()` included, lands here.
@@ -199,10 +585,18 @@ fn boot(handle: AppHandle) {
     };
 
     paths::app_log(&format!(
-        "--- GuitarTutor {} starting (pid {}) ---",
+        "--- Angel OS {} starting (pid {}) ---",
         env!("CARGO_PKG_VERSION"),
         std::process::id()
     ));
+    // Immediately under the banner, and on every launch — not only when the
+    // workaround fires. "Is the blank-window workaround active on this machine"
+    // is the first question a blank window raises, and an answer that only
+    // appears in one of the two cases cannot distinguish "not applied" from
+    // "this build is too old to know about it".
+    if let Some(note) = RENDERER_NOTE.get() {
+        paths::app_log(note);
+    }
 
     // BEFORE secrets, before any scan, before anything touches the cluster: is
     // this the only copy, and did the last one actually die? Rolling ports
@@ -238,15 +632,15 @@ fn boot(handle: AppHandle) {
             return fatal(
                 &handle,
                 "Δεν βρέθηκε ελεύθερη θύρα δικτύου για τη βάση δεδομένων του \
-                 GuitarTutor: άλλα προγράμματα στον υπολογιστή κρατούν ήδη τις \
+                 Angel OS: άλλα προγράμματα στον υπολογιστή κρατούν ήδη τις \
                  θύρες που χρειάζεται.\n\
                  Κλείστε τα άλλα προγράμματα — ή κάντε επανεκκίνηση του \
-                 υπολογιστή — και ξεκινήστε ξανά το GuitarTutor.\n\n\
-                 GuitarTutor could not find a free network port for its database: \
+                 υπολογιστή — και ξεκινήστε ξανά το Angel OS.\n\n\
+                 Angel OS could not find a free network port for its database: \
                  other programs on this computer are already holding the ports it \
                  needs.\n\
                  Close the other programs — or restart the computer — and start \
-                 GuitarTutor again.",
+                 Angel OS again.",
             )
         }
     };
@@ -517,7 +911,7 @@ fn boot(handle: AppHandle) {
                             &format!(
                                 "Δεν ήταν δυνατή η τακτοποίηση της ημιτελούς βάσης \
                                  δεδομένων. Δεν διαγράφηκε τίποτα.\n\
-                                 GuitarTutor could not set the half-installed database \
+                                 Angel OS could not set the half-installed database \
                                  aside. Nothing was deleted.\n\n{e}"
                             ),
                         ),
@@ -607,15 +1001,15 @@ fn boot(handle: AppHandle) {
                 // No port range in here on purpose: "8790–8829" is not
                 // something the tutor can act on. What he can act on is
                 // closing programs or restarting.
-                "Δεν βρέθηκε ελεύθερη θύρα δικτύου για το GuitarTutor: άλλα \
+                "Δεν βρέθηκε ελεύθερη θύρα δικτύου για το Angel OS: άλλα \
                  προγράμματα στον υπολογιστή κρατούν ήδη τις θύρες που \
                  χρειάζεται.\n\
                  Κλείστε τα άλλα προγράμματα — ή κάντε επανεκκίνηση του \
-                 υπολογιστή — και ξεκινήστε ξανά το GuitarTutor.\n\n\
-                 GuitarTutor could not find a free network port: other programs \
+                 υπολογιστή — και ξεκινήστε ξανά το Angel OS.\n\n\
+                 Angel OS could not find a free network port: other programs \
                  on this computer are already holding the ports it needs.\n\
                  Close the other programs — or restart the computer — and start \
-                 GuitarTutor again.",
+                 Angel OS again.",
                 ),
             )
         }
@@ -735,7 +1129,7 @@ fn boot(handle: AppHandle) {
 /// the tutor's has been moved aside and not yet said out loud.
 ///
 /// A boot that dies after a displacement never reaches the one-time dialog, and
-/// "GuitarTutor could not start" plus a library that has silently moved is
+/// "Angel OS could not start" plus a library that has silently moved is
 /// exactly the experience this round exists to end. The record is durable either
 /// way — the next boot that survives drains it — but the next boot may be days
 /// away, and the person reading THIS dialog is the one who can act now.
@@ -770,10 +1164,10 @@ fn data_folder_unwritable(detail: &str) -> String {
     format!(
         "Δεν ήταν δυνατή η εγγραφή στον φάκελο δεδομένων, οπότε η εγκατάσταση δεν \
          μπορεί να συνεχίσει με ασφάλεια.\n\
-         Ελευθερώστε χώρο στον δίσκο και ξεκινήστε ξανά το GuitarTutor.\n\n\
+         Ελευθερώστε χώρο στον δίσκο και ξεκινήστε ξανά το Angel OS.\n\n\
          The data folder could not be written to, so the installation cannot \
          safely continue.\n\
-         Free up disk space and start GuitarTutor again.\n\n{detail}"
+         Free up disk space and start Angel OS again.\n\n{detail}"
     )
 }
 
@@ -784,11 +1178,11 @@ fn data_folder_unwritable(detail: &str) -> String {
 /// key), so the only real action is to put the file back.
 fn secrets_unreadable(detail: &str) -> String {
     format!(
-        "Ένα αρχείο ρυθμίσεων του GuitarTutor υπάρχει αλλά δεν διαβάζεται. Το \
-         GuitarTutor ΔΕΝ το αντικατέστησε — προστατεύει το αποθηκευμένο κλειδί \
+        "Ένα αρχείο ρυθμίσεων του Angel OS υπάρχει αλλά δεν διαβάζεται. Το \
+         Angel OS ΔΕΝ το αντικατέστησε — προστατεύει το αποθηκευμένο κλειδί \
          σας.\n\
          Μην διαγράψετε τίποτα: δείξτε αυτό το μήνυμα σε όποιον σας υποστηρίζει.\n\n\
-         A GuitarTutor settings file exists but cannot be read. Nothing was \
+         A Angel OS settings file exists but cannot be read. Nothing was \
          overwritten — that file protects the stored Anthropic key, so it is \
          restored, never regenerated.\n\n{detail}"
     )
@@ -835,24 +1229,121 @@ fn show_main_window(handle: &AppHandle, _installed: &InstallComplete) {
         // named exactly `__GT_API_BASE__`, no trailing slash. serde_json emits
         // a properly escaped JS string literal (naive quoting would not).
         // Main frame only, which is all this app has.
+        // Two globals and a zoom engine, before any page script runs. `{}` is
+        // not a format placeholder in `ZOOM_JS` — it is substituted as a value,
+        // so its braces need no escaping.
         let init = format!(
-            "window.__GT_API_BASE__ = {};",
-            serde_json::to_string(&ports.api_base()).expect("serialize api base")
+            "window.__GT_API_BASE__ = {};\n{}\n{}",
+            serde_json::to_string(&ports.api_base()).expect("serialize api base"),
+            ZOOM_JS,
+            EXTERNAL_LINKS_JS
         );
+        let nav_handle = h.clone();
+        let win_handle = h.clone();
+        let dl_handle = h.clone();
         let built = WebviewWindowBuilder::new(&h, "main", WebviewUrl::External(url))
             .initialization_script(init)
-            .title("GuitarTutor")
+            .title("Angel OS")
             .inner_size(1360.0, 900.0)
             .min_inner_size(980.0, 640.0)
-            .on_download(|_webview, event| {
-                // Route downloads (backup exports, DOCX) to ~/Downloads under
-                // the server-suggested filename. Returning true proceeds.
-                if let DownloadEvent::Requested { destination, .. } = event {
-                    let name = destination
-                        .file_name()
-                        .map(|n| n.to_os_string())
-                        .unwrap_or_else(|| "download".into());
-                    *destination = unique_path(&paths::downloads_dir(), &name);
+            // A same-tab click onto the open internet. Returning false stops
+            // the app frame from being replaced by a web page it has no way
+            // back from — there is no Back button in this window.
+            .on_navigation(move |url| {
+                if !goes_to_the_browser(url) {
+                    return true;
+                }
+                open_in_browser(&nav_handle, url);
+                false
+            })
+            // `target="_blank"` — which is what the settings page uses for the
+            // Anthropic console link, and which did NOTHING before this: a
+            // webview has no tabs, so the click was swallowed in silence.
+            .on_new_window(move |url, _features| {
+                if goes_to_the_browser(&url) {
+                    open_in_browser(&win_handle, &url);
+                }
+                // Denied either way. Even a local URL must not open a second,
+                // chromeless window with no menu and no supervisor behind it.
+                NewWindowResponse::Deny
+            })
+            .on_download(move |_webview, event| {
+                // Unconditional, and it earns its place: when this handler does
+                // not fire there is NOTHING anywhere to distinguish "the webview
+                // never raised a download" from "we mishandled one". That
+                // ambiguity cost a long debugging session once already.
+                paths::app_log(&format!(
+                    "download event: {}",
+                    match &event {
+                        DownloadEvent::Requested { url, .. } => format!("requested {url}"),
+                        DownloadEvent::Finished { url, success, .. } =>
+                            format!("finished {url} (success={success})"),
+                        _ => "other".to_string(),
+                    }
+                ));
+                match event {
+                    // Stage it. We cannot ask here — this is the GTK main
+                    // thread and the dialog is documented as unusable on it.
+                    DownloadEvent::Requested { url, destination } => {
+                        let suggested = destination
+                            .file_name()
+                            .map(|n| n.to_os_string())
+                            .unwrap_or_else(|| "download".into());
+                        *destination = staging_path(&suggested);
+                        if let Ok(mut q) = STAGED_DOWNLOADS.lock() {
+                            q.push(Staged {
+                                url: url.to_string(),
+                                staged_at: destination.clone(),
+                                suggested,
+                            });
+                        }
+                    }
+                    // Now we may ask, on a thread of our own.
+                    DownloadEvent::Finished { url, path, success } => {
+                        let staged = STAGED_DOWNLOADS.lock().ok().and_then(|mut q| {
+                            // The FIRST match, not a keyed lookup: the backup
+                            // URL never varies, so two exports in a row share a
+                            // key and a map would lose one of them.
+                            let i = q.iter().position(|s| s.url == url.as_str())?;
+                            Some(q.remove(i))
+                        });
+                        if !success {
+                            paths::app_log(&format!("download failed: {url}"));
+                            return true;
+                        }
+                        // Whichever half this platform gave us. See
+                        // `place_finished_download` — WebKitGTK skips
+                        // `Requested` entirely for blob downloads, macOS never
+                        // reports a path.
+                        let landed = match staged {
+                            Some(s) => Some((s.staged_at, s.suggested)),
+                            None => path.map(|p| {
+                                let name = p
+                                    .file_name()
+                                    .map(|n| n.to_os_string())
+                                    .unwrap_or_else(|| "download".into());
+                                (p, name)
+                            }),
+                        };
+                        match landed {
+                            Some((from, suggested)) => {
+                                let h = dl_handle.clone();
+                                std::thread::spawn(move || {
+                                    place_finished_download(h, from, suggested)
+                                });
+                            }
+                            // Neither half. Nothing is lost — the file is
+                            // wherever the webview put it — but we cannot offer
+                            // to move something we cannot name, and saying so
+                            // beats a dialog that would move the wrong file.
+                            None => paths::app_log(&format!(
+                                "download finished but neither a staged path nor a \
+                                 reported one is available, so it was left where the \
+                                 webview placed it: {url}"
+                            )),
+                        }
+                    }
+                    _ => {}
                 }
                 true
             })
@@ -909,7 +1400,7 @@ fn build_menu(app: &mut tauri::App) -> tauri::Result<()> {
     // On macOS the first submenu becomes the application menu. The Edit roles
     // are REQUIRED: without them Cmd+C/Cmd+V do nothing in the webview and the
     // tutor cannot paste an API key.
-    let app_menu = SubmenuBuilder::new(handle, "GuitarTutor")
+    let app_menu = SubmenuBuilder::new(handle, "Angel OS")
         .about(None)
         .separator()
         .quit()
@@ -922,6 +1413,31 @@ fn build_menu(app: &mut tauri::App) -> tauri::Result<()> {
         .copy()
         .paste()
         .select_all()
+        .build()?;
+    // ZOOM IS NOT ONLY DISCOVERABILITY HERE — IT IS THE KEYBOARD.
+    //
+    // The injected listener in `ZOOM_JS` already handles Ctrl/Cmd +/-/0 while
+    // the page has focus, and these items would then be a duplicate. They are
+    // not: focus is not always in the page (the menu bar, a native dialog, a
+    // window that has just opened), and a tutor who does not know the shortcut
+    // exists will never press it. An accelerator on a menu item is the only
+    // version of this feature that can be FOUND.
+    //
+    // `CmdOrCtrl` maps to Cmd on macOS and Ctrl elsewhere, which is what makes
+    // one definition correct on both.
+    let zoom_in = MenuItemBuilder::with_id("zoom-in", "Zoom In — Μεγέθυνση")
+        .accelerator("CmdOrCtrl+Plus")
+        .build(handle)?;
+    let zoom_out = MenuItemBuilder::with_id("zoom-out", "Zoom Out — Σμίκρυνση")
+        .accelerator("CmdOrCtrl+-")
+        .build(handle)?;
+    let zoom_reset = MenuItemBuilder::with_id("zoom-reset", "Actual Size — Κανονικό μέγεθος")
+        .accelerator("CmdOrCtrl+0")
+        .build(handle)?;
+    let view = SubmenuBuilder::new(handle, "View")
+        .item(&zoom_in)
+        .item(&zoom_out)
+        .item(&zoom_reset)
         .build()?;
     // Built DISABLED. This menu exists from the instant the splash appears,
     // minutes before there is a backend to restart on a first run; a click in
@@ -940,12 +1456,15 @@ fn build_menu(app: &mut tauri::App) -> tauri::Result<()> {
         .build()?;
     let _ = RESTART_ITEM.set(restart);
     let menu = MenuBuilder::new(handle)
-        .items(&[&app_menu, &edit, &backend])
+        .items(&[&app_menu, &edit, &view, &backend])
         .build()?;
     app.set_menu(menu)?;
     app.on_menu_event(|handle, event| match event.id().0.as_str() {
         "show-logs" => open_logs(handle),
         "restart-backend" => menu_restart(handle.clone()),
+        "zoom-in" => zoom_command(handle, "zoomIn"),
+        "zoom-out" => zoom_command(handle, "zoomOut"),
+        "zoom-reset" => zoom_command(handle, "reset"),
         _ => {}
     });
     Ok(())
@@ -992,7 +1511,7 @@ fn notice(handle: &AppHandle, msg: &str) {
     handle
         .dialog()
         .message(msg)
-        .title("GuitarTutor")
+        .title("Angel OS")
         .buttons(MessageDialogButtons::Ok)
         .blocking_show();
 }
@@ -1053,10 +1572,10 @@ fn panic_text(payload: &Box<dyn std::any::Any + Send>) -> String {
 /// log directory and offers Show Logs.
 fn internal_error_message(detail: &str) -> String {
     format!(
-        "Παρουσιάστηκε εσωτερικό σφάλμα κατά την εκκίνηση του GuitarTutor.\n\
+        "Παρουσιάστηκε εσωτερικό σφάλμα κατά την εκκίνηση του Angel OS.\n\
          Δεν φταίει κάτι που κάνατε. Στείλτε τα αρχεία καταγραφής και δοκιμάστε \
-         να ανοίξετε ξανά το GuitarTutor.\n\n\
-         GuitarTutor hit an internal error while starting.\n\
+         να ανοίξετε ξανά το Angel OS.\n\n\
+         Angel OS hit an internal error while starting.\n\
          This is a bug in the app, not something you did. Please send the logs.\n\n\
          Internal error: {detail}"
     )
@@ -1083,7 +1602,7 @@ fn backend_died(handle: AppHandle) {
                     "Το backend σταμάτησε απροσδόκητα.\n\
                      The backend stopped unexpectedly.",
                 )
-                .title("GuitarTutor")
+                .title("Angel OS")
                 .kind(MessageDialogKind::Error)
                 .buttons(MessageDialogButtons::OkCancelCustom(
                     "Restart backend — Επανεκκίνηση".into(),
@@ -1115,7 +1634,7 @@ fn backend_died(handle: AppHandle) {
                      Logs: {}",
                     paths::log_dir().display()
                 ))
-                .title("GuitarTutor")
+                .title("Angel OS")
                 .kind(MessageDialogKind::Error)
                 .buttons(MessageDialogButtons::OkCancelCustom(
                     "Show logs — Αρχεία καταγραφής".into(),
@@ -1145,7 +1664,7 @@ fn fatal(handle: &AppHandle, msg: &str) {
     let show = handle
         .dialog()
         .message(format!("{msg}\n\nLogs: {}", paths::log_dir().display()))
-        .title("GuitarTutor")
+        .title("Angel OS")
         .kind(MessageDialogKind::Error)
         .buttons(MessageDialogButtons::OkCancelCustom(
             "Show Logs — Αρχεία καταγραφής".into(),
@@ -1163,6 +1682,84 @@ fn fatal(handle: &AppHandle, msg: &str) {
 mod tests {
     use super::*;
 
+    /// WHAT LEAVES THE APP FRAME, AND WHAT MUST NOT.
+    ///
+    /// Both directions of this are a real bug, which is why it is a table and
+    /// not an `if`. Send too little and the tutor gets what he had before: a
+    /// link that says "get a key at console.anthropic.com" and does NOTHING
+    /// when clicked, because a webview has no tab to open. Send too much and a
+    /// DOCX export — which is a `blob:` navigation, that is genuinely how the
+    /// feature works — gets handed to Firefox instead of being saved, breaking
+    /// the export the save dialog exists to serve.
+    #[test]
+    fn only_the_open_internet_leaves_the_app_frame() {
+        let browser = |u: &str| goes_to_the_browser(&u.parse().expect("url"));
+
+        // The open internet. This is the whole point of the feature.
+        assert!(browser("https://console.anthropic.com/settings/keys"));
+        assert!(browser("http://example.org/"));
+
+        // Our own web app, whatever port the scan landed on today. The port is
+        // deliberately not part of the test because it is deliberately not part
+        // of the rule — pinning it would break the moment the pair rolls.
+        assert!(!browser("http://localhost:8790/el/curricula"));
+        assert!(!browser("http://localhost:9999/el/settings"));
+        assert!(!browser("http://127.0.0.1:8791/health/ready"));
+
+        // How the PAGE does its own work. A DOCX export is the first one, and
+        // treating it as an outbound link would break exporting entirely.
+        assert!(!browser("blob:http://localhost:8790/9f0c-4a1e"));
+        assert!(!browser("data:text/plain,hello"));
+        assert!(!browser("about:blank"));
+    }
+
+    /// THE WORKAROUND APPLIES TO THE STACK IT FIXES, AND TO NOTHING ELSE.
+    ///
+    /// Pinned as a truth table because the failure it prevents is invisible and
+    /// the failure it could CAUSE is invisible too. Disabling the DMA-BUF
+    /// renderer on a machine where it works costs compositing for nothing and
+    /// there is no symptom to notice; leaving it on where it is broken hands the
+    /// tutor a black window with a working menu bar, which reads as "the app is
+    /// broken" and is unreportable — every log says the boot succeeded, because
+    /// it did.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_dmabuf_workaround_applies_only_to_the_stack_it_fixes() {
+        use std::ffi::OsStr;
+
+        // The NVIDIA userspace stack with nothing preset: THIS is the black
+        // window, and it is the only cell that may be touched.
+        let Dmabuf::Disable(why) = dmabuf_workaround(None, true) else {
+            panic!("an NVIDIA stack must get the workaround");
+        };
+        assert!(why.contains("NVIDIA"), "the log line must name the stack: {why}");
+
+        // Mesa — Intel, AMD, and nouveau, which is NVIDIA hardware on a Mesa
+        // userspace and therefore NOT affected. `/proc/driver/nvidia/version`
+        // is what distinguishes them: nouveau does not create it.
+        assert!(matches!(dmabuf_workaround(None, false), Dmabuf::LeaveAlone(_)));
+
+        // AN EXPLICIT SETTING IS NEVER OVERRIDDEN, IN EITHER DIRECTION. `0` on
+        // an NVIDIA box is somebody deliberately putting the fast path back
+        // (a fixed driver, a fixed WebKit) — forcing it to 1 anyway would make
+        // that impossible and leave them nothing in the log to explain why.
+        assert!(matches!(
+            dmabuf_workaround(Some(OsStr::new("0")), true),
+            Dmabuf::LeaveAlone(_)
+        ));
+        assert!(matches!(
+            dmabuf_workaround(Some(OsStr::new("1")), false),
+            Dmabuf::LeaveAlone(_)
+        ));
+        // Empty counts as set: WebKitGTK tests the variable's PRESENCE, so
+        // `WEBKIT_DISABLE_DMABUF_RENDERER=` already disables it. Reading that
+        // as "unset" would have us write over a decision already in force.
+        assert!(matches!(
+            dmabuf_workaround(Some(OsStr::new("")), true),
+            Dmabuf::LeaveAlone(_)
+        ));
+    }
+
     /// THE FATAL DIALOG IN THE FAILED-`ALTER DATABASE` WINDOW HAS TO NAME THE
     /// MEDIA THAT ALREADY MOVED.
     ///
@@ -1172,7 +1769,7 @@ mod tests {
     /// it. The boot is then fatal with the tutor's entire library sitting under
     /// `media_superseded_…`. app.log, `install-state.json` and the READ-ME all
     /// said so; the dialog — the only one of the four he actually sees — said
-    /// "GuitarTutor could not set the half-installed database aside" and stopped
+    /// "Angel OS could not set the half-installed database aside" and stopped
     /// there, which reads as "and your books are gone".
     ///
     /// Both halves of the fix are asserted: the receipt now survives the failure,
@@ -1213,7 +1810,7 @@ mod tests {
             .collect();
         assert_eq!(moved.len(), 1, "his library really moved: {moved:?}");
 
-        let failure = "GuitarTutor could not set the half-installed database aside.";
+        let failure = "Angel OS could not set the half-installed database aside.";
         let msg = and_what_was_set_aside(&dirs, &displaced, failure);
         assert!(msg.starts_with(failure), "the failure still comes first:\n{msg}");
         assert!(

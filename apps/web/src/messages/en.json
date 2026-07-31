@@ -1,6 +1,6 @@
 {
   "app": {
-    "title": "Guitar Tutor Copilot"
+    "title": "Angel OS"
   },
   "nav": {
     "curricula": "Curricula",
@@ -33,7 +33,7 @@
     "boardEmpty": "Generate a curriculum or select a template to see its tree.",
     "boardLoading": "Loading curriculum…",
     "boardError": "Could not load this curriculum.",
-    "exportDocx": "Download DOCX",
+    "exportDocx": "Save as DOCX",
     "exportError": "Export failed — try again.",
     "tree": {
       "estMinutes": "{count} min",
@@ -732,7 +732,7 @@
     "slowTurn": "The assistant is taking longer than usual — the reply is still being written and will appear here as soon as it's ready."
   },
   "login": {
-    "title": "Guitar Tutor Copilot",
+    "title": "Angel OS",
     "subtitle": "Enter the password to continue.",
     "passwordLabel": "Password",
     "passwordPlaceholder": "Your password",

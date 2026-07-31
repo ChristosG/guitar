@@ -5,7 +5,7 @@
 //! Two DIFFERENT failures used to be caught, by accident, by the frozen-port
 //! preflight this branch replaced with a rolling scan:
 //!
-//! 1. A SECOND copy of GuitarTutor launched while the first one is running.
+//! 1. A SECOND copy of Angel OS launched while the first one is running.
 //!    `tauri_plugin_single_instance` is not a guarantee: on Linux it wants a
 //!    session DBus and fails OPEN when there is none (containers, ssh, some
 //!    login setups), and it is a courtesy focus-the-window feature, not a
@@ -45,7 +45,7 @@
 //!   and say so — an flock on `<data>/instance.lock`, which cannot go stale
 //!   because the kernel drops it when the holder dies, SIGKILL included.
 //!
-//! * (2) is OUR process. Once the flock proves no other GuitarTutor shell is
+//! * (2) is OUR process. Once the flock proves no other Angel OS shell is
 //!   alive, a postmaster running in OUR data directory belongs to nobody but a
 //!   dead copy of this app — so we STOP IT and carry on booting. Sending a
 //!   guitar teacher to Activity Monitor to hunt a PID is not a fix, and telling
@@ -117,10 +117,10 @@ impl Blocked {
     /// that fixes it; a port number or an errno would be neither.
     pub fn message(&self) -> String {
         match self {
-            Blocked::Running => "Το GuitarTutor εκτελείται ήδη.\n\
+            Blocked::Running => "Το Angel OS εκτελείται ήδη.\n\
                  Χρησιμοποιήστε το παράθυρο που είναι ήδη ανοιχτό — δύο αντίγραφα \
                  δεν μπορούν να τρέχουν ταυτόχρονα.\n\n\
-                 GuitarTutor is already running.\n\
+                 Angel OS is already running.\n\
                  Use the window that is already open — two copies cannot run at \
                  the same time."
                 .to_string(),
@@ -130,15 +130,15 @@ impl Blocked {
             // `pg_ctl status` report "no server running" and simply continues —
             // the stale pid file no longer blocks anything.
             Blocked::OrphanStuck { pid } => format!(
-                "Η βάση δεδομένων του GuitarTutor από προηγούμενη χρήση τρέχει ακόμη \
+                "Η βάση δεδομένων του Angel OS από προηγούμενη χρήση τρέχει ακόμη \
                  και δεν μπόρεσε να σταματήσει{pid_el}.\n\
-                 Κάντε επανεκκίνηση του υπολογιστή και ανοίξτε ξανά το GuitarTutor: \
-                 μετά την επανεκκίνηση το GuitarTutor το τακτοποιεί μόνο του. Τα \
+                 Κάντε επανεκκίνηση του υπολογιστή και ανοίξτε ξανά το Angel OS: \
+                 μετά την επανεκκίνηση το Angel OS το τακτοποιεί μόνο του. Τα \
                  δεδομένα σας δεν έχουν χαθεί.\n\n\
-                 GuitarTutor's database from an earlier session is still running and \
+                 Angel OS's database from an earlier session is still running and \
                  could not be stopped{pid_en}.\n\
-                 Restart the computer and open GuitarTutor again: after a restart \
-                 GuitarTutor clears this up by itself. None of your data is lost.",
+                 Restart the computer and open Angel OS again: after a restart \
+                 Angel OS clears this up by itself. None of your data is lost.",
                 pid_el = pid.map(|p| format!(" (PID {p})")).unwrap_or_default(),
                 pid_en = pid.map(|p| format!(" (PID {p})")).unwrap_or_default(),
             ),
@@ -148,15 +148,15 @@ impl Blocked {
             // work — using the open window if there is one, restarting the
             // computer if there is not — and neither of them destroys anything.
             Blocked::UnprovableCluster { pid } => format!(
-                "Η βάση δεδομένων του GuitarTutor τρέχει ήδη{pid_el}.\n\
-                 Αν το GuitarTutor είναι ήδη ανοιχτό, χρησιμοποιήστε εκείνο το \
+                "Η βάση δεδομένων του Angel OS τρέχει ήδη{pid_el}.\n\
+                 Αν το Angel OS είναι ήδη ανοιχτό, χρησιμοποιήστε εκείνο το \
                  παράθυρο — δύο αντίγραφα δεν μπορούν να τρέχουν ταυτόχρονα. Αν δεν \
                  είναι ανοιχτό πουθενά, κάντε επανεκκίνηση του υπολογιστή και ανοίξτε \
-                 ξανά το GuitarTutor. Τα δεδομένα σας δεν έχουν χαθεί.\n\n\
-                 GuitarTutor's database is already running{pid_en}.\n\
-                 If GuitarTutor is already open, use that window — two copies cannot \
+                 ξανά το Angel OS. Τα δεδομένα σας δεν έχουν χαθεί.\n\n\
+                 Angel OS's database is already running{pid_en}.\n\
+                 If Angel OS is already open, use that window — two copies cannot \
                  run at the same time. If it is not open anywhere, restart the \
-                 computer and open GuitarTutor again. None of your data is lost.",
+                 computer and open Angel OS again. None of your data is lost.",
                 pid_el = pid.map(|p| format!(" (PID {p})")).unwrap_or_default(),
                 pid_en = pid.map(|p| format!(" (PID {p})")).unwrap_or_default(),
             ),
@@ -248,14 +248,14 @@ fn stop_cluster(res: &Path, dirs: &Dirs) -> Result<(), String> {
 }
 
 /// Take the guard, and clean up after ourselves. `Ok(())` means this process is
-/// the only GuitarTutor and nothing of its own is left running.
+/// the only Angel OS and nothing of its own is left running.
 pub fn acquire(res: &Path, dirs: &Dirs) -> Result<(), Blocked> {
     let lock = take_lock(&dirs.data.join("instance.lock"));
     if lock == LockState::TakenByAnother {
         return Err(Blocked::Running);
     }
     // The auto-stop below is only sound while we HOLD the lock. That is the
-    // whole argument for it: the lock proves no other GuitarTutor shell is
+    // whole argument for it: the lock proves no other Angel OS shell is
     // alive, so a postmaster in our pgdata can only belong to a dead copy of
     // us. Without the lock — flock unsupported on this filesystem, see
     // `LockState::Unavailable` — that proof does not exist, and stopping the
@@ -284,7 +284,7 @@ pub fn acquire(res: &Path, dirs: &Dirs) -> Result<(), Blocked> {
             let pid = recorded_pid(&dirs.pgdata);
             app_log(&format!(
                 "a database is running in our data directory{}, but flock is unavailable \
-                 here so we cannot prove no other copy of GuitarTutor is using it. \
+                 here so we cannot prove no other copy of Angel OS is using it. \
                  Leaving it alone and refusing to start — stopping a cluster that might \
                  belong to a live first copy would take the app away from the tutor \
                  mid-lesson.",
@@ -295,7 +295,7 @@ pub fn acquire(res: &Path, dirs: &Dirs) -> Result<(), Blocked> {
         ClusterStatus::Running => {
             let pid = recorded_pid(&dirs.pgdata);
             app_log(&format!(
-                "a previous GuitarTutor did not shut down cleanly: its database is \
+                "a previous Angel OS did not shut down cleanly: its database is \
                  still running{} and we hold the instance lock, so it is ours. \
                  Stopping it and continuing.",
                 pid.map(|p| format!(" (PID {p})")).unwrap_or_default()
@@ -333,7 +333,7 @@ pub fn release() {
 /// downstream trusted it. See `acquire`.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum LockState {
-    /// We hold it. No other GuitarTutor shell is alive — the kernel guarantees
+    /// We hold it. No other Angel OS shell is alive — the kernel guarantees
     /// that, SIGKILLed predecessors included.
     Held,
     /// EWOULDBLOCK: somebody else holds it. A live second copy.
@@ -499,7 +499,7 @@ fn reap_orphan_children(res: &Path, dirs: &Dirs, holding: bool) {
         // carried on. Every PID is named BEFORE anything is signalled, so even a
         // wrong guess leaves evidence.
         app_log(&format!(
-            "a previous GuitarTutor did not shut down cleanly: its {} is still running \
+            "a previous Angel OS did not shut down cleanly: its {} is still running \
              (PID {}), its command line is the {} inside this install and we hold the \
              instance lock, so it is ours. Stopping it and continuing.",
             child.role,
@@ -553,7 +553,7 @@ where
 {
     if !holding {
         app_log(
-            "a previous GuitarTutor recorded child processes, but flock is unavailable here \
+            "a previous Angel OS recorded child processes, but flock is unavailable here \
              so we cannot prove no other copy is running them right now. Leaving them \
              strictly alone — the port scan will roll past anything still holding a port.",
         );
@@ -849,7 +849,7 @@ mod tests {
         ] {
             let greek = msg.find(|c: char| ('\u{0370}'..='\u{03ff}').contains(&c));
             let english = msg
-                .find("GuitarTutor is already running")
+                .find("Angel OS is already running")
                 .or_else(|| msg.find("is still running and"))
                 .or_else(|| msg.find("database is already running"));
             assert!(greek.is_some(), "no Greek in: {msg}");
@@ -983,7 +983,7 @@ mod tests {
     /// kernel reports on the tutor's machine.
     fn res_root(tag: &str) -> PathBuf {
         std::path::PathBuf::from(format!(
-            "/Applications/GuitarTutor-{tag}.app/Contents/Resources/resources"
+            "/Applications/Angel OS-{tag}.app/Contents/Resources/resources"
         ))
     }
 
@@ -1021,13 +1021,13 @@ mod tests {
             "/opt/homebrew/bin/node server.js",
             // ANOTHER install of this very app — a second copy in ~/Downloads.
             // Its children are not ours to kill.
-            "/Applications/GuitarTutor-other.app/Contents/Resources/resources/python/bin/python3.12 -m uvicorn",
+            "/Applications/Angel OS-other.app/Contents/Resources/resources/python/bin/python3.12 -m uvicorn",
             // Merely NAMING our path. This is what a substring test would have
             // killed: a helper's grep, an editor, a tail on the log.
-            "grep -r /Applications/GuitarTutor-live.app/Contents/Resources/resources/python/bin/python3.12 .",
-            "/bin/sh -c /Applications/GuitarTutor-live.app/Contents/Resources/resources/node/bin/node",
+            "grep -r /Applications/Angel OS-live.app/Contents/Resources/resources/python/bin/python3.12 .",
+            "/bin/sh -c /Applications/Angel OS-live.app/Contents/Resources/resources/node/bin/node",
             // A sibling binary that shares our prefix.
-            "/Applications/GuitarTutor-live.app/Contents/Resources/resources/python/bin/python3.12-config --libs",
+            "/Applications/Angel OS-live.app/Contents/Resources/resources/python/bin/python3.12-config --libs",
             // A zombie or a kernel thread: exists, says nothing.
             "",
             "   ",
@@ -1055,20 +1055,20 @@ mod tests {
         // operating system actually used: these two lines are copied verbatim
         // out of `ps` on the machine where an E2E force-quit left them behind,
         // with the .deb's resource root rather than the .app's.
-        let deb = Path::new("/usr/lib/GuitarTutor/resources");
+        let deb = Path::new("/usr/lib/Angel OS/resources");
         assert!(command_line_is_ours(
-            "/usr/lib/GuitarTutor/resources/python/bin/python3.12 -m uvicorn app.main:app \
+            "/usr/lib/Angel OS/resources/python/bin/python3.12 -m uvicorn app.main:app \
              --host 127.0.0.1 --port 8793",
             &api_binary(deb)
         ));
         assert!(command_line_is_ours(
-            "/usr/lib/GuitarTutor/resources/node/bin/node server.js",
+            "/usr/lib/Angel OS/resources/node/bin/node server.js",
             &web_binary(deb)
         ));
         // The postgres left by the same force quit is NOT one of these. It is
         // not our child, it is not signalled here, and `pg_ctl` deals with it.
         assert!(!command_line_is_ours(
-            "/usr/lib/GuitarTutor/resources/pg/bin/postgres -D /home/tester/.local/share/\
+            "/usr/lib/Angel OS/resources/pg/bin/postgres -D /home/tester/.local/share/\
              guitar-tutor/pgdata -p 5434",
             &api_binary(deb)
         ));
@@ -1203,8 +1203,8 @@ mod tests {
         // THIS install, and a second copy of the app somewhere else — the exact
         // situation in which a PID from meta.json must not be trusted on its
         // number alone.
-        let res = root.join("GuitarTutor.app/Contents/Resources/resources");
-        let other = root.join("Downloads/GuitarTutor.app/Contents/Resources/resources");
+        let res = root.join("Angel OS.app/Contents/Resources/resources");
+        let other = root.join("Downloads/Angel OS.app/Contents/Resources/resources");
         let node = stand_in(&res, "node/bin/node");
         let their_python = stand_in(&other, "python/bin/python3.12");
 

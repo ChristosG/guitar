@@ -132,6 +132,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Stamp the version from the tag
+        # See desktop/scripts/stamp-version.sh — one script, both runners, and
+        # the reason the `desktop-v0.2.0` tag used to ship a 0.1.0 artifact that
+        # apt then refused to install over the old one.
+        run: |
+          V="$(bash desktop/scripts/stamp-version.sh)"
+          echo "APP_VERSION=$V" >> "$GITHUB_ENV"
+
       - name: Install Tauri build dependencies
         run: |
           sudo apt-get update
@@ -249,7 +257,15 @@ jobs:
         # collides with nothing on this runner — and it stays correct however
         # the shell's own derived pair lands on the tutor's machine.
         run: |
-          dpkg-deb -x desktop/src-tauri/target/release/bundle/deb/*.deb debtree
+          set -euo pipefail
+          # ARRAY, NOT A BARE GLOB. `productName` is "Angel OS", so the file is
+          # `Angel OS_<v>_amd64.deb` — an unquoted glob word-splits on that
+          # space and hands dpkg-deb two nonexistent paths. The old line worked
+          # only because the old name had no space in it.
+          shopt -s nullglob
+          debs=(desktop/src-tauri/target/release/bundle/deb/*.deb)
+          [ "${#debs[@]}" -gt 0 ] || { echo "no .deb was produced"; exit 1; }
+          dpkg-deb -x "${debs[0]}" debtree
           RES=$(find debtree -type d -name resources | grep -v icons | head -1)
           test -n "$RES" || { echo "no resources dir in deb"; exit 1; }
           for probe in models/e5-small/model.onnx pg/bin/postgres python/bin/python3.12 web/server.js api/alembic.ini; do
@@ -261,13 +277,22 @@ jobs:
 
       - name: Collect bundles
         run: |
+          set -euo pipefail
           mkdir -p dist
-          cp desktop/src-tauri/target/release/bundle/deb/*.deb dist/
+          # Spaces out of the delivered filename. `productName` is "Angel OS"
+          # because that is what belongs in the launcher and the window title,
+          # but a space in a downloaded file is something the tutor — and
+          # everyone typing `apt install ./…` for him over the phone — then has
+          # to quote forever. Renamed once, here, at the last moment.
+          shopt -s nullglob
+          for f in desktop/src-tauri/target/release/bundle/deb/*.deb; do
+            cp "$f" "dist/$(basename "$f" | tr ' ' '_')"
+          done
           ls -lh dist/
 
       - uses: actions/upload-artifact@v4
         with:
-          name: GuitarTutor-linux-x64${{ steps.seed.outputs.suffix }}
+          name: Angel_OS-linux-x64${{ steps.seed.outputs.suffix }}
           path: dist/*
           retention-days: 3
 

@@ -1,10 +1,10 @@
-GuitarTutor — Οδηγίες εγκατάστασης / Installation guide
+Angel OS — Οδηγίες εγκατάστασης / Installation guide
 ========================================================
 
 ΕΛΛΗΝΙΚΑ
 --------
 
-1. Σύρετε το GuitarTutor.app στον φάκελο "Εφαρμογές" (Applications).
+1. Σύρετε το "Angel OS.app" στον φάκελο "Εφαρμογές" (Applications).
 
 2. Πρώτο άνοιγμα σε macOS 15 ή νεότερο: η εφαρμογή δεν είναι υπογεγραμμένη
    από την Apple, οπότε το πρώτο διπλό κλικ θα εμφανίσει μήνυμα αποκλεισμού.
@@ -13,27 +13,27 @@ GuitarTutor — Οδηγίες εγκατάστασης / Installation guide
 
    Αν το κουμπί δεν εμφανίζεται, ανοίξτε το Terminal και εκτελέστε:
 
-       xattr -dr com.apple.quarantine /Applications/GuitarTutor.app
+       xattr -dr com.apple.quarantine "/Applications/Angel OS.app"
 
    και ανοίξτε ξανά την εφαρμογή.
 
 3. Την πρώτη φορά η εκκίνηση αργεί λίγο (δημιουργείται η βάση δεδομένων).
    Συνήθως ξεκινά κανονικά ακόμη κι αν έχετε ανοιχτά άλλα προγράμματα —
    προσαρμόζεται μόνο του σε ό,τι ήδη τρέχει στον υπολογιστή. Αν κάποια φορά
-   σας πει ότι δεν μπορεί να ξεκινήσει, κλείστε τελείως το GuitarTutor αν
+   σας πει ότι δεν μπορεί να ξεκινήσει, κλείστε τελείως το Angel OS αν
    είναι ήδη ανοιχτό (Command-Q) ή κάντε επανεκκίνηση του Mac, και
    δοκιμάστε ξανά. Μετά, ανοίξτε τις Ρυθμίσεις μέσα στην εφαρμογή και
    επικολλήστε το κλειδί Anthropic API σας.
 
 4. Τα δεδομένα σας (βιβλία, μαθήματα, συνομιλίες) ζουν στο:
-       ~/Library/Application Support/GuitarTutor
+       ~/Library/Application Support/AngelOS
    και ΔΕΝ χάνονται όταν ενημερώνετε την εφαρμογή — απλώς σύρετε τη νέα
    έκδοση πάνω στην παλιά στον φάκελο "Εφαρμογές" και αντικαταστήστε την.
 
 ENGLISH
 -------
 
-1. Drag GuitarTutor.app into the Applications folder.
+1. Drag "Angel OS.app" into the Applications folder.
 
 2. First launch on macOS 15 or newer: the app is not Apple-notarized, so the
    first double-click shows a "blocked" dialog. Go to: System Settings →
@@ -41,18 +41,18 @@ ENGLISH
 
    If the button does not appear, open Terminal and run:
 
-       xattr -dr com.apple.quarantine /Applications/GuitarTutor.app
+       xattr -dr com.apple.quarantine "/Applications/Angel OS.app"
 
    then open the app again.
 
 3. The very first start takes a little longer (the database is being created).
    It normally starts fine with your other programs open — it adapts itself to
    whatever is already running on the computer. If it ever says it cannot
-   start, fully quit any GuitarTutor that may already be open (Command-Q) or
+   start, fully quit any Angel OS that may already be open (Command-Q) or
    restart the Mac, then try again. Afterwards, open Settings inside the app
    and paste your Anthropic API key.
 
 4. Your data (books, lessons, chats) lives in:
-       ~/Library/Application Support/GuitarTutor
+       ~/Library/Application Support/AngelOS
    and SURVIVES updates — just drag the new version over the old one in
    Applications and replace it.

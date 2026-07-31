@@ -149,13 +149,25 @@ export default function CurriculaPage() {
             {t("searchNoMatch")}
           </p>
         )}
+        {/* A GRID THAT ANSWERS TO ITS CONTAINER, not a row of fixed cards.
+            `flex-wrap` with `sm:w-56` pinned every card at 224px forever: a
+            wider window bought more columns and never a wider card, so the last
+            column left a ragged gap and the whole list read as unresponsive.
+            `auto-fill` + `minmax(14rem, 1fr)` keeps 14rem as the FLOOR — the
+            width the titles were designed against — and spends whatever is left
+            over widening the columns evenly, so a row always reaches the right
+            edge. Fewer, wider cards on a narrow window; more, still-full-width
+            cards on a maximised one. */}
         {shown.length > 0 && (
-          <div className="flex flex-wrap gap-3" data-testid="templates-list">
+          <div
+            className="grid grid-cols-[repeat(auto-fill,minmax(14rem,1fr))] gap-3"
+            data-testid="templates-list"
+          >
             {shown.map((item) => (
-              <div key={item.id} className="relative w-full sm:w-auto" data-testid="template-item">
+              <div key={item.id} className="relative" data-testid="template-item">
                 <Link
                   href={`/${locale}/curricula/${item.id}`}
-                  className="flex w-full flex-col gap-1 rounded-xl border border-border bg-card p-3 pr-10 text-left text-sm ring-1 ring-foreground/10 transition-colors hover:bg-muted/50 sm:w-56"
+                  className="flex w-full flex-col gap-1 rounded-xl border border-border bg-card p-3 pr-10 text-left text-sm ring-1 ring-foreground/10 transition-colors hover:bg-muted/50"
                 >
                   <span className="truncate font-medium" data-testid="template-title">
                     {item.title}

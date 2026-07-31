@@ -1049,11 +1049,11 @@ const RECOVERY_NOTE: &str = "READ-ME-superseded-data.txt";
 // print three bare `psql` lines, and BOTH states of the machine defeated them,
 // in opposite directions:
 //
-//   * with GuitarTutor QUIT — which the note itself instructs, and which is
+//   * with Angel OS QUIT — which the note itself instructs, and which is
 //     required, because `ALTER DATABASE … RENAME` has no FORCE and the app holds
 //     a connection to `guitar` — there is no postgres running at all. Nothing is
 //     listening, on any port or socket, so `psql` cannot connect to anything.
-//   * with GuitarTutor OPEN there is a server, and the rename is refused for
+//   * with Angel OS OPEN there is a server, and the rename is refused for
 //     exactly the reason the note says to quit first.
 //
 // And even given a running server, `psql` on its own could not have reached it:
@@ -1080,7 +1080,7 @@ const RECOVERY_NOTE: &str = "READ-ME-superseded-data.txt";
 /// What makes a pinned number safe is the OTHER flag on that line,
 /// `-c listen_addresses=`: the repair server binds NO TCP PORT AT ALL and is
 /// reachable only through the unix socket inside `<data>/pgdata`. A Homebrew
-/// postgres, or a second GuitarTutor install, can be sitting on TCP 5434 and
+/// postgres, or a second Angel OS install, can be sitting on TCP 5434 and
 /// this still starts — measured, not assumed. The number then only names the
 /// socket FILE in a directory that is ours, so it cannot collide with anything.
 const REPAIR_PORT: u16 = 5434;
@@ -1088,7 +1088,7 @@ const REPAIR_PORT: u16 = 5434;
 /// One path, quoted for a shell.
 ///
 /// Not cosmetic: the macOS data folder is
-/// `~/Library/Application Support/GuitarTutor`. An unquoted path in a file that
+/// `~/Library/Application Support/Angel OS`. An unquoted path in a file that
 /// says "type this exactly" is a command that fails on the tutor's own machine
 /// and on nobody else's.
 fn shell_quoted(p: &Path) -> String {
@@ -1110,7 +1110,7 @@ fn repair_start_cmd(res: &Path, dirs: &Dirs) -> String {
     )
 }
 
-/// …and take it down again. Not optional: GuitarTutor starts its own postgres
+/// …and take it down again. Not optional: Angel OS starts its own postgres
 /// from this same directory and will not get past a postmaster already holding
 /// it.
 fn repair_stop_cmd(res: &Path, dirs: &Dirs) -> String {
@@ -1646,7 +1646,7 @@ pub fn describe_api_quarantine(res: &Path, dirs: &Dirs) -> Displaced {
         .map(|e| e.file_name().to_string_lossy().into_owned())
         // Only stamps the sweep itself writes. Anything else in there was put
         // there by a person, and describing somebody's own folder as something
-        // GuitarTutor set aside would be a lie in the file that must not lie.
+        // Angel OS set aside would be a lie in the file that must not lie.
         .filter(|n| is_compact_stamp(n))
         .collect();
     batches.sort();
@@ -1670,7 +1670,7 @@ pub fn describe_api_quarantine(res: &Path, dirs: &Dirs) -> Displaced {
             // consulted. `Unknown` is the only honest value, and the entry
             // spells out what to do about it.
             &Companion::Unknown,
-            "GuitarTutor's startup check found book files in the media folder that \
+            "Angel OS's startup check found book files in the media folder that \
              nothing in the current database refers to, and set them aside instead \
              of deleting them",
         ));
@@ -1788,7 +1788,7 @@ pub fn displace_database(
         },
         match what {
             Displacement::Rename => {
-                "the uploaded books, PDFs and page scans of the GuitarTutor \
+                "the uploaded books, PDFs and page scans of the Angel OS \
                  database that is being set aside in the same moment — they are \
                  one thing and must be restored together"
             }
@@ -1837,7 +1837,7 @@ pub fn displace_database(
                     displaced,
                     Err(format!(
                         "refusing to rename the database to {db_name:?}: not a plain \
-                         identifier. This is a bug in GuitarTutor; nothing was changed."
+                         identifier. This is a bug in Angel OS; nothing was changed."
                     )),
                 );
             }
@@ -2120,24 +2120,24 @@ fn restore_instructions(
             lines.push("     IT WORKED IF it prints:  ALTER DATABASE".into());
             lines.push("".into());
             lines.push("  5. Stop the repair server. This is NOT optional —".into());
-            lines.push("     GuitarTutor starts its own database from that same".into());
+            lines.push("     Angel OS starts its own database from that same".into());
             lines.push("     folder and will not get past one that is already up:".into());
             lines.push(format!("        {}", repair_stop_cmd(res, dirs)));
             lines.push("     IT WORKED IF the last line printed is:  server stopped".into());
             lines.push("".into());
-            lines.push("  Then start GuitarTutor. It opens the database you have".into());
+            lines.push("  Then start Angel OS. It opens the database you have".into());
             lines.push("  just put back.".into());
             lines.push("".into());
             lines.push("  IF STEP 3 OR STEP 4 SAYS  is being accessed by other users".into());
             lines.push("  then something is still connected to that database.".into());
             lines.push("  NOTHING HAS BEEN CHANGED and nothing is broken. First make".into());
-            lines.push("  sure GuitarTutor is really closed (step 1). If it is, run".into());
+            lines.push("  sure Angel OS is really closed (step 1). If it is, run".into());
             lines.push("  the line below and then repeat the step that failed — for".into());
             lines.push("  step 3 exactly as printed, for step 4 with".into());
             lines.push(format!("  {name}"));
             lines.push("  in place of guitar inside the quotes:".into());
             lines.push(format!("        {}", repair_evict_cmd(res, dirs, "guitar")));
-            lines.push("  IF STEP 2 SAYS a server is already running, GuitarTutor is".into());
+            lines.push("  IF STEP 2 SAYS a server is already running, Angel OS is".into());
             lines.push("  still open: go back to step 1.".into());
         }
         "media" => {
@@ -2151,24 +2151,24 @@ fn restore_instructions(
             lines.push("     folder out of the way, then".into());
             lines.push(format!("     rename \"{name}\" back to \"media\"."));
             lines.push("  3. Put the database it belongs to back as well — see the".into());
-            lines.push("     rest of this entry — and then start GuitarTutor.".into());
-            lines.push("  IT WORKED IF the books are in GuitarTutor's library again.".into());
+            lines.push("     rest of this entry — and then start Angel OS.".into());
+            lines.push("  IT WORKED IF the books are in Angel OS's library again.".into());
         }
         "file" => {
             lines.push("This is ONE FILE OF YOURS, renamed where it stood.".into());
-            lines.push("GuitarTutor was about to write a file of its own with the".into());
+            lines.push("Angel OS was about to write a file of its own with the".into());
             lines.push("same name in the same place, and renamed yours instead of".into());
             lines.push("writing over it. It is in the folder it always was in, under".into());
             lines.push("the name above.".into());
             lines.push("  1. QUIT GUITARTUTOR.".into());
-            lines.push("  2. Move GuitarTutor's own file — the one under the".into());
+            lines.push("  2. Move Angel OS's own file — the one under the".into());
             lines.push("     ORIGINAL name — somewhere else.".into());
             lines.push("  3. Rename this one back to that original name: the name".into());
             lines.push("     above with the \".superseded-…\" ending removed.".into());
-            lines.push("  4. Start GuitarTutor.".into());
+            lines.push("  4. Start Angel OS.".into());
         }
         "quarantine" => {
-            lines.push("THESE ARE FILES OF YOURS. GuitarTutor's own startup check".into());
+            lines.push("THESE ARE FILES OF YOURS. Angel OS's own startup check".into());
             lines.push("found them in the media folder with nothing in the database".into());
             lines.push("pointing at them, and set them aside rather than delete".into());
             lines.push("them. That check runs on every launch, and it reaches this".into());
@@ -2178,13 +2178,13 @@ fn restore_instructions(
             lines.push("all present and nothing has been lost.".into());
             lines.push("  The layout in here is".into());
             lines.push("      media/_superseded/<date>/<book-id>/source.pdf".into());
-            lines.push("  and the tree GuitarTutor actually reads is".into());
+            lines.push("  and the tree Angel OS actually reads is".into());
             lines.push("      media/<book-id>/source.pdf".into());
             lines.push("  So put the right database back FIRST — the other entries".into());
             lines.push("  in this file say which and how — and only then move each".into());
             lines.push("  <book-id> folder TWO levels up, out of the dated folder".into());
             lines.push("  and into \"media\" itself. One level up lands in".into());
-            lines.push("  \"_superseded\", which is still not where GuitarTutor".into());
+            lines.push("  \"_superseded\", which is still not where Angel OS".into());
             lines.push("  looks. There is a note of its own beside the files:".into());
             lines.push(format!(
                 "      {}",
@@ -2226,13 +2226,13 @@ fn restore_instructions(
             ));
             lines.push("     skip this step.".into());
             lines.push(format!("  3. rename \"{name}\" back to \"pgdata\"."));
-            lines.push("  4. Start GuitarTutor.".into());
-            lines.push("  IT WORKED IF GuitarTutor starts and your material is".into());
+            lines.push("  4. Start Angel OS.".into());
+            lines.push("  IT WORKED IF Angel OS starts and your material is".into());
             lines.push("  there.".into());
-            lines.push("  IF A RENAME IS REFUSED, GuitarTutor — or a postgres it".into());
+            lines.push("  IF A RENAME IS REFUSED, Angel OS — or a postgres it".into());
             lines.push("  left behind — is still running. Quit it and try again;".into());
             lines.push("  if that is not enough, restart the computer and do steps".into());
-            lines.push("  2 and 3 BEFORE starting GuitarTutor.".into());
+            lines.push("  2 and 3 BEFORE starting Angel OS.".into());
         }
     }
     // WHAT PAIRS WITH THIS ONE — keyed on the kind, because the same
@@ -2279,7 +2279,7 @@ fn database_companion_lines(dirs: &Dirs, companion: &Companion, lines: &mut Vec<
                 lines.push("put back.".into());
             } else {
                 lines.push("THAT DOES NOT MEAN THERE ARE NO FILES. These media".into());
-                lines.push("folders are in this data folder and GuitarTutor could".into());
+                lines.push("folders are in this data folder and Angel OS could".into());
                 lines.push("NOT establish which database they belong to:".into());
                 for o in &orphans {
                     lines.push(format!("    {o}"));
@@ -2314,13 +2314,13 @@ fn media_companion_lines(
             lines.push("copy of a scan he made himself.".into());
         }
         // NOT "was already gone" — that is `Alone`'s fact and it is not this
-        // one. Here the database WAS there; GuitarTutor looked inside it, found
+        // one. Here the database WAS there; Angel OS looked inside it, found
         // not one table, view or sequence, and removed it on that measurement.
         // Printing the other sentence would tell whoever is reading that a
         // database vanished on its own, which is both untrue and alarming.
         Companion::AloneEmptyDatabase => {
             lines.push("The database that stood beside these files was NOT already".into());
-            lines.push("gone: GuitarTutor looked inside it, found not one table,".into());
+            lines.push("gone: Angel OS looked inside it, found not one table,".into());
             lines.push("view or sequence — nothing had ever been put in it — and".into());
             lines.push("removed it on that measurement. So there is no database".into());
             lines.push("for these files to be paired with, and there is nothing".into());
@@ -2339,7 +2339,7 @@ fn media_companion_lines(
             lines.push("moments later and that block is the answer. Read it and stop".into());
             lines.push("here. If there is no such block, read on.".into());
             lines.push("".into());
-            lines.push("GuitarTutor moved these files aside and then stopped — or".into());
+            lines.push("Angel OS moved these files aside and then stopped — or".into());
             lines.push("failed — before it could finish moving the database they go".into());
             lines.push("with. Nothing was deleted; the pairing is simply not known,".into());
             lines.push("and this file will not guess at it.".into());
@@ -2361,7 +2361,7 @@ fn media_companion_lines(
             lines.push("     database these files belong to was never renamed — it".into());
             lines.push("     is still the one called \"guitar\", and these files".into());
             lines.push("     belong to IT.".into());
-            lines.push("     DO NOT SKIP THE LAST LINE: GuitarTutor will not start".into());
+            lines.push("     DO NOT SKIP THE LAST LINE: Angel OS will not start".into());
             lines.push("     while that server is still up.".into());
             lines.push("Restore these files only together with the database you".into());
             lines.push("identify that way, never on their own.".into());
@@ -2412,17 +2412,17 @@ fn append_recovery_note(
         "{stamp}\n\
          ΜΗΝ ΔΙΑΓΡΑΨΕΤΕ ΑΥΤΟΝ ΤΟΝ ΦΑΚΕΛΟ — DO NOT DELETE THIS FOLDER\n\
          \n\
-         Το GuitarTutor βρήκε δεδομένα από προηγούμενη, ημιτελή εγκατάσταση.\n\
+         Το Angel OS βρήκε δεδομένα από προηγούμενη, ημιτελή εγκατάσταση.\n\
          ΔΕΝ τα διέγραψε. Τα μετονόμασε και τα άφησε στην άκρη:\n\
            τι:      {kind_el}\n\
            όνομα:   {name}\n\
            μαζί με: {companion_el}\n\
            φάκελος: {data}\n\
-         Αν διαπιστώσετε ότι λείπει κάτι δικό σας από το GuitarTutor, δείξτε\n\
+         Αν διαπιστώσετε ότι λείπει κάτι δικό σας από το Angel OS, δείξτε\n\
          αυτό το αρχείο σε όποιον σας υποστηρίζει: τίποτα δεν έχει χαθεί και\n\
          όλα μπορούν να επανέλθουν από εδώ.\n\
          \n\
-         GuitarTutor found data from an earlier, unfinished installation and did\n\
+         Angel OS found data from an earlier, unfinished installation and did\n\
          NOT delete it. It was renamed and left aside:\n\
            what:      {kind}\n\
            name:      {name}\n\
@@ -2431,13 +2431,13 @@ fn append_recovery_note(
            why:       {why}\n\
          \n\
          ΓΙΑ ΝΑ ΤΟ ΕΠΑΝΑΦΕΡΕΤΕ (για όποιον σας υποστηρίζει): κλείστε πρώτα το\n\
-         GuitarTutor. Οι εντολές πιο κάτω είναι γραμμένες ώστε να δουλεύουν\n\
+         Angel OS. Οι εντολές πιο κάτω είναι γραμμένες ώστε να δουλεύουν\n\
          ακριβώς όπως είναι — αντιγράψτε τις αυτούσιες, με τη σειρά. Δεν\n\
          χρειάζεται να εγκαταστήσετε τίποτα: όλα όσα χρειάζονται βρίσκονται\n\
          ήδη μέσα στην εφαρμογή, και οι διαδρομές πιο κάτω τα δείχνουν.\n\
          \n\
          TO PUT THIS ONE BACK (for whoever supports this install). Quit\n\
-         GuitarTutor first. The commands below are written to work exactly as\n\
+         Angel OS first. The commands below are written to work exactly as\n\
          they are printed — copy them literally, in order. Nothing has to be\n\
          installed: everything they need already ships inside the application,\n\
          and the long paths are where it is.\n\
@@ -2458,7 +2458,7 @@ fn append_recovery_note(
          put it in that state, and the entry says which: the database it\n\
          belonged to was already gone when these files were found; or that\n\
          database was still there but was measured to hold nothing at all —\n\
-         not one table — and was removed on that measurement; or GuitarTutor\n\
+         not one table — and was removed on that measurement; or Angel OS\n\
          was stopped between those two steps, in which case the entry reads\n\
          NOT DETERMINED and lists exactly what to check; or the pairing is\n\
          recorded here and the folder was renamed by hand afterwards.\n\
@@ -2563,7 +2563,7 @@ pub fn set_aside_notice(dirs: &Dirs, displaced: &Displaced) -> String {
         lines_en.push("  — (see the file below)".to_string());
     }
     format!(
-        "Το GuitarTutor βρήκε δεδομένα από προηγούμενη εγκατάσταση και τα έβαλε \
+        "Το Angel OS βρήκε δεδομένα από προηγούμενη εγκατάσταση και τα έβαλε \
          στην άκρη για να μπορέσει να ξεκινήσει.\n\n\
          ΔΕΝ ΔΙΑΓΡΑΦΗΚΕ ΤΙΠΟΤΑ. Μετονομάστηκαν και βρίσκονται εδώ:\n\
          {names_el}\n\
@@ -2572,13 +2572,13 @@ pub fn set_aside_notice(dirs: &Dirs, displaced: &Displaced) -> String {
          σας υποστηρίζει το αρχείο {file} που βρίσκεται στον ίδιο φάκελο:\n\
          {note}\n\n\
          ------------------------------------------------------------\n\n\
-         GuitarTutor found data from an earlier installation and set it aside so \
+         Angel OS found data from an earlier installation and set it aside so \
          that it could start.\n\n\
          NOTHING WAS DELETED. It was renamed, and it is here:\n\
          {names_en}\n\
          in this folder:\n  {data}\n\n\
          If anything of yours seems to be missing — books, lessons, curricula — \
-         show whoever supports GuitarTutor the file {file} in that same folder:\n\
+         show whoever supports Angel OS the file {file} in that same folder:\n\
          {note}",
         names_el = lines_el.join("\n"),
         names_en = lines_en.join("\n"),
@@ -2632,7 +2632,7 @@ fn initdb_once(res: &Path, dirs: &Dirs, extra_args: &[&str]) -> Result<(), Strin
 fn append_conf_overrides(dirs: &Dirs, port: u16) -> Result<(), String> {
     let conf = dirs.pgdata.join("postgresql.conf");
     let block = format!(
-        "\n# --- GuitarTutor overrides (appended at first run) ---\n\
+        "\n# --- Angel OS overrides (appended at first run) ---\n\
          listen_addresses = '127.0.0.1'\n\
          port = {port}\n\
          unix_socket_directories = '{}'\n\
@@ -2890,14 +2890,14 @@ pub fn pgdata_is_safe_to_build_in(dirs: &Dirs) -> Result<(), String> {
         return Ok(());
     }
     Err(format!(
-        "Ο φάκελος της βάσης δεδομένων του GuitarTutor υπάρχει και περιέχει \
+        "Ο φάκελος της βάσης δεδομένων του Angel OS υπάρχει και περιέχει \
          δεδομένα, αλλά λείπει ένα μικρό αρχείο που χρειάζεται για να ανοίξει.\n\
-         Το GuitarTutor ΔΕΝ άλλαξε και ΔΕΝ διέγραψε τίποτα. Μην διαγράψετε τον \
+         Το Angel OS ΔΕΝ άλλαξε και ΔΕΝ διέγραψε τίποτα. Μην διαγράψετε τον \
          φάκελο — στείλτε αυτό το μήνυμα σε όποιον σας υποστηρίζει.\n\n\
-         GuitarTutor's database folder exists and contains data, but the small \
+         Angel OS's database folder exists and contains data, but the small \
          file that identifies it (PG_VERSION) is missing.\n\
          Nothing has been changed and nothing has been deleted. Building a new \
-         database here would destroy what is in it, so GuitarTutor stopped \
+         database here would destroy what is in it, so Angel OS stopped \
          instead.\n\n\
          Folder: {}\n\
          What is in there: {}",
@@ -2971,7 +2971,7 @@ pub fn set_aside_pgdata(res: &Path, dirs: &Dirs, why: &str) -> Result<Displaced,
         dirs,
         &suffix,
         Companion::Unknown,
-        "the uploaded books, PDFs and page scans of the GuitarTutor database \
+        "the uploaded books, PDFs and page scans of the Angel OS database \
          directory that is being set aside in the same moment — they are one \
          thing and must be restored together",
     )?;
@@ -3617,7 +3617,7 @@ fn set_aside_file(res: &Path, dirs: &Dirs, path: &Path) -> Result<Displaced, Str
         // else was moved with it and nothing is coming.
         &Companion::Alone,
         "a file of yours in the media folder had the same name as one of the files \
-         GuitarTutor installs, and a different size — so yours was renamed instead \
+         Angel OS installs, and a different size — so yours was renamed instead \
          of being written over",
     ))
 }
@@ -3962,7 +3962,7 @@ mod tests {
     /// tutor's machine. Nothing is executed out of it: the note is text. The
     /// tests that need commands that RUN use `bundled_res()` below.
     fn tmp_res(dirs: &Dirs) -> PathBuf {
-        dirs.data.join("GuitarTutor.app/Contents/Resources/resources")
+        dirs.data.join("Angel OS.app/Contents/Resources/resources")
     }
 
     /// The REAL staged resource tree — `desktop/src-tauri/resources`, the same
@@ -4411,7 +4411,7 @@ mod tests {
             assert!(refused.contains("nothing has been deleted")
                 || refused.contains("Nothing has been changed"), "{tag}: {refused}");
             let greek = refused.find(|c: char| ('\u{0370}'..='\u{03ff}').contains(&c));
-            let english = refused.find("GuitarTutor's database folder");
+            let english = refused.find("Angel OS's database folder");
             assert!(greek.is_some() && english.is_some() && greek < english, "{tag}: {refused}");
 
             // And the refusal is REAL: clear_unfinished_pgdata refuses too, and
@@ -4874,7 +4874,7 @@ mod tests {
         let greek = note
             .find(|c: char| ('\u{0370}'..='\u{03ff}').contains(&c))
             .expect("Greek");
-        let english = note.find("GuitarTutor found data").expect("English");
+        let english = note.find("Angel OS found data").expect("English");
         assert!(greek < english, "Greek first:\n{note}");
         let _ = fs::remove_dir_all(&dirs.data);
     }
@@ -5000,7 +5000,7 @@ mod tests {
         assert!(!note.contains("FOLLOW-UP NOTE\n\n"), "nothing settled it:\n{note}");
         // WHAT TO CHECK, as three lines that can be run. "use the psql that
         // ships inside the app bundle: psql -l" was neither: `psql` is on no
-        // PATH, and with GuitarTutor quit — which the same paragraph instructs
+        // PATH, and with Angel OS quit — which the same paragraph instructs
         // — there is no server for it to reach. So the note starts one, lists,
         // and stops it again.
         assert!(note.contains(&repair_start_cmd(&no_psql, &dirs)), "start it:\n{note}");
@@ -5307,7 +5307,7 @@ mod tests {
     /// database really does come back.
     ///
     /// The whole sequence is the one the note describes, in the state the note
-    /// is written in: GuitarTutor has displaced the database and QUIT, so there
+    /// is written in: Angel OS has displaced the database and QUIT, so there
     /// is no server running at all. Every step below is a line lifted out of
     /// `READ-ME-superseded-data.txt` and handed to `sh` with an empty
     /// environment.
@@ -5336,7 +5336,7 @@ mod tests {
         }
         let _stop = StopOnDrop { res: res.clone(), dirs: dirs.clone() };
 
-        // ---- what GuitarTutor's own first run leaves behind -----------------
+        // ---- what Angel OS's own first run leaves behind -----------------
         initdb_once(&res, &dirs, &["--locale=C.UTF-8"]).expect("initdb");
         // Deliberately NOT `REPAIR_PORT`: the app's port rolls, and the note has
         // to work without knowing it. This one is only ever a socket file name —
@@ -5377,7 +5377,7 @@ mod tests {
         assert!(out.contains("server stopped"), "the note promises this text: {out}");
         assert!(
             !dirs.pgdata.join(format!(".s.PGSQL.{app_port}")).exists(),
-            "with GuitarTutor quit there is nothing listening at all — which is \
+            "with Angel OS quit there is nothing listening at all — which is \
              exactly why the old note's bare `psql` could not work"
         );
 
@@ -5399,7 +5399,7 @@ mod tests {
             "and it must be reachable where the psql lines look for it"
         );
 
-        // 3. move the current `guitar` aside. There is none — GuitarTutor
+        // 3. move the current `guitar` aside. There is none — Angel OS
         //    renamed it away — and the note says in as many words that this is
         //    fine and what it will look like.
         let (ok, out) = run_as_printed(&dirs, "step3", &cmds[1]);
@@ -5424,7 +5424,7 @@ mod tests {
             psql_scalar(&res, &dirs, REPAIR_PORT, "guitar", "SELECT title FROM curriculum")
                 .expect("read it back"),
             "Μαθήματα κιθάρας",
-            "the whole point: his work is back in the database GuitarTutor opens"
+            "the whole point: his work is back in the database Angel OS opens"
         );
         assert!(
             !database_exists(&res, &dirs, REPAIR_PORT, &db),
@@ -5466,8 +5466,8 @@ mod tests {
 
     /// THE TUTOR'S MACHINE HAS A SPACE IN EVERY PATH THE NOTE PRINTS.
     ///
-    /// macOS puts the data folder in `~/Library/Application Support/GuitarTutor`
-    /// and the binaries in `…/GuitarTutor.app/Contents/Resources/…`. An unquoted
+    /// macOS puts the data folder in `~/Library/Application Support/Angel OS`
+    /// and the binaries in `…/Angel OS.app/Contents/Resources/…`. An unquoted
     /// path in a file that says "type this exactly" is a command that fails on
     /// HIS computer and on nobody else's — the worst shape a bug can have in a
     /// recovery note, because it works everywhere it is tested.
@@ -5481,13 +5481,13 @@ mod tests {
         // Exactly the macOS shape, under a temp root.
         let root = std::env::temp_dir().join(format!("gt-space-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        let data = root.join("Library/Application Support/GuitarTutor");
-        let res = root.join("Applications/GuitarTutor.app/Contents/Resources/resources");
+        let data = root.join("Library/Application Support/Angel OS");
+        let res = root.join("Applications/Angel OS.app/Contents/Resources/resources");
         let dirs = Dirs {
             pgdata: data.join("pgdata"),
             media: data.join("media"),
             secrets: data.join("secrets"),
-            logs: root.join("Library/Logs/GuitarTutor"),
+            logs: root.join("Library/Logs/Angel OS"),
             data: data.clone(),
         };
         for d in [&dirs.pgdata, &dirs.media, &dirs.logs] {
@@ -5515,7 +5515,7 @@ mod tests {
             let argv: Vec<&str> = out.lines().collect();
             // The socket directory — the one with the space in it — has to
             // arrive as a single argument, not as "…/Application" and
-            // "Support/GuitarTutor/pgdata".
+            // "Support/Angel OS/pgdata".
             assert!(
                 argv.contains(&dirs.pgdata.display().to_string().as_str()),
                 "the path arrived split: {cmd}\nargv = {argv:#?}"
@@ -5541,7 +5541,7 @@ mod tests {
     /// On the `Drop` path the media entry used to be recorded `Alone`, whose
     /// text reads "the database these files belonged to was already gone when
     /// they were found". That is true of a database that was never there
-    /// (`DbProbe::Absent`) and false here: this database WAS there, GuitarTutor
+    /// (`DbProbe::Absent`) and false here: this database WAS there, Angel OS
     /// counted the user objects in it, found none, and removed it on that count.
     /// The difference matters to the person reading — one sentence describes a
     /// database that vanished on its own, which is alarming and did not happen.
@@ -6280,7 +6280,7 @@ mod tests {
         };
         let msg = set_aside_notice(&dirs, &displaced);
         let greek = msg.find(|c: char| ('\u{0370}'..='\u{03ff}').contains(&c)).expect("Greek");
-        let english = msg.find("GuitarTutor found data from an earlier").expect("English");
+        let english = msg.find("Angel OS found data from an earlier").expect("English");
         assert!(greek < english, "Greek first:\n{msg}");
         assert!(msg.matches("guitar_superseded_20260730T142530Z").count() >= 2);
         assert!(

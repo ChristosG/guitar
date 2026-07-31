@@ -1,10 +1,19 @@
 import { test, expect } from "@playwright/test";
 
-test("serves the shell translated per locale", async ({ page }) => {
+test("serves the shell translated per locale, and the product NAME is not translated", async ({ page }) => {
+  // The brand used to be the thing this test watched, and it was renamed to a
+  // proper noun that reads identically in both locales. Asserting only on that
+  // would have left a test that passes on a completely untranslated shell — so
+  // it now pins the two SEPARATE facts that replaced the old one: the name is
+  // stable across locales (it is a name, not a phrase), and the chrome around
+  // it really is translated.
   await page.goto("/en");
-  await expect(page.getByTestId("app-title")).toHaveText(/Guitar Tutor Copilot/);
+  await expect(page.getByTestId("app-title")).toHaveText(/Angel OS/);
+  await expect(page.getByTestId("nav-curricula")).toHaveText(/Curricula/);
+
   await page.goto("/el");
-  await expect(page.getByTestId("app-title")).toHaveText(/Βοηθός Δασκάλου Κιθάρας/);
+  await expect(page.getByTestId("app-title")).toHaveText(/Angel OS/);
+  await expect(page.getByTestId("nav-curricula")).toHaveText(/Προγράμματα/);
 });
 
 // no-store is a production/deploy concern (Cloudflare edge). The dev server

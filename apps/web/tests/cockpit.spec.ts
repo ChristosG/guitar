@@ -402,7 +402,7 @@ test.describe("cockpit shell", () => {
   test("the persistent nav shows all 6 sections and links to /curricula, /library", async ({ page }) => {
     await page.goto("/en/curricula");
 
-    await expect(page.getByTestId("app-title")).toHaveText(/Guitar Tutor Copilot/);
+    await expect(page.getByTestId("app-title")).toHaveText(/Angel OS/);
 
     // Today/Students/Notes are GONE from the desktop build — the nav is
     // curricula-first now, and their routes no longer exist.

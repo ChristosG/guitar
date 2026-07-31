@@ -36,6 +36,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Stamp the version from the tag
+        # Same script as desktop-linux.yml, deliberately: the portable-sed trap
+        # (`-i` vs `-i ''`, GNU-only `0,/re/`) is exactly the kind of thing that
+        # gets written twice and only works once, and macOS is the half nobody
+        # here can try by hand.
+        run: |
+          V="$(bash desktop/scripts/stamp-version.sh)"
+          echo "APP_VERSION=$V" >> "$GITHUB_ENV"
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -130,6 +139,31 @@ jobs:
           codesign -f -s - "$APP"
           echo "APP=$APP" >> "$GITHUB_ENV"
 
+      - name: Verify the signature before it leaves the runner
+        # THE FAILURE THIS CATCHES IS SILENT AND REMOTE. There is no Apple
+        # Developer account here, so the bundle is ad-hoc signed — which is
+        # fine, and INSTALL.txt explains the one-time "Open Anyway". What is
+        # NOT fine is an ad-hoc signature that is internally BROKEN: macOS then
+        # kills the app on launch, or kills it later when it spawns
+        # postgres/python3.12/node, and the tutor sees a bounce-and-quit with
+        # nothing written anywhere. That is unreportable from 2,000km away.
+        #
+        # This app is unusually exposed to it: `--deep` has to cover three
+        # whole embedded runtimes, and a single unsigned Mach-O among the
+        # thousands of files in resources/ is enough. Verifying here turns a
+        # mystery on his Mac into a red X on a build nobody has shipped yet.
+        #
+        # NOT a notarization check — that needs the paid account we do not
+        # have. It is a structural one: is what we signed actually valid.
+        run: |
+          set -euo pipefail
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          # And prove it really is ad-hoc, so a future signing change cannot
+          # quietly ship unsigned while this step still passes.
+          codesign -dv "$APP" 2>&1 | grep -q 'Signature=adhoc' \
+            || { echo "expected an ad-hoc signature"; codesign -dv "$APP"; exit 1; }
+          echo "ad-hoc signature verified across the whole bundle"
+
       - name: Smoke test the bundled resources
         # Boots what the bundler actually copied, not the staged tree. It needs
         # no app port: smoke scans its own high ranges (pg 54410-54430, api
@@ -139,27 +173,37 @@ jobs:
 
       - name: Package dmg
         run: |
+          set -euo pipefail
           STAGE="$RUNNER_TEMP/dmg-stage"
           mkdir -p "$STAGE"
           cp -R "$APP" "$STAGE/"
           cp desktop/INSTALL.txt "$STAGE/"
+          # The version is IN the filename now. Two downloads called
+          # `GuitarTutor-macos-arm64.dmg` in a Downloads folder are
+          # indistinguishable, and "which one did you install?" is the first
+          # question any support call has to answer. Underscores, no spaces:
+          # `productName` is "Angel OS" because that is what belongs in the
+          # launcher, but nobody should have to quote a filename.
+          DMG="Angel_OS_${APP_VERSION}_macos-arm64.dmg"
+          echo "DMG=$DMG" >> "$GITHUB_ENV"
           # XProtect/Spotlight scan the freshly-signed .app and hdiutil then
           # flakes with "Resource busy" — retry a few times before giving up.
           for attempt in 1 2 3 4; do
-            if hdiutil create -volname GuitarTutor -srcfolder "$STAGE" -ov -format UDZO \
-              "GuitarTutor-macos-arm64.dmg"; then break; fi
+            if hdiutil create -volname "Angel OS" -srcfolder "$STAGE" -ov -format UDZO \
+              "$DMG"; then break; fi
             echo "hdiutil attempt $attempt failed; retrying in 15s"; sleep 15
             [ "$attempt" = 4 ] && exit 1
           done
+          ls -lh "$DMG"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: GuitarTutor-macos-arm64${{ steps.seed.outputs.suffix }}
-          path: GuitarTutor-macos-arm64.dmg
+          name: Angel_OS-macos-arm64${{ steps.seed.outputs.suffix }}
+          path: ${{ env.DMG }}
           retention-days: 3
 
       - name: Release (tags only)
         if: startsWith(github.ref, 'refs/tags/desktop-v')
         uses: softprops/action-gh-release@v2
         with:
-          files: GuitarTutor-macos-arm64.dmg
+          files: ${{ env.DMG }}

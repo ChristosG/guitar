@@ -19,21 +19,39 @@ fn xdg(var: &str, fallback: &str) -> PathBuf {
     }
 }
 
-/// macOS: `~/Library/Application Support/GuitarTutor`
-/// Linux: `${XDG_DATA_HOME:-~/.local/share}/guitar-tutor`
+// THE TWO PLATFORMS DISAGREE ON PURPOSE, AND THE ASYMMETRY IS THE SAFE CHOICE.
+//
+// The app was renamed "GuitarTutor" → "Angel OS". A data directory is not
+// branding:
+// it is where the tutor's cluster, his uploaded books and his page scans
+// actually live, and renaming one orphans every install that already exists —
+// the app would find no cluster, call it a first run, and seed a starter
+// library over the top of a library it simply could not see. That is the exact
+// shape of loss this whole file's neighbours exist to prevent.
+//
+// So Linux KEEPS `guitar-tutor`. Debs of the old name are installed and hold
+// real work. macOS moves to `AngelOS` because macOS has never shipped — there
+// is no install to strand, so it is the one platform where the new name costs
+// nothing. Neither path is a display string; nobody reads them but us.
+//
+// If Linux ever has to move too, it is a rename-across at boot, before the
+// instance guard, and it displaces rather than merges. Not a silent change here.
+
+/// macOS: `~/Library/Application Support/AngelOS`
+/// Linux: `${XDG_DATA_HOME:-~/.local/share}/guitar-tutor` — the OLD name, kept.
 pub fn data_dir() -> PathBuf {
     if cfg!(target_os = "macos") {
-        home().join("Library/Application Support/GuitarTutor")
+        home().join("Library/Application Support/AngelOS")
     } else {
         xdg("XDG_DATA_HOME", ".local/share").join("guitar-tutor")
     }
 }
 
-/// macOS: `~/Library/Logs/GuitarTutor`
-/// Linux: `${XDG_STATE_HOME:-~/.local/state}/guitar-tutor/log`
+/// macOS: `~/Library/Logs/AngelOS`
+/// Linux: `${XDG_STATE_HOME:-~/.local/state}/guitar-tutor/log` — the OLD name.
 pub fn log_dir() -> PathBuf {
     if cfg!(target_os = "macos") {
-        home().join("Library/Logs/GuitarTutor")
+        home().join("Library/Logs/AngelOS")
     } else {
         xdg("XDG_STATE_HOME", ".local/state").join("guitar-tutor/log")
     }

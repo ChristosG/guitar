@@ -94,6 +94,60 @@ function recordApiRequests(page: Page): Request[] {
   return seen;
 }
 
+// THE BUG THIS PINS SHIPPED, AND NOTHING LOOKED WRONG WHILE IT DID.
+//
+// `routing.ts` said `defaultLocale: "el"` the whole time. next-intl never
+// reached it: with `localeDetection` on (the default) it consults
+// `Accept-Language` first, WebKit builds that from the system `LANG`, and the
+// tutor's shell loads the bare origin with no path to disambiguate. On an
+// `en_US.UTF-8` machine the Greek app opened in English — no error, no warning,
+// every test green, because every test navigated to an explicitly prefixed URL
+// like `/el/settings` and so never exercised the one path the shell uses.
+//
+// Hence: these go through `/`, and they set the browser language to English on
+// purpose. The point is that it must NOT be obeyed.
+test.describe("the bare origin — what the desktop shell actually loads", () => {
+  test.describe("an English browser", () => {
+    test.use({ locale: "en-US" });
+
+    test("still opens in Greek — the OS language does not get a vote", async ({ page }) => {
+      await page.goto("/");
+      await expect(page).toHaveURL(/\/el\/curricula$/);
+    });
+
+    test("but an explicit choice still wins and still sticks", async ({ page, context }) => {
+      // What the EN/EL toggle leaves behind. next-intl keeps writing this
+      // cookie on locale-prefixed navigation even with detection off
+      // (`syncCookie` is gated on `localeCookie`), and `proxy.ts` reads it
+      // deliberately — it is the ONE signal allowed to override Greek.
+      await context.addCookies([
+        { name: "NEXT_LOCALE", value: "en", url: "http://localhost:3100" },
+      ]);
+      await page.goto("/");
+      await expect(page).toHaveURL(/\/en\/curricula$/);
+    });
+
+    test("a forged cookie cannot steer the redirect", async ({ page, context }) => {
+      // It is a plain client-writable cookie and it lands in a redirect path,
+      // so it is validated against `routing.locales`, not trusted.
+      await context.addCookies([
+        { name: "NEXT_LOCALE", value: "../../evil", url: "http://localhost:3100" },
+      ]);
+      await page.goto("/");
+      await expect(page).toHaveURL(/\/el\/curricula$/);
+    });
+  });
+
+  test.describe("a Greek browser", () => {
+    test.use({ locale: "el-GR" });
+
+    test("opens in Greek too, by default rather than by detection", async ({ page }) => {
+      await page.goto("/");
+      await expect(page).toHaveURL(/\/el\/curricula$/);
+    });
+  });
+});
+
 test.describe("X-App-Locale on every API call", () => {
   test("a Greek session sends el on every request, INCLUDING the SSE POST", async ({ page }) => {
     await mockApi(page);
