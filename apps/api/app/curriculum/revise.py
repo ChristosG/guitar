@@ -350,7 +350,8 @@ def build_revise_messages(*, course_title, brief, language, tree_text, instructi
     call here (including a bare `course_meta=None`, e.g. a caller that has not
     threaded a course through yet) renders SOME blueprint block, never a hole."""
     system = resolve(source, CURRICULUM_SYSTEM_SLICE_ID, CURRICULUM_SYSTEM)
-    content = resolve(source, REVISE_SLICE_ID, REVISE_TAIL).format(
+    tail_template = resolve(source, REVISE_SLICE_ID, REVISE_TAIL)
+    content = tail_template.format(
         course_title=course_title,
         course_brief_block=(REVISE_BRIEF_BLOCK.format(brief=brief) if brief else ""),
         tree=tree_text,
@@ -366,6 +367,15 @@ def build_revise_messages(*, course_title, brief, language, tree_text, instructi
         curriculum_style=curriculum_style(language, source),
         answer_in=answer_in(language, source),
     )
+    if "{curriculum_style}" not in tail_template:
+        # A saved override predating the placeholder (save-time validation
+        # required only the OLD placeholder set) would silently render with no
+        # register rule — the exact bug this flow just fixed, resurrected for
+        # precisely the tutor who edits his prompts. The register is an
+        # INVARIANT of every content-writing flow, not a tutor choice, so it is
+        # appended rather than skipped; a future re-save of the override picks
+        # up the placeholder and this branch goes quiet.
+        content = f"{content}\n{curriculum_style(language, source)}"
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": content},

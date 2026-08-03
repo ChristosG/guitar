@@ -232,6 +232,18 @@ export interface SourceOut {
    * `null` = never compiled into the canon; absent on any API old enough not to
    * send it (handled the same as `null`). */
   compile?: CompileStatus | null;
+  /** An in-flight canon-compile JOB — `ocr_active`'s direct analogue, and the
+   * flag that closes the compile's blind window: `book_compile.status` only
+   * flips to "running" after the worker has read the whole book's context
+   * (seconds on a big book), so the row and the list's poll key on THIS from
+   * the moment the 202 lands. */
+  compile_active?: boolean;
+  /** The LATEST ocr job's failure, present only while the latest one FAILED
+   * (a later successful run clears it). `error_kind` keys the localized
+   * `jobErrors` copy — this is how an auth-parked read stops looking like a
+   * healthy "Continue reading". */
+  last_ocr_error_kind?: string | null;
+  last_ocr_error?: string | null;
 }
 
 export interface ChunkPreviewOut {

@@ -259,11 +259,15 @@ def test_a_ready_compile_with_zero_claims_degrades_to_retrieval_not_general_know
     tokens = build_library_context(db, [source.id]).token_count
     monkeypatch.setattr(corpus_mod.settings, "canon_threshold", tokens - 1)
 
-    context = build_curriculum_context(db, [source.id])
+    # BOTH selection shapes: a scoped list, and the unscoped whole-library
+    # None (the crash the adversarial review caught — `len(None)` in the
+    # fallback's own log line, in exactly the doomsday path it guards).
+    for selection in ([source.id], None):
+        context = build_curriculum_context(db, selection)
 
-    assert not context.is_empty, "retrieval context still carries the sources"
-    assert context.fits is False, "fits=False is what routes every draft to per-lesson retrieval"
-    body = _prefix_text(context)
-    assert "You have nothing of his to read" not in body, (
-        "the NO_LIBRARY framing must never ship when the tutor DID select sources"
-    )
+        assert not context.is_empty, "retrieval context still carries the sources"
+        assert context.fits is False, "fits=False is what routes every draft to per-lesson retrieval"
+        body = _prefix_text(context)
+        assert "You have nothing of his to read" not in body, (
+            "the NO_LIBRARY framing must never ship when the tutor DID select sources"
+        )

@@ -95,7 +95,15 @@ export default function LibraryPage() {
   // source is compiling, re-read the list on a slow cadence; when the last
   // compile leaves `running` the key collapses to "" and this stops itself.
   const compilingKey = useMemo(
-    () => sources.filter((s) => s.compile?.status === "running").map((s) => s.id).join(","),
+    () =>
+      sources
+        // `compile_active` (the in-flight JOB) arms this from the moment the
+        // 202-triggered refresh lands — `book_compile.status` alone misses the
+        // opening seconds of every self-started compile, which is exactly when
+        // the tutor is watching.
+        .filter((s) => s.compile_active || s.compile?.status === "running")
+        .map((s) => s.id)
+        .join(","),
     [sources],
   );
   useEffect(() => {

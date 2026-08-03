@@ -66,11 +66,14 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
     SONNET: {
         "thinking": True,          # adaptive
         "effort": True,
-        # Sonnet 5's real ceiling is 128K output tokens. The old 64_000 here
-        # never bit (the largest role budget is 32K, so the min() below always
-        # chose the role) — but it would have silently halved the first role
-        # budget anyone raised past it, which is exactly how Haiku's stale
-        # 8_192 truncated every long Greek lesson once upon a time.
+        # Sonnet 5's documented ceiling is 128K output tokens. Inert today —
+        # the largest role budget is 32K, so the min() below always chooses
+        # the role — but the old stale 64_000 would have silently halved the
+        # first role budget anyone raised past it, which is exactly how
+        # Haiku's stale 8_192 truncated every long Greek lesson once upon a
+        # time. NOTE: whoever first raises a role budget past 64K should
+        # verify against the live API that no beta header is required at that
+        # size — a 400 there means this number, not your budget.
         "max_output": 128_000,
         "web_search_tool": "web_search_20260209",
     },

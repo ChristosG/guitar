@@ -1481,7 +1481,7 @@ _ENTRIES = [
         curriculum_group=True,
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/corpus.py:541",
+        source_ref="app/curriculum/corpus.py:545",
         title_el="Ολόκληρη η βιβλιοθήκη σου",
         what_it_does_el=(
             "Δίνει στον βοηθό όλα τα βιβλία που διάλεξες, ολόκληρα, με τον "
@@ -1510,7 +1510,7 @@ _ENTRIES = [
         id="curriculum.no_library",
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/corpus.py:496",
+        source_ref="app/curriculum/corpus.py:500",
         title_el="Όταν δεν διάλεξες κανένα βιβλίο",
         what_it_does_el=(
             "Αν δεν διαλέξεις καμία πηγή, μπαίνει αυτό στη θέση της "
@@ -1535,7 +1535,7 @@ _ENTRIES = [
         id="curriculum.library_too_large",
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/corpus.py:497",
+        source_ref="app/curriculum/corpus.py:501",
         title_el="Όταν η βιβλιοθήκη σου δεν χωράει",
         what_it_does_el=(
             "Αν τα βιβλία που διάλεξες είναι πάρα πολλά για να διαβαστούν "
@@ -1707,7 +1707,7 @@ _ENTRIES = [
         # This is the FIRST-PASS call only — the one-shot repair pass (2026-07-20)
         # has its own call site and its own entry, "curriculum.revise.repair"
         # below, exactly like "lesson.draft"/"lesson.repair" split theirs.
-        call_sites=("curriculum/revise.py:782",),
+        call_sites=("curriculum/revise.py:792",),
         slices=(
             Slice(
                 id=REVISE_SLICE_ID,
@@ -1721,7 +1721,7 @@ _ENTRIES = [
         id="curriculum.revise.repair",
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/revise.py:727",
+        source_ref="app/curriculum/revise.py:737",
         title_el="Όταν το σχέδιο αναθεώρησης απορρίπτει προτάσεις",
         what_it_does_el=(
             "Η εφαρμογή ελέγχει κάθε πρόταση αλλαγής (op) του βοηθού: αν ένα id "
@@ -1737,7 +1737,7 @@ _ENTRIES = [
         when_it_runs_el="Μόνο όταν απορριφθεί έστω μία πρόταση. Το πολύ μία φορά ανά σχέδιο.",
         source_of_truth=lambda: _revise_repair_message,
         build=_build_curriculum_revise_repair,
-        call_sites=("curriculum/revise.py:791",),
+        call_sites=("curriculum/revise.py:801",),
         slices=(
             Slice(
                 id=REVISE_REPAIR_SLICE_ID,
@@ -1770,7 +1770,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: REVISE_DISTILL_SYSTEM,
         build=_build_revise_distill,
-        call_sites=("curriculum/revise.py:718",),
+        call_sites=("curriculum/revise.py:728",),
         slices=(
             Slice(
                 id=REVISE_DISTILL_SLICE_ID,
@@ -2359,7 +2359,7 @@ _ENTRIES = [
         when_it_runs_el="Μία φορά για κάθε σελίδα, όταν ανεβάζεις ένα βιβλίο.",
         source_of_truth=lambda: OCR_PROMPT,
         build=_vision_prompt(OCR_SLICE_ID, OCR_PROMPT),
-        call_sites=("brain/ocr.py:1119",),
+        call_sites=("brain/ocr.py:1152",),
         slices=(
             Slice(
                 id=OCR_SLICE_ID,
@@ -2388,7 +2388,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: FIGURE_PROMPT,
         build=_vision_prompt(FIGURE_SLICE_ID, FIGURE_PROMPT),
-        call_sites=("brain/ocr.py:1119",),
+        call_sites=("brain/ocr.py:1152",),
         slices=(
             Slice(
                 id=FIGURE_SLICE_ID,

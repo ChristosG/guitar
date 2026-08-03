@@ -20,6 +20,7 @@ import { useConfirm } from "@/components/ui/confirm";
 import { RenameDialog } from "@/components/library/rename-dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { compileSource, renameSource, type SourceOut, type SourceProgressOut } from "@/lib/api";
+import { jobErrorText } from "@/lib/job-errors";
 
 /** Statuses the honesty requirement (spec D6) applies to: a source that
  * genuinely has nothing readable in it. Rendered LOUD/red/destructive with a
@@ -115,6 +116,17 @@ export function SourceRow({
   // `ocr_active` (a server fact — an in-flight GenerationJob) is the authority on
   // "is this book being read right now", not the presence of a poll result.
   const reading = progress?.active ?? source.ocr_active ?? false;
+  // The LATEST run's failure, localized — suppressed while a run is live
+  // (stale news beside a spinner) and absent when the latest run succeeded
+  // (the API only decorates a FAILED latest job).
+  const tJobErrors = useTranslations("jobErrors");
+  const lastOcrError =
+    !reading && source.last_ocr_error_kind
+      ? jobErrorText(
+          { error: source.last_ocr_error ?? null, error_kind: source.last_ocr_error_kind },
+          tJobErrors,
+        )
+      : null;
   const contentEmpty = isEmptyContent(source);
   const isPartial = !reading && source.status === "partial";
   const isBroken = !reading && (BROKEN_STATUSES.has(source.status) || contentEmpty);
@@ -288,6 +300,11 @@ export function SourceRow({
             >
               {retrying ? t("retrying") : t("retryFailedPages")}
             </Button>
+            {lastOcrError && (
+              <span data-testid={`ocr-last-error-${source.id}`} className="w-full text-xs text-destructive">
+                {lastOcrError}
+              </span>
+            )}
           </div>
         ) : isPartial ? (
           // `pending > 0` — the footgun `b886bd5` opened. Before that fix,
@@ -333,6 +350,16 @@ export function SourceRow({
             >
               {retrying ? t("retrying") : ready > 0 ? t("continueReading") : t("startReading")}
             </Button>
+            {/* The last run's verdict, when it FAILED — without this line an
+                auth-parked read (key revoked / out of credit at page 40) looked
+                like a healthy resumable book, and every Continue press failed
+                again in silence. `jobErrors` copy is the same localized
+                taxonomy every other failed-job surface renders. */}
+            {lastOcrError && (
+              <span data-testid={`ocr-last-error-${source.id}`} className="w-full text-xs text-destructive">
+                {lastOcrError}
+              </span>
+            )}
           </div>
         ) : isBroken ? (
           <div className="flex flex-wrap items-center gap-2 text-destructive">
@@ -389,7 +416,21 @@ export function SourceRow({
             Compile button the ethos asks for. Hidden while the book is being OCR'd
             (compile runs after a book is readable). */}
         {!reading && source.compile !== undefined && (
-          source.compile?.status === "ready" ? (
+          source.compile_active ? (
+            /* An in-flight compile JOB, decorated like `ocr_active` — checked
+               FIRST because `book_compile` itself only flips to "running"
+               after the worker has assembled the whole book's context
+               (seconds on a big book), and until this flag the row showed
+               "not compiled · [Compile]" (or "ready · Recompile") for the
+               opening stretch of a paid compile the tutor just started. */
+            <span
+              data-testid={`compile-running-${source.id}`}
+              className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground"
+            >
+              <Loader2 className="size-3 shrink-0 animate-spin" />
+              {t("compile.running")}
+            </span>
+          ) : source.compile?.status === "ready" ? (
             <span className="mt-0.5 flex flex-wrap items-center gap-2">
               <Link
                 href={`/${locale}/canon`}

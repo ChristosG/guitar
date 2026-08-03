@@ -25,13 +25,14 @@ from sqlalchemy.orm import Session
 
 from app.brain.ingest import IngestPayload, ingest_source
 from app.brain.media import purge_source_media
-from app.brain.ocr import PageCounts, active_ocr_jobs, page_counts
+from app.brain.ocr import PageCounts, active_ocr_jobs, latest_failed_ocr_jobs, page_counts
 from app.brain.reembed import reembed_all
 from app.brain.retrieve import answer as run_answer
 from app.brain.retrieve import search as run_search
 from app.brain.urlsafe import assert_public_url
 from app.canon.search import search_concepts as run_concept_search
 from app.db import get_db
+from app.jobs.canon_compile import active_compile_jobs
 from app.models.canon import BookCompile
 from app.models.knowledge import Chunk, KnowledgeSource
 from app.schemas.knowledge import (
@@ -76,6 +77,8 @@ def _to_source_out(
     counts: PageCounts | None = None,
     ocr_active: bool = False,
     compile: BookCompile | None = None,
+    compile_active: bool = False,
+    last_failed_ocr=None,
 ) -> SourceOut:
     """`counts`/`ocr_active`/`compile` are passed in, never queried here:
     `list_sources` resolves them for the WHOLE list in a fixed number of queries
@@ -93,6 +96,15 @@ def _to_source_out(
         # compile state the Library row shows beside OCR status (Part B, C7).
         "compile": CompileStatusOut.model_validate(compile, from_attributes=True)
         if compile is not None else None,
+        # `ocr_active`'s analogue for compiles: the in-flight JOB, because
+        # `book_compile.status` flips to "running" seconds late (see
+        # `jobs/canon_compile.active_compile_jobs`).
+        "compile_active": compile_active,
+        # The LATEST ocr job's failure, when there is one — what lets the row
+        # say "your key was rejected" instead of a healthy sky-blue "Continue
+        # reading" after an auth park (`latest_failed_ocr_jobs`' docstring).
+        "last_ocr_error_kind": last_failed_ocr.error_kind if last_failed_ocr else None,
+        "last_ocr_error": last_failed_ocr.error if last_failed_ocr else None,
     })
 
 
@@ -119,8 +131,13 @@ def _decorate(db: Session, sources: list[KnowledgeSource]) -> list[SourceOut]:
     counts = page_counts(db, ids)
     active = active_ocr_jobs(db, ids)
     compiles = _compiles(db, ids)
+    compiling = active_compile_jobs(db, ids)
+    failed_ocr = latest_failed_ocr_jobs(db, ids)
     return [
-        _to_source_out(s, counts.get(s.id), str(s.id) in active, compiles.get(s.id))
+        _to_source_out(
+            s, counts.get(s.id), str(s.id) in active, compiles.get(s.id),
+            str(s.id) in compiling, failed_ocr.get(str(s.id)),
+        )
         for s in sources
     ]
 

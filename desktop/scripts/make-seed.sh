@@ -56,13 +56,15 @@ log "archiving media volume"
 # extract on the host so file ownership lands on the current user.
 #
 # vision-scratch/ is EXCLUDED: it holds the OCR pipeline's working JPEGs, which
-# no DB row ever points at. Shipped in a seed they are pure ballast on the way
-# in — and worse on arrival: the app's first-boot orphan sweep would find them,
-# set them aside, and open a "files were set aside" note at the tutor over
-# junk. Both patterns are needed — busybox tar globs the directory entry and
-# its contents separately (verified against alpine's tar).
+# no DB row ever points at. Shipped in a seed they are pure ballast — the
+# orphan-media sweep quarantines only UUID-named dirs, so they would just sit
+# there forever, unowned. One pattern suffices: busybox tar's fnmatch treats
+# it as a leading-dir match, dropping the directory entry AND its contents
+# (verified against alpine's tar; it also matches a NESTED
+# …/media/vision-scratch, which the {media_dir}/{uuid}/{page}.jpg layout can
+# never produce).
 docker run --rm -v "$MEDIA_VOLUME":/media:ro alpine \
-  tar cf - --exclude='media/vision-scratch' --exclude='media/vision-scratch/*' -C / media \
+  tar cf - --exclude='media/vision-scratch' -C / media \
   | tar xf - -C "$BUILD"
 [ -d "$BUILD/media" ] || die "media/ extraction failed"
 

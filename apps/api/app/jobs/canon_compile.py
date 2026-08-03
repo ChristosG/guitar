@@ -56,11 +56,15 @@ log = logging.getLogger(__name__)
 _IN_FLIGHT = ("pending", "running")
 
 
-def active_compile_job(db, source_id) -> GenerationJob | None:
-    """The in-flight `canon_compile` job for one source, or None. THE IN-FLIGHT
-    GUARD — the direct analogue of `brain/ocr.active_ocr_job`. `source_id` lives
-    in `GenerationJob.params` (plain JSON), filtered in Python because the
-    in-flight set is a handful of rows at most."""
+def active_compile_jobs(db, source_ids=None) -> dict:
+    """`{source_id_str: GenerationJob}` for every in-flight `canon_compile` job —
+    `brain/ocr.active_ocr_jobs`' direct analogue, and what lets `_decorate`
+    stamp `SourceOut.compile_active` for a whole list in ONE query. Needed
+    because `book_compile.status` flips to "running" only after the worker has
+    assembled the whole book's context (seconds on a big book) — until this
+    flag, a just-started compile was invisible to the Library list and its
+    poll. `source_id` lives in `GenerationJob.params` (plain JSON), filtered in
+    Python because the in-flight set is a handful of rows at most."""
     jobs = (
         db.query(GenerationJob)
         .filter(GenerationJob.kind == "canon_compile",
@@ -68,11 +72,20 @@ def active_compile_job(db, source_id) -> GenerationJob | None:
         .order_by(GenerationJob.created_at)
         .all()
     )
-    sid = str(source_id)
+    wanted = {str(s) for s in source_ids} if source_ids is not None else None
+    out: dict = {}
     for job in jobs:
-        if str((job.params or {}).get("source_id") or "") == sid:
-            return job
-    return None
+        sid = str((job.params or {}).get("source_id") or "")
+        if not sid or (wanted is not None and sid not in wanted):
+            continue
+        out[sid] = job                          # latest wins; they're time-ordered
+    return out
+
+
+def active_compile_job(db, source_id) -> GenerationJob | None:
+    """The in-flight `canon_compile` job for one source, or None. THE IN-FLIGHT
+    GUARD — the direct analogue of `brain/ocr.active_ocr_job`."""
+    return active_compile_jobs(db, [source_id]).get(str(source_id))
 
 
 def enqueue_canon_compile(db, source_id, *, force=False) -> tuple[uuid.UUID | None, str]:

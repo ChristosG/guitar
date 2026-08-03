@@ -182,6 +182,27 @@ def ingest_source(db, source_id, payload: IngestPayload) -> None:
         sections = _cap_total_chars(sections, source_id)
         drafts = chunk_sections(sections)
 
+        # THE INVARIANT (shared with `ocr._evict_refused_chunks`): A PAGE WHOSE
+        # `text` IS NULL HAS NO CHUNKS — enforced at BOTH ends now.
+        # `paginate_source` refuses a GlyphLessFont layer (someone else's
+        # Tesseract, every fraction glyph gone) by setting `Page.text=None`;
+        # `extract_text` above re-reads the same bytes and happily re-adopts
+        # that very layer. Until this guard, those chunks were embedded,
+        # committed, and fully retrievable — search, chat and curriculum
+        # prompts served the poisoned text from upload until the first OCR
+        # pickup finally evicted it, a window measured in days on a book the
+        # tutor hadn't pressed "read" on yet. Filtered BEFORE the embed call:
+        # on an 888-page scan the refused layer is most of the book, and
+        # embedding it on the CPU inside the upload request just to discard it
+        # was minutes of pure waste.
+        if payload.kind == "pdf":
+            drafts = [
+                d for d in drafts
+                if not (
+                    (pg := page_by_no.get(d.page or 1)) is not None and pg.text is None
+                )
+            ]
+
         texts = [d.text for d in drafts]
         embedder = get_embedder()
         # Skip the call entirely for an empty source rather than asking the
@@ -193,18 +214,6 @@ def ingest_source(db, source_id, payload: IngestPayload) -> None:
         char_count = 0
         for draft, vector in zip(drafts, vectors):
             page = page_by_no.get(draft.page or 1) or (pages[0] if pages else None)
-            # THE INVARIANT (shared with `ocr._evict_refused_chunks`): A PAGE
-            # WHOSE `text` IS NULL HAS NO CHUNKS — enforced at BOTH ends now.
-            # `paginate_source` refuses a GlyphLessFont layer (someone else's
-            # Tesseract, every fraction glyph gone) by setting `Page.text=None`;
-            # `extract_text` above re-reads the same bytes and happily re-adopts
-            # that very layer. Until this guard, those chunks were embedded,
-            # committed, and fully retrievable — search, chat and curriculum
-            # prompts served the poisoned text from upload until the first OCR
-            # pickup finally evicted it, a window measured in days on a book the
-            # tutor hasn't pressed "read" on yet.
-            if payload.kind == "pdf" and page is not None and page.text is None:
-                continue
             db.add(
                 Chunk(
                     source_id=source.id,

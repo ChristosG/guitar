@@ -111,7 +111,7 @@ _QUARANTINE_README = "READ-ME-superseded-media.txt"
 _QUARANTINE_README_TEXT = """\
 ΜΗΝ ΔΙΑΓΡΑΨΕΤΕ ΑΥΤΟΝ ΤΟΝ ΦΑΚΕΛΟ — DO NOT DELETE THIS FOLDER
 
-Το GuitarTutor βρήκε εδώ αρχεία (PDF βιβλίων και σαρωμένες σελίδες) που δεν
+Το Angel OS βρήκε εδώ αρχεία (PDF βιβλίων και σαρωμένες σελίδες) που δεν
 αντιστοιχούν σε καμία καταχώριση στη βάση δεδομένων του. ΔΕΝ τα διέγραψε: τα
 μετέφερε εδώ. Κάθε υποφάκελος έχει την ημερομηνία που έγινε αυτό.
 
@@ -123,7 +123,7 @@ _QUARANTINE_README_TEXT = """\
 
 ---
 
-GuitarTutor found files here (book PDFs and page scans) that no row in its
+Angel OS found files here (book PDFs and page scans) that no row in its
 database refers to. It did NOT delete them — it moved them here. Each
 subdirectory is named for the moment that happened, in UTC.
 
@@ -133,18 +133,18 @@ restored or renamed — after which NOTHING in the database refers to ANY of the
 files, and every book in the library ends up in here at once. If that is what
 you are looking at, the files are all present and nothing has been lost.
 
-TO PUT THEM BACK, with GuitarTutor closed. The layout in here is
+TO PUT THEM BACK, with Angel OS closed. The layout in here is
 
     media/_superseded/<date>/<book-id>/source.pdf
 
-and the tree they came out of — the one GuitarTutor reads — is
+and the tree they came out of — the one Angel OS reads — is
 
     media/<book-id>/source.pdf
 
 So put the right database back first, then move each <book-id> folder out of
 media/_superseded/<date>/ and into media/ itself. That is TWO levels up, not
 one: one level up lands you in "_superseded/", which is still not where
-GuitarTutor looks.
+Angel OS looks.
 
 Each subdirectory here is DELETED FOR GOOD 30 days after the date in its name.
 If you need anything out of here, copy it somewhere else now.

@@ -101,20 +101,28 @@ def sweep_stuck_compiles(db) -> int:
 def sweep_stuck_ingests(db) -> int:
     """Fail every `KnowledgeSource` left `ingesting` by a restart; return the count.
 
-    Upload ingest runs synchronously inside the HTTP request, so a source still
-    `ingesting` at BOOT can only mean the process died mid-ingest (pagination /
-    extraction / embedding). Nothing ever swept it, so the row spun forever.
-    `failed` + the message gives the tutor the one recovery that is always
-    correct: upload the file again (a fresh row — the displaced one keeps its
-    media, per the never-delete invariant).
+    A source still `ingesting` at BOOT is orphaned either way it got there:
+    pdf/text ingest runs synchronously inside the HTTP request (the process
+    died mid-ingest), and a url RE-ingest runs as a background job
+    (`run_reingest_job`) — whose job row the jobs sweep above has ALREADY
+    failed by the time this runs (`main.py` calls the sweeps in order, before
+    serving), so nothing is coming back for it. Nothing ever swept the source
+    row itself, so it spun forever. The recovery message differs by type: a
+    pdf's is "upload the file again"; a url/text row has no file — its Retry
+    affordance (or re-adding) is the honest instruction.
     """
-    result = db.execute(
+    n = db.execute(
         update(KnowledgeSource)
-        .where(KnowledgeSource.status == "ingesting")
+        .where(KnowledgeSource.status == "ingesting", KnowledgeSource.type == "pdf")
         .values(status="failed", error="interrupted by a restart — upload the file again")
-    )
+    ).rowcount
+    n += db.execute(
+        update(KnowledgeSource)
+        .where(KnowledgeSource.status == "ingesting", KnowledgeSource.type != "pdf")
+        .values(status="failed", error="interrupted by a restart — try adding it again")
+    ).rowcount
     db.commit()
-    return result.rowcount
+    return n
 
 
 # Retention windows. Generous on purpose: these tables are audit/debugging

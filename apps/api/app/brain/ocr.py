@@ -683,6 +683,8 @@ def ocr_source(db, source_id) -> OcrResult:
                 # silently does nothing.
                 db.rollback()
                 page = db.get(Page, page.id)
+                if page is None:            # source deleted mid-run — nothing to park
+                    break
                 page.ocr_attempts = max(0, (page.ocr_attempts or 1) - 1)
                 page.status = "pending"
                 page.ocr_error = "rate limited — retry in a few minutes"
@@ -705,6 +707,8 @@ def ocr_source(db, source_id) -> OcrResult:
                 # `error_kind="auth"` and point him at Settings.
                 db.rollback()
                 page = db.get(Page, page.id)
+                if page is None:            # source deleted mid-run — just fail the job
+                    raise
                 page.ocr_attempts = max(0, (page.ocr_attempts or 1) - 1)
                 page.status = "pending"
                 page.ocr_error = "API key problem — check Settings"
@@ -1021,6 +1025,35 @@ def active_ocr_jobs(db, source_ids: list | None = None) -> dict:
             continue
         out[sid] = job                          # latest wins; they're time-ordered
     return out
+
+
+def latest_failed_ocr_jobs(db, source_ids=None) -> dict:
+    """`{source_id_str: GenerationJob}` for every source whose LATEST ocr job
+    FAILED — the fact `_decorate` stamps onto `SourceOut.last_ocr_error_kind`.
+
+    Exists because the auth park (see `ocr_source`'s auth branch) fails the job
+    loudly with `error_kind="auth"` — and until this, that verdict reached
+    nobody: the Library polls only `SourceProgress` (no error fields), the row
+    rendered the parked pages as a healthy sky-blue "Continue reading", and the
+    app-shell banner only fires for a MISSING key, not a rejected one. Latest
+    job per source (they're time-ordered), and only a failed latest counts — a
+    later successful run means the failure is history, not news.
+    """
+    jobs = (
+        db.query(GenerationJob)
+        .filter(GenerationJob.kind == "ocr",
+                GenerationJob.status.in_(("failed", "succeeded")))
+        .order_by(GenerationJob.created_at)
+        .all()
+    )
+    wanted = {str(s) for s in source_ids} if source_ids is not None else None
+    latest: dict = {}
+    for job in jobs:
+        sid = str((job.params or {}).get("source_id") or "")
+        if not sid or (wanted is not None and sid not in wanted):
+            continue
+        latest[sid] = job                       # latest wins; they're time-ordered
+    return {sid: job for sid, job in latest.items() if job.status == "failed"}
 
 
 def active_ocr_job(db, source_id):

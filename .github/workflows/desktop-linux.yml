@@ -143,9 +143,10 @@ jobs:
       - name: Install Tauri build dependencies
         run: |
           sudo apt-get update
-          # libfuse2: appimagetool is itself an AppImage and needs FUSE on 22.04.
+          # libfuse2 is gone with AppImage: this workflow bundles deb-only and
+          # tauri.conf.json no longer lists the appimage target at all.
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
-            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libfuse2
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
 
       - uses: actions/setup-node@v4
         with:

@@ -315,9 +315,13 @@ def build_curriculum_context(db, source_ids: list[UUID] | None):
             # of every source regardless of compile status; it is the honest
             # floor, not a refusal.
             log.warning(
-                "curriculum: %d source(s) report compiled but the canon is EMPTY "
-                "— falling back to retrieval grounding instead of drafting from "
-                "general knowledge", len(source_ids),
+                "curriculum: %d contributing source(s) report compiled but the "
+                "canon is EMPTY — falling back to retrieval grounding instead "
+                "of drafting from general knowledge",
+                # NOT len(source_ids): an unscoped selection passes None (the
+                # "whole library" contract), and this rung is exactly where a
+                # crash must not happen.
+                len(library.sources),
             )
             return build_retrieval_context(db, source_ids)
         return canon

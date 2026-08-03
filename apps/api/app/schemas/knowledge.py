@@ -112,6 +112,20 @@ class SourceOut(BaseModel):
     # beside the OCR status. Absent (defaults to None) on any API old enough not
     # to send it.
     compile: CompileStatusOut | None = None
+    # `ocr_active`'s analogue for compiles — an in-flight `canon_compile`
+    # GenerationJob. Needed because `book_compile.status` flips to "running"
+    # only after the worker has assembled the whole book's context (seconds on
+    # a big book): without this, a compile the tutor JUST started was invisible
+    # to the Library list and its poll for its whole opening stretch.
+    compile_active: bool = False
+    # The LATEST ocr job's failure, when the latest one FAILED (a later
+    # successful run clears it — history, not news). `error_kind` is the
+    # runner's taxonomy ("auth"/"rate_limit"/"timeout"/...), which the row
+    # renders via the localized `jobErrors` copy; `error` is the fallback
+    # prose for kinds without fixed copy. This is how an auth-parked read
+    # stops looking like a healthy "Continue reading".
+    last_ocr_error_kind: str | None = None
+    last_ocr_error: str | None = None
 
 
 class BulkSourceCreate(BaseModel):
