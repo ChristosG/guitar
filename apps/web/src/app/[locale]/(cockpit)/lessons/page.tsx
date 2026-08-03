@@ -10,7 +10,7 @@ import { ApiError, listLessons, type LessonListItem } from "@/lib/api";
  * order (newest first, per `GET /lessons`), each showing only its title and
  * where it came from — clicking a row opens the outline editor. Client
  * component for the same reason as every other cockpit page (see
- * `students/page.tsx`'s own docstring): it calls the API straight from the
+ * `lib/api.ts`'s own docstring): it calls the API straight from the
  * browser, which is also what makes it visible to Playwright's
  * `page.route`.
  *

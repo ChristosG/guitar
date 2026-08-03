@@ -29,7 +29,7 @@ the app DB from the actual browser walk this task's brief also requires (see
 touches (different `GenerationJob`/`Block` ids).
 
 Run:
-  cd apps/api && LLM_BASE_URL=http://localhost:6888/v1 EMBED_BASE_URL=http://localhost:8090/v1 \
+  cd apps/api && LLM_API_KEY=sk-ant-... \
     ./.venv/bin/python -m pytest -m integration -v -s tests/test_lesson_live.py
 """
 import os

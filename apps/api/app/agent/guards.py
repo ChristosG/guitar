@@ -312,8 +312,8 @@ def looks_like_named_song_request(text: str) -> bool:
     this module's top-level docstring for the full detection rationale.
     Used by `app/agent/loop.py` as a PRE-model short-circuit (mirrors Plan 11
     Task 1's forced-retrieval pre-hop shape): a positive here means the turn
-    is answered with `NAMED_SONG_DECLINE_MESSAGE` WITHOUT ever calling the
-    model — there is no reliable way to make the model itself decline (it is
+    is answered with the session-locale decline constant
+    (`named_song_decline_message` below) WITHOUT ever calling the model — there is no reliable way to make the model itself decline (it is
     the very thing that fabricates when asked), so the interception has to
     happen before it ever sees the request.
     """
@@ -346,6 +346,42 @@ NAMED_SONG_DECLINE_MESSAGE = (
     "pattern — just ask for one of those and I'll generate it as a real "
     "artifact."
 )
+
+# The decline is a CONSTANT-PER-LOCALE, not an LLM call — the whole point of
+# G5 is that the model cannot be trusted anywhere near a named-song request
+# (it is the very thing that fabricates when asked), so the reply must be
+# authored, deterministic, test-pinnable text. But a single English constant
+# was itself a locale bug: the app's default locale is el
+# (`app.i18n.DEFAULT_LOCALE`), so the ONE guaranteed-deterministic reply in
+# the whole product arrived in the wrong language for the tutor actually
+# using it, verbatim, on every named-song turn. `loop.py` already holds the
+# session's locale at both G5 call sites (the same `locale` it threads into
+# the system prompt and into every proposed tool call), so it picks the
+# variant there via `named_song_decline_message` below.
+NAMED_SONG_DECLINE_MESSAGE_EL = (
+    "Δεν μπορώ να αναπαράγω νότα-νότα την ταμπλατούρα μιας συγκεκριμένης "
+    "ηχογράφησης — δεν την έχω πραγματικά απομνημονευμένη, και αν μάντευα θα "
+    "έβγαζα απλώς μια σίγουρη αλλά λάθος μεταγραφή αντί για μια ειλικρινή "
+    "απάντηση. Αυτό που ΜΠΟΡΩ να σου φτιάξω: την ακολουθία συγχορδιών σε "
+    "αυτό το ύφος, μια κλίμακα ή μια άσκηση τεχνικής που πατάει πάνω του, ή "
+    "το ρυθμικό σχήμα του ριφ ως γενικό μοτίβο — ζήτησέ μου ένα από αυτά και "
+    "θα το φτιάξω ως κανονικό artifact."
+)
+
+NAMED_SONG_DECLINE_MESSAGES: dict[str, str] = {
+    "en": NAMED_SONG_DECLINE_MESSAGE,
+    "el": NAMED_SONG_DECLINE_MESSAGE_EL,
+}
+
+
+def named_song_decline_message(locale: str) -> str:
+    """The G5 decline in the session's language. Unknown/missing locales fall
+    back to GREEK, never English — the same el-never-en default rule as
+    `ChatSession.locale` and every locale-taking tool fn (`app.i18n.
+    DEFAULT_LOCALE` exists precisely because an `en` fallback is how the
+    English-only floors silently broke a Greek-first product before).
+    """
+    return NAMED_SONG_DECLINE_MESSAGES.get(locale, NAMED_SONG_DECLINE_MESSAGE_EL)
 
 # `app/routers/chat.py`'s `_inject_curriculum_context` appends a transient
 # "[CURRICULUM CONTEXT — ...]" block (this exact prefix) onto the LAST user

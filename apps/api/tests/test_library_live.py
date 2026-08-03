@@ -18,7 +18,7 @@ deliberately, not against a fresh `guitar_test` ingest:
     reach it, and this test can never destroy his library.
 
 Run:
-  cd apps/api && LLM_BASE_URL=http://localhost:6888/v1 EMBED_BASE_URL=http://localhost:8090/v1 \
+  cd apps/api && LLM_API_KEY=sk-ant-... \
     ./.venv/bin/python -m pytest -m integration -v -s tests/test_library_live.py
 """
 import os

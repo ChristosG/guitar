@@ -19,7 +19,7 @@ DB-touching (real Postgres `guitar_test`, forced by `conftest.py` before any
 `pyproject.toml`), same convention `test_curriculum_api.py`'s own
 `test_generate_curriculum_endpoint_returns_real_tree` established (the
 brief's named precedent for this task). Host runs additionally need
-`LLM_BASE_URL=http://localhost:6888/v1 EMBED_BASE_URL=http://localhost:8090/v1`
+`LLM_API_KEY=sk-ant-...`
 exported — `app.config.Settings`' defaults are the container-internal
 hostnames (`qwen-vllm`/`qwen-emb-vllm`), only resolvable from inside
 `platform-net`; see `docs/superpowers/plans/2026-07-07-knowledge-brain.md`'s

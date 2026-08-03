@@ -8,10 +8,10 @@ import { cn } from "@/lib/utils";
 import { routing } from "@/i18n/routing";
 
 /** GR/EN switcher: swaps the leading `/en`/`/el` path segment and keeps the
- * rest of the URL (so switching language on `/en/students` lands on
- * `/el/students`, not the home page). Plain `next/link` + manual locale
+ * rest of the URL (so switching language on `/en/library` lands on
+ * `/el/library`, not the home page). Plain `next/link` + manual locale
  * interpolation, same convention as the rest of this app (see
- * `app/[locale]/page.tsx`/`knowledge/page.tsx`) rather than next-intl's
+ * `app/[locale]/page.tsx`/`library/page.tsx`) rather than next-intl's
  * `createNavigation` wrapper, which this codebase doesn't otherwise use. */
 export function LocaleToggle() {
   const locale = useLocale();

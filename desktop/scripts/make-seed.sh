@@ -16,6 +16,19 @@
 # READ-ONLY against production: pg_dump + a tar out of the media volume, exactly
 # the invocations scripts/backup.sh has proven. Nothing is stopped or restarted.
 #
+# ── BEFORE CUTTING A SEED, PRUNE THE SOURCE DB ──────────────────────────────
+# The dump is a faithful copy of whatever the live DB holds, and a seed ships
+# to EVERY fresh install — so tutor-specific rows become everybody's rows:
+#   * `student` and `assignment` rows — the currently shipped seed carries two
+#     historical students; the UI no longer surfaces them, but the next cut
+#     must not keep smuggling them along.
+#   * stale OPEN `curriculum_interview` rows — a half-finished interview from
+#     the live box would greet a brand-new install mid-conversation.
+# Delete those from the source DB (or a scratch restore of it) before running
+# this script. Nothing here can do it automatically: this script is read-only
+# against production BY DESIGN, and that is not the invariant to spend.
+# ────────────────────────────────────────────────────────────────────────────
+#
 # Usage: ./make-seed.sh    (requires docker + gh auth on the host)
 # shellcheck source=./common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
@@ -41,7 +54,16 @@ docker exec "$PG_CONTAINER" pg_dump -Fc -U guitar -d guitar > "$BUILD/db.dump"
 log "archiving media volume"
 # Stream the volume out via a throwaway alpine (backup.sh's proven pattern) and
 # extract on the host so file ownership lands on the current user.
-docker run --rm -v "$MEDIA_VOLUME":/media:ro alpine tar cf - -C / media | tar xf - -C "$BUILD"
+#
+# vision-scratch/ is EXCLUDED: it holds the OCR pipeline's working JPEGs, which
+# no DB row ever points at. Shipped in a seed they are pure ballast on the way
+# in — and worse on arrival: the app's first-boot orphan sweep would find them,
+# set them aside, and open a "files were set aside" note at the tutor over
+# junk. Both patterns are needed — busybox tar globs the directory entry and
+# its contents separately (verified against alpine's tar).
+docker run --rm -v "$MEDIA_VOLUME":/media:ro alpine \
+  tar cf - --exclude='media/vision-scratch' --exclude='media/vision-scratch/*' -C / media \
+  | tar xf - -C "$BUILD"
 [ -d "$BUILD/media" ] || die "media/ extraction failed"
 
 log "manifest.json"

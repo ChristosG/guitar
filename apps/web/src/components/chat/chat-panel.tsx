@@ -344,15 +344,23 @@ export function ChatPanel({ sessionId, rootId, blockTitles, onJobDone }: ChatPan
           }
           appendMessage("assistant", t("revise.applied"));
         } else {
-          // Deep-link straight to the materialized curriculum's own board
-          // (Unit A's `/curricula/[rootId]` route) when the job says which
-          // one it is; fall back to the plain Curricula index in the
-          // defensive edge case where `result_root_id` came back unset.
+          // Deep-link straight to what the job actually produced, BRANCHED
+          // ON THE JOB'S KIND: a `draft_lesson_from_selection` job (kind
+          // "lesson") reports the drafted LESSON's root Block id in
+          // `result_root_id` (see `lib/api.ts`'s job docs), so sending it to
+          // `/curricula/{id}` — as this used to unconditionally — 404-ed the
+          // one link the narration offered. Lessons open in the outline
+          // editor (`/lessons/[lessonId]`), curricula on their own board
+          // (Unit A's `/curricula/[rootId]`); each falls back to its own
+          // index page in the defensive edge case where `result_root_id`
+          // came back unset.
+          const isLesson = job.kind === "lesson";
+          const section = isLesson ? "lessons" : "curricula";
           appendMessage("assistant", t("job.succeeded"), {
-            label: t("job.viewCurriculum"),
+            label: isLesson ? t("job.viewLesson") : t("job.viewCurriculum"),
             href: job.result_root_id
-              ? `/${locale}/curricula/${job.result_root_id}`
-              : `/${locale}/curricula`,
+              ? `/${locale}/${section}/${job.result_root_id}`
+              : `/${locale}/${section}`,
           });
         }
       } else if (job.status === "failed") {

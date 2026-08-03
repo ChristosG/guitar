@@ -13,7 +13,7 @@ import { ApiError, downloadCurriculumDocx, getCurriculum, type BlockNode } from 
 
 /** The per-curriculum board, split out of the old `curricula/page.tsx` so the
  * list page can become a plain navigable index (Unit A). Same shape as
- * `lessons/[lessonId]/page.tsx` / `students/[id]/page.tsx` / `library/
+ * `lessons/[lessonId]/page.tsx` / `library/
  * [sourceId]/page.tsx`: a client component reading its id via `useParams()`,
  * one mount-only fetch, a back link at the top.
  *

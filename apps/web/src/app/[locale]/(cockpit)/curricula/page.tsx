@@ -31,8 +31,8 @@ function dismissedIds(): string[] {
   }
 }
 
-// Client component for the same reason as knowledge/page.tsx and
-// students/page.tsx: it calls the API straight from the browser.
+// Client component for the same reason as every other cockpit page: it calls
+// the API straight from the browser (see lib/api.ts's docstring on why).
 //
 // Unit A: this page is now a plain navigable INDEX — cards link out to
 // `/[locale]/curricula/[rootId]` (the new detail route) instead of opening a

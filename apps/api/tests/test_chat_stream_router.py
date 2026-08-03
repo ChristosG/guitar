@@ -227,11 +227,14 @@ def test_stream_a_song_the_tutor_does_not_own_is_still_declined(monkeypatch):
     # decline text itself is only visible in what got persisted, not in the
     # "done" event's own payload (which carries only `citations`).
     assert events[-1][0] == "done"
-    from app.agent.guards import NAMED_SONG_DECLINE_MESSAGE
+    # The session was created with no X-App-Locale -> el (the default), so
+    # the persisted decline is the GREEK constant (C13 made this reply
+    # per-locale).
+    from app.agent.guards import NAMED_SONG_DECLINE_MESSAGE_EL
     rows = _db_messages(session_id)
     assistant_rows = [m for m in rows if m.role == "assistant"]
     assert len(assistant_rows) == 1
-    assert assistant_rows[0].content == NAMED_SONG_DECLINE_MESSAGE
+    assert assistant_rows[0].content == NAMED_SONG_DECLINE_MESSAGE_EL
 
 
 # ---------------------------------------------------------------------------

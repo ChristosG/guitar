@@ -686,24 +686,29 @@ test("a slice inside the cached prefix warns BEFORE he saves", async ({ page }) 
 
 // --- CHANGE 3: the preview must not lie about the language -----------------
 
-test("a course-language prompt says the language comes from the STUDENT, not this screen", async ({ page }) => {
+test("a course-language prompt says the language was chosen in the wizard, not on this screen", async ({ page }) => {
   // Chris spotted this himself from the screen, and it was real:
   //
   //     PREVIEW   (X-App-Locale: el):  "write everything you produce in Greek (el)"
   //     REAL CALL (a course whose language is 'en'): "...in English (en)"
   //
-  // The origin is the surprising part — a course takes its language from the STUDENT
-  // (`interview.py:311`), not from the cockpit — so the origin is what the screen has
-  // to say out loud. In his live DB 5 of 6 courses are English.
+  // The origin is the surprising part — a course's language is not the cockpit's —
+  // so the origin is what the screen has to say out loud. In his live DB 5 of 6
+  // courses are English. The wording moved with the product: the students UI is
+  // gone and the wizard's FIRST STEP is where the course language is chosen now,
+  // so the note names the wizard («στο πρώτο βήμα του οδηγού») instead of a
+  // student card the tutor can no longer open.
   await mockApi(page);
   await page.goto("/el/settings");
   const card = await open(page, "curriculum", "curriculum.outline");
 
   const note = card.getByTestId("prompt-language-origin-curriculum.outline");
   await expect(note).toBeVisible();
-  await expect(note).toContainText("μαθητή");
+  await expect(note).toContainText("οδηγού");
 
-  // and the chip over the directive itself says it too
+  // and the chip over the directive itself names its origin too — the registry
+  // slice label deliberately still says the student's/course's language (legacy
+  // courses with a student on file still redraft through `student.pitch`).
   await expect(card.getByTestId("prompt-span-language_directive")).toContainText("μαθητή");
 });
 

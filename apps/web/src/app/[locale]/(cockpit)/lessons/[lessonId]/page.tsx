@@ -60,8 +60,9 @@ export default function LessonEditorPage() {
   }, [lessonId, applyTree, t]);
 
   // Mount-only fetch — `loading`'s own `useState(true)` initializer already
-  // covers the "first load" spinner (same precedent as `students/[id]/
-  // page.tsx`'s `fetchDetail` effect), so this never needs a bare
+  // covers the "first load" spinner (the same discipline every cockpit
+  // detail page follows, e.g. `library/[sourceId]/page.tsx`'s manifest
+  // effect), so this never needs a bare
   // `setLoading(true)` inside the effect body itself (flagged by
   // `react-hooks/set-state-in-effect` — cascading-render risk).
   useEffect(() => {

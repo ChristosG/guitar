@@ -27,9 +27,9 @@ export function ArtifactList({ artifacts, loading, error, deletingId, onDelete }
   // The confirm lives HERE, not in the page's `handleDelete` — the page only
   // ever receives an `id`, and a dialog that cannot name what it is deleting
   // is the useless "Are you sure?" this whole change exists to avoid. Same
-  // reasoning in `source-row`, `student-card`, `note-card`: the guard belongs
-  // wherever the item's title is in scope. `onDelete` is only ever reached
-  // once the tutor has said yes, so the parent pages need no change at all.
+  // reasoning in `source-row`: the guard belongs wherever the item's title
+  // is in scope. `onDelete` is only ever reached once the tutor has said
+  // yes, so the parent pages need no change at all.
   async function requestDelete(artifact: ArtifactOut) {
     const ok = await confirm({
       title: t("confirmDelete.title", { title: artifact.title }),

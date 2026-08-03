@@ -65,8 +65,8 @@ forced-retrieval pre-hop: on a fresh user turn, if
 bug — asked for the "Smells Like Teen Spirit" riff, got a real
 `generate_artifact` tab back with one note repeated seven times, because the
 model cannot actually recall a specific song's recording and invents
-instead), the turn is answered with `NAMED_SONG_DECLINE_MESSAGE` and the
-model is NEVER called. This has to happen before the model sees the request
+instead), the turn is answered with the session-locale decline constant
+(`guards.named_song_decline_message`) and the model is NEVER called. This has to happen before the model sees the request
 at all — there is no reliable way to make the model itself decline, since it
 is the very thing that fabricates when asked. See `guards.py`'s own
 docstring for the full "why not a hardcoded song list" detection rationale
@@ -104,9 +104,9 @@ from dataclasses import dataclass, field, replace
 from typing import Iterator
 
 from app.agent.guards import (
-    NAMED_SONG_DECLINE_MESSAGE,
     looks_like_named_song_request,
     looks_like_tablature,
+    named_song_decline_message,
     strip_curriculum_context,
 )
 from app.agent.prompts import SYSTEM_PROMPT
@@ -179,9 +179,12 @@ _TAB_BLUFF_FALLBACK_MESSAGE = (
 #   1. small talk / pleasantries ("hi", "hello", "thanks") — nothing to
 #      look up.
 #   2. an INSTRUCTION about an entity already in the tutor's OWN data (a
-#      student, curriculum, lesson, session, note, progress entry, or a
-#      request for a generated artifact/tab/diagram/scale) — these are
-#      resolved by a read/mutation tool (`app/agent/tools.py`), never by a
+#      curriculum, lesson, session, or a request for a generated artifact/
+#      tab/diagram/scale — plus the student/note/progress nouns, whose
+#      tools and screens the desktop build removed but which the regex
+#      still matches on purpose; see `_ENTITY_OR_ARTIFACT_RE`'s own comment
+#      below) — these are resolved by a read/mutation tool
+#      (`app/agent/tools.py`) or by nothing at all, never by a
 #      library search: "split session 2 of that lesson" is about session #2
 #      of one specific row, not a question his book could ever answer, and
 #      forcing a search on it would inject irrelevant "grounding" noise into
@@ -193,12 +196,15 @@ _TAB_BLUFF_FALLBACK_MESSAGE = (
 # (possibly the very same one) to classify the turn first would just move
 # that same unreliability one hop earlier and re-introduce exactly the
 # failure mode this task exists to remove. A keyword rule is auditable,
-# deterministic, and — because both exclusion categories above are already
-# literally enumerated in `SYSTEM_PROMPT` itself ("students, curricula,
-# lessons, sessions, notes, progress, artifacts" vs "any guitar technique/
-# theory/gear/tone question") — this rule is not a new taxonomy, it is the
-# SAME split the prompt already draws, just enforced in code instead of
-# requested in prose. See `tests/test_agent_grounding.py`'s "TEST BOTH
+# deterministic, and it is the SAME split `SYSTEM_PROMPT` itself draws
+# ("curricula, lessons, sessions, artifacts" — the tool-routed topics — vs
+# "any guitar technique/theory/gear/tone question"), just enforced in code
+# instead of requested in prose. Not a byte-for-byte mirror any more: the
+# desktop build dropped students/notes/progress from the prompt along with
+# their tools, while this regex deliberately KEEPS those nouns — a turn
+# about them is still a bookkeeping turn a library search cannot help, so
+# matching them keeps suppressing pointless searches (see
+# `_ENTITY_OR_ARTIFACT_RE`'s own comment). See `tests/test_agent_grounding.py`'s "TEST BOTH
 # SIDES" section for the concrete cases this is pinned against (small talk,
 # entity instructions, and genuine content questions).
 #
@@ -242,10 +248,17 @@ _SMALL_TALK_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Nouns naming the tutor's OWN data (students/curricula/lessons/sessions/
-# notes/progress) or a structured artifact request (tab/chord diagram/scale)
-# — exactly the domain `SYSTEM_PROMPT` already routes to a read/mutation
-# tool rather than a knowledge question about the library.
+# Nouns naming the tutor's OWN data or a structured artifact request
+# (tab/chord diagram/scale). Curricula/lessons/sessions/artifacts are
+# exactly the domain `SYSTEM_PROMPT` routes to a read/mutation tool rather
+# than a knowledge question about the library. The student/note/progress
+# stems STAY in this list even though their tools and screens are gone
+# (the desktop build removed them, and `SYSTEM_PROMPT` no longer names
+# them): a turn mentioning them is still about the tutor's own bookkeeping
+# — nothing his books could answer — so matching them here keeps
+# suppressing a pointless, noise-injecting library search on such turns.
+# Suppression is cheap and correct; only DROPPING real content questions
+# would be a bug.
 #
 # The Greek stems are truncated before the inflectional ending on purpose
 # (`μαθητ` covers μαθητής/μαθητή/μαθητές/μαθητών/μαθήτρια; `κλιμακ` covers
@@ -698,9 +711,15 @@ def run_agent_turn(
     # mine". A genuine miss (his library does NOT have it) still declines,
     # because that is exactly the case where the model would fabricate.
     if named_song and not hits:
-        messages.append({"role": "assistant", "content": NAMED_SONG_DECLINE_MESSAGE})
+        # In the SESSION's language (`named_song_decline_message`) — this is
+        # the one reply in the product the model never writes, so it is also
+        # the one reply the LANGUAGE directive can never translate; a
+        # constant-per-locale lookup is what keeps it both deterministic AND
+        # in the tutor's own language.
+        decline = named_song_decline_message(locale)
+        messages.append({"role": "assistant", "content": decline})
         return AgentResult(
-            status="answer", content=NAMED_SONG_DECLINE_MESSAGE,
+            status="answer", content=decline,
             messages=messages, citations=citations,
         )
 
@@ -953,9 +972,13 @@ def stream_plain_turn(
     # the final answer, same as `run_agent_turn`'s equivalent branch returns
     # it directly rather than falling back.
     if named_song and not hits:
-        messages.append({"role": "assistant", "content": NAMED_SONG_DECLINE_MESSAGE})
+        # Session-locale variant, same as `run_agent_turn`'s branch above —
+        # see the comment there for why this constant-per-locale lookup is
+        # the only way this reply can be both deterministic and Greek.
+        decline = named_song_decline_message(locale)
+        messages.append({"role": "assistant", "content": decline})
         yield {
-            "event": "done", "content": NAMED_SONG_DECLINE_MESSAGE,
+            "event": "done", "content": decline,
             "citations": citations, "messages": messages,
         }
         return

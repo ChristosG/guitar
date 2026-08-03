@@ -29,8 +29,10 @@ import pytest
 import app.agent.loop as agent_loop
 from app.agent.guards import (
     NAMED_SONG_DECLINE_MESSAGE,
+    NAMED_SONG_DECLINE_MESSAGE_EL,
     looks_like_named_song_request,
     looks_like_tablature,
+    named_song_decline_message,
 )
 from app.agent.loop import AgentResult, run_agent_turn
 from app.agent.tools import TOOLS
@@ -238,19 +240,51 @@ def test_looks_like_named_song_request_does_not_flag_an_unrelated_clause():
     assert not looks_like_named_song_request("list students and make a tab")
 
 
-def test_named_song_decline_message_offers_a_real_alternative():
+@pytest.mark.parametrize(
+    "message, alternatives, honesty",
+    [
+        # EN: chord progression / scale / exercise, honest about why.
+        (
+            NAMED_SONG_DECLINE_MESSAGE,
+            ("chord progression", "scale", "exercise"),
+            ("copyright", "recording", "memorized"),
+        ),
+        # EL (the app's DEFAULT locale — the constant most tutors actually
+        # see): the same three concrete alternatives and the same honesty,
+        # in Greek.
+        (
+            NAMED_SONG_DECLINE_MESSAGE_EL,
+            ("συγχορδιών", "κλίμακα", "άσκηση"),
+            ("ηχογράφησης", "απομνημονευμένη"),
+        ),
+    ],
+    ids=["en", "el"],
+)
+def test_named_song_decline_message_offers_a_real_alternative(message, alternatives, honesty):
     """The brief's own explicit requirement: "do not just say no — a tutor
     asked for something and deserves a useful alternative." Pins that the
     decline names concrete things the agent CAN actually do (a chord
     progression, a scale, a technique exercise, the riff's rhythmic shape) —
-    not a bare refusal.
+    not a bare refusal. Pinned for BOTH locale constants: the decline is now
+    per-locale (`named_song_decline_message`), and a Greek variant that
+    degraded into a bare "όχι" would be exactly the regression the English
+    one was tested against.
     """
-    lowered = NAMED_SONG_DECLINE_MESSAGE.lower()
-    assert "chord progression" in lowered
-    assert "scale" in lowered
-    assert "exercise" in lowered
+    lowered = message.lower()
+    for alt in alternatives:
+        assert alt in lowered
     # Also honest about WHY, not just WHAT it can't do.
-    assert "copyright" in lowered or "recording" in lowered or "memorized" in lowered
+    assert any(word in lowered for word in honesty)
+
+
+def test_named_song_decline_message_falls_back_to_greek():
+    """Unknown/missing locale -> GREEK, never English: el is the product's
+    default (`app.i18n.DEFAULT_LOCALE`), and an en fallback is the exact
+    English-only-floor failure mode the memory of this project warns about.
+    """
+    assert named_song_decline_message("el") == NAMED_SONG_DECLINE_MESSAGE_EL
+    assert named_song_decline_message("en") == NAMED_SONG_DECLINE_MESSAGE
+    assert named_song_decline_message("de") == NAMED_SONG_DECLINE_MESSAGE_EL
 
 
 # ---------------------------------------------------------------------------
@@ -277,11 +311,29 @@ def test_run_agent_turn_declines_a_named_song_request_without_calling_the_model(
     result = run_agent_turn(None, messages)
 
     assert result.status == "answer"
-    assert result.content == NAMED_SONG_DECLINE_MESSAGE
-    assert "chord progression" in result.content.lower()
+    # No explicit locale -> the session default (el, `DEFAULT_LOCALE`) -> the
+    # GREEK decline constant. The English one is asserted separately below.
+    assert result.content == NAMED_SONG_DECLINE_MESSAGE_EL
+    assert "συγχορδιών" in result.content.lower()
     # The decline is recorded in history too (Task 4's router persists
     # `messages`, not just `content`).
-    assert result.messages[-1]["content"] == NAMED_SONG_DECLINE_MESSAGE
+    assert result.messages[-1]["content"] == NAMED_SONG_DECLINE_MESSAGE_EL
+
+
+def test_run_agent_turn_declines_in_english_for_an_english_session(monkeypatch):
+    """The decline follows the SESSION's locale (`ChatSession.locale`, the
+    same value threaded into the system prompt and every tool call) — an
+    `en` session gets the English constant, not Greek."""
+    monkeypatch.setattr(agent_loop, "get_provider", lambda: _ProviderThatMustNotBeCalled())
+
+    result = run_agent_turn(
+        None,
+        [{"role": "user", "content": "give me the tab for Sweet Child O' Mine"}],
+        locale="en",
+    )
+
+    assert result.status == "answer"
+    assert result.content == NAMED_SONG_DECLINE_MESSAGE
 
 
 @pytest.mark.parametrize("text", _WORKS_EXAMPLES)
@@ -441,7 +493,9 @@ def test_live_model_asked_chris_exact_question_teen_spirit_riff(db):
     )
 
     assert result.status == "answer"
-    assert result.content == NAMED_SONG_DECLINE_MESSAGE
+    # Default (el) session -> the Greek decline constant, per C13's
+    # per-locale localization of this reply.
+    assert result.content == NAMED_SONG_DECLINE_MESSAGE_EL
     print(
         "[live-llm teen-spirit-riff] FINDING: the G5 pre-model guard "
         "intercepted this request before the model was ever called — an "
@@ -482,7 +536,10 @@ def test_a_song_the_tutor_OWNS_is_answered_not_declined(db, monkeypatch):
         "text": "Intro riff: E5 G5 A5", "score": 0.9,
     })()
     monkeypatch.setattr("app.agent.loop.search", lambda *a, **kw: [hit])
-    monkeypatch.setattr("app.agent.loop.NAMED_SONG_DECLINE_MESSAGE", "DECLINED")
+    # The loop resolves the reply per-locale now (`named_song_decline_message`),
+    # so THAT is what gets sentinel-stubbed — same intent as the old
+    # constant-level monkeypatch this replaced.
+    monkeypatch.setattr("app.agent.loop.named_song_decline_message", lambda locale: "DECLINED")
     fake_provider = _FakeProvider(
         [AssistantTurn(content="Here's the intro riff from page 42: E5 G5 A5", tool_calls=[])]
     )
@@ -499,14 +556,22 @@ def test_a_song_the_tutor_does_NOT_own_is_still_declined(db, monkeypatch):
     teacher, handed to a student — the same harm as an invalid citation."""
     monkeypatch.setattr("app.agent.loop.search", lambda *a, **kw: [])
     result = run_agent_turn(db, [{"role": "user", "content": "give me the tab for Sweet Child O' Mine"}], locale="el")
-    assert result.content == NAMED_SONG_DECLINE_MESSAGE
+    # An `el` session declines in GREEK — the whole point of C13: the one
+    # deterministic reply in the product must not arrive in English for the
+    # locale the product actually defaults to.
+    assert result.content == NAMED_SONG_DECLINE_MESSAGE_EL
 
 
 def test_the_decline_no_longer_cites_copyright():
     """For a private, single-user, non-commercial app over books the tutor owns,
-    copyright is noise. Accuracy is the real and sufficient reason."""
+    copyright is noise. Accuracy is the real and sufficient reason. Holds for
+    BOTH locale constants — a Greek variant quietly reintroducing the
+    copyright excuse would be the same regression in the default language."""
     assert "copyright" not in NAMED_SONG_DECLINE_MESSAGE.lower()
     assert "memorized" in NAMED_SONG_DECLINE_MESSAGE
+    assert "copyright" not in NAMED_SONG_DECLINE_MESSAGE_EL.lower()
+    assert "πνευματικ" not in NAMED_SONG_DECLINE_MESSAGE_EL.lower()
+    assert "απομνημονευμένη" in NAMED_SONG_DECLINE_MESSAGE_EL
 
 
 # ---------------------------------------------------------------------------

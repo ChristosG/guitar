@@ -8,7 +8,7 @@ runtimes and shows the web app in a native window.
 ## Architecture
 
 ```
-Angel OS.app / .deb / .AppImage
+Angel OS.app / .deb
 └── resources/
     ├── pg/            Postgres 16.9 (theseus-rs full distribution) + pgvector 0.8.0
     ├── python/        CPython 3.12 (python-build-standalone) with apps/api
@@ -231,7 +231,10 @@ libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev`.
 
 `.github/workflows/desktop-macos.yml` (macos-14 → .dmg with INSTALL.txt) and
 `desktop-linux.yml` (ubuntu-22.04 → .deb; AppImage is deliberately off —
-linuxdeploy chokes opaquely on the 1.3GB payload). Both trigger on pushes
+linuxdeploy chokes opaquely on the 1.3GB payload — and to keep that decision
+in one place it is also absent from tauri.conf.json's bundle targets, so a
+bare `cargo tauri build` on a dev box cannot wander into the same opaque
+failure CI sidesteps with explicit `--bundles`). Both trigger on pushes
 to `desktop`, tags `desktop-v*`, and manual dispatch; tags publish a GitHub
 release.
 

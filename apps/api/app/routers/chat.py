@@ -212,10 +212,12 @@ def _result_ref(tool_result) -> str | None:
     mutation's success (`app.models.chat.ApprovalRequest.result_ref` is
     deliberately untyped — "a created row's id" is just the common case, not
     a contract every tool must satisfy). Every current sync mutation's `fn`
-    returns a dict: `create_student`/`update_student`/`update_block`/
-    `generate_artifact` carry `"id"`; `assign_curriculum` returns a block
-    tree (also `"id"`, the new root's); `segment_block` alone has no single
-    id, only `"session_ids"`. Anything else (or a non-dict result) falls
+    returns a dict (the student/note tools this docstring used to enumerate
+    left with the desktop build — see tools.py's module docstring):
+    `update_block`/`generate_artifact`/`merge_sessions`/`add_session` carry
+    `"id"`; `segment_block` has no single id, only `"session_ids"`;
+    `split_session` returns a `"sessions"` list, which lands in the
+    catch-all below. Anything else (or a non-dict result) falls
     back to `None` rather than raising — this is bookkeeping, not a
     correctness-critical value.
 

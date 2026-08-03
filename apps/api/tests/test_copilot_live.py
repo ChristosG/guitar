@@ -22,8 +22,10 @@ DB (`guitar`), never the `guitar_test` conftest.py force-pins `DATABASE_URL`
 to. `run_agent_turn` is called DIRECTLY (not through the FastAPI router) —
 it never writes anything itself (a forced-retrieval SELECT for cases 1-3; for
 case 4 a proposed mutation is only ever SUSPENDED, never executed — that IS
-the assertion). No fake provider, no stubbed `search` — the REAL 9B model
-against the REAL 194,671-char, page-addressable book.
+the assertion). No fake provider, no stubbed `search` — the REAL model
+(Claude, via the Anthropic API — the 9B/vLLM era this file was written in is
+gone; `claude` is the only provider) against the REAL 194,671-char,
+page-addressable book.
 
 DO NOT force anything green. Every assertion below is the literal acceptance
 criterion from the brief; where the model's actual behaviour is genuinely
@@ -31,8 +33,8 @@ uncertain going in (case 3 above all), the test says so in its own docstring
 and the report this task produces prints the real transcript regardless of
 pass/fail.
 
-Run:
-  cd apps/api && LLM_BASE_URL=http://localhost:6888/v1 EMBED_BASE_URL=http://localhost:8090/v1 \\
+Run (spends real tokens against api.anthropic.com):
+  cd apps/api && LLM_API_KEY=sk-ant-... \\
     ./.venv/bin/python -m pytest -m integration -v -s tests/test_copilot_live.py
 """
 import os

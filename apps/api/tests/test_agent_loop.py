@@ -13,7 +13,7 @@ reconstruction, the unknown-tool guard, a tool-dispatch-exception guard, the
 import json
 
 import app.agent.loop as agent_loop
-from app.agent.guards import NAMED_SONG_DECLINE_MESSAGE
+from app.agent.guards import NAMED_SONG_DECLINE_MESSAGE_EL
 from app.agent.loop import AgentResult, run_agent_turn
 from app.agent.prompts import SYSTEM_PROMPT
 from app.i18n import DEFAULT_LOCALE, language_directive
@@ -413,7 +413,8 @@ def test_genuine_named_song_request_still_declined_inside_revise_session(monkeyp
     messages = [{"role": "user", "content": raw + _REVISE_CTX}]
     result = run_agent_turn(None, messages, locale="el", raw_user_text=raw)
 
-    assert result.content == NAMED_SONG_DECLINE_MESSAGE
+    # locale="el" -> the Greek decline constant (C13 localized this reply).
+    assert result.content == NAMED_SONG_DECLINE_MESSAGE_EL
     assert len(fake_provider.calls) == 0  # pre-model short-circuit intact
 
 
@@ -469,4 +470,4 @@ def test_stream_revise_turn_with_injected_curriculum_reaches_the_model(monkeypat
 
     done = [e for e in events if e["event"] == "done"]
     assert done and done[0]["content"] == "Έγινε."
-    assert done[0]["content"] != NAMED_SONG_DECLINE_MESSAGE
+    assert done[0]["content"] != NAMED_SONG_DECLINE_MESSAGE_EL

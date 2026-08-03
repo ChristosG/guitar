@@ -2092,7 +2092,7 @@ fn restore_instructions(
             lines.push("this order. Type each command exactly as it is printed —".into());
             lines.push("the long paths are what make it work on this computer.".into());
             lines.push("".into());
-            lines.push("  1. QUIT GUITARTUTOR — the whole application, not just its".into());
+            lines.push("  1. QUIT ANGEL OS — the whole application, not just its".into());
             lines.push("     window. While it runs it holds a connection to the".into());
             lines.push("     database called \"guitar\", and step 3 cannot rename a".into());
             lines.push("     database that anything is connected to.".into());
@@ -2146,7 +2146,7 @@ fn restore_instructions(
             lines.push("be restored together with that database, never on its own.".into());
             lines.push("It is put back by MOVING FOLDERS — there is nothing to type".into());
             lines.push("into a database and no server to start:".into());
-            lines.push("  1. QUIT GUITARTUTOR completely.".into());
+            lines.push("  1. QUIT ANGEL OS completely.".into());
             lines.push("  2. In the folder named above, move the current \"media\"".into());
             lines.push("     folder out of the way, then".into());
             lines.push(format!("     rename \"{name}\" back to \"media\"."));
@@ -2160,7 +2160,7 @@ fn restore_instructions(
             lines.push("same name in the same place, and renamed yours instead of".into());
             lines.push("writing over it. It is in the folder it always was in, under".into());
             lines.push("the name above.".into());
-            lines.push("  1. QUIT GUITARTUTOR.".into());
+            lines.push("  1. QUIT ANGEL OS.".into());
             lines.push("  2. Move Angel OS's own file — the one under the".into());
             lines.push("     ORIGINAL name — somewhere else.".into());
             lines.push("  3. Rename this one back to that original name: the name".into());
@@ -2217,7 +2217,7 @@ fn restore_instructions(
             lines.push("This is a COMPLETE PostgreSQL 16 DATA DIRECTORY — every".into());
             lines.push("database at once. It is put back by MOVING FOLDERS: there".into());
             lines.push("is nothing to type into a database and no server to start.".into());
-            lines.push("  1. QUIT GUITARTUTOR completely.".into());
+            lines.push("  1. QUIT ANGEL OS completely.".into());
             lines.push("  2. In the folder named above, move the current \"pgdata\"".into());
             lines.push("     folder out of the way — rename it to".into());
             lines.push(format!(
@@ -2348,7 +2348,7 @@ fn media_companion_lines(
             lines.push(format!("     \"at\" times in {INSTALL_STATE_FILE} in this same folder;"));
             lines.push("  2. app.log in the \"logs\" folder around that time — it".into());
             lines.push("     records every rename this app makes, in order;".into());
-            lines.push("  3. which databases exist now. QUIT GUITARTUTOR — with it".into());
+            lines.push("  3. which databases exist now. QUIT ANGEL OS — with it".into());
             lines.push("     closed there is no database running at all, so start".into());
             lines.push("     one just to look, then stop it again. Three lines, in".into());
             lines.push("     this order:".into());
@@ -5371,7 +5371,7 @@ mod tests {
         renamed.expect("the displacement itself must succeed");
         let db = displaced.databases[0].clone();
 
-        // ---- "QUIT GUITARTUTOR" — step 1, and the state the note is read in --
+        // ---- "QUIT ANGEL OS" — step 1, and the state the note is read in ----
         let (ok, out) = run_as_printed(&dirs, "quit", &repair_stop_cmd(&res, &dirs));
         assert!(ok, "{out}");
         assert!(out.contains("server stopped"), "the note promises this text: {out}");

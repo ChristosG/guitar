@@ -93,6 +93,7 @@ from uuid import UUID
 from sqlalchemy import select
 
 from app.artifacts.generate import generate_artifact as _generate_artifact_service
+from app.artifacts.specs import SPECS
 from app.brain.retrieve import answer, search
 from app.canon.search import search_concepts as _search_concepts_service
 from app.curriculum.generate import generate_curriculum as _generate_curriculum_service
@@ -335,9 +336,12 @@ def _list_artifacts(db, *, block_id: str | None = None, kind: str | None = None)
 def _block_tree(block: Block) -> dict:
     """Recursive content-tree summary for `get_curriculum` — same shape
     `routers/curriculum.py`'s `block_to_tree` returns, minus `order`/
-    `language`/`plane`/`student_id` (internal bookkeeping the chat model has
-    no use for; `order` in particular is redundant once children are already
-    returned pre-sorted). Deliberately NOT imported from that module — see
+    `language`/`plane`/`student_id`/`meta`/`artifacts` (bookkeeping and
+    board-rendering payload the chat model has no use for; `order` in
+    particular is redundant once children are already returned pre-sorted,
+    and `student_id` is the Block column that outlived the removed students
+    UI, not something the model can act on). Deliberately NOT imported from
+    that module — see
     this module's docstring for why. Faithfully mirrors `block_to_tree`'s
     one quirk too: no `plane` filter on `block.children`, so a curriculum
     that has already been segmented would show its delivery-plane child
@@ -525,6 +529,14 @@ def _generate_artifact(
     `block_id`, when given, is checked for existence BEFORE the slow
     generation call — mirrors `routers/artifacts.py`'s own "check first,
     don't waste a 49-179s call on an attach target that 404s" ordering.
+    An unknown `kind` gets the same pre-flight treatment: the service raises
+    plain `ValueError` for it BEFORE its LLM call (`app.artifacts.generate`
+    line one of the body), but letting that propagate would crash the resolve
+    step on what is squarely a "bad but plausible tool argument" — the model
+    inventing a kind is the same failure class as the model inventing an id,
+    so it gets the same graceful `{"error": ...}` dict every other tool in
+    this registry returns for one.
+
     Anything the LLM call itself can raise (`GuidedJSONError`, a transport
     timeout, or a `pydantic.ValidationError` surviving generate_artifact's
     one repair retry) is deliberately left to propagate uncaught — those are
@@ -533,6 +545,8 @@ def _generate_artifact(
     treatment; Task 4's resolve endpoint maps them to HTTP status the same
     way `routers/artifacts.py`'s own `generate_artifact_endpoint` already does.
     """
+    if kind not in SPECS:
+        return {"error": f"unknown artifact kind: {kind!r}"}
     parsed_block_id = None
     if block_id is not None:
         parsed_block_id = _parse_uuid(block_id)
@@ -1015,7 +1029,7 @@ TOOLS: dict[str, ToolEntry] = {
                     "Partition a curriculum block's content into ~"
                     "session_minutes teaching sessions on the delivery "
                     "plane. Replaces any existing session plan for the same "
-                    "block/student. This is a MUTATION — it requires the "
+                    "block. This is a MUTATION — it requires the "
                     "tutor's explicit approval before it's actually applied."
                 ),
                 "parameters": {
@@ -1033,13 +1047,14 @@ TOOLS: dict[str, ToolEntry] = {
                             "type": "integer",
                             "description": "optional: sessions per week (default 1)",
                         },
-                        "student_id": {
-                            "type": "string",
-                            "description": (
-                                "optional: scope the delivery plan to this student id "
-                                "(UUID); omit for the template's unscoped plan"
-                            ),
-                        },
+                        # NO `student_id` — the students feature left the product
+                        # UI, so there is no student the model could legitimately
+                        # name here; offering the parameter just invites a
+                        # hallucinated UUID. Same "it cannot supply what it isn't
+                        # offered" move as the LOCALE_ARG note at the top of this
+                        # module. `_segment_block` KEEPS the keyword (with a None
+                        # default) because it is also called directly (tests, a
+                        # future non-chat caller) and the column is real.
                     },
                     "required": ["block_id", "session_minutes"],
                 },
@@ -1084,8 +1099,8 @@ TOOLS: dict[str, ToolEntry] = {
                 "name": "generate_artifact",
                 "description": (
                     "Generate a new teaching artifact (chord diagram, "
-                    "scale, tab, tone recipe, signal chain, amp dial "
-                    "settings, gear card) from a free-text prompt using the "
+                    "scale diagram, tab, tone recipe, signal chain, amp "
+                    "dial settings) from a free-text prompt using the "
                     "LLM, and persist it. This is a MUTATION — it requires "
                     "the tutor's explicit approval before it's actually "
                     "generated and saved."
@@ -1095,9 +1110,21 @@ TOOLS: dict[str, ToolEntry] = {
                     "properties": {
                         "kind": {
                             "type": "string",
+                            # This list is the kinds that are real AND renderable —
+                            # `app/artifacts/specs.py`'s SPECS minus `gear_card`,
+                            # exactly the set the UI's own kind pickers offer
+                            # (`apps/web/src/components/artifacts/kinds.ts`).
+                            # The old text here said 'scale' (the real kind is
+                            # 'scale_diagram' — validation rejected every call the
+                            # model copied from its own description) and offered
+                            # 'gear_card', which has no client renderer: one or
+                            # two billed model calls to produce a card that can
+                            # only ever show the "unsupported kind" placeholder.
+                            # It returns here the day it gets a renderer.
                             "description": (
-                                "artifact kind, e.g. 'chord_diagram', 'scale', 'tab', "
-                                "'tone_recipe', 'signal_chain', 'amp_settings', 'gear_card'"
+                                "artifact kind, one of 'chord_diagram', "
+                                "'scale_diagram', 'tab', 'tone_recipe', "
+                                "'signal_chain', 'amp_settings'"
                             ),
                         },
                         "prompt": {
@@ -1160,14 +1187,14 @@ TOOLS: dict[str, ToolEntry] = {
                             "type": "integer",
                             "description": "minutes per session, e.g. 50",
                         },
-                        "student_id": {
-                            "type": "string",
-                            "description": (
-                                "optional: the student this is for. Omit it for a "
-                                "course aimed at no one in particular — that is a "
-                                "normal, expected answer, not a missing field."
-                            ),
-                        },
+                        # NO `student_id` either — the students feature left the
+                        # product UI, so a model-supplied student here could only
+                        # be a hallucinated UUID (same "cannot supply what it
+                        # isn't offered" move as `language` above and LOCALE_ARG
+                        # at the top of this module). `_generate_curriculum`
+                        # KEEPS the keyword: the interview path and the tests
+                        # call the fn directly, and legacy courses with a student
+                        # on file still redraft through it.
                         "profile": {
                             "type": "object",
                             "description": "optional: target profile, e.g. {\"level\": \"beginner\"}",

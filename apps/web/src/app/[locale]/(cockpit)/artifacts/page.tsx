@@ -6,7 +6,7 @@ import { ArtifactList } from "@/components/artifacts/artifact-list";
 import { GenerateArtifactForm } from "@/components/artifacts/generate-form";
 import { ApiError, deleteArtifact, listArtifacts, type ArtifactOut } from "@/lib/api";
 
-// Client component for the same reason as knowledge/students/curricula
+// Client component for the same reason as the library/curricula
 // pages: it calls the API straight from the browser (see lib/api.ts's
 // docstring on why — the app owns CORS specifically so the browser, not the
 // Next.js server, is the caller), which is also what makes it visible to

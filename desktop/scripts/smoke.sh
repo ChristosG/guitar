@@ -27,8 +27,17 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 RES="${1:-$RES_DIR}"
 RES="$(cd "$RES" && pwd)" || die "resources dir not found: ${1:-$RES_DIR}"
 
+# web/server.js and node/bin/node are CHECKED here but never BOOTED — the
+# scope above still holds. They are on the list because absence is exactly
+# what the one real shipping failure looked like: a bad resources glob once
+# produced a bundle with zero web assets, and a smoke that only exercised
+# pg+python+api waved it through (see README's CI section). Both paths are
+# layout-invariant: stage-web.sh guarantees a root-level web/server.js on
+# every layout (it shims one in for nested standalone trees), and
+# stage-node.sh installs exactly node/bin/node on macOS and Linux alike.
 for f in pg/bin/initdb pg/bin/pg_ctl python/bin/python3.12 api/alembic.ini \
-         api/app/main.py models/e5-small/model.onnx models/e5-small/tokenizer.json; do
+         api/app/main.py models/e5-small/model.onnx models/e5-small/tokenizer.json \
+         web/server.js node/bin/node; do
   [ -e "$RES/$f" ] || die "staged tree incomplete: missing $RES/$f"
 done
 

@@ -61,5 +61,5 @@ packages = ["app"]
 # Also exempts the test from conftest's autouse `_fake_embedder`: an `integration`
 # test gets the REAL embedder (the e5 weights baked into the image), which is the
 # whole reason it is marked.
-markers = ["integration: needs a live model — vLLM at :6888/:8090, or the real local e5 weights"]
+markers = ["integration: needs a live model — a real LLM_API_KEY for api.anthropic.com, or the real local e5 weights"]
 asyncio_mode = "auto"
