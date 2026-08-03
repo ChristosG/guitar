@@ -90,9 +90,16 @@ def _extract_pdf(data: bytes | None) -> list[Section]:
             try:
                 page = doc[page_index]
                 page_sections = _page_sections(page, page_number)
-                if not page_sections:
-                    # No text layer at all (e.g. a scanned page) — fall back to OCR.
-                    page_sections = _ocr_page_section(page, page_number)
+                # No text layer at all (a raster scan)? Leave it EMPTY — no
+                # local-OCR fallback. The Tesseract-via-MuPDF fallback that
+                # used to live here was host-dependent (nothing ships
+                # Tesseract; a dev machine that happened to have it ran
+                # hundreds of full-page OCRs inside one upload request) and
+                # hard-coded `language="eng"`, so a Greek scan came back as
+                # garbage that no screen ever checked. The vision OCR job is
+                # the one reader of scanned pages — the page stays `pending`
+                # until the tutor presses "read", exactly like every other
+                # scanned page.
                 sections.extend(page_sections)
             except Exception:
                 # Isolate one bad page (e.g. the unguarded plain-text fallback
@@ -175,31 +182,6 @@ def _page_sections(page: "fitz.Page", page_number: int) -> list[Section]:
     flush()
 
     return sections
-
-
-def _ocr_page_section(page: "fitz.Page", page_number: int) -> list[Section]:
-    """Best-effort OCR fallback for a page with no extractable text layer at
-    all (e.g. a raster-scanned page with no embedded fonts/glyphs).
-
-    Requires no new Python dependency: OCR is a MuPDF-native capability of
-    `fitz` (already a hard dependency here), gated on the system having
-    Tesseract + its `tessdata` language files installed. When that's absent —
-    the common case unless someone has deliberately set it up — this raises
-    a plain `RuntimeError` (confirmed empirically: no hang, no crash), which
-    we treat exactly like "nothing found", per this module's contract.
-    Heading detection is skipped for OCR'd text: full-page OCR text all comes
-    back tagged with Tesseract's synthetic "GlyphLessFont" with no meaningful
-    per-line size variation, so the font-size heuristic has nothing to key
-    off; `heading=None` is the honest answer here (contract explicitly allows
-    it — "None is fine if undetectable").
-    """
-    try:
-        ocr_textpage = page.get_textpage_ocr(language="eng", dpi=150, full=True)
-        plain = (page.get_text(textpage=ocr_textpage) or "").strip()
-    except Exception:
-        log.info("OCR fallback unavailable/failed for page %d", page_number, exc_info=True)
-        return []
-    return [Section(heading=None, text=plain, page=page_number)] if plain else []
 
 
 # ---- URL (one redirect-safe fetch, then trafilatura with an html.parser

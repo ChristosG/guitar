@@ -401,6 +401,45 @@ def test_ocr_source_stopping_early_with_pages_still_pending_rolls_up_to_partial_
     assert reloaded.char_count == len(pages[0].text)
 
 
+def test_an_auth_failure_parks_the_run_and_burns_no_page_budget(db, tmp_path, monkeypatch):
+    """THE AUTH RULE, the harsher sibling of the 429 rule above: a revoked key /
+    exhausted credit is a fact about SETTINGS, equally true for every page after
+    this one. Before this branch, a key that died at page 40 of 888 burned ~2
+    calls per remaining page into `_mark_failed`, the book turned amber
+    "848 failed", and three Retry presses later every page had spent its
+    permanent MAX_PAGE_ATTEMPTS budget on a problem no re-read could fix.
+
+    Page 1 reads clean; page 2 hits the auth wall — its attempt is refunded, it
+    goes back to `pending`, page 3 is never dialled, the source rolls up
+    `partial` (page 1's work is kept), and the error RE-RAISES so `run_ocr_job`
+    fails the job with `error_kind="auth"` — the one kind whose UI copy points
+    at Settings instead of apologising for our bug."""
+    from app.llm.errors import LLMError
+
+    src = _src_with_pending_pages(db, 3)
+    monkeypatch.setattr("app.brain.ocr.settings.media_dir", str(tmp_path))
+    for i in (1, 2, 3):
+        p = tmp_path / str(src.id); p.mkdir(exist_ok=True)
+        (p / f"{i:04d}.jpg").write_bytes(b"jpeg")
+    fake = _Vision([
+        "Page one, about humbuckers and how their two coils cancel mains hum.",
+        LLMError("auth", "401 invalid x-api-key"),
+    ])
+    monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
+    monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
+
+    with pytest.raises(LLMError):
+        ocr_source(db, src.id)
+
+    pages = db.query(Page).filter_by(source_id=src.id).order_by(Page.page_no).all()
+    assert [p.status for p in pages] == ["ready", "pending", "pending"]
+    assert pages[1].ocr_attempts == 0, "the auth attempt must be refunded"
+    assert pages[2].ocr_attempts is None or pages[2].ocr_attempts == 0, "page 3 never dialled"
+    assert "Settings" in (pages[1].ocr_error or "")
+    reloaded = db.get(KnowledgeSource, src.id)
+    assert reloaded.status == "partial", "page 1's committed work still rolls up"
+
+
 def test_ocr_source_rollup_failure_does_not_undo_committed_page_work(db, tmp_path, monkeypatch):
     """A rollup failure (e.g. the re-fetch/commit of the source row blowing
     up) must not cost already-committed page work — pages that reached
@@ -1475,28 +1514,35 @@ def _pages_of(db, src) -> list[Page]:
     return db.query(Page).filter_by(source_id=src.id).order_by(Page.page_no).all()
 
 
-def test_the_fixture_reproduces_the_bug_an_upload_indexes_the_layer_we_refused(
+def _poison(db, page) -> None:
+    """Plant the refused Tesseract layer as an indexed chunk — the state every
+    PRE-FIX install is still in (upload used to re-adopt the layer `paginate`
+    refused; the tutor's real library was ingested by that code). The eviction
+    tests below run against this seeded state so `_evict_refused_chunks`
+    stays a proven belt-and-braces, not a vacuous no-op."""
+    db.add(Chunk(source_id=page.source_id, page_id=page.id,
+                 text=_REFUSED_LAYER, section_path=None, embedding=[0.0] * 384))
+    db.commit()
+
+
+def test_an_upload_no_longer_indexes_the_layer_paginate_refused(
     db, tmp_path, monkeypatch
 ):
-    """THE CHARACTERISATION TEST, and it must keep passing. If this ever goes
-    green-by-accident the tests below stop testing anything at all — which is
-    precisely how the vacuous invariant above shipped.
-
-    It also pins the PRODUCT ANSWER as it stands: between upload and a completed
-    re-OCR, a scanned book's chunk store serves the untrusted layer. That is not
-    a regression (it is exactly as wrong as before this branch) and it is not
-    what this fix changes — see the report's open question."""
+    """THE INVARIANT, enforced at the FRONT DOOR now: a page whose `text` is
+    NULL has no chunks — from the moment of upload, not merely after the first
+    OCR pickup. The old characterisation test in this spot pinned the opposite
+    ("between upload and a completed re-OCR, a scanned book's chunk store
+    serves the untrusted layer") as the standing product answer; that window —
+    days long on a book whose read button was never pressed — is closed by
+    `ingest_source`'s own guard."""
     src = _upload(db, monkeypatch, tmp_path, [_REFUSED_LAYER])
     page = _pages_of(db, src)[0]
 
     assert page.status == "pending", "paginate must refuse the inherited layer"
     assert page.text is None, "...and drop it"
     assert page.ocr_reason == "inherited_ocr"
-    # ...and yet:
-    chunks = _chunks_of(db, page)
-    assert chunks, "the fixture is meaningless unless the upload really indexed something"
-    assert any("4-inch" in c for c in chunks), (
-        "ingest re-adopted the very layer paginate refused, linked to a page whose text is NULL"
+    assert _chunks_of(db, page) == [], (
+        "ingest must not re-adopt the very layer paginate refused"
     )
 
 
@@ -1539,6 +1585,7 @@ def test_a_page_that_ends_EMPTY_keeps_no_chunks_of_the_text_we_refused(
     number on it, and curriculum (which reads `Page.text` -> NULL) skips the same
     page. Silent, citable, permanently disagreeing consumers."""
     src = _upload(db, monkeypatch, tmp_path, [_REFUSED_LAYER])
+    _poison(db, _pages_of(db, src)[0])  # the pre-fix install state
     fake = _Vision(["There is no visible text on this page."])
     monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
@@ -1558,6 +1605,7 @@ def test_a_page_that_ends_FAILED_keeps_no_chunks_of_the_text_we_refused(
     chunks. So a page we could not read went on serving someone else's OCR
     forever, while `Page.text` said NULL."""
     src = _upload(db, monkeypatch, tmp_path, [_REFUSED_LAYER])
+    _poison(db, _pages_of(db, src)[0])  # the pre-fix install state
     fake = _Vision([RuntimeError("vl timeout"), RuntimeError("vl timeout")])
     monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
@@ -1579,6 +1627,7 @@ def test_a_rate_limited_page_keeps_no_chunks_of_the_text_we_refused(
     from app.llm.errors import LLMError
 
     src = _upload(db, monkeypatch, tmp_path, [_REFUSED_LAYER])
+    _poison(db, _pages_of(db, src)[0])  # the pre-fix install state
     fake = _Vision([LLMError("rate_limit", "429 slow down")])
     monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
@@ -1599,6 +1648,7 @@ def test_a_page_that_reaches_READY_serves_only_the_words_we_actually_read(
     refused layer instead of stacking on it. Chat must not be able to answer
     "4-inch" for a page Claude has read."""
     src = _upload(db, monkeypatch, tmp_path, [_REFUSED_LAYER])
+    _poison(db, _pages_of(db, src)[0])  # the pre-fix install state
     fake = _Vision([_WHAT_CLAUDE_READS])
     monkeypatch.setattr("app.brain.ocr.get_ocr_provider", lambda: fake)
     monkeypatch.setattr("app.brain.ocr.get_embedder", lambda: fake)
@@ -1651,6 +1701,8 @@ def test_the_invariant_holds_across_a_whole_mixed_book_read_end_to_end(
 
     Asserted on `text`, in both directions, for every page of the book."""
     src = _upload(db, monkeypatch, tmp_path, [_REFUSED_LAYER] * 4)
+    for _pg in _pages_of(db, src):
+        _poison(db, _pg)  # the pre-fix install state, on every page
     fake = _Vision([
         _WHAT_CLAUDE_READS,                          # p1 -> ready
         "There is no visible text on this page.",    # p2 -> empty

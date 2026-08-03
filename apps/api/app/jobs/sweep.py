@@ -20,9 +20,11 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import delete, select, update
 
 from app.models.block import Block
+from app.models.canon import BookCompile
 from app.models.chat import ChatSession, Message
 from app.models.generation_job import GenerationJob
 from app.models.interview import CurriculumInterview
+from app.models.knowledge import KnowledgeSource
 
 
 def sweep_interrupted_lessons(db) -> int:
@@ -70,6 +72,46 @@ def sweep_orphaned_jobs(db) -> int:
         update(GenerationJob)
         .where(GenerationJob.status.in_(("pending", "running")))
         .values(status="failed", error_kind="internal", error="interrupted by a restart")
+    )
+    db.commit()
+    return result.rowcount
+
+
+def sweep_stuck_compiles(db) -> int:
+    """Fail every `BookCompile` left `running` by a restart; return the count.
+
+    `compile_book` commits `status="running"` BEFORE its one long model call
+    (the crash marker `models/canon.py` documents) — but until this sweep,
+    nothing ever read the marker: a force-quit during the 3-minute compile left
+    the row `running` forever, the Library row showed a permanent spinner with
+    NO button (`source-row.tsx` renders `running` as spinner-only), and
+    `/canon` counted one book compiling until the end of time. `failed` is the
+    honest state — nothing was written (the ledger clears only after the model
+    answers) — and it is the state whose row has a Retry button.
+    """
+    result = db.execute(
+        update(BookCompile)
+        .where(BookCompile.status == "running")
+        .values(status="failed", error="interrupted by a restart — compile it again")
+    )
+    db.commit()
+    return result.rowcount
+
+
+def sweep_stuck_ingests(db) -> int:
+    """Fail every `KnowledgeSource` left `ingesting` by a restart; return the count.
+
+    Upload ingest runs synchronously inside the HTTP request, so a source still
+    `ingesting` at BOOT can only mean the process died mid-ingest (pagination /
+    extraction / embedding). Nothing ever swept it, so the row spun forever.
+    `failed` + the message gives the tutor the one recovery that is always
+    correct: upload the file again (a fresh row — the displaced one keeps its
+    media, per the never-delete invariant).
+    """
+    result = db.execute(
+        update(KnowledgeSource)
+        .where(KnowledgeSource.status == "ingesting")
+        .values(status="failed", error="interrupted by a restart — upload the file again")
     )
     db.commit()
     return result.rowcount

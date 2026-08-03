@@ -66,7 +66,12 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
     SONNET: {
         "thinking": True,          # adaptive
         "effort": True,
-        "max_output": 64_000,
+        # Sonnet 5's real ceiling is 128K output tokens. The old 64_000 here
+        # never bit (the largest role budget is 32K, so the min() below always
+        # chose the role) — but it would have silently halved the first role
+        # budget anyone raised past it, which is exactly how Haiku's stale
+        # 8_192 truncated every long Greek lesson once upon a time.
+        "max_output": 128_000,
         "web_search_tool": "web_search_20260209",
     },
     HAIKU: {
@@ -129,6 +134,11 @@ _DEFAULT_TIMEOUT_S = 600.0
 # 1568px). We cap at 2000: comfortably inside the limit, and a deliberate
 # cost/legibility choice rather than an asserted maximum — every extra pixel is
 # billed on all 77 pages of the book.
+# Enforced by `brain/ocr.py::_render_for_vision` (the one image producer):
+# a page whose long edge would rasterise past this is rendered at a reduced
+# zoom instead. Not a provider hard limit — the API downscales oversized
+# images itself — but downscaling here keeps the bytes and the aspect ratio
+# under our control and off the wire.
 MAX_IMAGE_EDGE_PX = 2000
 
 
@@ -395,9 +405,15 @@ class ClaudeProvider(LLMProvider):
         """Zero-token probe. `models.retrieve` distinguishes a bad key (401) from
         a bad model id (404) from a rate limit (429) without generating anything
         — unlike a `max_tokens=1` ping, which on Sonnet 5 runs adaptive thinking
-        when `thinking` is omitted and is at best a wasted billed call."""
+        when `thinking` is omitted and is at best a wasted billed call.
+
+        SHORT timeout, NO retries — deliberately unlike every generating call.
+        This runs on `/health/ready`'s poll path: on the base client (600s ×
+        5 attempts) a captive portal or dead network could park a worker
+        thread for the better part of an hour per probe, and the desktop
+        supervisor gives its own side of the poll 5 seconds anyway."""
         try:
-            self.client.models.retrieve(self._model)
+            self.client.with_options(timeout=5.0, max_retries=0).models.retrieve(self._model)
             return {"llm": True}
         except Exception:
             log.warning("Claude health probe failed for %s", self._model, exc_info=True)

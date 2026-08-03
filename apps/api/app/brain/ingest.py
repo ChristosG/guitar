@@ -193,6 +193,18 @@ def ingest_source(db, source_id, payload: IngestPayload) -> None:
         char_count = 0
         for draft, vector in zip(drafts, vectors):
             page = page_by_no.get(draft.page or 1) or (pages[0] if pages else None)
+            # THE INVARIANT (shared with `ocr._evict_refused_chunks`): A PAGE
+            # WHOSE `text` IS NULL HAS NO CHUNKS — enforced at BOTH ends now.
+            # `paginate_source` refuses a GlyphLessFont layer (someone else's
+            # Tesseract, every fraction glyph gone) by setting `Page.text=None`;
+            # `extract_text` above re-reads the same bytes and happily re-adopts
+            # that very layer. Until this guard, those chunks were embedded,
+            # committed, and fully retrievable — search, chat and curriculum
+            # prompts served the poisoned text from upload until the first OCR
+            # pickup finally evicted it, a window measured in days on a book the
+            # tutor hasn't pressed "read" on yet.
+            if payload.kind == "pdf" and page is not None and page.text is None:
+                continue
             db.add(
                 Chunk(
                     source_id=source.id,

@@ -153,47 +153,24 @@ def test_pdf_page_extraction_failure_is_isolated_to_that_page(monkeypatch):
     assert all(s.page != 1 for s in secs)  # page 1's failure was isolated, not fatal
 
 
-def test_pdf_ocr_fallback_invoked_when_a_page_has_no_text_layer(monkeypatch):
-    """Deterministically exercise the OCR-fallback *wiring* (call the OCR
-    helper when the normal text-layer path finds nothing) without depending
-    on whether Tesseract is actually installed on the machine running the
-    tests — that environment-dependent behavior is covered separately by
-    `test_ocr_fallback_is_a_clean_noop_without_tesseract` and by the real-book
-    tests below.
+def test_pdf_page_with_no_text_layer_yields_no_sections():
+    """A raster-scanned page produces NOTHING at extract time — deliberately.
+
+    The Tesseract-via-MuPDF fallback that used to fire here was
+    host-dependent (nothing ships Tesseract) and hard-coded `language="eng"`,
+    so a Greek scan on a machine that happened to have Tesseract came back as
+    English-model garbage that no quality screen ever checked. The vision OCR
+    job is the ONE reader of scanned pages; until the tutor presses "read",
+    the page honestly has no text.
     """
     import fitz
-
-    from app.brain import extract as extract_module
 
     doc = fitz.open()
     doc.new_page()  # a page with no text layer at all (blank)
     data = doc.tobytes()
     doc.close()
 
-    def fake_ocr_page_section(page, page_number):
-        return [extract_module.Section(heading=None, text="ocr'd content", page=page_number)]
-
-    monkeypatch.setattr(extract_module, "_ocr_page_section", fake_ocr_page_section)
-
-    secs = extract_text("pdf", data=data)
-    assert secs == [extract_module.Section(heading=None, text="ocr'd content", page=1)]
-
-
-def test_ocr_fallback_is_a_clean_noop_without_tesseract():
-    """A blank page has nothing to recognize, so this is a true environment-
-    independent assertion: it returns [] whether OCR fails outright (no
-    Tesseract installed — confirmed the case in this sandbox) or runs and
-    finds nothing (Tesseract installed elsewhere). Either way: never raises.
-    """
-    import fitz
-
-    from app.brain.extract import _ocr_page_section
-
-    doc = fitz.open()
-    page = doc.new_page()
-    result = _ocr_page_section(page, 1)
-    doc.close()
-    assert result == []
+    assert extract_text("pdf", data=data) == []
 
 
 # --- The real book -----------------------------------------------------------
@@ -213,21 +190,15 @@ def test_ocr_fallback_is_a_clean_noop_without_tesseract():
 #      so even that font can't be mapped back to real characters).
 #
 # Getting "pickup" out of *this specific file* requires OCR (rendering each
-# page to a bitmap and recognizing it), which extract.py now supports as a
-# fallback (see `_ocr_page_section`, gated on the system having Tesseract
-# installed) — but Tesseract is not installed in this environment (confirmed:
-# `which tesseract` finds nothing, and installing it needs `apt-get install`,
-# which needs root/a password this task does not have). It is also, by
-# design, a no-op everywhere pymupdf's normal text-layer extraction already
-# finds something, so it changes nothing for ordinary text-layer PDFs.
+# page to a bitmap and recognizing it) — which is exactly the vision OCR
+# job's whole job (`app.brain.ocr`), started by the tutor's "read" button,
+# never by extraction. extract.py once had a Tesseract-via-MuPDF fallback
+# here; it was deleted as host-dependent (`language="eng"`, screened by
+# nothing) — see `_extract_pdf`'s comment.
 #
 # These tests verify what extract_text() can honestly promise for *this*
-# file today: it does not raise, does not hang, and degrades to `[]` per the
-# "never raises on unextractable input" contract, rather than asserting book
-# content that does not exist in the source file as currently provided. See
-# the task report's Concerns section for the full writeup and next steps
-# (installing Tesseract host- and image-side would make the OCR fallback
-# above start actually returning prose here, with no further code changes).
+# file: it does not raise, does not hang, and degrades to `[]` per the
+# "never raises on unextractable input" contract.
 
 
 @pytest.mark.skipif(not os.path.exists(BOOK), reason="book not present")

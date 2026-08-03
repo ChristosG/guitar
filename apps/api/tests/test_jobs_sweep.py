@@ -101,3 +101,75 @@ def test_sweep_orphaned_jobs_returns_zero_when_nothing_is_orphaned():
         db.close()
 
     assert count == 0
+
+
+def test_sweep_stuck_compiles_fails_running_and_leaves_terminal_states_alone():
+    """`compile_book` commits `status="running"` BEFORE its one long model call.
+    A force-quit during those minutes used to leave the row `running` forever —
+    a permanent spinner in the Library with no button, because nothing ever
+    read the crash marker `models/canon.py` documents. The boot sweep is that
+    reader."""
+    from app.jobs.sweep import sweep_stuck_compiles
+    from app.models.canon import BookCompile
+    from app.models.knowledge import KnowledgeSource
+
+    db = SessionLocal()
+    try:
+        # One compile per source — `source_id` IS the primary key.
+        srcs = [KnowledgeSource(type="pdf", title=t, status="ready")
+                for t in ("Running", "Ready", "Failed")]
+        db.add_all(srcs)
+        db.commit()
+        db.add_all([
+            BookCompile(source_id=srcs[0].id, status="running"),
+            BookCompile(source_id=srcs[1].id, status="ready"),
+            BookCompile(source_id=srcs[2].id, status="failed", error="old reason"),
+        ])
+        db.commit()
+        ids = [s.id for s in srcs]
+
+        count = sweep_stuck_compiles(db)
+        assert count == 1
+    finally:
+        db.close()
+
+    # Fresh session -> genuine DB round-trip (`_reread`'s reasoning: the bulk
+    # UPDATE bypasses the identity map, so same-session reads are stale).
+    db = SessionLocal()
+    try:
+        assert db.get(BookCompile, ids[0]).status == "failed"
+        assert "interrupted" in db.get(BookCompile, ids[0]).error
+        assert db.get(BookCompile, ids[1]).status == "ready"      # untouched
+        assert db.get(BookCompile, ids[2]).error == "old reason"  # untouched
+    finally:
+        db.close()
+
+
+def test_sweep_stuck_ingests_fails_sources_orphaned_mid_ingest():
+    """Upload ingest runs synchronously inside the HTTP request, so a source
+    still `ingesting` at BOOT can only mean the process died mid-ingest —
+    nothing was ever going to finish it, and the row spun forever."""
+    from app.jobs.sweep import sweep_stuck_ingests
+    from app.models.knowledge import KnowledgeSource
+
+    db = SessionLocal()
+    try:
+        stuck = KnowledgeSource(type="pdf", title="Half-uploaded", status="ingesting")
+        fine = KnowledgeSource(type="pdf", title="Fine", status="ready")
+        db.add_all([stuck, fine])
+        db.commit()
+        stuck_id, fine_id = stuck.id, fine.id
+
+        count = sweep_stuck_ingests(db)
+        assert count == 1
+    finally:
+        db.close()
+
+    db = SessionLocal()  # fresh session — same identity-map reasoning as above
+    try:
+        after = db.get(KnowledgeSource, stuck_id)
+        assert after.status == "failed"
+        assert "upload the file again" in after.error
+        assert db.get(KnowledgeSource, fine_id).status == "ready"  # untouched
+    finally:
+        db.close()

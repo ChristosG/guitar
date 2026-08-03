@@ -17,6 +17,8 @@ from app.jobs.sweep import (
     sweep_expired_records,
     sweep_interrupted_lessons,
     sweep_orphaned_jobs,
+    sweep_stuck_compiles,
+    sweep_stuck_ingests,
 )
 from app.llm.errors import LLMNotConfigured
 from app.routers import (
@@ -87,6 +89,8 @@ async def lifespan(app: FastAPI):
     try:
         sweep_orphaned_jobs(db)
         sweep_interrupted_lessons(db)
+        sweep_stuck_compiles(db)
+        sweep_stuck_ingests(db)
         sweep_orphaned_media(db)
         sweep_expired_records(db)
         warm_index(db)

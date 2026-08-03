@@ -690,6 +690,34 @@ def ocr_source(db, source_id) -> OcrResult:
                 log.warning("ocr: rate-limited at page %s — stopping this run; "
                             "the remaining pages stay pending", page.page_no)
                 break
+            if e.kind == "auth":
+                # THE AUTH RULE, same shape as the 429 one and for a harsher
+                # reason: a revoked key / exhausted credit is not a bad page
+                # either — it is a fact about SETTINGS, and it will be exactly
+                # as true for every page after this one. Without this branch a
+                # key that dies at page 40 of 888 burns ~2 calls per remaining
+                # page into `_mark_failed`, the book turns amber "848 failed",
+                # and three Retry presses later every page has spent its
+                # permanent MAX_PAGE_ATTEMPTS budget on a problem no re-read
+                # could ever fix. Refund, park as pending, stop, and RE-RAISE —
+                # unlike the 429 (a wait fixes it), this run cannot finish until
+                # the tutor acts, so the job must fail loudly with
+                # `error_kind="auth"` and point him at Settings.
+                db.rollback()
+                page = db.get(Page, page.id)
+                page.ocr_attempts = max(0, (page.ocr_attempts or 1) - 1)
+                page.status = "pending"
+                page.ocr_error = "API key problem — check Settings"
+                db.commit()
+                log.warning("ocr: auth failure at page %s — stopping this run; "
+                            "the remaining pages stay pending", page.page_no)
+                # Roll up before re-raising: pages 1..N-1 are committed `ready`
+                # and the source row must reflect them (`partial`), exactly as
+                # the 429 park does via the shared exit below. Skipping this
+                # would leave the row's status a stale lie until the next
+                # successful run.
+                _rollup_source_status(db, source_id)
+                raise
             log.warning("ocr: page %s failed permanently", page.page_no, exc_info=True)
             _mark_failed(db, page, e, task)
             failed += 1
@@ -1036,7 +1064,22 @@ def _render_for_vision(page: Page, dpi: int) -> bytes | None:
                         "source=%s — falling back to the stored scan",
                         page.page_no, doc.page_count, page.source_id)
             return None
-        return doc[index].get_pixmap(dpi=dpi).tobytes("jpeg")
+        pdf_page = doc[index]
+        # Enforce the provider's documented edge budget (`MAX_IMAGE_EDGE_PX`,
+        # llm/claude.py) — until now it was declared and applied by nothing.
+        # Letter/A4 at 150dpi lands well inside it; an oversized songbook
+        # folio does not, and an over-budget image is downscaled server-side
+        # by the provider anyway — better to do it here, where the aspect
+        # ratio and the JPEG bytes stay under our control.
+        from app.llm.claude import MAX_IMAGE_EDGE_PX
+
+        rect = pdf_page.rect
+        long_edge_pts = max(rect.width, rect.height) or 1.0
+        long_edge_px = long_edge_pts / 72.0 * dpi
+        if long_edge_px > MAX_IMAGE_EDGE_PX:
+            zoom = (MAX_IMAGE_EDGE_PX / long_edge_px) * (dpi / 72.0)
+            return pdf_page.get_pixmap(matrix=fitz.Matrix(zoom, zoom)).tobytes("jpeg")
+        return pdf_page.get_pixmap(dpi=dpi).tobytes("jpeg")
     finally:
         doc.close()
 
@@ -1120,11 +1163,12 @@ def _transcribe_with_retry(provider, page: Page, task: _VisionTask) -> str:
                 )
             return text
         except LLMError as e:
-            if e.kind == "rate_limit":
-                # Do NOT spend the in-call retries on a 429 — two instant
-                # re-fires into the same rate-limit window can only fail the
-                # same way. Propagate immediately; `ocr_source` refunds the
-                # attempt and parks the run.
+            if e.kind in ("rate_limit", "auth"):
+                # Do NOT spend the in-call retries on a 429 or a dead key —
+                # two instant re-fires into the same rate-limit window (or at
+                # the same revoked key) can only fail the same way. Propagate
+                # immediately; `ocr_source` refunds the attempt and parks the
+                # run (and for auth, fails the job loudly toward Settings).
                 raise
             last = e
             log.info("ocr: page %s attempt %d failed", page.page_no, attempt)

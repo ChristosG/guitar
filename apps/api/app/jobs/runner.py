@@ -508,6 +508,26 @@ def run_ocr_job(job_id: uuid.UUID) -> None:
             job.error_kind = "auth"
             job.error = "No Anthropic API key is configured. Open Settings and paste your key."
             db.commit()
+        except LLMError as e:
+            # `ocr_source` re-raises a mid-run AUTH failure after parking the
+            # remaining pages as `pending` (see ocr.py's auth branch — the
+            # revoked-key/no-credit case must stop the run, not burn every
+            # page's permanent attempt budget on a problem Settings fixes).
+            # Map the kind so the UI says "your key", never "our bug" —
+            # `jobErrorText` fully localizes auth/rate_limit/timeout.
+            db.rollback()
+            job = db.get(GenerationJob, job_id)
+            if job is None:
+                return
+            job.status = "failed"
+            job.error_kind = e.kind
+            job.error = (
+                "The Anthropic API rejected your key (revoked, or out of credit). "
+                "Open Settings, test the key, then continue reading."
+                if e.kind == "auth"
+                else str(e)
+            )
+            db.commit()
         except Exception:
             log.exception("run_ocr_job: job_id=%s failed", job_id)
             try:
