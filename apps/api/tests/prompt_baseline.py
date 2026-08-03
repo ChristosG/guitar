@@ -50,6 +50,14 @@ LOCALES = ("el", "en")
 # cockpit's. That is Chris's bug being fixed, not a prompt being edited: the text the
 # model receives is untouched, and the diff was confirmed to be exactly those five ×
 # `en` and nothing else before regenerating. See `registry._SAMPLE_COURSE_LANGUAGE`.
+#
+# 2026-08-03, two SCOPED recaptures (single entries, diff verified first, everything
+# else byte-identical): `tools.descriptions` — the catalogue stopped advertising a
+# nonexistent artifact kind ('scale'→'scale_diagram'), the unrenderable 'gear_card',
+# and the model-facing `student_id` args; and `curriculum.revise` — the revise
+# planner now carries `{curriculum_style}` like every other flow that writes course
+# material (its titles/objectives land verbatim on the board — the register rule
+# in `app.i18n.curriculum_style` applied, not new prose invented).
 
 
 class _FrozenDate(datetime.date):

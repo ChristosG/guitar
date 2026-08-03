@@ -156,12 +156,13 @@ export function DraftProgressBar({
     setError(null);
     try {
       await resumeCurriculumDraft(rootId);
-      // The requeue (failed/queued -> queued) is a DB write inside the request
-      // handler itself — by the time the 202 response lands, it has already
-      // happened server-side. Refetch right away rather than waiting for the
-      // next 2s poll tick: this is what makes the board show "queued" the
-      // moment Resume is clicked (no reload), and the fresh tree's rising
-      // `queued` count is what re-arms the poll loop above via its own deps.
+      // NOTE the 202 writes NO lesson meta: the route only enqueues a fresh
+      // fan-out, and a `failed` lesson flips visibly to queued/drafting only
+      // when a worker CLAIMS it (`_claim` accepts `failed` — that is the
+      // whole requeue). So this immediate refetch may still show the old
+      // `failed` rows for a beat; the 2s poll tick that follows is what
+      // catches the workers picking them up. The refetch is still worth it —
+      // it re-arms the poll loop above via the fresh tree's deps.
       await onLessonReady();
     } catch (err) {
       setError(err instanceof ApiError ? err.detail : t("resumeError"));

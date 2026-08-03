@@ -190,8 +190,9 @@ def curriculum_style(locale: str, source=None) -> str:
     a second rule and not an edit to `language_directive`. Appended immediately
     AFTER `language_directive` by every flow that WRITES course material
     (`curriculum/outline.py`, `curriculum/draft.py`, `curriculum/extend.py`,
-    `curriculum/segment_generate.py`, `curriculum/refine.py`) and by none that
-    answers questions from the library.
+    `curriculum/segment_generate.py`, `curriculum/refine.py`,
+    `curriculum/revise.py` — the planner's titles/objectives land verbatim on
+    the board) and by none that answers questions from the library.
     """
     from app.prompts.overrides import resolve
 

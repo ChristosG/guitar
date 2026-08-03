@@ -190,10 +190,21 @@ def generate_segment(db, segment: Block) -> None:
     fallback for a section that was never written, unlike `refine_block`'s
     already-has-a-body case. The job loop decides what a raised exception means
     for the segment's status.
+
+    THE CONNECTION DISCIPLINE (`jobs/curriculum_draft.py`'s, applied here):
+    every DB read happens BEFORE the model call, the read transaction is
+    released, and the rows are re-fetched for the write afterwards. This is a
+    `role="draft"` call — 32K output, minutes each, run once per queued segment
+    in a drain that can cover a whole course ("add a homework section to every
+    lesson" = 24 of these back-to-back). Holding the read transaction across
+    the call pinned a pooled connection for the entire drain, which is exactly
+    the starvation the draft fan-out's docstring spends 18 lines defending
+    against while the board polls progress every 2 seconds.
     """
-    meta = segment.meta or {}
-    instruction = meta.get("segment_instruction") or ""
+    segment_id = segment.id
     lesson = db.get(Block, segment.parent_id) if segment.parent_id else None
+    lesson_id = lesson.id if lesson is not None else None
+    instruction = (segment.meta or {}).get("segment_instruction") or ""
 
     siblings = _sibling_text(db, lesson.id, segment.id) if lesson is not None else None
     source_ids = _course_source_ids(db, lesson) if lesson is not None else None
@@ -207,21 +218,32 @@ def generate_segment(db, segment: Block) -> None:
     context = "\n\n".join(
         f"[{p.source_title}, p.{p.page_no}] {p.text}" for p in passages
     ) or None
-
-    result = get_provider().guided_json(
-        build_segment_messages(
-            instruction=instruction,
-            lesson_title=lesson_title,
-            lesson_objective=lesson_objective,
-            title=segment.title,
-            language=segment.language,
-            siblings=siblings,
-            context=context,
-            source=db,
-        ),
-        SEGMENT_SCHEMA,
-        role="draft",
+    messages = build_segment_messages(
+        instruction=instruction,
+        lesson_title=lesson_title,
+        lesson_objective=lesson_objective,
+        title=segment.title,
+        language=segment.language,
+        siblings=siblings,
+        context=context,
+        source=db,
     )
+
+    # Everything is read; hand the connection back before dialling the model.
+    # A read-only transaction has nothing to keep — rollback is the honest way
+    # to end it (commit would imply there was something to save).
+    db.rollback()
+
+    result = get_provider().guided_json(messages, SEGMENT_SCHEMA, role="draft")
+
+    # Fresh transaction for the write. Re-fetch: the segment may have been
+    # deleted while the model wrote (a revise op, a course delete) — writing
+    # onto a vanished row would resurrect it.
+    segment = db.get(Block, segment_id)
+    if segment is None:
+        log.info("generate_segment: segment %s deleted mid-generation — discarding", segment_id)
+        return
+    meta = segment.meta or {}
 
     segment.title = (result.get("title") or segment.title).strip() or segment.title
     # The style rule tells the model to keep page markers out of the prose;
@@ -242,6 +264,7 @@ def generate_segment(db, segment: Block) -> None:
         "segment_status": "done",
         "citations": citations,
     }
+    lesson = db.get(Block, lesson_id) if lesson_id is not None else None
     if lesson is not None:
         _recompute_lesson_word_count(db, lesson)
 

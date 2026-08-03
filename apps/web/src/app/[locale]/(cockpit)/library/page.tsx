@@ -30,7 +30,7 @@ import {
 const POLL_INTERVAL_MS = 2000;
 
 // Client component for the same reason as every other cockpit page (see
-// `students/page.tsx`'s docstring): it talks to the API straight from the
+// `lib/api.ts`'s docstring): it talks to the API straight from the
 // browser, which is also what makes it visible to Playwright's `page.route`.
 export default function LibraryPage() {
   const t = useTranslations("library");
@@ -46,8 +46,8 @@ export default function LibraryPage() {
   const [movingId, setMovingId] = useState<string | null>(null);
   const [progress, setProgress] = useState<Record<string, SourceProgressOut>>({});
 
-  // Same .then/.catch/.finally shape as e.g. `students/page.tsx`'s own
-  // `fetchStudents`, for the same reason (every setState call stays
+  // Same .then/.catch/.finally shape as e.g. `artifacts/page.tsx`'s own
+  // fetch, for the same reason (every setState call stays
   // lexically inside a callback rather than a bare statement).
   const fetchAll = useCallback(() => {
     return Promise.all([listSources(), listCollections()])
@@ -86,6 +86,23 @@ export default function LibraryPage() {
   // refresh (and this page refreshes every 2s while a job runs), so depending on
   // the array itself would tear down and rebuild the interval on every tick.
   const activeKey = activeIds.join(",");
+
+  // The COMPILE blind spot, closed: `activeIds` tracks OCR jobs only, so a
+  // canon compile — minutes of `compile.status === "running"` — used to show
+  // "Ξεκινά…" and then sit on the stale prior state until a manual reload
+  // (and a compile orphaned by a force-quit sat on its spinner forever; the
+  // boot sweep now fails those, but only a refetch ever showed it). While any
+  // source is compiling, re-read the list on a slow cadence; when the last
+  // compile leaves `running` the key collapses to "" and this stops itself.
+  const compilingKey = useMemo(
+    () => sources.filter((s) => s.compile?.status === "running").map((s) => s.id).join(","),
+    [sources],
+  );
+  useEffect(() => {
+    if (compilingKey === "") return;
+    const timer = setInterval(() => refresh(), POLL_INTERVAL_MS * 2);
+    return () => clearInterval(timer);
+  }, [compilingKey, refresh]);
 
   /** THE DURABLE PROGRESS LOOP. This replaced a `watchOcr` state machine that
    * lived entirely in this tab: it started only when THIS tab pressed the button,

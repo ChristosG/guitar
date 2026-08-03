@@ -1302,8 +1302,8 @@ _ENTRIES = [
         source_ref="app/agent/prompts.py:67",
         title_el="Ο βοηθός συνομιλίας",
         what_it_does_el=(
-            "Λέει στον βοηθό ότι δεν ξέρει τίποτα από μόνος του για τους μαθητές "
-            "σου, τα προγράμματα και τα βιβλία σου — πρέπει πάντα να ψάξει πρώτα "
+            "Λέει στον βοηθό ότι δεν ξέρει τίποτα από μόνος του για τα "
+            "προγράμματα και τα βιβλία σου — πρέπει πάντα να ψάξει πρώτα "
             "και να μην αναφέρει ποτέ κάτι που δεν βρήκε. Του απαγορεύει να "
             "γράφει ταμπλατούρες σαν απλό κείμενο (τις φτιάχνει σωστά, ώστε να "
             "παίζονται πραγματικά) και να επινοεί το ριφ ενός γνωστού τραγουδιού που δεν "
@@ -1314,7 +1314,7 @@ _ENTRIES = [
         when_it_runs_el="Σε κάθε μήνυμα που γράφεις στη συνομιλία.",
         source_of_truth=lambda: SYSTEM_PROMPT,
         build=_build_chat_system,
-        call_sites=("agent/loop.py:719", "agent/loop.py:966"),
+        call_sites=("agent/loop.py:738", "agent/loop.py:989"),
         slices=(
             Slice(
                 id=SYSTEM_SLICE_ID,
@@ -1328,7 +1328,7 @@ _ENTRIES = [
         id="chat.grounding",
         flow="chat",
         kind="prompt",
-        source_ref="app/agent/loop.py:398",
+        source_ref="app/agent/loop.py:411",
         title_el="Τα αποσπάσματα από τη βιβλιοθήκη σου",
         what_it_does_el=(
             "Πριν απαντήσει, η εφαρμογή ψάχνει μόνη της στα βιβλία σου και "
@@ -1404,7 +1404,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: SUGGESTIONS_SYSTEM,
         build=_build_chat_suggestions,
-        call_sites=("routers/chat.py:1088",),
+        call_sites=("routers/chat.py:1090",),
         slices=(
             Slice(
                 id=SUGGESTIONS_SLICE_ID,
@@ -1422,10 +1422,18 @@ _ENTRIES = [
         kind="fragment",
         source_ref="app/agent/tools.py:1",
         title_el="Τα εργαλεία του βοηθού",
+        # `len(TOOLS)`, never a hand-written number: the last literal here
+        # said "22 εργαλεία" while the registry actually held 17 — the
+        # desktop build removed the student/note tools (see tools.py's
+        # module docstring) and nobody chased the prose. It also listed
+        # «άνοιγμα μαθητή» among the examples, a tool that no longer
+        # exists. Derived from the same dict the loop hands the provider,
+        # the count cannot rot again; the examples name only surviving
+        # tools.
         what_it_does_el=(
-            "Ο κατάλογος με τα 22 εργαλεία που έχει ο βοηθός — αναζήτηση στα "
+            f"Ο κατάλογος με τα {len(TOOLS)} εργαλεία που έχει ο βοηθός — αναζήτηση στα "
             "βιβλία σου, αναζήτηση στις έννοιες που συνέθεσε από όλα τα βιβλία "
-            "(εκεί που συμφωνούν και εκεί που διαφωνούν), άνοιγμα μαθητή, "
+            "(εκεί που συμφωνούν και εκεί που διαφωνούν), "
             "δημιουργία προγράμματος, και τα υπόλοιπα. Για καθένα υπάρχει μια "
             "περιγραφή που του εξηγεί πότε να το χρησιμοποιήσει και πότε να "
             "προτιμήσει άλλο. Αυτές οι περιγραφές είναι κι αυτές κείμενο που "
@@ -1434,7 +1442,7 @@ _ENTRIES = [
         when_it_runs_el="Σε κάθε μήνυμα που γράφεις στη συνομιλία.",
         source_of_truth=lambda: TOOLS,
         build=_build_tools_descriptions,
-        call_sites=("agent/loop.py:719", "agent/loop.py:966"),
+        call_sites=("agent/loop.py:738", "agent/loop.py:989"),
     ),
     # ---- curriculum ----
     PromptEntry(
@@ -1473,7 +1481,7 @@ _ENTRIES = [
         curriculum_group=True,
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/corpus.py:524",
+        source_ref="app/curriculum/corpus.py:541",
         title_el="Ολόκληρη η βιβλιοθήκη σου",
         what_it_does_el=(
             "Δίνει στον βοηθό όλα τα βιβλία που διάλεξες, ολόκληρα, με τον "
@@ -1502,7 +1510,7 @@ _ENTRIES = [
         id="curriculum.no_library",
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/corpus.py:479",
+        source_ref="app/curriculum/corpus.py:496",
         title_el="Όταν δεν διάλεξες κανένα βιβλίο",
         what_it_does_el=(
             "Αν δεν διαλέξεις καμία πηγή, μπαίνει αυτό στη θέση της "
@@ -1527,7 +1535,7 @@ _ENTRIES = [
         id="curriculum.library_too_large",
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/corpus.py:480",
+        source_ref="app/curriculum/corpus.py:497",
         title_el="Όταν η βιβλιοθήκη σου δεν χωράει",
         what_it_does_el=(
             "Αν τα βιβλία που διάλεξες είναι πάρα πολλά για να διαβαστούν "
@@ -1654,7 +1662,7 @@ _ENTRIES = [
         when_it_runs_el="Όταν εγκρίνεται σχέδιο με προσθήκη/διόρθωση ενότητας.",
         source_of_truth=lambda: build_segment_messages,
         build=_build_segment_generate,
-        call_sites=("curriculum/segment_generate.py:211",),
+        call_sites=("curriculum/segment_generate.py:237",),
         slices=(
             Slice(
                 id=SEGMENT_SYSTEM_SLICE_ID,
@@ -1675,7 +1683,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/revise.py:334",
+        source_ref="app/curriculum/revise.py:335",
         title_el="Η αναθεώρηση ενός τελειωμένου προγράμματος",
         what_it_does_el=(
             "Δείχνει στον βοηθό ΟΛΟΚΛΗΡΟ το πρόγραμμα όπως είναι σήμερα — μαθήματα "
@@ -1699,7 +1707,7 @@ _ENTRIES = [
         # This is the FIRST-PASS call only — the one-shot repair pass (2026-07-20)
         # has its own call site and its own entry, "curriculum.revise.repair"
         # below, exactly like "lesson.draft"/"lesson.repair" split theirs.
-        call_sites=("curriculum/revise.py:775",),
+        call_sites=("curriculum/revise.py:782",),
         slices=(
             Slice(
                 id=REVISE_SLICE_ID,
@@ -1713,7 +1721,7 @@ _ENTRIES = [
         id="curriculum.revise.repair",
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/revise.py:720",
+        source_ref="app/curriculum/revise.py:727",
         title_el="Όταν το σχέδιο αναθεώρησης απορρίπτει προτάσεις",
         what_it_does_el=(
             "Η εφαρμογή ελέγχει κάθε πρόταση αλλαγής (op) του βοηθού: αν ένα id "
@@ -1729,7 +1737,7 @@ _ENTRIES = [
         when_it_runs_el="Μόνο όταν απορριφθεί έστω μία πρόταση. Το πολύ μία φορά ανά σχέδιο.",
         source_of_truth=lambda: _revise_repair_message,
         build=_build_curriculum_revise_repair,
-        call_sites=("curriculum/revise.py:784",),
+        call_sites=("curriculum/revise.py:791",),
         slices=(
             Slice(
                 id=REVISE_REPAIR_SLICE_ID,
@@ -1762,7 +1770,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: REVISE_DISTILL_SYSTEM,
         build=_build_revise_distill,
-        call_sites=("curriculum/revise.py:711",),
+        call_sites=("curriculum/revise.py:718",),
         slices=(
             Slice(
                 id=REVISE_DISTILL_SLICE_ID,
@@ -1795,7 +1803,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: DISTILL_SYSTEM,
         build=_build_interview_distill,
-        call_sites=("curriculum/interview.py:787",),
+        call_sites=("curriculum/interview.py:783",),
         slices=(
             Slice(
                 id=DISTILL_SLICE_ID,
@@ -2351,7 +2359,7 @@ _ENTRIES = [
         when_it_runs_el="Μία φορά για κάθε σελίδα, όταν ανεβάζεις ένα βιβλίο.",
         source_of_truth=lambda: OCR_PROMPT,
         build=_vision_prompt(OCR_SLICE_ID, OCR_PROMPT),
-        call_sites=("brain/ocr.py:1076",),
+        call_sites=("brain/ocr.py:1119",),
         slices=(
             Slice(
                 id=OCR_SLICE_ID,
@@ -2380,7 +2388,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: FIGURE_PROMPT,
         build=_vision_prompt(FIGURE_SLICE_ID, FIGURE_PROMPT),
-        call_sites=("brain/ocr.py:1076",),
+        call_sites=("brain/ocr.py:1119",),
         slices=(
             Slice(
                 id=FIGURE_SLICE_ID,
@@ -2488,7 +2496,7 @@ _ENTRIES = [
         id="shared.answer_in",
         flow="shared",
         kind="fragment",
-        source_ref="app/i18n.py:203",
+        source_ref="app/i18n.py:204",
         title_el="Η τελευταία υπενθύμιση γλώσσας",
         what_it_does_el=(
             "Μία γραμμή, κολλημένη στο τέλος-τέλος, μετά τα αγγλικά "

@@ -237,3 +237,33 @@ def test_the_canon_prefix_is_byte_identical_across_two_calls_and_is_cached(db, m
         "re-write the block at 1.25x and the only symptom is the invoice"
     )
     assert "<canon" in cached_first[0]["content"]
+
+
+def test_a_ready_compile_with_zero_claims_degrades_to_retrieval_not_general_knowledge(
+    db, monkeypatch
+):
+    """Every contributor SAYS compiled, but the canon holds no claims (lost
+    rows, purged ledger, bad migration). The empty canon used to ship anyway,
+    `prefix_messages` rendered its NO_LIBRARY branch, and the tutor paid full
+    price for a course drafted ENTIRELY from general knowledge — his library
+    never sent, no error anywhere, the only tell the tier badges. Retrieval
+    (`fits=False` -> per-lesson grounding over every chunk) is the honest
+    floor."""
+    source = _book(db)
+    # A `ready` BookCompile with NO Concept/ConceptClaim behind it.
+    db.add(BookCompile(source_id=source.id, status="ready", model="claude-sonnet-5",
+                       concept_count=0, token_count=100))
+    db.commit()
+    from app.curriculum.corpus import build_library_context
+
+    tokens = build_library_context(db, [source.id]).token_count
+    monkeypatch.setattr(corpus_mod.settings, "canon_threshold", tokens - 1)
+
+    context = build_curriculum_context(db, [source.id])
+
+    assert not context.is_empty, "retrieval context still carries the sources"
+    assert context.fits is False, "fits=False is what routes every draft to per-lesson retrieval"
+    body = _prefix_text(context)
+    assert "You have nothing of his to read" not in body, (
+        "the NO_LIBRARY framing must never ship when the tutor DID select sources"
+    )

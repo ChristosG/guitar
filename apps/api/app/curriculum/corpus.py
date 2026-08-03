@@ -303,7 +303,24 @@ def build_curriculum_context(db, source_ids: list[UUID] | None):
     if not uncompiled:
         from app.canon.render import build_canon_context
 
-        return build_canon_context(db, source_ids)
+        canon = build_canon_context(db, source_ids)
+        if canon.is_empty:
+            # Every contributor SAYS it is compiled (`BookCompile.status ==
+            # "ready"`) yet the canon holds zero claims — lost rows, a purged
+            # ledger, a bad migration. Returning the empty canon here fed
+            # `prefix_messages`' NO_LIBRARY branch, and the tutor paid full
+            # price for a 24-lesson course drafted ENTIRELY from general
+            # knowledge with his library never sent and no error anywhere —
+            # the only tell was the tier badges. Retrieval reads every chunk
+            # of every source regardless of compile status; it is the honest
+            # floor, not a refusal.
+            log.warning(
+                "curriculum: %d source(s) report compiled but the canon is EMPTY "
+                "— falling back to retrieval grounding instead of drafting from "
+                "general knowledge", len(source_ids),
+            )
+            return build_retrieval_context(db, source_ids)
+        return canon
 
     if library.fits:
         # Full context still fits, and it reads every book whole — including the

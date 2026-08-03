@@ -64,6 +64,7 @@ import uuid
 
 from sqlalchemy import select
 
+from app.curriculum.sanitize import strip_inline_citations
 from app.curriculum.blueprint import (
     BlueprintInvalid,
     blueprint_from_course_meta,
@@ -74,7 +75,7 @@ from app.curriculum.blueprint import (
 from app.curriculum.corpus import CURRICULUM_SYSTEM, CURRICULUM_SYSTEM_SLICE_ID
 from app.curriculum.ground import ground_topic
 from app.curriculum.outline import TIER_ORDER
-from app.i18n import answer_in, language_directive
+from app.i18n import answer_in, curriculum_style, language_directive
 from app.llm.factory import get_provider
 from app.models.block import Block
 from app.prompts.overrides import resolve
@@ -292,7 +293,7 @@ REVISE_TAIL = (
     "\nIF THE CURRENT BLUEPRINT MAKES THE REQUEST IMPOSSIBLE AS ASKED, SAY SO "
     "PLAINLY in `summary` — never silently plan around it or quietly substitute "
     "something smaller.\n"
-    "\n{language_directive}\n\n{answer_in}"
+    "\n{language_directive}\n{curriculum_style}\n\n{answer_in}"
 )
 REVISE_BRIEF_BLOCK = "\n\nWHAT THE TUTOR WANTS FROM THIS COURSE, IN HIS OWN WORDS:\n{brief}"
 # The passages `ground_topic` retrieved for THIS instruction — for grounding
@@ -357,6 +358,12 @@ def build_revise_messages(*, course_title, brief, language, tree_text, instructi
         retrieved_block=(REVISE_RETRIEVED_BLOCK.format(retrieved=retrieved) if retrieved else ""),
         instruction=instruction.strip(),
         language_directive=language_directive(language, source),
+        # The revise planner WRITES course material — the titles and objectives
+        # it proposes land verbatim on the tutor's board (`apply_revision`), so
+        # it carries the curriculum register exactly like the other five
+        # content flows (the rule `app.i18n.curriculum_style` documents).
+        # Without it, a Greek course grew planner-register module titles.
+        curriculum_style=curriculum_style(language, source),
         answer_in=answer_in(language, source),
     )
     return [
@@ -848,6 +855,18 @@ def apply_revision(db, root_id: uuid.UUID, plan: dict) -> dict:
     try:
         for op in validated["ops"]:
             name = op["op"]
+            # The planner's titles/objectives land VERBATIM on the board — no
+            # chained draft ever rewrites them — so they pass through the same
+            # citation net every drafted body does (`sanitize.py`). A module
+            # titled "Συγχορδίες (σελ. 47)" is exactly the leak the net exists
+            # to catch, and until now this was the one writer that skipped it.
+            for key in ("title", "objective"):
+                if isinstance(op.get(key), str):
+                    op[key] = strip_inline_citations(op[key])
+            for spec in op.get("lessons") or []:
+                for key in ("title", "objective"):
+                    if isinstance(spec.get(key), str):
+                        spec[key] = strip_inline_citations(spec[key])
             if name == "insert_lesson":
                 lesson = edit._add_lesson(
                     db, uuid.UUID(op["module_id"]), title=op["title"], objective=op["objective"],
