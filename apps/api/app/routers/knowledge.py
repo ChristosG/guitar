@@ -12,6 +12,7 @@ dependency, so there is nothing to declare in this file. One tutor, one
 password; there is still no authorization model, because there is nobody to
 authorize against anybody else.
 """
+import hashlib
 import logging
 import re
 from typing import Annotated
@@ -62,7 +63,11 @@ _CHUNK_PREVIEW_LIMIT = 5
 # request schemas instead (`schemas/knowledge.py`) since Pydantic gives those
 # a 422; these two need a distinct 413 ("payload too large"), so they're
 # plain in-router checks instead of Field constraints.
-MAX_UPLOAD_BYTES = 30 * 1024 * 1024  # 30 MiB cap for POST /sources/upload
+# 60 MiB. The old 30 MiB cap left ~14% headroom over the tutor's LARGEST real
+# book (Gallagher, 26 MB) — the very next scanned book he buys would have
+# bounced. Scans of long books routinely run 40-50 MB; ingest cost scales with
+# page count, not file size, so the cap only needs to keep out the absurd.
+MAX_UPLOAD_BYTES = 60 * 1024 * 1024
 MAX_TEXT_CHARS = 1_000_000  # cap for kind="text" ingestion via POST /sources
 
 
@@ -266,13 +271,55 @@ def upload_source(
 ) -> SourceOut:
     # Bounded read: stop at one byte past the cap rather than reading an
     # arbitrarily large upload fully into memory before checking its size.
+    # The `{"code", "message"}` detail shape below is the auth/settings
+    # routers' convention — `parseError` (api.ts) lifts `code` out, and the
+    # add-source dialog renders its own LOCALIZED sentence for a code it
+    # knows instead of parroting English at a Greek tutor.
     data = file.file.read(MAX_UPLOAD_BYTES + 1)
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(
             status_code=413,
-            detail=f"upload exceeds the {MAX_UPLOAD_BYTES}-byte limit",
+            detail={
+                "code": "upload_too_large",
+                "message": f"the file exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit",
+            },
         )
-    source = KnowledgeSource(type="pdf", title=title, domain=domain, language=language)
+
+    # Magic bytes, not the picker's word for it. The route hard-codes
+    # `type="pdf"`, so a JPEG chosen through "All Files" used to sail in,
+    # explode inside `fitz.open`, and leave a red row whose error was MuPDF's
+    # own English — with a Retry button that ran an OCR job over zero pages.
+    # (The spec allows junk before the header; 1024 bytes is the same window
+    # real readers scan.)
+    if b"%PDF-" not in data[:1024]:
+        raise HTTPException(
+            status_code=415,
+            detail={"code": "upload_not_pdf", "message": "this file is not a PDF"},
+        )
+
+    # THE DUPLICATE GUARD. Two ids for the same bytes become two compiles, and
+    # canon consensus/divergence — keyed on distinct source ids — then shows
+    # the same book "disagreeing with itself" as a headline DIVERGENCE, with
+    # `coverage: 2/2 books` a lie. Re-uploading after a bad read is a real
+    # workflow, so the message names the existing row: delete or displace it
+    # first, and the upload goes through.
+    digest = hashlib.sha256(data).hexdigest()
+    existing = db.scalars(
+        select(KnowledgeSource).where(KnowledgeSource.content_sha256 == digest)
+    ).first()
+    if existing is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "upload_duplicate",
+                "message": f"this exact file is already in the library as “{existing.title}”",
+                "existing_title": existing.title,
+            },
+        )
+
+    source = KnowledgeSource(
+        type="pdf", title=title, domain=domain, language=language, content_sha256=digest,
+    )
     db.add(source)
     db.commit()
 

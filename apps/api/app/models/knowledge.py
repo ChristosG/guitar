@@ -56,6 +56,11 @@ class KnowledgeSource(Base, PkMixin, TimestampMixin):
     # models' spaces have no shared geometry, and nothing in the result set looks
     # any different).
     embed_model: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # SHA-256 of the uploaded bytes (pdf uploads only; NULL for url/text rows
+    # and for anything uploaded before the column existed). The duplicate-upload
+    # guard's key: two ids for the same book manufacture a false "divergence"
+    # in the canon, because consensus is keyed on distinct source ids.
+    content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
 
 
 class Collection(Base, PkMixin, TimestampMixin):

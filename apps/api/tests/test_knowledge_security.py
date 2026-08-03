@@ -234,8 +234,11 @@ def test_max_text_chars_constant_matches_documented_1_000_000():
     assert knowledge_router.MAX_TEXT_CHARS == 1_000_000
 
 
-def test_max_upload_bytes_constant_matches_documented_30_mib():
-    assert knowledge_router.MAX_UPLOAD_BYTES == 30 * 1024 * 1024
+def test_max_upload_bytes_constant_matches_documented_60_mib():
+    # 60 MiB (raised from 30): the tutor's largest real book is 26 MB, and
+    # scans of long books routinely run 40-50 MB — the old cap left the very
+    # next book he buys one bounce away. See the constant's own comment.
+    assert knowledge_router.MAX_UPLOAD_BYTES == 60 * 1024 * 1024
 
 
 def test_create_text_source_over_cap_rejected_with_413(monkeypatch):
@@ -255,3 +258,50 @@ def test_upload_source_over_cap_rejected_with_413(monkeypatch):
         files={"file": ("x.pdf", b"x" * 11, "application/pdf")},
     )
     assert r.status_code == 413
+
+
+def test_upload_rejects_non_pdf_with_415_and_a_machine_code():
+    """The route hard-codes `type="pdf"`; a JPEG picked through "All Files"
+    used to sail in, explode inside `fitz.open`, and leave a red row whose
+    error was MuPDF's own English with a dead-end Retry. Magic bytes, checked
+    before any row exists — and a `{code, message}` detail so the dialog can
+    render its own localized sentence."""
+    r = client.post(
+        "/knowledge/sources/upload",
+        data={"title": "Not a PDF"},
+        files={"file": ("x.jpg", b"\xff\xd8\xff\xe0 not a pdf at all", "image/jpeg")},
+    )
+    assert r.status_code == 415
+    assert r.json()["detail"]["code"] == "upload_not_pdf"
+
+
+def test_upload_same_bytes_twice_is_409_naming_the_existing_row(tmp_path, monkeypatch):
+    """THE DUPLICATE GUARD: two ids for the same book become two compiles, and
+    canon divergence — keyed on distinct source ids — then shows the same book
+    "disagreeing with itself" on the product's headline surface."""
+    monkeypatch.setattr("app.brain.paginate.settings.media_dir", str(tmp_path))
+
+    import fitz
+
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "A humbucker pickup cancels 60-cycle hum.")
+    data = doc.tobytes()
+    doc.close()
+
+    first = client.post(
+        "/knowledge/sources/upload",
+        data={"title": "Tone Book"},
+        files={"file": ("tone.pdf", data, "application/pdf")},
+    )
+    assert first.status_code == 200, first.text
+
+    second = client.post(
+        "/knowledge/sources/upload",
+        data={"title": "Tone Book again"},
+        files={"file": ("tone-copy.pdf", data, "application/pdf")},
+    )
+    assert second.status_code == 409
+    detail = second.json()["detail"]
+    assert detail["code"] == "upload_duplicate"
+    assert detail["existing_title"] == "Tone Book"

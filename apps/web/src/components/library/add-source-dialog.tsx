@@ -101,7 +101,20 @@ export function AddSourceDialog({ onCreated }: AddSourceDialogProps) {
       setOpen(false);
       onCreated();
     } catch (err) {
-      setError(err instanceof ApiError ? err.detail : t("error"));
+      // The upload guards return machine codes (`routers/knowledge.py`) so a
+      // Greek tutor reads a Greek sentence, not the server's English. Branch
+      // on `code`, never on `detail` (ApiError's own rule).
+      if (err instanceof ApiError && err.code === "upload_too_large") {
+        setError(t("uploadTooLarge"));
+      } else if (err instanceof ApiError && err.code === "upload_not_pdf") {
+        setError(t("uploadNotPdf"));
+      } else if (err instanceof ApiError && err.code === "upload_duplicate") {
+        const title =
+          (err.body as { detail?: { existing_title?: string } })?.detail?.existing_title ?? "";
+        setError(t("uploadDuplicate", { title }));
+      } else {
+        setError(err instanceof ApiError ? err.detail : t("error"));
+      }
     } finally {
       setSubmitting(false);
     }
