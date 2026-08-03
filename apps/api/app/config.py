@@ -74,6 +74,19 @@ class Settings(BaseSettings):
     # to, and it is where a future second provider would plug back in.
     ocr_provider: str | None = None
 
+    # WHICH MODEL transcribes a page scan. Vision is built into every Claude
+    # model — there is no separate "OCR model" — so this is purely a cost
+    # dial: transcription is the app's highest-volume call (one per page, 888
+    # on the tutor's real library) and its least demanding one, and Haiku 4.5
+    # reads a scan for roughly a third of Sonnet's price. Chris, verbatim:
+    # "lets use the cheapest :D". Everything that THINKS about the pages —
+    # canon compile, outline, drafts — stays on the Settings model. The
+    # per-page quality screens (garbage / truncation / stub detection,
+    # `brain/ocr.py`) apply to this model's output exactly as they did to
+    # Sonnet's, and a book can always be re-read after `OCR_MODEL=claude-
+    # sonnet-5` if a specific scan reads badly.
+    ocr_model: str = "claude-haiku-4-5"
+
     # Pages ROUTED TO VISION are re-rendered from the source PDF at this DPI.
     # `paginate.RENDER_DPI = 110` is a QWEN CEILING, not a quality choice: at
     # 150dpi the local vLLM rejects the image outright ("image item with length

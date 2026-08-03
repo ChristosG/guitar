@@ -87,30 +87,35 @@ export default function LibraryPage() {
   // the array itself would tear down and rebuild the interval on every tick.
   const activeKey = activeIds.join(",");
 
-  // The COMPILE blind spot, closed: `activeIds` tracks OCR jobs only, so a
-  // canon compile — minutes of `compile.status === "running"` — used to show
-  // "Ξεκινά…" and then sit on the stale prior state until a manual reload
-  // (and a compile orphaned by a force-quit sat on its spinner forever; the
-  // boot sweep now fails those, but only a refetch ever showed it). While any
-  // source is compiling, re-read the list on a slow cadence; when the last
-  // compile leaves `running` the key collapses to "" and this stops itself.
-  const compilingKey = useMemo(
+  // The SLOW-WORK blind spots, closed: `activeIds` tracks OCR jobs only, so
+  // a canon compile (minutes of `compile.status === "running"`) and now an
+  // async upload ingest (minutes of `status === "ingesting"` on a big book)
+  // used to show their opening state and then sit stale until a manual
+  // reload (and a compile/ingest orphaned by a force-quit sat on its spinner
+  // forever; the boot sweeps now fail those, but only a refetch ever showed
+  // it). While any source is compiling or ingesting, re-read the list on a
+  // slow cadence; when the last one finishes the key collapses to "" and
+  // this stops itself.
+  const backgroundKey = useMemo(
     () =>
       sources
         // `compile_active` (the in-flight JOB) arms this from the moment the
         // 202-triggered refresh lands — `book_compile.status` alone misses the
         // opening seconds of every self-started compile, which is exactly when
         // the tutor is watching.
-        .filter((s) => s.compile_active || s.compile?.status === "running")
+        .filter(
+          (s) =>
+            s.compile_active || s.compile?.status === "running" || s.status === "ingesting",
+        )
         .map((s) => s.id)
         .join(","),
     [sources],
   );
   useEffect(() => {
-    if (compilingKey === "") return;
+    if (backgroundKey === "") return;
     const timer = setInterval(() => refresh(), POLL_INTERVAL_MS * 2);
     return () => clearInterval(timer);
-  }, [compilingKey, refresh]);
+  }, [backgroundKey, refresh]);
 
   /** THE DURABLE PROGRESS LOOP. This replaced a `watchOcr` state machine that
    * lived entirely in this tab: it started only when THIS tab pressed the button,

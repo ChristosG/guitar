@@ -196,11 +196,12 @@ jobs:
           done
           ls -lh "$DMG"
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Angel_OS-macos-arm64${{ steps.seed.outputs.suffix }}
-          path: ${{ env.DMG }}
-          retention-days: 3
+      # NO upload-artifact: a ~750MB dmg per branch push against the private
+      # repo's 500MB artifact allowance is how the quota died on 2026-08-03
+      # (2.2GB stored, every CreateArtifact failing). Branch pushes exist to
+      # prove build+smoke; the deliverable ships ONLY via the tag Release
+      # below — Release assets are free and don't count against Actions
+      # artifact storage.
 
       - name: Release (tags only)
         if: startsWith(github.ref, 'refs/tags/desktop-v')

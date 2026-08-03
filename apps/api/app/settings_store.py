@@ -169,9 +169,9 @@ def resolve_llm_config(provider: str | None = None) -> LLMConfig:
     `provider`, if given, resolves for THAT provider instead of
     `settings.llm_provider` — reusing the exact same DB-model / DB-or-env-key
     logic below for a provider that is not necessarily the one chat is using
-    (`llm/factory.py::get_ocr_provider()` passes `settings.ocr_provider`).
-    Every zero-arg call site is unaffected — `provider or
-    settings.llm_provider` is a no-op when omitted.
+    (`resolve_ocr_config()` below passes `settings.ocr_provider`). Every
+    zero-arg call site is unaffected — `provider or settings.llm_provider`
+    is a no-op when omitted.
 
     `claude` is the only provider left (the `claude_cli` bridge and the local
     `qwen` vLLM are gone), so every resolution follows the same path: model
@@ -213,6 +213,18 @@ def resolve_llm_config(provider: str | None = None) -> LLMConfig:
             "No Anthropic API key is configured. Open Settings and paste your key."
         )
     return LLMConfig(provider=provider, model=model, api_key=key)
+
+
+def resolve_ocr_config() -> LLMConfig:
+    """The config OCR dispatches on: the chat resolution (same key, same
+    provider rules) with `settings.ocr_model` swapped in when it is a model we
+    know. Content-keyed caching (`LLMConfig.fingerprint`) means this shares
+    the chat provider's cache entry whenever the models coincide."""
+    base = resolve_llm_config(settings.ocr_provider or None)
+    ocr_model = settings.ocr_model
+    if ocr_model in MODELS and ocr_model != base.model:
+        return LLMConfig(provider=base.provider, model=ocr_model, api_key=base.api_key)
+    return base
 
 
 def is_configured() -> bool:

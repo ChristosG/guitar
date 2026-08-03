@@ -561,6 +561,38 @@ def run_ocr_job(job_id: uuid.UUID) -> None:
         db.close()
 
 
+def run_upload_ingest_job(source_id: uuid.UUID, data: bytes) -> None:
+    """Ingest an uploaded PDF OFF the request path, on its own session.
+
+    Upload used to run `ingest_source` synchronously inside the HTTP request:
+    a 388-page book meant minutes of a frozen «Προσθήκη…» dialog with zero
+    feedback (rasterise every page, extract, embed — all before the response),
+    one parked threadpool slot, and a tutor who reasonably concluded it hung
+    and force-quit, leaving the row `ingesting` forever. Now the route commits
+    the row and returns; this runs behind the 200 and the Library row's own
+    `ingesting` spinner (already rendered, previously unreachable) plus the
+    list's background poll show the truth until the status flips.
+
+    UNLIKE its job-row siblings there is no `GenerationJob` here and nothing
+    to flip on failure: `ingest_source` owns the whole status lifecycle and
+    never raises for an ingestion failure — it records it on the source row,
+    which IS the record the Library renders. The `data` bytes ride in this
+    closure (Starlette runs background tasks in-process, after the response);
+    a crash before this runs leaves the row `ingesting`, which the boot sweep
+    (`sweep_stuck_ingests`) fails with the upload-again message.
+    """
+    db = SessionLocal()
+    try:
+        ingest_source(db, source_id, IngestPayload(kind="pdf", data=data))
+    except Exception:
+        # `ingest_source` already swallows-and-records ingestion failures;
+        # anything that still escapes (a DB outage mid-write) has nowhere to
+        # surface but the log — the boot sweep is the recovery of last resort.
+        log.exception("run_upload_ingest_job: source_id=%s failed", source_id)
+    finally:
+        db.close()
+
+
 def run_reingest_job(job_id: uuid.UUID) -> None:
     """Re-run the full ingest pipeline for a "url"-kind source, off the
     request path (Plan 9 Task 6's controller decision for the url branch of

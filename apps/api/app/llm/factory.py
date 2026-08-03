@@ -4,7 +4,7 @@ from app.config import settings
 from app.llm.base import LLMProvider
 from app.llm.claude import ClaudeProvider
 from app.llm.errors import LLMNotConfigured
-from app.settings_store import LLMConfig, resolve_llm_config
+from app.settings_store import LLMConfig, resolve_llm_config, resolve_ocr_config
 
 # Fingerprint -> provider. NOT an `lru_cache(maxsize=1)`, and that change is the
 # whole of Plan 13 Task 3.4's runtime half.
@@ -72,23 +72,18 @@ def get_ocr_provider() -> LLMProvider:
     """The provider that transcribes a page scan. `brain/ocr.py` calls this in
     place of `get_provider()`.
 
-    `OCR_PROVIDER` UNSET (the default) returns exactly `get_provider()`:
-    identical object, identical cache entry, nothing changes for anyone until
-    the knob is touched.
+    Resolves via `resolve_ocr_config()`: the chat provider's key and rules,
+    with `settings.ocr_model` (default `claude-haiku-4-5` — vision is built
+    into every Claude model, so a page read is a COST question, not a
+    capability one; see the setting's own comment) swapped in for the model.
+    When the models coincide (`OCR_MODEL` set to the Settings model, or the
+    tutor running Haiku for everything), the content-keyed cache returns the
+    IDENTICAL chat provider object — one cache, one invalidation path.
 
-    SET, it resolves a fresh `LLMConfig` for THAT provider via the same
-    `resolve_llm_config()` model/key logic chat uses — so `OCR_PROVIDER=claude`
-    fails with the SAME honest `LLMNotConfigured` a bare `claude` chat provider
-    raises when no key is configured, instead of quietly building a broken
-    client that 401s forty pages into a run. With `claude` the only provider
-    left the knob is mostly a no-op, but the seam stays: it is the reason the
-    guard below (`require_ocr_configured`) can resolve the provider OCR will
-    actually use.
+    A missing key fails here with the SAME honest `LLMNotConfigured` chat
+    raises — never a quietly broken client that 401s forty pages into a run.
     """
-    override = settings.ocr_provider
-    if not override:
-        return get_provider()
-    return _get_cached(resolve_llm_config(override))
+    return _get_cached(resolve_ocr_config())
 
 
 def clear_provider_cache() -> None:
@@ -142,11 +137,17 @@ def require_ocr_configured() -> None:
     prevent: the tutor gets 888 failed pages instead of a 409 pointing him at
     Settings.
 
-    A GUARD MUST RESOLVE THE PROVIDER ITS JOB WILL ACTUALLY USE. Mirrors
-    `_current_text_source` (brain/ocr.py), which resolves `settings.ocr_provider`
-    for the same reason: `OCR_PROVIDER` unset makes the two identical
-    (`provider or settings.llm_provider` falls through), so nothing changes for
-    any install today — and when it is set, this is what stops chat's key
-    vouching for a read chat is not doing.
+    A GUARD MUST RESOLVE THE CONFIG ITS JOB WILL ACTUALLY USE — which is now
+    `resolve_ocr_config()` (the provider seam plus the `ocr_model` swap), the
+    exact resolution `get_ocr_provider()` dispatches on. The model swap can
+    never change key-configuredness (same key either way), but resolving
+    anything OTHER than the dispatch path here is how a guard drifts into
+    vouching for a read it is not doing.
     """
-    _require_configured(settings.ocr_provider)
+    try:
+        resolve_ocr_config()
+    except LLMNotConfigured as e:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "llm_not_configured", "message": str(e)},
+        ) from e

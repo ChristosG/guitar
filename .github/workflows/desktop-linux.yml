@@ -291,11 +291,10 @@ jobs:
           done
           ls -lh dist/
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Angel_OS-linux-x64${{ steps.seed.outputs.suffix }}
-          path: dist/*
-          retention-days: 3
+      # NO upload-artifact — same reasoning as desktop-macos.yml: the ~800MB
+      # deb per branch push is what exhausted the 500MB artifact quota.
+      # Branch pushes prove build+smoke; the tag Release below is the one
+      # delivery channel (Release assets don't count against the quota).
 
       - name: Release (tags only)
         if: startsWith(github.ref, 'refs/tags/desktop-v')

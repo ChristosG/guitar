@@ -227,6 +227,17 @@ def test_upload_source_ingests_pdf(tmp_path, monkeypatch):
     )
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["status"] == "ready"
+    # The RESPONSE is the pre-ingest row now — ingest runs OFF the request
+    # (`run_upload_ingest_job`), so upload no longer freezes the dialog for
+    # the minutes a big book takes. TestClient executes background tasks
+    # before returning, so the DB state right after this call is the
+    # post-ingest one — the re-GET below is the same truth the Library's
+    # poll converges on.
+    assert body["status"] == "ingesting"
     assert body["type"] == "pdf"
-    assert body["char_count"] and body["char_count"] > 0
+
+    r2 = client.get(f"/knowledge/sources/{body['id']}")
+    assert r2.status_code == 200, r2.text
+    after = r2.json()
+    assert after["status"] == "ready"
+    assert after["char_count"] and after["char_count"] > 0

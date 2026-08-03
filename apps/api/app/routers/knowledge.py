@@ -19,11 +19,12 @@ from typing import Annotated
 from urllib.parse import unquote, urlsplit
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.brain.ingest import IngestPayload, ingest_source
+from app.jobs.runner import run_upload_ingest_job
 from app.brain.media import purge_source_media
 from app.brain.ocr import PageCounts, active_ocr_jobs, latest_failed_ocr_jobs, page_counts
 from app.brain.reembed import reembed_all
@@ -280,6 +281,7 @@ def bulk_create_sources(payload: BulkSourceCreate, db: Session = Depends(get_db)
 
 @router.post("/sources/upload", response_model=SourceOut)
 def upload_source(
+    background_tasks: BackgroundTasks,
     title: Annotated[str, Form()],
     domain: Annotated[str | None, Form()] = None,
     language: Annotated[str | None, Form()] = None,
@@ -340,7 +342,12 @@ def upload_source(
     db.add(source)
     db.commit()
 
-    ingest_source(db, source.id, IngestPayload(kind="pdf", data=data))
+    # OFF the request, like OCR and url re-ingest before it: a 388-page book
+    # is minutes of pagination+extraction+embedding, and running it here froze
+    # the add dialog with zero feedback until the tutor force-quit (see
+    # `run_upload_ingest_job`'s docstring). The response carries the row at
+    # `ingesting`; the Library's spinner and poll take it from there.
+    background_tasks.add_task(run_upload_ingest_job, source.id, data)
     return _decorate(db, [source])[0]
 
 
