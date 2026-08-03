@@ -342,6 +342,17 @@ fn zoom_command(handle: &AppHandle, func: &str) {
     }
 }
 
+/// Run one of the webview's own history moves (`back`/`forward`) in the
+/// tutor's window. Mirrors `zoom_command`, but needs no injected script and no
+/// guard: `window.history` exists on every page from the first byte, and a
+/// `back()` with nowhere to go is a no-op by spec, not an error. Eval into the
+/// remote origin is the same move `reload_main` already makes.
+fn history_command(handle: &AppHandle, func: &str) {
+    if let Some(w) = handle.get_webview_window("main") {
+        let _ = w.eval(format!("window.history.{func}()"));
+    }
+}
+
 // ---- where a link is allowed to go -----------------------------------------
 
 /// Does this URL belong in the tutor's BROWSER rather than inside the app?
@@ -1439,6 +1450,35 @@ fn build_menu(app: &mut tauri::App) -> tauri::Result<()> {
         .item(&zoom_out)
         .item(&zoom_reset)
         .build()?;
+    // HISTORY IS THE SAME ARGUMENT AS ZOOM: THE MENU ITEM IS THE KEYBOARD.
+    //
+    // wry already routes mouse buttons 8/9 — the thumb buttons — to
+    // history.back/forward natively, so a tutor with such a mouse has always
+    // had this. A tutor without one had NOTHING: this window has no address
+    // bar, no toolbar and no Back button, so a wrong click's only way home was
+    // restarting the app. And a shortcut that appears nowhere on screen might
+    // as well not exist — the accelerator on a menu item is the only version
+    // of this feature that can be FOUND.
+    //
+    // Two spellings on purpose, not one `CmdOrCtrl`: each platform's browsers
+    // trained the hands we are serving. Alt+Left/Right is Back/Forward
+    // everywhere except macOS — where that chord is a text-caret motion and
+    // the browsers use Cmd+[ / Cmd+] instead.
+    let (back_accel, forward_accel) = if cfg!(target_os = "macos") {
+        ("CmdOrCtrl+[", "CmdOrCtrl+]")
+    } else {
+        ("Alt+Left", "Alt+Right")
+    };
+    let back = MenuItemBuilder::with_id("history-back", "Back — Πίσω")
+        .accelerator(back_accel)
+        .build(handle)?;
+    let forward = MenuItemBuilder::with_id("history-forward", "Forward — Εμπρός")
+        .accelerator(forward_accel)
+        .build(handle)?;
+    let history = SubmenuBuilder::new(handle, "History")
+        .item(&back)
+        .item(&forward)
+        .build()?;
     // Built DISABLED. This menu exists from the instant the splash appears,
     // minutes before there is a backend to restart on a first run; a click in
     // that window used to reach `Supervisor::ports()` and panic. Greying it out
@@ -1456,7 +1496,7 @@ fn build_menu(app: &mut tauri::App) -> tauri::Result<()> {
         .build()?;
     let _ = RESTART_ITEM.set(restart);
     let menu = MenuBuilder::new(handle)
-        .items(&[&app_menu, &edit, &view, &backend])
+        .items(&[&app_menu, &edit, &view, &history, &backend])
         .build()?;
     app.set_menu(menu)?;
     app.on_menu_event(|handle, event| match event.id().0.as_str() {
@@ -1465,6 +1505,8 @@ fn build_menu(app: &mut tauri::App) -> tauri::Result<()> {
         "zoom-in" => zoom_command(handle, "zoomIn"),
         "zoom-out" => zoom_command(handle, "zoomOut"),
         "zoom-reset" => zoom_command(handle, "reset"),
+        "history-back" => history_command(handle, "back"),
+        "history-forward" => history_command(handle, "forward"),
         _ => {}
     });
     Ok(())

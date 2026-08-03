@@ -5,6 +5,8 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
 import {
+  ArrowLeft,
+  ArrowRight,
   Combine,
   GraduationCap,
   Guitar,
@@ -177,6 +179,46 @@ export function AppShell({ children }: { children: ReactNode }) {
           >
             <Menu className="size-5" />
           </button>
+          {/* Browser-style Back/Forward. The desktop shell (Tauri) has no
+              browser chrome at all, so without these a citation deep-link —
+              curricula board → «σελ. 47» → the Reader — was a one-way door:
+              the only route back was Library → Curricula → re-open the course
+              → re-scroll to the lesson. The history stack itself was always
+              correct (every deep-link is a plain <Link> push); this is merely
+              the missing affordance to walk it. Also on the web build, where
+              it is redundant with the browser's own buttons but harmless —
+              one code path beats a desktop-only fork.
+
+              Always enabled, deliberately: the History API exposes no
+              `canGoBack`, and every counting scheme misfires somewhere
+              (reload, deep-link entry, locale switch). At the stack's floor
+              `router.back()` is a spec'd no-op — the first entry is
+              /{locale}/curricula (the origin redirect is a `replace`), so the
+              button can never escape the app. The desktop shell's History
+              menu (Alt+Left / Cmd+[) makes the same call via
+              `window.history`. */}
+          <div className="hidden items-center gap-0.5 sm:flex">
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label={t("back")}
+              data-testid="nav-back"
+              onClick={() => router.back()}
+              className="text-muted-foreground hover:text-foreground"
+            >
+              <ArrowLeft className="size-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label={t("forward")}
+              data-testid="nav-forward"
+              onClick={() => router.forward()}
+              className="text-muted-foreground hover:text-foreground"
+            >
+              <ArrowRight className="size-4" />
+            </Button>
+          </div>
           <h1 data-testid="page-title" className="truncate text-sm font-semibold">
             {pageTitle}
           </h1>
