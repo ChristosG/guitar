@@ -1011,14 +1011,14 @@ export async function downloadCurriculumDocx(rootId: string): Promise<void> {
  * convention as every other section of this file.
  */
 
-/** One `options[]` entry on the "who"/"sources" steps. `type`/`char_count`/
+/** One `options[]` entry on the "scope"/"sources" steps. `type`/`char_count`/
  * `default_selected` are only ever populated for "sources" (every source's
  * title/type/char_count so the tutor can tell real material from a
- * synthetic filler source apart — see `InterviewDialog`'s own docstring);
- * "who"'s student options never set them. All optional here (not a
- * discriminated union) since both step's options share this one shape on
- * the wire (`describe_step`'s two `options=[...]` list comprehensions in
- * `app.curriculum.interview`). */
+ * synthetic filler source apart — see `InterviewDialog`'s own docstring).
+ * The "who" step used to have options too (the student roster) — it now
+ * returns `options: null` and asks level + language via `findings`. All
+ * optional here (not a discriminated union) since every step's options share
+ * this one shape on the wire. */
 export interface InterviewOption {
   value: string;
   label: string;
@@ -1085,6 +1085,11 @@ export interface InterviewShape {
  * outline itself. */
 export interface InterviewFindings {
   levels?: string[];
+  /** "who" step only — the course languages the API accepts ("el"/"en").
+   * Asked explicitly since the student roster left the product: the tutor
+   * runs a Greek cockpit and writes English courses, so the wizard must ask
+   * rather than inherit the UI locale. */
+  languages?: string[];
   shape?: InterviewShape;
   title?: string;
   modules?: OutlineModule[];
@@ -2321,9 +2326,10 @@ export interface PromptSummary {
   provider: string | null;
   /** This prompt sits inside the cached prefix (`curriculum/corpus.py`). */
   cache_prefix: boolean;
-  /** The model's LANGUAGE for this prompt is decided by the COURSE — which takes it
-   * from the student (`interview.py:311`) — not by the cockpit locale. Chris caught
-   * the viewer claiming otherwise: the preview said Greek while a course whose
+  /** The model's LANGUAGE for this prompt is decided by the COURSE — the wizard's
+   * "who" step asks for it explicitly (`_answer_who` in
+   * `app.curriculum.interview`) — not by the cockpit locale. Chris caught the
+   * viewer claiming otherwise: the preview said Greek while a course whose
    * language is 'en' had the model told English. 5 of his 6 courses are English. */
   language_from_course: boolean;
   /** Whether the UI must warn before a change. Equal to `cache_prefix` today and

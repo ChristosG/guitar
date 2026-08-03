@@ -13,13 +13,21 @@ call — and it never sees `step` or `answers`.
 
 SEVEN STEPS:
 
-  who      -> THE STUDENT IS FULLY OPTIONAL. Chris, verbatim: "this has to be
-              optional dude.. the student part here has to be TOTALLY optional".
-              So "no student, all levels" is a first-class answer with its own
-              option, not a field left blank — and when there IS no student there
-              is an explicit LEVEL selector, because "who is this for" and "how
-              advanced are they" are two questions and only one of them needs a
-              person.
+  who      -> the LEVEL the course is pitched at and the LANGUAGE it is written
+              in. This step used to offer the student roster (Chris, then:
+              "this has to be optional dude.. the student part here has to be
+              TOTALLY optional") — and then the student feature left the
+              product entirely. What survives is the two facts the generation
+              actually consumes: `target_profile.level` and `Block.language`.
+              The language is asked EXPLICITLY, not inherited from the UI
+              locale: before this, picking the one English-speaking student was
+              the only way the wizard could produce an English course, and 5 of
+              6 real courses are English — a Greek-UI tutor writing English
+              courses is the NORMAL case, not an edge.
+              The step KEEPS its "who" key: renaming it would strand
+              crash-resumable interviews persisted at `step="who"`, and
+              `generate_interview_outline`/`_answer_confirm` read
+              `answers["who"]` by literal key.
   duration -> weeks x sessions/week x minutes, and it ECHOES THE DERIVED SHAPE
               back at him: "20 sessions -> 5 modules x 4 lessons -> ~2,200 words
               each". He is agreeing to a SIZE before we spend his money on it.
@@ -79,17 +87,21 @@ from app.i18n import DEFAULT_LOCALE, language_directive, normalize_locale
 from app.llm.factory import get_provider
 from app.models.interview import CurriculumInterview
 from app.models.knowledge import KnowledgeSource
-from app.models.student import Student
 from app.prompts.overrides import resolve
 from app.students.context import build_student_brief
 
 STEP_ORDER = ["who", "duration", "scope", "structure", "sources", "outline", "confirm"]
 
-# The levels offered when no student is chosen. "all_levels" is the DEFAULT and it
-# is not a cop-out: a tutor building a course for his whole roster is the common
-# case, and forcing him to pick "beginner" would silently pitch every lesson at
-# the least advanced student he has.
+# "all_levels" is the DEFAULT and it is not a cop-out: a tutor building a course
+# for his whole roster is the common case, and forcing him to pick "beginner"
+# would silently pitch every lesson at the least advanced student he has.
 LEVELS = ("all_levels", "beginner", "intermediate", "advanced")
+
+# The languages a course can be WRITTEN in — `Block.language` and every
+# `language_directive` fragment understand exactly these two. Distinct from the
+# UI locale on purpose: the tutor runs a Greek cockpit and writes English
+# courses (5 of his 6 real ones), so the wizard asks instead of assuming.
+COURSE_LANGUAGES = ("el", "en")
 
 
 def start_interview(db: Session, *, title: str) -> CurriculumInterview:
@@ -128,30 +140,17 @@ def describe_step(db: Session, interview: CurriculumInterview) -> dict:
     step = interview.step
 
     if step == "who":
-        students = db.scalars(select(Student).order_by(Student.name)).all()
-        options = [
-            {
-                "value": "none",
-                "label": "No particular student — a course for anyone",
-                "kind": "none",
-            },
-            *[
-                {
-                    "value": str(s.id),
-                    "label": s.name + (f" ({s.level})" if s.level else ""),
-                    "kind": "student",
-                }
-                for s in students
-            ],
-        ]
+        # No roster here any more — the student feature left the product, and a
+        # fresh install's seed DB still carries historical student rows that must
+        # never resurface as wizard options. The step asks the two questions the
+        # generation actually consumes: level and course language.
         return {
             "question": (
-                "Who is this curriculum for? Pick a student, or build it for no "
-                "one in particular — that is a perfectly normal answer, and then "
-                "you just tell me the level."
+                "What level is this course pitched at, and what language should "
+                "it be written in?"
             ),
-            "options": options,
-            "findings": {"levels": list(LEVELS)},
+            "options": None,
+            "findings": {"levels": list(LEVELS), "languages": list(COURSE_LANGUAGES)},
         }
 
     if step == "duration":
@@ -355,40 +354,37 @@ def _parse_uuid(value) -> uuid.UUID | None:
         return None
 
 
-def _answer_who(db: Session, interview: CurriculumInterview, answer) -> dict:
-    """The student is OPTIONAL — `{"student_id": null}` and `{"level": "all_levels"}`
-    are both complete, valid answers. The only thing this step can reject is a
-    student id that does not exist, or a level that is not one of ours."""
-    if not isinstance(answer, dict):
-        return _reask("Pick a student, or choose 'no particular student' and give me a level.")
+def _answer_who(interview: CurriculumInterview, answer) -> dict:
+    """Level + language — the two facts generation reads from this step.
 
-    raw = answer.get("student_id")
+    The answer keeps the historical `answers["who"]` shape (`student_id`/`name`
+    pinned to None) because `generate_interview_outline` and `_answer_confirm`
+    read those keys literally, and a crash-resumed interview from an older
+    version must keep rendering. A legacy client still sending `student_id` is
+    IGNORED, not re-asked — the roster it referred to is no longer part of the
+    product, and refusing the answer would strand a resumed wizard on a question
+    the UI can no longer render.
+    """
+    if not isinstance(answer, dict):
+        return _reask("Give me a level, and the language the course should be written in.")
+
     level = answer.get("level") or "all_levels"
     if level not in LEVELS:
         return _reask(f"'{level}' isn't a level I know. Pick one of: {', '.join(LEVELS)}.")
 
-    if raw in (None, "", "none"):
-        who = {"student_id": None, "name": None, "level": level, "language": DEFAULT_LOCALE}
-    else:
-        student_id = _parse_uuid(raw)
-        student = db.get(Student, student_id) if student_id else None
-        if student is None:
-            return _reask("I don't recognize that student — pick one from the list.")
-        who = {
-            "student_id": str(student.id),
-            "name": student.name,
-            # The student's OWN level wins over the selector when he has one on
-            # file — the selector exists for the case where there is no student to
-            # ask. `all_levels` from the picker is not an override, it is a default.
-            "level": student.level or (level if level != "all_levels" else None),
-            # Normalized: `preferred_language` is free text the agent tools can
-            # write ("el-GR", "EL"), and un-normalized it lands verbatim on
-            # Block.language, where anything not exactly "el"/"en" used to flip
-            # the persisted section headings to English.
-            "language": normalize_locale(student.preferred_language),
-        }
+    raw_language = answer.get("language")
+    # `normalize_locale` never raises on a string ("el-GR" -> "el", junk -> the
+    # default) — but it is typed str|None, so anything else (a number, a bool)
+    # takes the default rather than crashing. VALIDATION contract: a garbled
+    # answer re-asks or defaults, never 500s.
+    language = (
+        normalize_locale(raw_language) if isinstance(raw_language, str) else DEFAULT_LOCALE
+    )
 
-    interview.answers = {**interview.answers, "who": who}
+    interview.answers = {
+        **interview.answers,
+        "who": {"student_id": None, "name": None, "level": level, "language": language},
+    }
     return _ok()
 
 
@@ -685,7 +681,7 @@ def answer_interview(db: Session, interview: CurriculumInterview, answer) -> dic
         interview.answers.get(step) if step in ("duration", "scope", "sources") else None
     )
     if step == "who":
-        result = _answer_who(db, interview, answer)
+        result = _answer_who(interview, answer)
     elif step == "duration":
         result = _answer_duration(interview, answer)
     elif step == "scope":

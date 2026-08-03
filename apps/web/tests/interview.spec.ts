@@ -307,9 +307,12 @@ async function mockInterviewApi(
     const prior = savedAnswers[s] ?? null;
     if (s === "who")
       return state({
-        step: "who", prior, question: "Who is this curriculum for?",
-        options: [{ value: "none", label: "No particular student", kind: "none" }],
-        findings: { levels: ["all_levels", "beginner", "intermediate", "advanced"] },
+        step: "who", prior, question: "What level, and what language?",
+        options: null,
+        findings: {
+          levels: ["all_levels", "beginner", "intermediate", "advanced"],
+          languages: ["el", "en"],
+        },
       });
     if (s === "duration") return state({ step: "duration", prior, question: "How long does this run?" });
     if (s === "scope")
@@ -390,9 +393,12 @@ async function mockInterviewApi(
       return json(
         state({
           step: "who",
-          question: "Who is this curriculum for?",
-          options: [{ value: "none", label: "No particular student", kind: "none" }],
-          findings: { levels: ["all_levels", "beginner", "intermediate", "advanced"] },
+          question: "What level, and what language?",
+          options: null,
+          findings: {
+            levels: ["all_levels", "beginner", "intermediate", "advanced"],
+            languages: ["el", "en"],
+          },
         }),
         201,
       );
@@ -632,7 +638,7 @@ async function startToStep(
   await page.getByTestId("interview-start-submit").click();
   if (target === "who") return;
 
-  await page.getByTestId("interview-answer-submit").click(); // who: no student, all levels
+  await page.getByTestId("interview-answer-submit").click(); // who: all levels, default language
   if (target === "duration") return;
 
   await page.getByTestId("interview-duration-weeks").fill("3");
@@ -683,19 +689,22 @@ async function expandFirstLesson(page: Page, moduleIndex = 0) {
 }
 
 test.describe("the guided interview, v2 (mocked API)", () => {
-  test("the student is OPTIONAL, and the level selector stands in for him", async ({ page }) => {
+  test("the first step asks level + language — the roster left the product", async ({ page }) => {
     const mock = await mockInterviewApi(page);
     await startToStep(page, "who");
 
-    // Chris: "this has to be optional dude.. the student part here has to be
-    // TOTALLY optional." So it is an option with its own button, not a blank field.
-    await expect(page.getByTestId("interview-who-option-none")).toBeVisible();
+    // No student options anywhere — the step renders the two selectors the
+    // generation actually consumes. The language defaults to the cockpit
+    // locale (this run is /en) but is a first-class choice, because a
+    // Greek-UI tutor writing English courses is the normal case.
     await expect(page.getByTestId("interview-who-levels")).toBeVisible();
+    await expect(page.getByTestId("interview-who-languages")).toBeVisible();
 
     await page.getByTestId("interview-who-level-beginner").click();
+    await page.getByTestId("interview-who-language-el").click();
     await page.getByTestId("interview-answer-submit").click();
 
-    expect(mock.answerBodies[0]).toEqual({ student_id: null, level: "beginner" });
+    expect(mock.answerBodies[0]).toEqual({ student_id: null, level: "beginner", language: "el" });
     await expect(page.getByTestId("interview-duration-weeks")).toBeVisible();
   });
 

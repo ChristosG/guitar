@@ -445,8 +445,8 @@ export function InterviewDialog({ onMaterialized, resume, onResumeDismissed }: I
               <InterviewWhoStep
                 key={state.step}
                 prior={state.prior}
-                options={state.options ?? []}
                 levels={findings?.levels ?? []}
+                languages={findings?.languages ?? []}
                 submitting={submitting}
                 error={state.error}
                 onSubmit={handleAnswer}

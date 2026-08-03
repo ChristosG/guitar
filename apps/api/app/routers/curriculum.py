@@ -172,7 +172,7 @@ def start_curriculum_interview(
     payload: InterviewStartRequest, db: Session = Depends(get_db)
 ) -> dict:
     """Start the guided curriculum interview (Plan 12 Task 3, G2) — the
-    first of its five code-driven steps ("who"). See
+    first of its code-driven steps ("who": level + course language). See
     `app.curriculum.interview`'s module docstring for why this whole flow
     is a state machine in code, not a free-form chat.
     """

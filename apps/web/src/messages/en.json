@@ -9,6 +9,8 @@
     "lessons": "Lessons",
     "artifacts": "Artifacts",
     "chat": "Chat",
+    "back": "Back",
+    "forward": "Forward",
     "openMenu": "Open menu",
     "closeMenu": "Close menu",
     "settings": "Settings",
@@ -162,14 +164,17 @@
       "planFirst": "Want to talk it through first?",
       "steps": {
         "who": {
-          "heading": "Who is this curriculum for?",
-          "noStudent": "No one in particular",
-          "levelHint": "Then just tell me the level.",
+          "heading": "What level is this curriculum for?",
+          "languageHint": "What language should it be written in?",
           "levels": {
             "all_levels": "All levels",
             "beginner": "Beginner",
             "intermediate": "Intermediate",
             "advanced": "Advanced"
+          },
+          "languages": {
+            "el": "Ελληνικά",
+            "en": "English"
           }
         },
         "duration": {
@@ -346,7 +351,7 @@
   },
   "library": {
     "heading": "Library",
-    "subheading": "Your book, your links, your notes — filed away and honestly labeled.",
+    "subheading": "Your books, your links, your texts — filed away and honestly labeled.",
     "loading": "Loading your library…",
     "error": "Could not load your library.",
     "empty": "Nothing here yet — add your first source to get started.",
@@ -400,7 +405,10 @@
       "submitting": "Adding…",
       "error": "Could not add this source.",
       "crawlLabel": "Pages to follow (same site)",
-      "crawlHint": "1 = just this page. Higher = also follow the page's own links on the same site (a multi-page guide or course), up to 50 pages."
+      "crawlHint": "1 = just this page. Higher = also follow the page's own links on the same site (a multi-page guide or course), up to 50 pages.",
+      "uploadTooLarge": "That file is over the 60 MB limit.",
+      "uploadNotPdf": "That file isn't a PDF — pick the book's PDF file.",
+      "uploadDuplicate": "This exact file is already in your library as “{title}”. Delete that one first if you want to re-upload it."
     },
     "collectionDialog": {
       "trigger": "New collection",
@@ -652,7 +660,7 @@
   },
   "chat": {
     "heading": "Chat",
-    "subheading": "Ask the copilot to look things up or make changes to your students and curricula — every change needs your approval before it runs.",
+    "subheading": "Ask the copilot to look things up or make changes to your curricula and lessons — every change needs your approval before it runs.",
     "placeholder": "Message the copilot…",
     "send": "Send",
     "empty": "Say hello to get started — the copilot can look things up or, with your approval, make changes.",
@@ -699,6 +707,7 @@
       "pending": "Generating your curriculum — this can take a minute…",
       "succeeded": "Your curriculum is ready.",
       "viewCurriculum": "View curricula",
+      "viewLesson": "View lesson",
       "failed": "Curriculum generation failed.",
       "stillGenerating": "Still generating — check the Curricula page again shortly.",
       "pollError": "Lost track of the generation job — check the Curricula page shortly."
@@ -836,7 +845,7 @@
     "editableHelp": "Whatever you write here is what goes to the model, from the next time onwards. Put your own teaching ideas in: you know them, the model doesn't. Reset always brings the original back.",
     "resetConfirmTitle": "Restore the original text?",
     "resetConfirmBody": "The text you wrote will be deleted and replaced with the one the app started with. It isn't lost for good: you'll find it in History, just below.",
-    "languageOrigin": "This screen doesn't decide the language here: the course's student does (the language on his card). That's why a course can be written in English while you're using the app in Greek.",
+    "languageOrigin": "This screen doesn't decide the language here: it was chosen in the first step of the wizard when the course was created. That's why a course can be written in English while you're using the app in Greek.",
     "languageShow": "Show it in:",
     "languageName": {
       "el": "Greek",
@@ -911,13 +920,13 @@
   },
   "backup": {
     "title": "Backups",
-    "help": "Download everything the app holds into one file — books, page scans, curricula, students and settings — or bring it all back from such a file. The same file also works on another installation of the app.",
+    "help": "Download everything the app holds into one file — your library and its page scans, curricula, chats and settings — or bring it all back from such a file. The same file also works on another installation of the app.",
     "export": "Download a backup",
     "restore": "Restore from a file",
     "restoring": "Restoring…",
     "restoreConfirm": "Restore",
     "restoreConfirmTitle": "Restore from a backup?",
-    "restoreConfirmBody": "ALL of the app's current data will be replaced with what's inside “{name}” — books, page scans, curricula, students and settings. Anything not in the backup is lost and does not come back. When it finishes, the app reloads on its own.",
+    "restoreConfirmBody": "ALL of the app's current data will be replaced with what's inside “{name}” — your library and its page scans, curricula, chats and settings. Anything not in the backup is lost and does not come back. When it finishes, the app reloads on its own.",
     "errors": {
       "not_a_backup": "That file isn't a backup of this app. Pick a file you downloaded with the “Download a backup” button.",
       "pg_major_mismatch": "This backup was made on a different version of the database and can't be restored here.",

@@ -211,11 +211,14 @@ async function mockCurriculaApi(
         body: JSON.stringify({
           interview_id: interviewId,
           step: "who",
-          question: "Who is this curriculum for?",
-          // The API always offers "no particular student" as a first-class option,
-          // and hands over the levels it will accept — the student is OPTIONAL.
-          options: [{ value: "none", label: "No particular student", kind: "none" }],
-          findings: { levels: ["all_levels", "beginner", "intermediate", "advanced"] },
+          question: "What level, and what language?",
+          // No roster — the step hands over the levels and course languages
+          // the API will accept, nothing else.
+          options: null,
+          findings: {
+            levels: ["all_levels", "beginner", "intermediate", "advanced"],
+            languages: ["el", "en"],
+          },
           error: null,
         }),
       });
@@ -441,8 +444,8 @@ test.describe("curricula (mocked API)", () => {
     await page.getByTestId("interview-title").fill("Tone Shaping Fundamentals");
     await page.getByTestId("interview-start-submit").click();
 
-    // "who" — the student is OPTIONAL, so "no one in particular" + a level is a
-    // complete answer.
+    // "who" — level + language; the default language (the cockpit locale) is
+    // a complete answer.
     await page.getByTestId("interview-who-level-beginner").click();
     await page.getByTestId("interview-answer-submit").click();
 
@@ -492,7 +495,7 @@ test.describe("curricula (mocked API)", () => {
     expect(mock.calls.interviewStart).toBe(1);
     // Six answers: who, duration, scope, sources, outline, confirm.
     expect(mock.answerBodies).toHaveLength(6);
-    expect(mock.answerBodies[0]).toEqual({ student_id: null, level: "beginner" });
+    expect(mock.answerBodies[0]).toEqual({ student_id: null, level: "beginner", language: "en" });
     expect(mock.answerBodies[1]).toEqual({ weeks: 6, sessions_per_week: 1, minutes_per_session: 60 });
     expect(mock.answerBodies[5]).toEqual({ approved: true });
 
