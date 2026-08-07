@@ -27,8 +27,33 @@ from sqlalchemy.orm import Session
 from app.models.block import Block
 
 
-def clone_content_subtree(db: Session, node: Block, *, parent_id: UUID | None, student_id: UUID) -> Block:
+def clone_content_subtree(
+    db: Session,
+    node: Block,
+    *,
+    parent_id: UUID | None,
+    student_id: UUID | None,
+    is_template: bool = False,
+    id_map: dict[UUID, UUID] | None = None,
+) -> Block:
     """Recursively deep-clone `node`'s CONTENT-plane subtree only.
+
+    TWO CALLERS WITH OPPOSITE STAMPS, ONE WALK. Assignment produces a
+    student-owned INSTANCE (`is_template=False`, a real `student_id`);
+    `curriculum/duplicate.py` produces another TEMPLATE (`is_template=True`,
+    `student_id=None`). Everything else — the plane filter, the ordering, the
+    field-by-field copy, the flush-then-reparent — is identical, and this
+    module exists precisely because a second copy of it would drift (see the
+    module docstring). So the stamp is a parameter and the walk is not
+    duplicated. `is_template` defaults to False so the assignment call site
+    reads exactly as it did.
+
+    `id_map`, when passed, is filled as `{source_block_id: clone_block_id}` for
+    every node this creates, in walk order. Duplicate needs it to re-point
+    attached `Artifact` rows at the cloned blocks; assignment passes nothing
+    and is unaffected. It is an out-parameter rather than a second return value
+    so the recursion stays a plain `-> Block` and the caller keeps owning the
+    dict it allocated.
 
     A template that has already been segmented (`POST /blocks/{id}/segment`
     with `student_id=None`) also carries a delivery-plane child
@@ -64,7 +89,7 @@ def clone_content_subtree(db: Session, node: Block, *, parent_id: UUID | None, s
         body=node.body,
         est_minutes=node.est_minutes,
         language=node.language,
-        is_template=False,
+        is_template=is_template,
         target_profile=dict(node.target_profile) if node.target_profile else None,
         student_id=student_id,
         plane=node.plane,
@@ -80,6 +105,8 @@ def clone_content_subtree(db: Session, node: Block, *, parent_id: UUID | None, s
     )
     db.add(clone)
     db.flush()
+    if id_map is not None:
+        id_map[node.id] = clone.id
 
     children = db.scalars(
         select(Block)
@@ -87,6 +114,9 @@ def clone_content_subtree(db: Session, node: Block, *, parent_id: UUID | None, s
         .order_by(Block.order)
     ).all()
     for child in children:
-        clone_content_subtree(db, child, parent_id=clone.id, student_id=student_id)
+        clone_content_subtree(
+            db, child, parent_id=clone.id, student_id=student_id,
+            is_template=is_template, id_map=id_map,
+        )
 
     return clone

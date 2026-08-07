@@ -26,6 +26,7 @@ from app.curriculum import from_chat as from_chat_service
 from app.curriculum import interview as interview_service
 from app.curriculum.assign import clone_content_subtree
 from app.curriculum.draft import draft_progress
+from app.curriculum.duplicate import duplicate_curriculum
 from app.curriculum.export_docx import build_curriculum_docx, filename_for
 from app.curriculum.outline import TIER_GAP
 from app.curriculum.refine import refine_block, undo_refine
@@ -459,6 +460,26 @@ def rename_curriculum(
     course.title = stripped
     db.commit()
     return CurriculumListItem.model_validate(course, from_attributes=True)
+
+
+@router.post("/curricula/{root_id}/duplicate", response_model=CurriculumListItem, status_code=201)
+def duplicate_curriculum_endpoint(root_id: UUID, db: Session = Depends(get_db)) -> CurriculumListItem:
+    """Fork a curriculum — prose, blueprint, artifacts and all — so the tutor
+    has something to fall back to before he lets the AI rewrite it.
+
+    NO 409, AND THAT IS THE DIFFERENCE FROM DELETE BELOW. Delete refuses while a
+    job is in flight because deleting the tree out from under the draft worker
+    strands it mid-write. This only READS the source, so there is nothing to
+    strand — and refusing here would block him at the exact moment a backup is
+    worth most, which is while the thing is still being written.
+
+    No request body: the name is derived (`duplicate.copy_title`), and renaming
+    is already its own door one route up.
+    """
+    _get_course_root_or_404(db, root_id)
+    copy = duplicate_curriculum(db, root_id)
+    db.commit()
+    return CurriculumListItem.model_validate(copy, from_attributes=True)
 
 
 @router.delete("/curricula/{root_id}", status_code=204, response_model=None)
