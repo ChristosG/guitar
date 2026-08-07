@@ -73,6 +73,16 @@ interface ChatPanelProps {
   /** Called INSTEAD of appending the "view curriculum" link once an async
    * mutation job succeeds, when `rootId` is set. */
   onJobDone?: () => void;
+  /** Text to drop into the composer when this panel mounts, or when the value
+   * changes. The module ⋯ menu's "Restructure with AI" uses it to open the
+   * drawer with the module already named — the tutor then finishes the
+   * sentence in his own words rather than having to describe which module he
+   * means to a model that cannot see what he clicked.
+   *
+   * SEEDED, NOT SENT. It lands in the composer and waits: the whole point is
+   * that he says what he actually wants, and a message that sent itself would
+   * spend a 20-60s planner call on a half-written instruction. */
+  seedDraft?: string;
 }
 
 /** A persisted transcript row becomes a bubble. Rows with no `content` are
@@ -124,7 +134,7 @@ function toDisplayMessage(row: ChatMessageOut): ChatDisplayMessage | null {
  *    being rendered as a stray bubble above it — exactly where it sits in the
  *    live (never-reloaded) flow.
  */
-export function ChatPanel({ sessionId, rootId, blockTitles, onJobDone }: ChatPanelProps) {
+export function ChatPanel({ sessionId, rootId, blockTitles, onJobDone, seedDraft }: ChatPanelProps) {
   const t = useTranslations("chat");
   const tJobErrors = useTranslations("jobErrors");
   const locale = useLocale();
@@ -134,9 +144,18 @@ export function ChatPanel({ sessionId, rootId, blockTitles, onJobDone }: ChatPan
   const [sessionError, setSessionError] = useState<string | null>(null);
 
   const [messages, setMessages] = useState<ChatDisplayMessage[]>([]);
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = useState(seedDraft ?? "");
   const [sending, setSending] = useState(false);
   const [composerError, setComposerError] = useState<string | null>(null);
+
+  // A NEW seed replaces the composer; the SAME seed never re-fires. Keyed on
+  // the seed's own value rather than on mount, because the drawer stays mounted
+  // between openings: without this, clicking "Restructure with AI" on a second
+  // module would leave the first module's sentence sitting there. Guarded on
+  // truthiness so an unscoped open (no seed) never wipes something he typed.
+  useEffect(() => {
+    if (seedDraft) setDraft(seedDraft);
+  }, [seedDraft]);
 
   const [pendingApproval, setPendingApproval] = useState<PendingApprovalState | null>(null);
   const [resolving, setResolving] = useState(false);

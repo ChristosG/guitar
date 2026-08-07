@@ -1,13 +1,14 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocale, useTranslations } from "next-intl";
-import { Loader2, Maximize2, MessagesSquare, Minimize2, RotateCcw, X } from "lucide-react";
+import { Layers, Loader2, Maximize2, MessagesSquare, Minimize2, RotateCcw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm";
 import { ChatPanel } from "@/components/chat/chat-panel";
 import { ChatSessionsProvider } from "@/components/chat/chat-sessions";
 import { ApiError, createChatSession, getOrCreateCurriculumChatSession, type BlockNode } from "@/lib/api";
+import { useReviseScope } from "@/components/curriculum/revise-scope";
 import { cn } from "@/lib/utils";
 
 interface ReviseDrawerProps {
@@ -89,6 +90,11 @@ export function ReviseDrawer({ rootId, tree, onApplied }: ReviseDrawerProps) {
   const confirm = useConfirm();
 
   const [open, setOpen] = useState(false);
+  // Scope lives in the shared provider above BOTH this drawer and the board —
+  // the module ⋯ menu is the other writer. See `revise-scope.tsx`.
+  const reviseScope = useReviseScope();
+  const scope = reviseScope?.scope ?? null;
+  const seed = reviseScope?.seed;
   const [fullScreen, setFullScreen] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -117,8 +123,7 @@ export function ReviseDrawer({ rootId, tree, onApplied }: ReviseDrawerProps) {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [open]);
 
-  async function handleOpen() {
-    setOpen(true);
+  const ensureSession = useCallback(async () => {
     if (sessionId || creating) return;
     setCreating(true);
     setCreateError(null);
@@ -130,7 +135,28 @@ export function ReviseDrawer({ rootId, tree, onApplied }: ReviseDrawerProps) {
     } finally {
       setCreating(false);
     }
+  }, [creating, rootId, sessionId, t]);
+
+  async function handleOpen() {
+    // This button is the WHOLE-COURSE door, so it clears any scope a previous
+    // module opening left behind — otherwise "Revise with AI" would silently
+    // stay pointed at whatever module he restructured last.
+    reviseScope?.clearScope();
+    setOpen(true);
+    await ensureSession();
   }
+
+  // The module ⋯ menu asks to open by bumping `openRequest`. A counter rather
+  // than a boolean because THIS component owns open/closed (Escape, the X, the
+  // backdrop all close it) and a shared boolean would fight that.
+  const lastRequest = useRef(0);
+  useEffect(() => {
+    const n = reviseScope?.openRequest ?? 0;
+    if (n === 0 || n === lastRequest.current) return;
+    lastRequest.current = n;
+    setOpen(true);
+    void ensureSession();
+  }, [reviseScope?.openRequest, ensureSession]);
 
   async function handleClearChat() {
     const ok = await confirm({
@@ -182,6 +208,32 @@ export function ReviseDrawer({ rootId, tree, onApplied }: ReviseDrawerProps) {
               <div>
                 <h2 className="font-heading text-base font-medium">{t("heading")}</h2>
                 <p className="text-sm text-muted-foreground">{t("description")}</p>
+                {/* NOT DECORATION. A scoped planner that looks unscoped is a
+                    trap: he would ask for something course-wide, watch the plan
+                    come back with half of it missing, and have no way to tell
+                    why. The chip says which module, and clearing it is how you
+                    get the whole course back. */}
+                {scope && (
+                  <div className="mt-2 flex items-center gap-1.5" data-testid="revise-scope-chip">
+                    <span className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-border bg-muted px-2.5 py-0.5 text-xs">
+                      <Layers className="size-3 shrink-0" aria-hidden />
+                      <span className="truncate" title={scope.title}>
+                        {t("scopedTo", { title: scope.title })}
+                      </span>
+                    </span>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      data-testid="revise-scope-clear"
+                      title={t("scopeClear")}
+                      onClick={() => reviseScope?.clearScope()}
+                    >
+                      <X />
+                      <span className="sr-only">{t("scopeClear")}</span>
+                    </Button>
+                  </div>
+                )}
               </div>
               <div className="flex shrink-0 items-center gap-1">
                 {sessionId && (
@@ -262,6 +314,7 @@ export function ReviseDrawer({ rootId, tree, onApplied }: ReviseDrawerProps) {
                     rootId={rootId}
                     blockTitles={blockTitles}
                     onJobDone={onApplied}
+                    seedDraft={seed}
                   />
                 </ChatSessionsProvider>
               )}

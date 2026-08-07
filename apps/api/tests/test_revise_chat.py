@@ -88,8 +88,11 @@ def test_propose_fn_passes_through_the_planner_result(monkeypatch):
     canned = {"summary": "add a DS-1 lesson", "ops": [
         {"op": "insert_lesson", "module_id": "m", "title": "DS-1", "objective": "o", "reason": "r"}]}
 
-    def _fake_plan(db, root_id, *, instruction):
-        captured.update(root_id=root_id, instruction=instruction)
+    # `scope_module_id` is keyword-only and optional (module-scoped restructure,
+    # 2026-08-07). The tool always forwards it, so a stub that omits it fails
+    # with a TypeError dressed up as a planner error.
+    def _fake_plan(db, root_id, *, instruction, scope_module_id=None):
+        captured.update(root_id=root_id, instruction=instruction, scope_module_id=scope_module_id)
         return canned
 
     monkeypatch.setattr(agent_tools, "_plan_revision_service", _fake_plan)

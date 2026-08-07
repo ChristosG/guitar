@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronRight,
   ChevronUp,
+  Layers,
   Loader2,
   MoreVertical,
   Pencil,
@@ -31,6 +32,7 @@ import { AttachArtifactDialog } from "@/components/curriculum/attach-artifact-di
 import { SegmentDialog } from "@/components/curriculum/segment-dialog";
 import { ExtendWithChat } from "@/components/curriculum/extend-with-chat";
 import { LessonWhatChanged } from "@/components/curriculum/lesson-what-changed";
+import { useReviseScope } from "@/components/curriculum/revise-scope";
 import { LessonSources } from "@/components/curriculum/lesson-sources";
 import { TierBadge } from "@/components/curriculum/tier-badge";
 import {
@@ -175,6 +177,9 @@ export function BlockCard({
   const [added, setAdded] = useState<ArtifactOut[]>([]);
 
   const meta = node.meta ?? {};
+  // null outside the curriculum board (no provider) — the module's
+  // restructure item simply does not render there.
+  const reviseScope = useReviseScope();
   const isSegment = node.kind === "segment";
   const isLesson = node.kind === "lesson";
   const isModule = node.kind === "module";
@@ -534,6 +539,31 @@ export function BlockCard({
               <DropdownMenuItem data-testid="menu-add-lesson" onClick={handleAddLesson}>
                 <Plus />
                 {t("addLesson")}
+              </DropdownMenuItem>
+            )}
+            {/* THE DOOR CHRIS WAS LOOKING FOR. "Extend with AI" on a module
+                only ever rewrote the module's own description, because it is
+                `refine_block` — a TEXT tool that never sees a module's
+                children. This is the structural one: it opens the revise
+                drawer already pointed at this module, so "5 lessons instead of
+                3" has somewhere to be said. Rendered only inside a
+                `ReviseScopeContext` provider, i.e. on the curriculum board. */}
+            {isModule && reviseScope && (
+              <DropdownMenuItem
+                data-testid="menu-restructure-ai"
+                onClick={() =>
+                  reviseScope.openForModule(
+                    node.id,
+                    node.title,
+                    // The id goes into the MESSAGE, not just into state: this
+                    // drawer drives a chat, so the planner is reached through a
+                    // tool call and the model can only pass an id it can see.
+                    t("restructureSeed", { title: node.title, id: node.id }),
+                  )
+                }
+              >
+                <Layers />
+                {t("restructureWithAi")}
               </DropdownMenuItem>
             )}
             <DropdownMenuSeparator />

@@ -603,7 +603,9 @@ def _generate_curriculum(
     return {"root_id": root_id}
 
 
-def _propose_curriculum_revision(db, *, root_id: str, instruction: str) -> dict:
+def _propose_curriculum_revision(
+    db, *, root_id: str, instruction: str, scope_module_id: str | None = None
+) -> dict:
     """READ-ONLY: read the whole curriculum + the tutor's library and return a
     PLAN of structural revisions, each with a `reason`. This answers "should I
     add X?" WITHOUT changing anything — `apply_curriculum_revision` is the gated
@@ -619,8 +621,20 @@ def _propose_curriculum_revision(db, *, root_id: str, instruction: str) -> dict:
     parsed = _parse_uuid(root_id)
     if parsed is None:
         return {"error": f"invalid root_id: {root_id!r}"}
+
+    # SCOPE, when the tutor's message named a module (the module ⋯ menu's
+    # "Restructure with AI" writes the id into the message for exactly this).
+    # A malformed id is an ERROR rather than a silent fall-back to unscoped:
+    # the tutor asked to change ONE module, and quietly widening that to the
+    # whole course is the opposite of what he asked for.
+    scope: UUID | None = None
+    if scope_module_id:
+        scope = _parse_uuid(scope_module_id)
+        if scope is None:
+            return {"error": f"invalid scope_module_id: {scope_module_id!r}"}
+
     try:
-        return _plan_revision_service(db, parsed, instruction=instruction)
+        return _plan_revision_service(db, parsed, instruction=instruction, scope_module_id=scope)
     except Exception as e:   # ReviseError, or anything the planner surfaces
         return {"error": str(e)}
 
@@ -981,6 +995,19 @@ TOOLS: dict[str, ToolEntry] = {
                         "instruction": {
                             "type": "string",
                             "description": "what the tutor wants changed, in his own words",
+                        },
+                        "scope_module_id": {
+                            "type": "string",
+                            "description": (
+                                "OPTIONAL. Pass this ONLY when the tutor's message "
+                                "names a module id to confine the revision to — the "
+                                "'Restructure with AI' button on a module opens the "
+                                "chat with exactly that, spelled out. When set, the "
+                                "planner sees ONLY that module and every operation "
+                                "outside it is discarded, so passing the WRONG id "
+                                "silently throws away the whole plan. If the tutor "
+                                "did not name one, omit this entirely."
+                            ),
                         },
                     },
                     "required": ["root_id", "instruction"],

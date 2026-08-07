@@ -240,3 +240,80 @@ test.describe("a whole lesson rewritten by revise", () => {
     await expect(page.getByTestId("lesson-what-changed-trigger")).toHaveCount(0);
   });
 });
+
+test.describe("restructure one module with AI", () => {
+  /** The board plus a chat session, so the revise drawer can open. */
+  async function mockBoard(page: Page) {
+    async function handler(route: Route) {
+      const req = route.request();
+      const { pathname } = new URL(req.url());
+      if (req.method() === "OPTIONS") {
+        await route.fulfill({ status: 204, headers: CORS_HEADERS });
+        return;
+      }
+      const json = (status: number, body: unknown) =>
+        route.fulfill({ status, contentType: "application/json", headers: CORS_HEADERS, body: JSON.stringify(body) });
+
+      if (pathname === `/curricula/${ROOT_ID}/chat-session`) {
+        await json(200, { session_id: "77777777-7777-7777-7777-777777777777" });
+        return;
+      }
+      if (pathname.startsWith("/chat/")) {
+        await json(200, { messages: [] });
+        return;
+      }
+      if (pathname === `/curricula/${ROOT_ID}`) {
+        await json(200, node({
+          id: ROOT_ID, kind: "course", title: "Ήχος Κιθάρας", meta: { brief: null },
+          children: [node({
+            id: MODULE_ID, kind: "module", title: "Από το πετάλι στον ενισχυτή",
+            body: "Στόχος.", meta: { tier: "library" },
+            children: [node({ id: LESSON_ID, kind: "lesson", title: "Μάθημα 1",
+                              meta: { draft_status: "ready" }, children: [] })],
+          })],
+        }));
+        return;
+      }
+      if (pathname.endsWith("/progress")) {
+        await json(200, { root_id: ROOT_ID, total: 1, queued: 0, drafting: 0, ready: 1, failed: 0, done: true });
+        return;
+      }
+      await json(200, null);
+    }
+    await page.route(`${API_ORIGIN}/**`, handler);
+  }
+
+  test("a module's ⋯ opens the drawer scoped, with the id spelled into the message", async ({ page }) => {
+    await mockBoard(page);
+    await page.goto(`/el/curricula/${ROOT_ID}`);
+    await expect(page.getByTestId("tree-board")).toBeVisible();
+
+    const moduleCard = page.locator('[data-testid="block-card"][data-kind="module"]');
+    await moduleCard.getByTestId("block-card-menu").first().click();
+    await page.getByTestId("menu-restructure-ai").click();
+
+    // The chip says which module — a scoped planner that looks unscoped is a trap.
+    await expect(page.getByTestId("revise-scope-chip")).toContainText("Από το πετάλι στον ενισχυτή");
+
+    // THE ID IS IN THE COMPOSER, and that is what makes scoping possible at all:
+    // this drawer drives a CHAT, so the planner is reached through a tool call,
+    // and the model can only pass an id it can actually see.
+    const composer = page.getByTestId("chat-input");
+    await expect(composer).toHaveValue(new RegExp(MODULE_ID));
+    await expect(composer).toHaveValue(/Από το πετάλι/);
+  });
+
+  test("the drawer's own button is the whole-course door and clears any scope", async ({ page }) => {
+    await mockBoard(page);
+    await page.goto(`/el/curricula/${ROOT_ID}`);
+    await expect(page.getByTestId("tree-board")).toBeVisible();
+
+    await page.locator('[data-testid="block-card"][data-kind="module"]').getByTestId("block-card-menu").first().click();
+    await page.getByTestId("menu-restructure-ai").click();
+    await expect(page.getByTestId("revise-scope-chip")).toBeVisible();
+
+    await page.getByTestId("revise-close").click();
+    await page.getByTestId("revise-open").click();
+    await expect(page.getByTestId("revise-scope-chip")).toHaveCount(0);
+  });
+});

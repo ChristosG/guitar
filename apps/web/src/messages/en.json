@@ -112,7 +112,9 @@
       },
       "libraryWhole": "Written from {sources, plural, one {# source} other {# sources}} of your library — {tokens, number} tokens, read whole.",
       "libraryDegraded": "Your library ({tokens, number} tokens) was too large to read whole — the lessons were drafted from per-module search instead of the full text.",
-      "shapeWords": "~{words, number} words per lesson"
+      "shapeWords": "~{words, number} words per lesson",
+      "restructureWithAi": "Restructure with AI",
+      "restructureSeed": "In the module “{title}” (id: {id}) I want "
     },
     "actions": {
       "menuLabel": "Curriculum actions",
@@ -364,7 +366,10 @@
       },
       "dropped": {
         "warning": "{count, plural, one {# proposed change was rejected} other {# proposed changes were rejected}} by the safety check — see why before you approve."
-      }
+      },
+      "scopedTo": "Only the module “{title}”",
+      "scopeClear": "Revise the whole curriculum",
+      "scopedSeed": "In the module “{title}” (id: {id}) I want "
     }
   },
   "library": {

@@ -8,6 +8,7 @@ import { ArrowLeft, FileDown, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CurriculumActionsMenu } from "@/components/curriculum/curriculum-actions-menu";
 import { ReviseDrawer } from "@/components/curriculum/revise-drawer";
+import { ReviseScopeProvider } from "@/components/curriculum/revise-scope";
 import { TreeBoard } from "@/components/curriculum/tree-board";
 import {
   ApiError,
@@ -116,6 +117,11 @@ export default function CurriculumDetailPage() {
   }, [rootId]);
 
   return (
+    // WRAPS BOTH the drawer and the board, because they are siblings and the
+    // module ⋯ menu (deep inside `TreeBoard` -> recursive `BlockCard`) has to
+    // reach the drawer. See `revise-scope.tsx` for why this is a context
+    // rather than a prop threaded through the recursion.
+    <ReviseScopeProvider>
     <div className="flex flex-col gap-6">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <Link
@@ -210,5 +216,6 @@ export default function CurriculumDetailPage() {
         />
       )}
     </div>
+    </ReviseScopeProvider>
   );
 }

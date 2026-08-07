@@ -112,7 +112,9 @@
       },
       "libraryWhole": "Γράφτηκε από {sources, plural, one {# πηγή} other {# πηγές}} της βιβλιοθήκης σου — {tokens, number} tokens, διαβάστηκαν ολόκληρες.",
       "libraryDegraded": "Η βιβλιοθήκη σου ({tokens, number} tokens) ήταν πολύ μεγάλη για να διαβαστεί ολόκληρη — τα μαθήματα γράφτηκαν με αναζήτηση ανά ενότητα, όχι με πλήρες κείμενο.",
-      "shapeWords": "στόχος ~{words, number} λέξεις ανά μάθημα"
+      "shapeWords": "στόχος ~{words, number} λέξεις ανά μάθημα",
+      "restructureWithAi": "Αναδιάρθρωση με AI",
+      "restructureSeed": "Στην ενότητα «{title}» (id: {id}) θέλω "
     },
     "actions": {
       "menuLabel": "Ενέργειες προγράμματος",
@@ -364,7 +366,10 @@
       },
       "dropped": {
         "warning": "{count, plural, one {# προτεινόμενη αλλαγή απορρίφθηκε} other {# προτεινόμενες αλλαγές απορρίφθηκαν}} από τον έλεγχο ασφαλείας — δες τον λόγο πριν εγκρίνεις."
-      }
+      },
+      "scopedTo": "Μόνο η ενότητα «{title}»",
+      "scopeClear": "Αναθεώρηση όλου του προγράμματος",
+      "scopedSeed": "Στην ενότητα «{title}» (id: {id}) θέλω "
     }
   },
   "library": {
