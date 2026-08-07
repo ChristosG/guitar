@@ -3,6 +3,7 @@ from fastapi import HTTPException
 from app.config import settings
 from app.llm.base import LLMProvider
 from app.llm.claude import ClaudeProvider
+from app.llm.claude_cli import ClaudeCLIProvider
 from app.llm.errors import LLMNotConfigured
 from app.settings_store import LLMConfig, resolve_llm_config, resolve_ocr_config
 
@@ -26,15 +27,36 @@ _PROVIDERS: dict[tuple[str, str, str], LLMProvider] = {}
 
 
 def _build(cfg: LLMConfig) -> LLMProvider:
-    # `claude` is the ONLY provider. The `claude_cli` bridge and the local
-    # `qwen` vLLM box were deleted with the CLI-bridge era; a config that still
-    # names one of them is a stale .env, and the honest answer is a loud error
-    # naming the fix, not a silently different model.
+    # TWO PROVIDERS, ONE PER SHIPPING SURFACE, AND THE SPLIT IS THE POINT.
+    #
+    #   claude      — the Anthropic API, on a key. What the .dmg/.deb use, and
+    #                 the ONLY thing they can use: `desktop/src-tauri/src/
+    #                 supervisor.rs` hardcodes `LLM_PROVIDER=claude` on the api
+    #                 child, so the bundle cannot reach the branch below even by
+    #                 accident, and `tools/claude_bridge/` is not in the
+    #                 bundle's resources.
+    #   claude_cli  — Claude on the tutor's SUBSCRIPTION, via the `claude` CLI
+    #                 behind the bridge container. What the WEBAPP uses. A Max
+    #                 plan buys no API key, which is the whole reason this
+    #                 exists.
+    #
+    # `claude_cli` was deleted in feb9b2c ("Anthropic API is the only LLM path")
+    # because it is dead weight for the desktop app — which was true, and only
+    # true for the desktop app. Rebuilding the webapp's containers off this
+    # branch then took the live site's LLM down with a loud ValueError, because
+    # the webapp had been on the bridge all along. Restored 2026-08-07: the two
+    # surfaces have genuinely different billing models, so they need genuinely
+    # different providers, and the seam that separates them is this function.
+    #
+    # `qwen` stays deleted. It was the local vLLM box, and CPU-only deployment
+    # ended it — no surface wants it back.
     if cfg.provider == "claude":
         return ClaudeProvider(api_key=cfg.api_key, model=cfg.model)
+    if cfg.provider == "claude_cli":
+        return ClaudeCLIProvider(model=cfg.model)
     raise ValueError(
-        f"Unknown LLM_PROVIDER: {cfg.provider!r} (the only supported provider "
-        f"is 'claude' — the 'claude_cli' bridge and 'qwen' were removed)"
+        f"Unknown LLM_PROVIDER: {cfg.provider!r} (expected 'claude' for the "
+        f"desktop app or 'claude_cli' for the webapp — 'qwen' was removed)"
     )
 
 

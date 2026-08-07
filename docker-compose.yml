@@ -50,6 +50,80 @@ services:
       postgres: { condition: service_healthy }
     networks: [appnet, platform-net]
 
+  # LLM_PROVIDER=claude_cli ONLY. Claude on the tutor's Max SUBSCRIPTION, via the
+  # `claude` CLI — no API key, no per-token bill. Idle and harmless under
+  # LLM_PROVIDER=qwen/claude, which never dial it.
+  #
+  # WHY A SEPARATE CONTAINER AND NOT `claude` INSIDE `api`. The mounted
+  # ~/.claude/.credentials.json is not one token — alongside the Claude OAuth token it
+  # holds live access AND refresh tokens for every MCP server you have ever authorised
+  # (Linear, GitLab, Postman, HuggingFace, ...). The `api` container is the web-facing
+  # one: it parses uploads, serves a chat box, and runs an agent loop over text a user
+  # typed. It is the thing worth attacking, and it gets none of this. THIS container
+  # runs one thing — `claude -p` with every tool disabled — and publishes no port.
+  claude-bridge:
+    build: { context: ./tools/claude_bridge }
+    env_file: .env            # CLAUDE_BRIDGE_TOKEN — must match the api's copy
+    environment:
+      CLAUDE_BRIDGE_HOST: "0.0.0.0"     # inside the container; see the missing `ports:` below
+      CLAUDE_BRIDGE_PORT: "8799"
+      CLAUDE_BRIDGE_MAX_CONCURRENCY: "3"
+      # The ONLY directory /v1/vision will read from, and it must match the `media`
+      # volume's mount point below AND the api's `settings.media_dir`. It is set
+      # here rather than left to the default so that the fence is visible in the
+      # deployment, not just in the code it fences.
+      CLAUDE_BRIDGE_MEDIA_ROOT: "/media"
+    # NO `ports:` — DELIBERATELY. Reachable only from `api` over the internal appnet.
+    # (The earlier host-run version of this bridge had to bind 0.0.0.0 on a real host
+    # port, because a container cannot reach the host's loopback — which left a
+    # subscription-spending endpoint exposed to the LAN. Running it in compose is what
+    # lets it have no host-facing surface at all.)
+    #
+    # THE REAL ~/.claude DIRECTORY, read-write. Not a copy, and not the single
+    # .credentials.json file:
+    #   - a COPY gives you two independent OAuth sessions off one refresh token; the
+    #     first to refresh can invalidate the other, and the symptom is your own
+    #     terminal `claude` demanding a re-login for no visible reason.
+    #   - a single-FILE bind mount breaks the moment the CLI does an atomic
+    #     write-and-rename on refresh: the host gets a new inode, the container stays
+    #     bound to the old one, and they silently diverge.
+    # The directory mount means container and host share ONE file — exactly what two
+    # `claude` terminals already do, which is normal and supported.
+    volumes:
+      - ${HOME}/.claude:/home/node/.claude
+      # THE PAGE SCANS, READ-ONLY. The one hole in `--tools ""`: /v1/vision runs
+      # `claude -p --tools Read`, because `claude -p` has no image parameter and a
+      # real file on disk is the only route from a page scan to the model. This
+      # mount is what that tool is allowed to see — the scans and nothing else. Not
+      # the repo, not the DB, not the rest of the host.
+      #
+      # THE SAME NAMED VOLUME `api` MOUNTS, NOT `./media`. The api WRITES the staged
+      # page here (`settings.media_dir` = /media) and the bridge READS it, so they
+      # must be the same filesystem. A `./media:/media:ro` bind would be a DIFFERENT,
+      # empty host directory (there is no ./media in this repo) — docker would create
+      # it, the mount would look fine, and every vision call would 400 "no such image"
+      # while both containers sat there healthy.
+      #
+      # `:ro` is the bridge's half of the contract: only the api may write a page,
+      # and a compromised `claude` cannot plant a file for its next self to read.
+      - media:/media:ro
+    # uid 1000 = the human on the host. Without it the CLI's first token refresh writes
+    # a root-owned .credentials.json into your home directory and your own `claude`
+    # can no longer update it.
+    user: "1000:1000"
+    restart: unless-stopped
+    healthcheck:
+      # Zero-cost: reads the OAuth token's own expiry. NEVER a `claude -p` ping — a
+      # health probe that spends a real call burns a 5-hour rate limit to answer
+      # "are we up".
+      test: ["CMD", "python3", "-c",
+             "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://localhost:8799/health',timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    networks: [appnet]
+
   web:
     # After a host reboot the whole app must come back with nobody at the
     # keyboard — 2026-07-21 it sat down for 33 minutes until someone noticed.

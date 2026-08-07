@@ -5,14 +5,36 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+psycopg://guitar:guitar@postgres:5432/guitar"
 
-    # `claude` — the Anthropic API — is the ONLY provider. The `claude_cli`
-    # bridge (Claude on the tutor's subscription via `claude -p`) and the local
-    # `qwen` vLLM box are gone; `llm/factory.py::_build` rejects anything else
-    # loudly. The API key does NOT live here in steady state: the tutor pastes
-    # it into Settings and it is stored encrypted (`settings_store.py`).
-    # `llm_api_key` is only the bootstrap/CI env fallback.
+    # TWO PROVIDERS, ONE PER SHIPPING SURFACE — see `llm/factory.py::_build`.
+    #
+    #   claude      the Anthropic API, on a key. The DESKTOP app (.dmg/.deb),
+    #               which hardcodes this in `desktop/src-tauri/src/supervisor.rs`.
+    #   claude_cli  Claude on the tutor's SUBSCRIPTION via `claude -p` behind the
+    #               sibling bridge container. The WEBAPP, which must never spend
+    #               per-token money.
+    #
+    # The DEFAULT stays `claude`, deliberately: an install that says nothing is
+    # the desktop app, and the desktop app has no bridge to talk to. The webapp
+    # sets `LLM_PROVIDER=claude_cli` in its `.env`.
+    #
+    # The API key does NOT live here in steady state: the tutor pastes it into
+    # Settings and it is stored encrypted (`settings_store.py`). `llm_api_key`
+    # is only the bootstrap/CI env fallback — and `claude_cli` needs no key at
+    # all, which `resolve_llm_config` handles before it ever looks for one.
     llm_provider: str = "claude"
     llm_api_key: str = "none"
+
+    # ---- The bridge, for `claude_cli` only --------------------------------
+    # The CLI does not run in THIS container and its credentials are not mounted
+    # here. It runs in the sibling `claude-bridge` service (docker-compose.yml),
+    # which is the only container that ever sees ~/.claude — this one is the
+    # web-facing process and deliberately gets nothing. Plain compose DNS: the
+    # service name resolves on `appnet`.
+    claude_bridge_url: str = "http://claude-bridge:8799"
+    # Shared secret. The bridge binds a TCP port that SPENDS MONEY, so it refuses
+    # to start without one, and refuses any request that does not carry it. Must
+    # be byte-identical to the value the bridge was started with.
+    claude_bridge_token: str = ""
     # Legacy of the deleted qwen provider. `llm_base_url` is kept (truthy on
     # purpose) as the standing regression guard that `ClaudeProvider` reads
     # `anthropic_base_url` and never this — see the comment below and

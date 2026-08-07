@@ -163,6 +163,19 @@ class LLMConfig:
         )
 
 
+def _model_from_db() -> str:
+    """The model the tutor picked in Settings, or the default. NEVER raises —
+    that is the whole difference from the `claude` path below, which must fail
+    loudly on a missing key. The bridge has no key to be missing."""
+    try:
+        with SessionLocal() as db:
+            row = load(db)
+            return row.model if row.model in MODELS else DEFAULT_MODEL
+    except Exception:
+        log.warning("settings_store: could not read app_setting model; using default", exc_info=True)
+        return DEFAULT_MODEL
+
+
 def resolve_llm_config(provider: str | None = None) -> LLMConfig:
     """What provider should we build RIGHT NOW.
 
@@ -186,6 +199,26 @@ def resolve_llm_config(provider: str | None = None) -> LLMConfig:
     var that silently overrode it would make the Settings screen a lie.
     """
     provider = provider or settings.llm_provider
+
+    # `claude_cli` NEEDS NO KEY, and that is not a loophole — it is the entire
+    # proposition. It spends the tutor's Claude SUBSCRIPTION through the `claude`
+    # CLI behind the bridge container (`llm/claude_cli.py`), and a subscription
+    # is not an API key: a Max plan buys zero API credits. So "no key" is the
+    # correct, working, steady state for the WEBAPP, and raising
+    # `LLMNotConfigured` at it — which the `claude` path below does, correctly,
+    # for the DESKTOP app's case — would 409 a perfectly healthy install and
+    # send the tutor to a Settings screen to paste something he does not have
+    # and does not need.
+    #
+    # It still reads the MODEL from the database, so Settings' Sonnet/Haiku
+    # picker keeps working across both Claude providers.
+    #
+    # Deleted in feb9b2c along with the provider itself and restored with it on
+    # 2026-08-07: the deletion was correct for the desktop app and wrong for the
+    # webapp, which had been running on the subscription the whole time. See
+    # `llm/factory.py::_build` for why the two surfaces need different providers.
+    if provider == "claude_cli":
+        return LLMConfig(provider=provider, model=_model_from_db(), api_key="")
 
     model = DEFAULT_MODEL
     key: str | None = None
