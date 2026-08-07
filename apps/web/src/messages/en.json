@@ -37,6 +37,7 @@
     "boardError": "Could not load this curriculum.",
     "exportDocx": "Save as DOCX",
     "exportError": "Export failed — try again.",
+    "openTheCopy": "Open the copy “{title}”",
     "tree": {
       "estMinutes": "{count} min",
       "editTitlePlaceholder": "Block title",
@@ -119,6 +120,9 @@
       "renameTitle": "Rename curriculum",
       "renameSave": "Save",
       "renameError": "Rename failed — try again.",
+      "duplicate": "Create a copy",
+      "duplicateDone": "Created “{title}”.",
+      "duplicateError": "Could not create the copy — try again.",
       "delete": "Delete",
       "deleteTitle": "Delete curriculum?",
       "deleteDescription": "“{title}” and all of its lessons will be permanently deleted. This cannot be undone.",

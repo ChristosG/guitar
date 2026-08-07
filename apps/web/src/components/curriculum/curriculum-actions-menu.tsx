@@ -2,12 +2,13 @@
 
 import { useState, type FormEvent } from "react";
 import { useTranslations } from "next-intl";
-import { Loader2, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
+import { Copy, Loader2, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
@@ -19,32 +20,57 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { useConfirm } from "@/components/ui/confirm";
-import { ApiError, deleteCurriculum, renameCurriculum } from "@/lib/api";
+import {
+  ApiError,
+  deleteCurriculum,
+  duplicateCurriculum,
+  renameCurriculum,
+  type CurriculumListItem,
+} from "@/lib/api";
 
 interface CurriculumActionsMenuProps {
   rootId: string;
   title: string;
   onRenamed: (nextTitle: string) => void;
   onDeleted: () => void;
+  /** The copy, straight from the server — its real, server-derived title
+   * included. Optional so a caller that has nowhere to put a new curriculum
+   * simply doesn't offer the action. */
+  onDuplicated?: (created: CurriculumListItem) => void;
 }
 
-/** The "⋯" on a curriculum — Rename (dialog) and Delete (confirm, destructive).
- * Used on the index cards and the detail header; the CALLER decides what
- * follows (refresh the list / navigate away).
+/** The "⋯" on a curriculum — Rename (dialog), Create a copy, and Delete
+ * (confirm, destructive). Used on the index cards and the detail header; the
+ * CALLER decides what follows (refresh the list / navigate away).
  *
  * Delete's 409 ("lessons are still drafting") is a codebase-convention
  * ENGLISH string from the API (`routers/curriculum.py`) — this is the one
  * error the tutor is guaranteed to hit in the ordinary course of using the
  * app (materialize a curriculum, immediately try to delete it while it's
  * still writing), so it gets a real Greek/English sentence via `code`-free
- * status branching rather than surfacing `err.detail` verbatim. */
-export function CurriculumActionsMenu({ rootId, title, onRenamed, onDeleted }: CurriculumActionsMenuProps) {
+ * status branching rather than surfacing `err.detail` verbatim.
+ *
+ * DUPLICATE HAS NO DIALOG AND NO CONFIRM, deliberately. There is nothing to
+ * type (the name is derived server-side, in the course's own language) and
+ * nothing to warn about — it only ever ADDS. It also has no drafting branch,
+ * because unlike Delete the server does not refuse mid-draft: duplicating only
+ * reads the source, and mid-draft is exactly when a backup is worth most. */
+export function CurriculumActionsMenu({
+  rootId,
+  title,
+  onRenamed,
+  onDeleted,
+  onDuplicated,
+}: CurriculumActionsMenuProps) {
   const t = useTranslations("curricula.actions");
   const confirm = useConfirm();
   const [renameOpen, setRenameOpen] = useState(false);
   const [draftTitle, setDraftTitle] = useState(title);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Named so it cannot be mistaken for an error: duplicating is silent
+   * otherwise, and on the detail header nothing on screen would move at all. */
+  const [notice, setNotice] = useState<string | null>(null);
 
   const submitRename = async (e: FormEvent) => {
     e.preventDefault();
@@ -61,6 +87,21 @@ export function CurriculumActionsMenu({ rootId, title, onRenamed, onDeleted }: C
       onRenamed(updated.title);
     } catch (err) {
       setError(err instanceof ApiError ? err.detail : t("renameError"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleDuplicate = async () => {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const created = await duplicateCurriculum(rootId);
+      setNotice(t("duplicateDone", { title: created.title }));
+      onDuplicated?.(created);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.detail : t("duplicateError"));
     } finally {
       setBusy(false);
     }
@@ -116,6 +157,16 @@ export function CurriculumActionsMenu({ rootId, title, onRenamed, onDeleted }: C
             <Pencil />
             {t("rename")}
           </DropdownMenuItem>
+          {onDuplicated && (
+            <DropdownMenuItem data-testid="curriculum-duplicate" onClick={handleDuplicate}>
+              <Copy />
+              {t("duplicate")}
+            </DropdownMenuItem>
+          )}
+          {/* Not decoration. Three items with the destructive one flush against
+              a benign one is a misclick waiting to happen, and the two benign
+              ones now read as a group. */}
+          <DropdownMenuSeparator />
           <DropdownMenuItem destructive data-testid="curriculum-delete" onClick={handleDelete}>
             <Trash2 />
             {t("delete")}
@@ -135,6 +186,20 @@ export function CurriculumActionsMenu({ rootId, title, onRenamed, onDeleted }: C
           className="mt-1 max-w-48 text-right text-xs text-destructive"
         >
           {error}
+        </p>
+      )}
+
+      {/* `role="status"`, NOT `role="alert"`: a copy being made is good news,
+          and an assertive live region would interrupt a screen reader
+          mid-sentence to say so. Nothing else on the detail header moves when a
+          duplicate lands, so without this the action is completely silent. */}
+      {notice && !renameOpen && (
+        <p
+          role="status"
+          data-testid="curriculum-duplicate-notice"
+          className="mt-1 max-w-48 text-right text-xs text-muted-foreground"
+        >
+          {notice}
         </p>
       )}
 

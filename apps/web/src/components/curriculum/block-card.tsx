@@ -363,6 +363,12 @@ export function BlockCard({
       ) : (
         <span
           data-testid="block-card-title"
+          // From `sm` up this truncates (see the class below), and a module
+          // called «Από το πετάλι στον ενισχυτή: αλυσίδα σήματος και τελικ…»
+          // was unreadable past the ellipsis with no way to see the rest.
+          // Native tooltip, same as the segment-error chip below — no portal to
+          // position, which matters on the desktop build.
+          title={node.title}
           // Mobile: the title WRAPS and the badges drop below it — every chip in
           // this row is shrink-0, so a truncating title was the only thing that
           // could yield and it collapsed to nothing. The 12rem flex-BASIS is the

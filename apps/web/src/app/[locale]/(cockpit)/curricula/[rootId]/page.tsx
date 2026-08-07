@@ -9,7 +9,13 @@ import { Button } from "@/components/ui/button";
 import { CurriculumActionsMenu } from "@/components/curriculum/curriculum-actions-menu";
 import { ReviseDrawer } from "@/components/curriculum/revise-drawer";
 import { TreeBoard } from "@/components/curriculum/tree-board";
-import { ApiError, downloadCurriculumDocx, getCurriculum, type BlockNode } from "@/lib/api";
+import {
+  ApiError,
+  downloadCurriculumDocx,
+  getCurriculum,
+  type BlockNode,
+  type CurriculumListItem,
+} from "@/lib/api";
 
 /** The per-curriculum board, split out of the old `curricula/page.tsx` so the
  * list page can become a plain navigable index (Unit A). Same shape as
@@ -50,6 +56,12 @@ export default function CurriculumDetailPage() {
   const [refreshNonce, setRefreshNonce] = useState(0);
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
+  // The copy this page just made, if it made one. Held so the header can offer
+  // a way INTO it — the menu's own notice says a copy exists, but on this page
+  // nothing else moves when one lands, and "it's in the list" is a worse answer
+  // than a link. Cleared on navigation by the remount, which is correct: the
+  // offer belongs to the moment it was made.
+  const [duplicated, setDuplicated] = useState<CurriculumListItem | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -120,7 +132,14 @@ export default function CurriculumDetailPage() {
 
       {tree && title && (
         <div className="flex flex-wrap items-center gap-2">
-          <h1 className="min-w-0 truncate text-xl font-semibold" data-testid="curriculum-detail-title">
+          {/* `title=` for the same reason as the board's block titles: this
+              truncates, and a long course name was unreadable past the
+              ellipsis. */}
+          <h1
+            className="min-w-0 truncate text-xl font-semibold"
+            data-testid="curriculum-detail-title"
+            title={title}
+          >
             {title}
           </h1>
           <Button
@@ -149,8 +168,22 @@ export default function CurriculumDetailPage() {
             title={title}
             onRenamed={handleRenamed}
             onDeleted={handleRootDeleted}
+            // Stay put. The copy is the BACKUP — he keeps working on the thing
+            // he was working on, and gets a link if he wants the other one.
+            onDuplicated={setDuplicated}
           />
         </div>
+      )}
+
+      {duplicated && (
+        <p className="text-sm text-muted-foreground" data-testid="curriculum-duplicate-link">
+          <Link
+            href={`/${locale}/curricula/${duplicated.id}`}
+            className="underline underline-offset-4 hover:text-foreground"
+          >
+            {t("openTheCopy", { title: duplicated.title })}
+          </Link>
+        </p>
       )}
       {exportError && (
         <p role="alert" data-testid="curriculum-export-error" className="text-sm text-destructive">

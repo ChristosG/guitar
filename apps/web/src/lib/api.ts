@@ -965,6 +965,18 @@ export function deleteCurriculum(rootId: string): Promise<void> {
   return request<void>(`/curricula/${rootId}`, { method: "DELETE" });
 }
 
+/** Fork a curriculum — the whole tree, its prose, its blueprint and its
+ * attached artifacts — so the tutor has something to fall back to before the
+ * AI rewrites it. No body: the copy's name is derived server-side in the
+ * COURSE'S own language (`curriculum/duplicate.py:copy_title`), not the UI
+ * locale, and renaming is already its own door.
+ *
+ * Unlike `deleteCurriculum` this never 409s while lessons are drafting — the
+ * server only reads the source — so callers need no drafting branch. */
+export function duplicateCurriculum(rootId: string): Promise<CurriculumListItem> {
+  return request<CurriculumListItem>(`/curricula/${rootId}/duplicate`, { method: "POST" });
+}
+
 /** Fetches the clean DOCX export and hands it to the browser as a download.
  * Not routed through `request()`: that helper always parses the body as JSON
  * (or 204s), and this response is a binary stream with its filename living in

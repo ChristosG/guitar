@@ -169,7 +169,13 @@ export default function CurriculaPage() {
                   href={`/${locale}/curricula/${item.id}`}
                   className="flex w-full flex-col gap-1 rounded-xl border border-border bg-card p-3 pr-10 text-left text-sm ring-1 ring-foreground/10 transition-colors hover:bg-muted/50"
                 >
-                  <span className="truncate font-medium" data-testid="template-title">
+                  {/* `title=` because the span TRUNCATES — a long course name
+                      ends in an ellipsis and, without this, there is no way to
+                      read the rest of it. Native tooltip rather than a
+                      component: it works in the desktop WebKitGTK build with no
+                      portal to position, which is the machinery that was
+                      mispositioning things in the first place. */}
+                  <span className="truncate font-medium" data-testid="template-title" title={item.title}>
                     {item.title}
                   </span>
                   <span className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -183,6 +189,11 @@ export default function CurriculaPage() {
                     title={item.title}
                     onRenamed={() => fetchTemplates()}
                     onDeleted={() => fetchTemplates()}
+                    // No navigation: the list is ordered `created_at desc`, so
+                    // the copy simply appears at the top and he can open it if
+                    // he wants to. Being teleported into a copy made for
+                    // safekeeping is the wrong default.
+                    onDuplicated={() => fetchTemplates()}
                   />
                 </div>
               </div>
