@@ -631,7 +631,14 @@ export function BlockCard({
             </Button>
           )}
           {(isSegment || isModule || (isLesson && draftStatus === "ready")) && (
-            <ExtendWithChat blockId={node.id} canUndo={Boolean(meta.prev_body)} onRefined={onChanged} />
+            <ExtendWithChat
+              blockId={node.id}
+              canUndo={Boolean(meta.prev_body)}
+              prevBody={meta.prev_body}
+              body={node.body}
+              instruction={meta.refine_instruction}
+              onRefined={onChanged}
+            />
           )}
         </div>
       )}

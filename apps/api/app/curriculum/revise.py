@@ -904,13 +904,38 @@ def apply_revision(db, root_id: uuid.UUID, plan: dict) -> dict:
                 _queue(lesson)                            # re-draft in its new position/context
             elif name == "modify_lesson":
                 lesson = db.get(Block, uuid.UUID(op["lesson_id"]))
-                # `prev_body` used to be stashed here too, but nothing ever reads it —
-                # `_draft_one` now threads the lesson's LIVE SEGMENTS (not this stale
+                # `prev_body` used to be stashed here and was a dead write —
+                # `_draft_one` threads the lesson's LIVE SEGMENTS (not this stale
                 # top-level `body`, which `persist_lesson` only ever sets from the
                 # draft's one-line `summary`) into the re-draft prompt instead
-                # (`revise_current`, Spec D). Writing it was a dead write.
-                lesson.meta = {**(lesson.meta or {}), "draft_status": "queued", "error": None,
-                               "revise_instruction": op["instruction"]}
+                # (`revise_current`, Spec D).
+                #
+                # `prev_segments` REPLACES IT, and is not the same idea. This op does
+                # not edit text at all: it queues the lesson and a worker rewrites
+                # every segment from scratch, so the "before" is the whole SET —
+                # possibly a different count, with different titles and sections —
+                # and no single block's `prev_body` could stand in for it. Captured
+                # HERE because after this commit the old segments are gone.
+                #
+                # Read by the «Τι άλλαξε;» panel and by
+                # `curriculum/restore.py::restore_lesson_segments`. ONE LEVEL DEEP,
+                # overwritten on every revise — same rule `prev_body` follows, and
+                # for the same reason: two levels is version control, which is a
+                # different feature with a different UI.
+                segs = db.scalars(
+                    select(Block)
+                    .where(Block.parent_id == lesson.id, Block.kind == "segment")
+                    .order_by(Block.order)
+                ).all()
+                lesson.meta = {
+                    **(lesson.meta or {}), "draft_status": "queued", "error": None,
+                    "revise_instruction": op["instruction"],
+                    "prev_segments": [
+                        {"title": s.title, "body": s.body,
+                         "section": (s.meta or {}).get("section")}
+                        for s in segs
+                    ],
+                }
             elif name == "remove_lesson":
                 lesson = db.get(Block, uuid.UUID(op["lesson_id"]))
                 parent_id = lesson.parent_id

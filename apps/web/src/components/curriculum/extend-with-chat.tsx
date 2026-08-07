@@ -2,9 +2,10 @@
 
 import { useState, type FormEvent } from "react";
 import { useTranslations } from "next-intl";
-import { Loader2, Undo2, Wand2 } from "lucide-react";
+import { GitCompare, Loader2, Undo2, Wand2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { WhatChanged } from "@/components/curriculum/what-changed";
 import { ApiError, refineBlock, undoRefine, type BlockNode } from "@/lib/api";
 
 interface ExtendWithChatProps {
@@ -13,6 +14,14 @@ interface ExtendWithChatProps {
    * something to undo. Comes off the tree, so it survives a reload: the Undo
    * button is still there tomorrow morning. */
   canUndo: boolean;
+  /** The two sides of the diff, both straight off the tree. `prevBody` is the
+   * same `meta.prev_body` that drives `canUndo`, so the chip and the Undo
+   * button appear and disappear together — which is correct: they are two
+   * answers to the same question, "what did the AI just do here". */
+  prevBody?: string | null;
+  body?: string | null;
+  /** `meta.refine_instruction` — what he typed to cause this. */
+  instruction?: string | null;
   onRefined: (block: BlockNode) => void;
 }
 
@@ -28,13 +37,21 @@ interface ExtendWithChatProps {
  * The instruction box is collapsed behind its own button. Twenty lessons times four
  * segments is eighty always-open textareas, and the board would read as a form.
  */
-export function ExtendWithChat({ blockId, canUndo, onRefined }: ExtendWithChatProps) {
+export function ExtendWithChat({
+  blockId,
+  canUndo,
+  prevBody,
+  body,
+  instruction: pastInstruction,
+  onRefined,
+}: ExtendWithChatProps) {
   const t = useTranslations("curricula.extend");
 
   const [open, setOpen] = useState(false);
   const [instruction, setInstruction] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [diffOpen, setDiffOpen] = useState(false);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -82,6 +99,25 @@ export function ExtendWithChat({ blockId, canUndo, onRefined }: ExtendWithChatPr
           {t("trigger")}
         </Button>
 
+        {/* «Τι άλλαξε;» sits BEFORE Undo on purpose: reading what happened is
+            the step that decides whether to undo, so the order matches the
+            decision. Same `canUndo` gate — both are answers to "what did the
+            AI just do here", and neither is meaningful without a stashed
+            previous body. */}
+        {canUndo && (
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            data-testid="what-changed-trigger"
+            disabled={busy}
+            onClick={() => setDiffOpen(true)}
+          >
+            <GitCompare />
+            {t("whatChanged")}
+          </Button>
+        )}
+
         {canUndo && (
           <Button
             type="button"
@@ -96,6 +132,16 @@ export function ExtendWithChat({ blockId, canUndo, onRefined }: ExtendWithChatPr
           </Button>
         )}
       </div>
+
+      {canUndo && (
+        <WhatChanged
+          open={diffOpen}
+          onOpenChange={setDiffOpen}
+          before={prevBody ?? ""}
+          after={body ?? ""}
+          instruction={pastInstruction}
+        />
+      )}
 
       {open && (
         <form onSubmit={handleSubmit} className="flex flex-col gap-2" data-testid="extend-form">

@@ -718,7 +718,19 @@ export interface BlockMeta {
   segment_error?: string | null;
   // any block that has been through Extend-with-chat
   prev_body?: string;
+  prev_title?: string;
+  /** What the tutor typed to cause the last rewrite. Shown at the top of the
+   * «Τι άλλαξε;» panel — "what did I ask for" is the question a diff is being
+   * read to answer. */
+  refine_instruction?: string;
   refined?: boolean;
+  /** LESSON ONLY. `modify_lesson` does not edit text — it requeues the lesson
+   * and a worker rewrites every segment from scratch — so the "before" is a
+   * whole segment SET, captured at apply time, and there is no single block
+   * whose `prev_body` could stand in for it. One level deep, overwritten each
+   * time, exactly like `prev_body`. */
+  prev_segments?: { title: string; body: string | null; section?: string | null }[];
+  revise_instruction?: string;
   // course
   brief?: string | null;
   gap_policy?: string;

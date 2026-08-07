@@ -307,7 +307,16 @@
       "undo": "Undo",
       "undoError": "Could not undo that.",
       "error": "Could not rewrite this block.",
-      "working": "Rewriting…"
+      "working": "Rewriting…",
+      "whatChanged": "What changed?",
+      "whatChangedTitle": "What changed",
+      "whatChangedAsked": "You asked for:",
+      "whatChangedRewritten": "This was rewritten from scratch — a word-by-word comparison would not help, so here are both texts in full.",
+      "whatChangedBefore": "Before",
+      "whatChangedAfter": "After",
+      "whatChangedUnchanged": "{count, plural, one {# paragraph unchanged} other {# paragraphs unchanged}}",
+      "whatChangedNothing": "Nothing changed in this text.",
+      "whatChangedClose": "Close"
     },
     "revise": {
       "open": "Revise with AI",

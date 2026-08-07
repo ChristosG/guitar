@@ -30,6 +30,7 @@ from app.curriculum.duplicate import duplicate_curriculum
 from app.curriculum.export_docx import build_curriculum_docx, filename_for
 from app.curriculum.outline import TIER_GAP
 from app.curriculum.refine import refine_block, undo_refine
+from app.curriculum.restore import restore_lesson_segments
 from app.curriculum.revise import validate_ops
 from app.curriculum.segment import segment_block
 from app.db import get_db
@@ -1026,6 +1027,28 @@ def undo_block_refine(block_id: UUID, db: Session = Depends(get_db)) -> dict:
         raise HTTPException(status_code=422, detail="nothing to undo on this block")
     db.commit()
     return block_to_tree(block, _artifacts_for(db, block))
+
+
+@router.post("/blocks/{lesson_id}/restore-segments", response_model=BlockTreeOut)
+def restore_lesson_segments_endpoint(lesson_id: UUID, db: Session = Depends(get_db)) -> dict:
+    """Swap a LESSON's segments for the set stashed before the AI rewrote them.
+
+    A SEPARATE DOOR FROM `/undo` ABOVE, because it is a different operation on a
+    different thing. Undo restores one block's TEXT from `meta.prev_body`, which
+    is all a refine or a surgical `edit_segment` ever changed. A `modify_lesson`
+    revise changes the segment SET — different count, different titles — so
+    there is nothing for Undo to grab, and this is the only route back.
+
+    IT TOGGLES. The displaced version is stashed on the way out, so calling this
+    twice returns the AI's version and nothing is ever destroyed.
+    """
+    lesson = _get_block_or_404(db, lesson_id)
+    if lesson.kind != "lesson":
+        raise HTTPException(status_code=404, detail="not a lesson")
+    if not restore_lesson_segments(db, lesson):
+        raise HTTPException(status_code=422, detail="no previous version stored for this lesson")
+    db.commit()
+    return block_to_tree(lesson, _artifacts_for(db, lesson))
 
 
 @router.get("/blocks/{block_id}", response_model=BlockTreeOut)

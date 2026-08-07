@@ -307,7 +307,16 @@
       "undo": "Αναίρεση",
       "undoError": "Δεν ήταν δυνατή η αναίρεση.",
       "error": "Δεν ήταν δυνατή η επεξεργασία αυτού του κειμένου.",
-      "working": "Το ξαναγράφει…"
+      "working": "Το ξαναγράφει…",
+      "whatChanged": "Τι άλλαξε;",
+      "whatChangedTitle": "Τι άλλαξε",
+      "whatChangedAsked": "Ζήτησες:",
+      "whatChangedRewritten": "Αυτό ξαναγράφτηκε από την αρχή — δεν υπάρχει χρήσιμη σύγκριση λέξη προς λέξη, οπότε δες τα δύο κείμενα ολόκληρα.",
+      "whatChangedBefore": "Πριν",
+      "whatChangedAfter": "Μετά",
+      "whatChangedUnchanged": "{count, plural, one {# παράγραφος αμετάβλητη} other {# παράγραφοι αμετάβλητες}}",
+      "whatChangedNothing": "Δεν άλλαξε τίποτα σε αυτό το κείμενο.",
+      "whatChangedClose": "Κλείσιμο"
     },
     "revise": {
       "open": "Αναθεώρηση με AI",
