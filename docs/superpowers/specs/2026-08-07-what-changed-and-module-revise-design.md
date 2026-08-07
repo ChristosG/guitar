@@ -82,9 +82,46 @@ lesson.meta = {
   `MutableDict`. This is not optional and it fails silently in production.
 
 `undo_refine` must ignore `prev_segments` — it restores a body, and a lesson's
-body is not its segments. Restoring a whole segment set is a different operation
-and is **not** in this spec; the panel is an inspector, and the existing
-per-segment Undo already covers the surgical case.
+body is not its segments.
+
+### A2b. Restoring a whole lesson (decided 2026-08-07, Chris)
+
+The existing Undo is per-BLOCK: `POST /blocks/{id}/undo` puts back one block's
+text from `meta.prev_body`. It cannot reach a `modify_lesson` rewrite, because
+that produces a different SET of segments — possibly a different number of them,
+with different titles and sections — so there is no single block whose
+`prev_body` helps.
+
+So a whole-lesson restore is added: `POST /blocks/{lesson_id}/restore-segments`.
+
+**It is a TOGGLE, not a destruction, and that is the whole design.** Restoring
+writes the segments it is about to replace into `prev_segments` before replacing
+them. Flip once and you are back on the old lesson; flip again and you are back
+on the AI's. Neither version is ever destroyed, so the confirm is about "are you
+sure you meant to swap" rather than "this cannot be undone" — and the standing
+rule that this app displaces rather than deletes
+([[guitar-tutor-never-delete-tutor-data]]) is satisfied by construction instead
+of by carefulness.
+
+Mechanics, in one transaction:
+1. Read the lesson's current live segments; build the new snapshot from them.
+2. Delete the current `segment` children. (Re-parent-then-delete does not apply
+   — segments are leaves. `Block.children` is `delete-orphan`, so their own
+   children, if any ever exist, go with them, which is correct here.)
+3. Recreate the stored `prev_segments` in order, with `segment_status: "ready"`
+   — they were ready when they were captured, and a restored segment must not
+   look queued or the draft fan-out will rewrite the very thing just restored.
+4. Write the snapshot from step 1 as the new `meta.prev_segments`.
+5. `_recompute_lesson_word_count`, which already exists (`revise.py:835`).
+
+Ids are NOT preserved across a restore — the recreated segments are new rows.
+That matters for one thing only: an `Artifact` attached to a restored-away
+segment has `block_id` set to `NULL` by its own `ondelete="SET NULL"`, so the
+artifact survives but loses its attachment. Preserving ids would mean an
+update-in-place diff against the snapshot rather than a delete-and-recreate,
+which is a materially bigger change for a case (artifacts pinned to a segment
+that an AI rewrite then replaced) that the tutor has not hit. **Noted, not
+solved** — and the note is here so the next person finds it before a tutor does.
 
 ### A3. The algorithm — the part that is actually hard
 
@@ -226,7 +263,8 @@ redraft lands.
 
 1. **Inline vs side-by-side** as the default rendering. Spec says unified inline;
    easy to flip, and worth seeing real Greek prose in both before deciding.
-2. **Should a lesson-level diff offer a restore?** The spec says no — the panel
-   is an inspector and restoring a whole segment set is a different operation
-   with different failure modes. But `prev_segments` makes it *possible*, and if
-   he wants it, it is better designed now than bolted on.
+
+**Settled 2026-08-07:** the lesson-level restore is IN, as a reversible toggle —
+see A2b. The original draft said no on the grounds that it was destructive; making
+it stash what it replaces removes that objection entirely, so the reason for
+saying no stopped applying.
