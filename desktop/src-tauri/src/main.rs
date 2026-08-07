@@ -192,33 +192,54 @@ fn steer_webkit_renderer() {
 
 /// Page zoom, injected into the tutor's window before any page script runs.
 ///
-/// IN THE PAGE RATHER THAN IN RUST, and that is a measured decision, not a
-/// shortcut. Tauri's `zoom_hotkeys_enabled` is WINDOWS-ONLY — in wry 0.55 the
-/// flag is read by the webview2 backend and by nothing else, so on WebKitGTK
-/// and WKWebView (the two this app actually ships) it does nothing at all.
-/// `Webview::set_zoom` does work on both, but only Rust can call it, and Rust
-/// cannot see a `wheel` event or a trackpad pinch. Routing those back would
-/// mean opening IPC to a REMOTE origin — this window loads `http://localhost`,
-/// not `tauri://` — which is a capability grant and a much wider blast radius
-/// than a zoom control is worth.
+/// THE GESTURES ARE READ IN THE PAGE; THE ZOOM IS APPLIED BY THE WEBVIEW.
+/// That split is the whole design, and it replaced a version that did both in
+/// CSS.
 ///
-/// The obvious objection to doing it in CSS is that `zoom` is not browser zoom
-/// and would break a viewport-sized layout: the shell is `h-dvh`, and if `dvh`
-/// resolved against the UNZOOMED viewport the whole app would overflow its own
-/// window at any zoom above 1. That was checked rather than assumed — built,
-/// run, and photographed at `zoom: 1.5` in the real WebKitGTK build: the
-/// sidebar still ends exactly at the window bottom. WebKit resolves viewport
-/// units against the EFFECTIVE zoom, so the objection does not apply. WKWebView
-/// is the same engine family.
+/// This used to set `documentElement.style.zoom`, for a reason that was true
+/// about layout and wrong about everything else: `dvh` really does resolve
+/// against the effective zoom on WebKit (checked, built and photographed at
+/// `zoom: 1.5`, and still true). What CSS `zoom` also does is make
+/// `getBoundingClientRect()` report POST-zoom pixels. Base UI's dropdowns,
+/// dialogs and tooltips are portaled, and `@floating-ui/dom` positions them by
+/// reading that rect and writing coordinates back onto an element that is
+/// itself inside the zoomed root — so the zoom got applied TWICE and every
+/// floating element drifted by `(zoom - 1) x distance-from-viewport-origin`.
+/// At zoom 1 it is perfect; at 1.5 a ⋯ menu near the right edge lands off
+/// screen. The tutor found it in the .deb, and no test could have: Playwright
+/// drives Chromium, this ships WebKitGTK, and `@floating-ui/dom` takes explicit
+/// `isWebKit()` branches. Native zoom is invisible to CSSOM, so the whole class
+/// of bug is gone rather than corrected one component at a time.
 ///
-/// PINCH COMES FREE. WebKit delivers a trackpad pinch as a `wheel` event with
-/// `ctrlKey` set — the same shape as Ctrl+wheel — so the one listener covers
-/// the macOS gesture and the Linux mouse without a line of platform code.
+/// THE IPC GRANT IS ONE PERMISSION WIDE, and this reverses the previous note
+/// here. `Webview::set_zoom` is NOT Rust-only: Tauri 2 exposes it as the core
+/// command `set_webview_zoom`, so `capabilities/main.json` grants exactly
+/// `core:webview:allow-set-webview-zoom` to window `main` on
+/// `http://localhost:*` and nothing else. That is one command taking one
+/// clamped float — not the general capability grant the old note was right to
+/// refuse. (Tauri's `zoom_hotkeys_enabled` remains useless to us: in wry 0.55
+/// it is read by the webview2 backend and by nothing else.)
+///
+/// PINCH STILL COMES FREE, which is why the listeners stay in the page at all.
+/// WebKit delivers a trackpad pinch as a `wheel` event with `ctrlKey` set — the
+/// same shape as Ctrl+wheel — so one listener covers the macOS gesture and the
+/// Linux mouse without a line of platform code. Rust cannot see either event,
+/// which is what made a page-side listener non-negotiable.
+///
+/// IT FALLS BACK TO THE OLD BEHAVIOUR, NEVER TO NOTHING. If the invoke is
+/// missing (the bridge is not injected until after document-start) or rejects,
+/// `paint` writes `style.zoom` exactly as before — bug included. The worst case
+/// of this change is therefore the status quo, and the fallback doubles as the
+/// diagnostic: menus still drifting in a built .deb means the CSS path ran, and
+/// the capability is what to go and look at. The two are mutually exclusive by
+/// construction — whichever path sets the zoom clears the other's mechanism, so
+/// they can never compound into a 2.25x page.
 ///
 /// The level persists in `localStorage`, which is exactly why boot goes to the
 /// trouble of REMEMBERING the port pair: localStorage is partitioned by origin
 /// including the port, so a stable origin is what lets a zoom set today still
-/// be there tomorrow.
+/// be there tomorrow. Tauri does not persist webview zoom itself, so this
+/// remains the only memory the setting has.
 const ZOOM_JS: &str = r#"
 (function () {
   var KEY = "angelos.zoom";
@@ -236,13 +257,42 @@ const ZOOM_JS: &str = r#"
   }
   function save() { try { localStorage.setItem(KEY, String(current)); } catch (e) {} }
 
+  // Set once the webview has accepted a NATIVE zoom. From then on the CSS
+  // fallback is off for good: if a later invoke ever failed we would be adding
+  // a CSS zoom on top of a native one and the two would MULTIPLY.
+  var native = false;
+
+  // The fallback, and the whole of what this function used to be.
   // `documentElement` may not exist yet: this runs at document-start, before
-  // the parser has produced <html>. Both callers are guarded and the
-  // DOMContentLoaded pass below is what actually paints on a cold load.
-  function paint() {
+  // the parser has produced <html>.
+  function cssPaint() {
+    if (native) return;
     var el = document.documentElement;
     if (!el) return;
     el.style.zoom = current === 1 ? "" : String(current);
+  }
+
+  // Native first — real browser zoom, invisible to getBoundingClientRect, which
+  // is the entire point (see the Rust docstring above). The IPC bridge is not
+  // injected yet at document-start, so a missing `__TAURI_INTERNALS__` on the
+  // first call is EXPECTED, not an error; the DOMContentLoaded pass below is
+  // what actually lands it on a cold load. In a browser (the hosted webapp
+  // never runs this script at all) it would simply always take the CSS path.
+  function paint() {
+    var ipc = window.__TAURI_INTERNALS__;
+    if (!ipc || typeof ipc.invoke !== "function") { cssPaint(); return; }
+    try {
+      ipc.invoke("plugin:webview|set_webview_zoom", { value: current }).then(
+        function () {
+          native = true;
+          // Clear whatever the fallback painted before the bridge arrived,
+          // otherwise the CSS zoom and the native zoom compound.
+          var el = document.documentElement;
+          if (el && el.style.zoom) el.style.zoom = "";
+        },
+        cssPaint
+      );
+    } catch (e) { cssPaint(); }
   }
   function step(dir) {
     var best = 0, dist = Infinity;
@@ -1723,6 +1773,58 @@ fn fatal(handle: &AppHandle, msg: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// THE ZOOM ENGINE AND THE CAPABILITY THAT LETS IT WORK ARE ONE FEATURE IN
+    /// TWO FILES, AND NOTHING ELSE HOLDS THEM TOGETHER.
+    ///
+    /// `ZOOM_JS` invokes a command by name; `capabilities/main.json` grants a
+    /// permission that allows that same name. Get either string wrong and there
+    /// is no compile error, no test failure, and no runtime error the tutor
+    /// would ever see — the invoke just rejects, `paint` quietly takes the CSS
+    /// fallback, and we are back to menus flying off screen at zoom 1.5 with
+    /// everything apparently fine. That is precisely the bug this replaced, so
+    /// the silent way back to it is worth a test.
+    ///
+    /// Reads the capability off disk rather than restating it: a copy of the
+    /// permission string in here would be a third place to get it wrong.
+    #[test]
+    fn the_zoom_engine_asks_for_exactly_what_the_capability_grants() {
+        let capability = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities/main.json"),
+        )
+        .expect("capabilities/main.json is missing — the zoom fix does not work without it");
+
+        // The command ZOOM_JS calls, and the permission that allows it. Tauri
+        // names the permission after the command, so these two must agree.
+        assert!(
+            ZOOM_JS.contains("plugin:webview|set_webview_zoom"),
+            "ZOOM_JS no longer invokes set_webview_zoom"
+        );
+        assert!(
+            capability.contains("core:webview:allow-set-webview-zoom"),
+            "the capability no longer grants set_webview_zoom"
+        );
+
+        // The origin the tutor's window actually loads. `pick_app_ports` makes
+        // the port unknowable here, so the port is a wildcard and the host is
+        // not — a capability that dropped `localhost` would grant nothing.
+        assert!(
+            capability.contains("http://localhost:*"),
+            "the capability no longer covers the origin the main window loads"
+        );
+        assert!(
+            capability.contains("\"main\""),
+            "the capability no longer applies to the main window"
+        );
+
+        // The fallback is load-bearing: without it a rejected invoke leaves the
+        // tutor with a zoom control that does nothing at all, which is worse
+        // than the bug it replaced.
+        assert!(
+            ZOOM_JS.contains("style.zoom"),
+            "the CSS fallback is gone — a rejected invoke now silently does nothing"
+        );
+    }
 
     /// WHAT LEAVES THE APP FRAME, AND WHAT MUST NOT.
     ///
