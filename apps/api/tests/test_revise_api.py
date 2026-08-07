@@ -144,8 +144,11 @@ def test_revise_on_a_non_course_block_is_404(monkeypatch):
 
 def test_runner_plan_mode_stores_the_plan_on_progress(monkeypatch):
     canned = {"summary": "s", "ops": [{"op": "remove_lesson", "lesson_id": "x", "reason": "r"}]}
+    # `scope_module_id` is keyword-only and optional (module-scoped restructure,
+    # 2026-08-07) — the runner always passes it, so the stub must accept it or
+    # this fails with a TypeError that looks like a runner bug.
     monkeypatch.setattr(revise_job, "plan_revision",
-                        lambda db, root_id, *, instruction: canned)
+                        lambda db, root_id, *, instruction, scope_module_id=None: canned)
     db = SessionLocal()
     try:
         job = GenerationJob(kind="curriculum_revise", status="pending",

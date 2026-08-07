@@ -206,7 +206,7 @@ _REQUIRED: dict[str, tuple[str, ...]] = {
 }
 
 
-def compact_tree_text(db, course: Block) -> str:
+def compact_tree_text(db, course: Block, *, scope_module_id: uuid.UUID | None = None) -> str:
     """The tree as the model needs it to locate an insertion point: every module
     and lesson with its id, title and objective, and — one indented line each —
     every SEGMENT a lesson already has, id + title only. This is what the
@@ -225,10 +225,20 @@ def compact_tree_text(db, course: Block) -> str:
     reference one with `edit_segment`/`remove_segment`, or to place a new one
     relative to with `add_segment`. Keeping the tree to ids + titles + objectives
     is the token discipline the whole read-only planner rides on (Global
-    Constraint #5)."""
-    modules = db.scalars(
-        select(Block).where(Block.parent_id == course.id, Block.kind == "module").order_by(Block.order)
-    ).all()
+    Constraint #5).
+
+    `scope_module_id` NARROWS THIS TO ONE MODULE, and the shape of every line is
+    deliberately unchanged — the model must not have to learn a second format
+    depending on how it was called. Scoping is what makes "make this module 5
+    lessons instead of 3" a small ask: unscoped, the planner reads all 24
+    lessons of a course to edit 3 of them, which is a longer prompt, a more
+    distracted model, and collateral edits elsewhere that are merely unlikely
+    rather than impossible. `validate_ops` takes the same argument and makes
+    them impossible."""
+    module_q = select(Block).where(Block.parent_id == course.id, Block.kind == "module")
+    if scope_module_id is not None:
+        module_q = module_q.where(Block.id == scope_module_id)
+    modules = db.scalars(module_q.order_by(Block.order)).all()
     lines: list[str] = []
     for mi, m in enumerate(modules, start=1):
         mobj = (m.meta or {}).get("objective") or ""
@@ -332,8 +342,20 @@ def _blueprint_block_text(course_meta: dict | None, language: str) -> str:
     return REVISE_BLUEPRINT_BLOCK.format(enabled=fmt(enabled), disabled=fmt(disabled))
 
 
+REVISE_SCOPE_BLOCK = (
+    "\n\nSCOPE — READ THIS BEFORE PROPOSING ANYTHING. This revision is confined to "
+    "the module «{scope_title}», and the tree above shows ONLY that module. Every "
+    "operation you propose must target that module or a lesson inside it. Do NOT "
+    "propose a new module, do NOT touch the course blueprint, and do NOT reference "
+    "a lesson you cannot see above — the rest of the course exists, it is simply "
+    "not yours to change on this turn, and anything reaching outside will be "
+    "dropped before the tutor ever sees it."
+)
+
+
 def build_revise_messages(*, course_title, brief, language, tree_text, instruction,
-                          retrieved=None, course_meta=None, source=None) -> list[dict]:
+                          retrieved=None, course_meta=None, source=None,
+                          scope_title=None) -> list[dict]:
     """Pure. The curriculum SYSTEM message (shared, so overrides re-mint one cache,
     not one-per-variant), then every request-specific fact after it — the compact
     tree, the current blueprint, the targeted retrieval passages, and the tutor's
@@ -376,18 +398,41 @@ def build_revise_messages(*, course_title, brief, language, tree_text, instructi
         # appended rather than skipped; a future re-save of the override picks
         # up the placeholder and this branch goes quiet.
         content = f"{content}\n{curriculum_style(language, source)}"
+
+    # APPENDED, NOT A PLACEHOLDER, and that is deliberate. `REVISE_TAIL` is one
+    # of the slices the tutor can rewrite in Settings (`prompts/overrides.py`),
+    # and a saved override predating a new `{scope_block}` would raise a
+    # KeyError at `.format()` — turning his edited prompt into a hard failure
+    # the moment this feature shipped. Appending keeps every existing override
+    # working and still puts the constraint in front of the model.
+    #
+    # Belt and braces regardless: `validate_ops` drops out-of-scope ops whatever
+    # the model does with this paragraph. The prompt is here to stop it WASTING
+    # a turn proposing them, not to be the enforcement.
+    if scope_title:
+        content = f"{content}{REVISE_SCOPE_BLOCK.format(scope_title=scope_title)}"
+
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": content},
     ]
 
 
-def _tree_ids(db, root_id: uuid.UUID) -> tuple[dict[str, uuid.UUID], dict[str, uuid.UUID]]:
+def _tree_ids(
+    db, root_id: uuid.UUID, *, scope_module_id: uuid.UUID | None = None
+) -> tuple[dict[str, uuid.UUID], dict[str, uuid.UUID]]:
     """Live module ids and lesson ids under this root, as {str: UUID} maps —
-    membership is checked in one pass, no per-op query."""
-    modules = db.scalars(
-        select(Block).where(Block.parent_id == root_id, Block.kind == "module")
-    ).all()
+    membership is checked in one pass, no per-op query.
+
+    `scope_module_id` narrows both maps to that ONE module and its lessons. That
+    is the whole enforcement of a scoped revision: every existing per-op id
+    check in `validate_ops` already refuses an id that is not in these maps, so
+    narrowing them here makes an op targeting a different module structurally
+    impossible without adding a single new branch downstream."""
+    module_q = select(Block).where(Block.parent_id == root_id, Block.kind == "module")
+    if scope_module_id is not None:
+        module_q = module_q.where(Block.id == scope_module_id)
+    modules = db.scalars(module_q).all()
     module_ids = {str(m.id): m.id for m in modules}
     lesson_ids: dict[str, uuid.UUID] = {}
     for m in modules:
@@ -399,6 +444,22 @@ def _tree_ids(db, root_id: uuid.UUID) -> tuple[dict[str, uuid.UUID], dict[str, u
 def _lesson_module(db, lesson_id: uuid.UUID) -> uuid.UUID | None:
     l = db.get(Block, lesson_id)
     return l.parent_id if l is not None and l.kind == "lesson" else None
+
+
+def _segment_lesson_id(db, segment_id_str: str) -> uuid.UUID | None:
+    """The LESSON a segment hangs off, or None if the id does not resolve to a
+    live segment. Same defensive parsing as `_segment_course_id` below, one level
+    shallower: a module-scoped revision needs to know which lesson owns a
+    segment, because `validate_ops`' narrowed `lesson_ids` map is what confines
+    the plan."""
+    try:
+        segment_id = uuid.UUID(segment_id_str)
+    except (ValueError, TypeError, AttributeError):
+        return None
+    seg = db.get(Block, segment_id)
+    if seg is None or seg.kind != "segment":
+        return None
+    return seg.parent_id
 
 
 def _segment_course_id(db, segment_id_str: str) -> uuid.UUID | None:
@@ -421,7 +482,9 @@ def _segment_course_id(db, segment_id_str: str) -> uuid.UUID | None:
     return module.parent_id if module is not None and module.kind == "module" else None
 
 
-def validate_ops(db, root_id: uuid.UUID, raw: dict) -> dict:
+def validate_ops(
+    db, root_id: uuid.UUID, raw: dict, *, scope_module_id: uuid.UUID | None = None
+) -> dict:
     """Drop every op whose required fields are missing or whose ids do not resolve
     to a real block of the right kind UNDER THIS ROOT (constraint #2). Logs each
     drop WITH the offending value (2026-07-20 hotfix: a bare "an id/payload does
@@ -433,8 +496,18 @@ def validate_ops(db, root_id: uuid.UUID, raw: dict) -> dict:
     it into `ops`, in the SAME order they were seen. `plan_revision` reads
     `dropped` to decide whether to run its one-shot repair pass, and forwards it
     to the tutor-facing plan so an approval never hides that something was
-    silently cut."""
-    module_ids, lesson_ids = _tree_ids(db, root_id)
+    silently cut.
+
+    `scope_module_id` CONFINES THE PLAN TO ONE MODULE, and it does so by
+    narrowing the id maps rather than by adding checks — every per-op resolution
+    below already refuses an id it cannot find, so an op aimed at a lesson in a
+    different module now fails the check it was always making. `insert_module`
+    is the one op with no id to narrow, so it is refused outright: a revision
+    scoped to a module has no business creating a sibling for it.
+
+    A dropped op still lands in `dropped` with its reason, so the tutor's plan
+    card shows what was cut instead of quietly shrinking."""
+    module_ids, lesson_ids = _tree_ids(db, root_id, scope_module_id=scope_module_id)
     course = db.get(Block, root_id)
     stored_bp = blueprint_from_course_meta(course.meta if course else None)
     stored_keys = {s["key"] for s in stored_bp["sections"]}      # enabled OR disabled
@@ -492,6 +565,35 @@ def validate_ops(db, root_id: uuid.UUID, raw: dict) -> dict:
             log.warning("revise: dropping %s op — missing %s", name, missing)
             dropped.append({"op": op, "reason": detail})
             continue
+
+        # SCOPE. Narrowing `module_ids`/`lesson_ids` above already refuses any op
+        # that names a lesson or module outside the scoped one, because every id
+        # check below is a membership test against those maps. Two families slip
+        # past that and are handled here:
+        #
+        #   * COURSE-LEVEL ops have no id in those maps to narrow.
+        #     `insert_module` would create a SIBLING of the module being revised;
+        #     `update_blueprint`/`set_section_enabled` reshape every lesson in
+        #     the course. A revision the tutor scoped to one module has no
+        #     business doing either, and silently allowing them is how "restructure
+        #     this module" becomes "restructure the course".
+        #   * SEGMENT ops resolve against the COURSE (`_segment_course_id`), which
+        #     is the right check unscoped and too loose here — a segment in another
+        #     module passes it. Re-check against the narrowed lesson map.
+        if scope_module_id is not None:
+            if name in ("insert_module", "update_blueprint", "set_section_enabled"):
+                detail = f"{name} changes the whole course, and this revision is scoped to one module"
+                log.warning("revise: dropping course-level %s under module scope %s", name, scope_module_id)
+                dropped.append({"op": op, "reason": detail})
+                continue
+            if name in ("edit_segment", "remove_segment"):
+                owner = _segment_lesson_id(db, op["segment_id"])
+                if owner is None or str(owner) not in lesson_ids:
+                    detail = (f"segment_id={op.get('segment_id')!r} is outside the module "
+                              f"this revision is scoped to")
+                    log.warning("revise: dropping %s outside module scope %s", name, scope_module_id)
+                    dropped.append({"op": op, "reason": detail})
+                    continue
         # id resolution / payload validation, per op. `detail` names the exact
         # offending value on failure — read by the shared log line + `dropped`
         # entry below, never left as a bare "does not resolve".
@@ -749,8 +851,19 @@ def _revise_repair_message(dropped: list[dict], source=None) -> dict:
     }
 
 
-def plan_revision(db, root_id: uuid.UUID, *, instruction: str) -> dict:
+def plan_revision(
+    db, root_id: uuid.UUID, *, instruction: str, scope_module_id: uuid.UUID | None = None
+) -> dict:
     """The whole read-only planner. Mutates nothing.
+
+    `scope_module_id` CONFINES THE REVISION TO ONE MODULE. Chris asked "I want
+    that module to have 5 lessons instead of 3 — how do I do that?", and the
+    answer was that the op vocabulary could already express it but nothing in the
+    UI or the prompt said which module he meant. Scoping fixes both halves:
+    `compact_tree_text` shows the model that module alone (a course is 24 lessons
+    of context to edit 3 of them), and `validate_ops` refuses anything that
+    reaches outside it — so collateral edits become impossible rather than
+    merely unlikely.
 
     Grounds via TARGETED RETRIEVAL for the instruction topic (`ground_topic`),
     scoped to the course's own `source_ids` — NOT `build_curriculum_context`'s whole
@@ -783,14 +896,26 @@ def plan_revision(db, root_id: uuid.UUID, *, instruction: str) -> dict:
         f"[{p.source_title}, p.{p.page_no}] {p.text}" for p in passages
     ) or None
 
+    # The scoped module has to be REAL and under THIS course, or the narrowing
+    # below would silently produce empty id maps and every op would be dropped
+    # with a confusing reason. Fail loudly on the caller's mistake instead.
+    scope_title: str | None = None
+    if scope_module_id is not None:
+        module = db.get(Block, scope_module_id)
+        if module is None or module.kind != "module" or module.parent_id != root_id:
+            raise ReviseError(f"module {scope_module_id} is not a module of curriculum {root_id}")
+        scope_title = module.title
+
     messages = build_revise_messages(
         course_title=course.title, brief=meta.get("brief"), language=course.language,
-        tree_text=compact_tree_text(db, course), instruction=instruction,
+        tree_text=compact_tree_text(db, course, scope_module_id=scope_module_id),
+        instruction=instruction,
         retrieved=retrieved, course_meta=meta, source=db,
+        scope_title=scope_title,
     )
     provider = get_provider()
     raw = provider.guided_json(messages, REVISION_PLAN_SCHEMA, role="plan")
-    validated = validate_ops(db, root_id, raw)
+    validated = validate_ops(db, root_id, raw, scope_module_id=scope_module_id)
 
     raw_ops = raw.get("ops") or []
     needs_repair = bool(validated["dropped"]) or (not validated["ops"] and bool(raw_ops))
@@ -799,7 +924,7 @@ def plan_revision(db, root_id: uuid.UUID, *, instruction: str) -> dict:
                     root_id, len(validated["dropped"]))
         repair_messages = [*messages, _revise_repair_message(validated["dropped"], source=db)]
         raw = provider.guided_json(repair_messages, REVISION_PLAN_SCHEMA, role="plan")
-        validated = validate_ops(db, root_id, raw)
+        validated = validate_ops(db, root_id, raw, scope_module_id=scope_module_id)
 
     return validated
 

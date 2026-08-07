@@ -188,6 +188,12 @@ class ReviseRequest(BaseModel):
     instruction: str = Field(min_length=1)
     mode: Literal["plan", "apply"] = "plan"
     plan: dict | None = None
+    # PLAN MODE ONLY, and optional. Confines the revision to one module: the
+    # planner is shown that module's subtree alone and `validate_ops` refuses
+    # anything reaching outside it. Apply mode ignores it — by then the plan has
+    # already been validated under whatever scope produced it, and re-scoping at
+    # apply could only ever drop ops the tutor already approved.
+    scope_module_id: UUID | None = None
 
 
 class PlanningBriefIn(BaseModel):

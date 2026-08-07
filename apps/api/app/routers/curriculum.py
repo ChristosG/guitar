@@ -907,6 +907,15 @@ def revise_curriculum(
         raise HTTPException(status_code=422, detail="apply requires a plan")
 
     params = {"root_id": str(root_id), "instruction": payload.instruction}
+    if payload.scope_module_id is not None:
+        # Validated HERE rather than in the job, so a bad id is a 422 the tutor
+        # sees immediately instead of a job that starts, spends a planner call
+        # and fails minutes later. Same instinct as the apply-requires-a-plan
+        # check above.
+        module = db.get(Block, payload.scope_module_id)
+        if module is None or module.kind != "module" or module.parent_id != root_id:
+            raise HTTPException(status_code=422, detail="scope_module_id is not a module of this curriculum")
+        params["scope_module_id"] = str(payload.scope_module_id)
     if payload.mode == "apply":
         params["plan"] = validate_ops(db, root_id, payload.plan)
     job = GenerationJob(kind="curriculum_revise", status="pending", params=params)

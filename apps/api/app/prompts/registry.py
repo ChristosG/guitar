@@ -1683,7 +1683,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/revise.py:335",
+        source_ref="app/curriculum/revise.py:356",
         title_el="Η αναθεώρηση ενός τελειωμένου προγράμματος",
         what_it_does_el=(
             "Δείχνει στον βοηθό ΟΛΟΚΛΗΡΟ το πρόγραμμα όπως είναι σήμερα — μαθήματα "
@@ -1707,7 +1707,7 @@ _ENTRIES = [
         # This is the FIRST-PASS call only — the one-shot repair pass (2026-07-20)
         # has its own call site and its own entry, "curriculum.revise.repair"
         # below, exactly like "lesson.draft"/"lesson.repair" split theirs.
-        call_sites=("curriculum/revise.py:792",),
+        call_sites=("curriculum/revise.py:917",),
         slices=(
             Slice(
                 id=REVISE_SLICE_ID,
@@ -1721,7 +1721,7 @@ _ENTRIES = [
         id="curriculum.revise.repair",
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/revise.py:737",
+        source_ref="app/curriculum/revise.py:839",
         title_el="Όταν το σχέδιο αναθεώρησης απορρίπτει προτάσεις",
         what_it_does_el=(
             "Η εφαρμογή ελέγχει κάθε πρόταση αλλαγής (op) του βοηθού: αν ένα id "
@@ -1737,7 +1737,7 @@ _ENTRIES = [
         when_it_runs_el="Μόνο όταν απορριφθεί έστω μία πρόταση. Το πολύ μία φορά ανά σχέδιο.",
         source_of_truth=lambda: _revise_repair_message,
         build=_build_curriculum_revise_repair,
-        call_sites=("curriculum/revise.py:801",),
+        call_sites=("curriculum/revise.py:926",),
         slices=(
             Slice(
                 id=REVISE_REPAIR_SLICE_ID,
@@ -1770,7 +1770,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: REVISE_DISTILL_SYSTEM,
         build=_build_revise_distill,
-        call_sites=("curriculum/revise.py:728",),
+        call_sites=("curriculum/revise.py:830",),
         slices=(
             Slice(
                 id=REVISE_DISTILL_SLICE_ID,

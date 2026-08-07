@@ -75,7 +75,14 @@ def run_curriculum_revise_job(job_id: uuid.UUID) -> None:
         plan = job.params.get("plan")
         if plan is None:
             # PLAN MODE — read-only. Store the validated plan the poller reads.
-            result = plan_revision(db, root_id, instruction=job.params["instruction"])
+            # `scope_module_id`, when present, confines the whole plan to one
+            # module (route-validated before the job was ever enqueued).
+            raw_scope = job.params.get("scope_module_id")
+            result = plan_revision(
+                db, root_id,
+                instruction=job.params["instruction"],
+                scope_module_id=uuid.UUID(str(raw_scope)) if raw_scope else None,
+            )
             job.status = "succeeded"
             job.result_root_id = root_id
             job.progress = {"phase": "done", "plan": result}
