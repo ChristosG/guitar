@@ -316,7 +316,12 @@
       "whatChangedAfter": "Μετά",
       "whatChangedUnchanged": "{count, plural, one {# παράγραφος αμετάβλητη} other {# παράγραφοι αμετάβλητες}}",
       "whatChangedNothing": "Δεν άλλαξε τίποτα σε αυτό το κείμενο.",
-      "whatChangedClose": "Κλείσιμο"
+      "whatChangedClose": "Κλείσιμο",
+      "restoreLesson": "Επαναφορά μαθήματος",
+      "restoreLessonConfirmTitle": "Επαναφορά του προηγούμενου μαθήματος;",
+      "restoreLessonConfirmBody": "Το μάθημα θα γυρίσει στην έκδοση πριν το ξαναγράψει το AI. Η τωρινή έκδοση ΚΡΑΤΙΕΤΑΙ — μπορείς να γυρίσεις πίσω όποτε θες.",
+      "restoreLessonConfirm": "Επαναφορά",
+      "restoreLessonError": "Η επαναφορά απέτυχε — δοκίμασε ξανά."
     },
     "revise": {
       "open": "Αναθεώρηση με AI",

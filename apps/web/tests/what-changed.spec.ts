@@ -142,3 +142,101 @@ test.describe("what changed", () => {
     await expect(page.getByTestId("extend-undo")).toBeVisible();
   });
 });
+
+test.describe("a whole lesson rewritten by revise", () => {
+  /** A lesson carrying `prev_segments` — the shape `modify_lesson` leaves
+   * behind — with its live segments already regenerated. */
+  async function mockRewrittenLesson(page: Page) {
+    const restored: string[] = [];
+
+    async function handler(route: Route) {
+      const req = route.request();
+      const { pathname } = new URL(req.url());
+      if (req.method() === "OPTIONS") {
+        await route.fulfill({ status: 204, headers: CORS_HEADERS });
+        return;
+      }
+      const json = (status: number, body: unknown) =>
+        route.fulfill({ status, contentType: "application/json", headers: CORS_HEADERS, body: JSON.stringify(body) });
+
+      if (pathname === `/blocks/${LESSON_ID}/restore-segments` && req.method() === "POST") {
+        restored.push(pathname);
+        await json(200, node({ id: LESSON_ID, kind: "lesson", title: "Μάθημα 1", meta: {}, children: [] }));
+        return;
+      }
+      if (pathname === `/curricula/${ROOT_ID}`) {
+        await json(200, node({
+          id: ROOT_ID, kind: "course", title: "Ήχος Κιθάρας", meta: { brief: null },
+          children: [node({
+            id: MODULE_ID, kind: "module", title: "Ενότητα 1", body: "Στόχος.", meta: { tier: "library" },
+            children: [node({
+              id: LESSON_ID, kind: "lesson", title: "Μάθημα 1",
+              meta: {
+                draft_status: "ready",
+                revise_instruction: "κάν' το πιο αναλυτικό",
+                prev_segments: [
+                  { title: "Ζέσταμα", body: "Ξεκίνα με ανοιχτές χορδές.", section: "warmup" },
+                ],
+              },
+              children: [
+                node({ id: SEGMENT_ID, kind: "segment", title: "Ζέσταμα",
+                       body: "Ξεκίνα με ανοιχτές χορδές. Άκου προσεκτικά τον ενισχυτή.",
+                       meta: { section: "warmup" } }),
+              ],
+            })],
+          })],
+        }));
+        return;
+      }
+      if (pathname.endsWith("/progress")) {
+        await json(200, { root_id: ROOT_ID, total: 1, queued: 0, drafting: 0, ready: 1, failed: 0, done: true });
+        return;
+      }
+      if (pathname === "/curricula/interview/open") {
+        await json(200, null);
+        return;
+      }
+      await json(500, { detail: "unexpected" });
+    }
+
+    await page.route(`${API_ORIGIN}/curricula/**`, handler);
+    await page.route(`${API_ORIGIN}/curricula`, handler);
+    await page.route(`${API_ORIGIN}/blocks/**`, handler);
+    return { restored };
+  }
+
+  test("the lesson gets its own panel, and it can restore", async ({ page }) => {
+    const mock = await mockRewrittenLesson(page);
+
+    await page.goto(`/el/curricula/${ROOT_ID}`);
+    await expect(page.getByTestId("tree-board")).toBeVisible();
+    await page.locator('[data-testid="block-card"][data-kind="module"]').getByTestId("block-card-toggle").click();
+    // The chip lives in the card BODY, like every other per-block control, so
+    // the lesson has to be open — you look at what changed while looking at the
+    // lesson, not from the table of contents.
+    await page.locator('[data-testid="block-card"][data-kind="lesson"]').getByTestId("block-card-toggle").click();
+
+    await page.getByTestId("lesson-what-changed-trigger").click();
+    await expect(page.getByTestId("what-changed-dialog")).toBeVisible();
+    await expect(page.getByTestId("what-changed-instruction")).toContainText("πιο αναλυτικό");
+    await expect(page.getByTestId("diff-add").first()).toContainText("ενισχυτή");
+
+    // The restore is confirm-gated, and the copy PROMISES the current version
+    // is kept — the server keeps that promise by stashing it.
+    await page.getByTestId("what-changed-restore").click();
+    await expect(page.getByTestId("confirm-dialog")).toBeVisible();
+    await expect(page.getByTestId("confirm-dialog")).toContainText("ΚΡΑΤΙΕΤΑΙ");
+    await page.getByTestId("confirm-accept").click();
+
+    await expect.poll(() => mock.restored.length).toBe(1);
+  });
+
+  test("a lesson with no snapshot offers nothing", async ({ page }) => {
+    await mockTree(page, { section: "warmup" }, AFTER);
+    await page.goto(`/el/curricula/${ROOT_ID}`);
+    await expect(page.getByTestId("tree-board")).toBeVisible();
+    await page.locator('[data-testid="block-card"][data-kind="module"]').getByTestId("block-card-toggle").click();
+    await page.locator('[data-testid="block-card"][data-kind="lesson"]').getByTestId("block-card-toggle").click();
+    await expect(page.getByTestId("lesson-what-changed-trigger")).toHaveCount(0);
+  });
+});

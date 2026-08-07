@@ -948,6 +948,20 @@ export function undoRefine(blockId: string): Promise<BlockNode> {
   return request<BlockNode>(`/blocks/${blockId}/undo`, { method: "POST" });
 }
 
+/** Swap a LESSON's segments for the set stashed before the AI rewrote them.
+ *
+ * NOT the same thing as `undoRefine`, which restores one block's TEXT from
+ * `meta.prev_body`. A `modify_lesson` revise replaces the whole segment set —
+ * different count, different titles — so there is nothing for Undo to grab and
+ * this is the only route back.
+ *
+ * It TOGGLES: the displaced version is stashed on the way out, so calling it
+ * twice returns the AI's version. Nothing is destroyed either way, which is why
+ * the confirm copy can promise that. */
+export function restoreLessonSegments(lessonId: string): Promise<BlockNode> {
+  return request<BlockNode>(`/blocks/${lessonId}/restore-segments`, { method: "POST" });
+}
+
 export interface BlockUpdateInput {
   title?: string;
   body?: string | null;

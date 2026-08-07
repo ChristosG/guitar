@@ -316,7 +316,12 @@
       "whatChangedAfter": "After",
       "whatChangedUnchanged": "{count, plural, one {# paragraph unchanged} other {# paragraphs unchanged}}",
       "whatChangedNothing": "Nothing changed in this text.",
-      "whatChangedClose": "Close"
+      "whatChangedClose": "Close",
+      "restoreLesson": "Restore lesson",
+      "restoreLessonConfirmTitle": "Restore the previous lesson?",
+      "restoreLessonConfirmBody": "The lesson goes back to how it was before the AI rewrote it. The current version is KEPT — you can switch back whenever you like.",
+      "restoreLessonConfirm": "Restore",
+      "restoreLessonError": "Could not restore — try again."
     },
     "revise": {
       "open": "Revise with AI",

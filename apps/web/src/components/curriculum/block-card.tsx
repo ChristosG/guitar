@@ -30,6 +30,7 @@ import { useConfirm } from "@/components/ui/confirm";
 import { AttachArtifactDialog } from "@/components/curriculum/attach-artifact-dialog";
 import { SegmentDialog } from "@/components/curriculum/segment-dialog";
 import { ExtendWithChat } from "@/components/curriculum/extend-with-chat";
+import { LessonWhatChanged } from "@/components/curriculum/lesson-what-changed";
 import { LessonSources } from "@/components/curriculum/lesson-sources";
 import { TierBadge } from "@/components/curriculum/tier-badge";
 import {
@@ -615,6 +616,24 @@ export function BlockCard({
             ))}
           </div>
         </div>
+      )}
+
+      {/* A LESSON'S OWN «Τι άλλαξε;», which is a different mechanism from the
+          segment-level one below and needs its own control. `modify_lesson`
+          does not edit text — it requeues and a worker rewrites every segment
+          from scratch — so what changed is the whole SET, and the two sides
+          come from `meta.prev_segments` and the live segment children rather
+          than from one block's `prev_body`. This is also the only place a
+          RESTORE is offered: a segment already has Undo, a lesson has nothing
+          else. */}
+      {isLesson && Array.isArray(meta.prev_segments) && (
+        <LessonWhatChanged
+          lessonId={node.id}
+          prevSegments={meta.prev_segments}
+          liveSegments={contentChildren.filter((c) => c.kind === "segment")}
+          instruction={meta.revise_instruction}
+          onRestored={onChanged}
+        />
       )}
 
       {!editingBody && (canEditBody || isSegment || isModule || (isLesson && draftStatus === "ready")) && (
