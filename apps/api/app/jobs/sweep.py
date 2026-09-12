@@ -28,20 +28,34 @@ from app.models.knowledge import KnowledgeSource
 
 
 def sweep_interrupted_lessons(db) -> int:
-    """Every lesson left `drafting` by a restart goes back to `queued`. Returns the
-    count.
+    """Every lesson left `drafting` by a restart goes back to `queued` — UNLESS it
+    already has text underneath it, in which case it goes back to `ready`. Returns
+    the count of lessons touched either way.
 
-    NOT `failed`, and the distinction is the difference between a feature and a
-    bug report. A lesson that was mid-draft when the container restarted has
-    nothing wrong with it — no model has judged it, no content is bad. Marking it
-    `failed` would paint the tutor's board red after a routine deploy and tell him
-    his curriculum broke, when the truth is "click Resume". `queued` is exactly
-    what it is: waiting to be written.
+    `drafting` means two different things depending on whether the lesson already
+    had a body. A lesson drafted from nothing (the fan-out job) has no segments
+    yet when it's `drafting`; a restart there loses nothing, so `queued` — waiting
+    to be written — is correct, same as always. But the lesson panel's apply
+    (`apply_lesson_change`) and the revise engine's re-draft both set `drafting`
+    on a lesson that ALREADY HAS TEXT: it's being REWRITTEN, not drafted. A
+    restart there must leave that text alone. Flipping it to `queued` would tell
+    Resume to draft the lesson from scratch — throwing away a perfectly good body
+    over a routine deploy, which is the one thing an interruption must not cause.
+    So: has a segment with a real body underneath it -> `ready`; otherwise ->
+    `queued`, unchanged from before.
+
+    NOT `failed` either way, and the distinction is the difference between a
+    feature and a bug report. A lesson that was mid-draft (or mid-rewrite) when
+    the container restarted has nothing wrong with it — no model has judged it,
+    no content is bad. Marking it `failed` would paint the tutor's board red
+    after a routine deploy and tell him his curriculum broke, when the truth is
+    "click Resume" (or, now, nothing at all).
 
     Row-by-row rather than a bulk UPDATE, unlike its sibling below, because
     `Block.meta` is a JSON blob and the status is one key inside it — a bulk
     `values(meta=...)` would have to overwrite the whole document and would take
-    `word_count`, `citations` and `objective` with it.
+    `word_count`, `citations` and `objective` with it. The has-text check is a
+    second single-row query per stuck lesson, in that same row-by-row style.
     """
     stuck = db.scalars(
         select(Block).where(
@@ -50,11 +64,20 @@ def sweep_interrupted_lessons(db) -> int:
         )
     ).all()
     for lesson in stuck:
+        has_text = db.scalar(
+            select(Block.id).where(
+                Block.parent_id == lesson.id,
+                Block.kind == "segment",
+                Block.body.isnot(None),
+                Block.body != "",
+            ).limit(1)
+        ) is not None
+        status = "ready" if has_text else "queued"
         # Whole-dict reassignment — plain sa.JSON, no MutableDict (see Block.meta).
         lesson.meta = {
             **(lesson.meta or {}),
-            "draft_status": "queued",
-            "error": "interrupted by a restart — press Resume",
+            "draft_status": status,
+            "error": "interrupted by a restart" + ("" if has_text else " — press Resume"),
         }
     db.commit()
     return len(stuck)

@@ -371,6 +371,43 @@ def test_the_boot_sweep_puts_interrupted_lessons_back_to_queued_not_failed(db):
     assert statuses.count("ready") == 1, "an already-drafted lesson SURVIVES the restart"
 
 
+def test_an_interrupted_rewrite_with_existing_text_goes_back_to_ready_not_queued(db):
+    """The lesson panel's apply and the revise engine's re-draft both set `drafting`
+    on a lesson that ALREADY HAS TEXT — it is being REWRITTEN, not drafted from
+    nothing. A restart mid-rewrite must leave that text alone: `ready`, not
+    `queued`, because `queued` is what tells Resume to draft the lesson from
+    scratch and would throw away a perfectly good lesson body."""
+    root_id = _course(db)
+    lessons = _lessons(db, root_id)
+
+    # This lesson was mid-REWRITE: `drafting`, but it already has a segment with a
+    # real body underneath it (the text the rewrite was revising).
+    rewriting = lessons[0]
+    rewriting.meta = {**rewriting.meta, "draft_status": "drafting"}
+    db.add(Block(
+        parent_id=rewriting.id, order=0, kind="segment", title="Intro",
+        body="Some already-drafted lesson text.",
+    ))
+
+    # This lesson was mid-DRAFT from nothing: `drafting`, no segments at all yet.
+    drafting_fresh = lessons[1]
+    drafting_fresh.meta = {**drafting_fresh.meta, "draft_status": "drafting"}
+    db.commit()
+
+    swept = sweep_interrupted_lessons(db)
+
+    assert swept == 2
+    db.expire_all()
+    rewriting_after = db.get(Block, rewriting.id)
+    assert rewriting_after.meta["draft_status"] == "ready"
+    assert "interrupted by a restart" in rewriting_after.meta["error"]
+    assert "press Resume" not in rewriting_after.meta["error"]
+
+    fresh_after = db.get(Block, drafting_fresh.id)
+    assert fresh_after.meta["draft_status"] == "queued"
+    assert fresh_after.meta["error"] == "interrupted by a restart — press Resume"
+
+
 def test_resume_drafts_only_the_remainder(db, _provider):
     """The flagship proof: drafted lessons survive, and Resume finishes only what is
     left — it does not re-draft (or re-bill) the fifteen that already landed."""
