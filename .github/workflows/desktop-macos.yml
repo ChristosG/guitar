@@ -101,7 +101,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: desktop/src-tauri/resources/pg
-          key: pg-theseus16.9.0-pgvector0.8.0-${{ env.TARGET }}-v1
+          key: pg-theseus16.9.0-pgvector0.8.0-${{ env.TARGET }}-v2
 
       # No host postgres needed: pgvector builds against the bundled tree's own
       # relocatable pg_config (see stage-postgres.sh).
@@ -170,6 +170,19 @@ jobs:
         # 18791-18811), so the pair the shell derives at boot — whatever it
         # turns out to be — is never involved.
         run: bash desktop/scripts/smoke.sh "$APP/Contents/Resources/resources"
+
+      - name: No Homebrew or /usr/local load paths anywhere in the bundle
+        # The tutor's Mac has no Homebrew. 2026-09-12: theseus's postgres linked
+        # OpenSSL at /opt/homebrew/opt/openssl@3 and initdb died with "dyld:
+        # Library not loaded" on first run — invisible on every runner, which
+        # HAS Homebrew. stage-postgres.sh now vendors + relocates; this proves
+        # nothing else in the bundle (python, node, wheels, pgvector) does it.
+        run: |
+          set -euo pipefail
+          bad=$(find "$APP/Contents/Resources/resources" -type f \( -perm -u+x -o -name '*.dylib' -o -name '*.so' \) -print0 \
+            | xargs -0 -n1 sh -c 'file "$1" | grep -q Mach-O && otool -L "$1" | awk -v f="$1" "NR>1 && \$1 ~ /^\\/(opt\\/homebrew|usr\\/local)\\// {print f\": \"\$1}"' _ || true)
+          if [ -n "$bad" ]; then echo "$bad"; echo "::error::bundle depends on paths that only exist with Homebrew"; exit 1; fi
+          echo "no Homebrew/usr-local load paths in the bundle"
 
       - name: Package dmg
         run: |

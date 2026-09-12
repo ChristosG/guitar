@@ -96,6 +96,52 @@ case "$TARGET" in darwin-*) PGV_MOD="vector.dylib" ;; *) PGV_MOD="vector.so" ;; 
 [ -f "$SHAREDIR/extension/vector.control" ] || die "vector.control did not land in $SHAREDIR/extension"
 log "pgvector installed into the tree"
 
+# ---- 2b. darwin: make the tree self-contained (no Homebrew at runtime) ------
+# theseus-rs's darwin build links OpenSSL 3 by ABSOLUTE Homebrew path:
+# `postgres`, `libpq`, `pgcrypto`, `sslinfo`, `pgbench`, `pg_verifybackup` all
+# load `/opt/homebrew/opt/openssl@3/lib/lib{ssl,crypto}.3.dylib`. On a Mac
+# without Homebrew (the tutor's, 2026-09-12) `initdb` dies with
+# "dyld: Library not loaded" before the app can even create its cluster — and
+# CI never saw it, because every macOS runner HAS Homebrew. So: vendor the two
+# dylibs into lib/, rewrite every Homebrew load command to a bundle-relative
+# one, re-sign ad hoc (editing load commands invalidates the signature, and
+# arm64 refuses unsigned code), then PROVE no Homebrew path is left. The
+# acceptance run below then exercises the relocated tree.
+relocate_darwin() {
+  local ssl_prefix; ssl_prefix="$(brew --prefix openssl@3)" || die "brew --prefix openssl@3 failed"
+  for lib in libssl.3.dylib libcrypto.3.dylib; do
+    [ -f "$ssl_prefix/lib/$lib" ] || die "runner has no $ssl_prefix/lib/$lib"
+    cp -f "$ssl_prefix/lib/$lib" "$PG_OUT/lib/$lib"
+    chmod 755 "$PG_OUT/lib/$lib"
+  done
+  local f dir rel dep base new changed
+  while IFS= read -r -d '' f; do
+    file "$f" | grep -q 'Mach-O' || continue
+    dir="$(dirname "$f")"
+    rel="$(python3 -c "import os,sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))" "$PG_OUT/lib" "$dir")"
+    changed=""
+    # the dylib's own install name
+    case "$f" in "$PG_OUT/lib/"*.dylib)
+      install_name_tool -id "@loader_path/$(basename "$f")" "$f" 2>/dev/null && changed=1 ;;
+    esac
+    while IFS= read -r dep; do
+      base="$(basename "$dep")"
+      [ -f "$PG_OUT/lib/$base" ] || die "$f loads $dep but lib/$base is not vendored"
+      new="@loader_path/$rel/$base"; [ "$rel" = "." ] && new="@loader_path/$base"
+      install_name_tool -change "$dep" "$new" "$f" && changed=1
+    done < <(otool -L "$f" | awk 'NR>1 {print $1}' | grep -E '^(/opt/homebrew|/usr/local)/' || true)
+    if [ -n "$changed" ]; then
+      codesign --force --sign - "$f" >/dev/null 2>&1 || die "codesign failed for $f"
+    fi
+  done < <(find "$PG_OUT" -type f -print0)
+  # THE GUARD. This is the check that would have caught the tutor's Mac.
+  local bad
+  bad="$(find "$PG_OUT" -type f -exec sh -c 'file "$1" | grep -q Mach-O && otool -L "$1" | awk "NR>1 {print FILENAME\": \"\$1}" FILENAME="$1"' _ {} \; | grep -E '(/opt/homebrew|/usr/local)/' || true)"
+  [ -z "$bad" ] || { printf '%s\n' "$bad" >&2; die "Homebrew/usr-local load commands remain in the bundled postgres tree"; }
+  log "darwin relocation ok: OpenSSL vendored into lib/, no Homebrew load paths left"
+}
+case "$TARGET" in darwin-*) relocate_darwin ;; esac
+
 # ---- 3. acceptance ----------------------------------------------------------
 # Binaries carry RUNPATH $ORIGIN/../lib, but export the lib dir anyway (belt).
 log "acceptance: initdb + start + vector(384) + Greek collation"
