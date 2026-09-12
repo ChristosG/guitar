@@ -225,3 +225,24 @@ class DraftProgressOut(BaseModel):
     failed: int
     done: bool
     draft_error: str | None = None
+
+
+class LessonAiPlanRequest(BaseModel):
+    """`POST /blocks/{lesson_id}/ai/plan` body — «Φτιάξε πλάνο». Read-only:
+    the job stores its verdict on `job.progress["plan"]`, never touches the tree."""
+    instruction: str = Field(min_length=1)
+    note: str | None = None
+
+
+class LessonAiSectionPick(BaseModel):
+    """One ticked section for `POST /blocks/{lesson_id}/ai/apply` — the section
+    key the plan/board offered, plus the one-line brief of what must change."""
+    section: str = Field(min_length=1)
+    brief: str = ""
+
+
+class LessonAiApplyRequest(LessonAiPlanRequest):
+    """`sections` is `min_length=1` so an empty tick-list is a 422 before any
+    job row exists — the same "fail before enqueue" instinct as
+    `revise_curriculum`'s "apply requires a plan" check."""
+    sections: list[LessonAiSectionPick] = Field(min_length=1)

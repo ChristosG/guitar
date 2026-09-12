@@ -38,6 +38,7 @@ from app.db import get_db
 from app.i18n import locale_dep
 from app.jobs.curriculum_draft import resume_queued_segments, run_curriculum_draft_job
 from app.jobs.curriculum_revise import run_curriculum_revise_job
+from app.jobs.lesson_ai import run_lesson_ai_job
 from app.jobs.module_generate import run_module_generate_job
 from app.jobs.runner import run_curriculum_job, run_outline_job
 from app.llm.errors import LLMError
@@ -58,6 +59,8 @@ from app.schemas.curriculum import (
     CurriculumListItem,
     CurriculumRenameRequest,
     DraftProgressOut,
+    LessonAiApplyRequest,
+    LessonAiPlanRequest,
     LessonCreate,
     LessonFromChat,
     ModuleCreate,
@@ -925,6 +928,76 @@ def revise_curriculum(
     db.refresh(job)
     background_tasks.add_task(run_curriculum_revise_job, job.id)
     return JobAccepted(job_id=job.id, status=job.status)
+
+
+def _lesson_busy(db: Session, lesson_id: UUID) -> bool:
+    """True while this lesson already has a `lesson_ai` job in flight, or is
+    itself `drafting` (an apply already claimed it, or a redraft/deepen is
+    running) — either way a second AI request on the same lesson would race
+    the first one's rewrite rather than queue behind it."""
+    lesson = db.get(Block, lesson_id)
+    if lesson is not None and (lesson.meta or {}).get("draft_status") == "drafting":
+        return True
+    return db.scalar(
+        select(GenerationJob.id).where(
+            GenerationJob.kind == "lesson_ai",
+            GenerationJob.status.in_(("pending", "running")),
+            GenerationJob.params["lesson_id"].as_string() == str(lesson_id),
+        ).limit(1)
+    ) is not None
+
+
+def _enqueue_lesson_ai(
+    db: Session, background_tasks: BackgroundTasks, lesson_id: UUID, params: dict,
+) -> JobAccepted:
+    lesson = _get_block_or_404(db, lesson_id)
+    if lesson.kind != "lesson":
+        raise HTTPException(status_code=404, detail="not a lesson")
+    if _lesson_busy(db, lesson_id):
+        raise HTTPException(status_code=409, detail={
+            "code": "lesson_busy", "message": "this lesson is already being worked on"})
+    job = GenerationJob(kind="lesson_ai", status="pending", params={"lesson_id": str(lesson_id), **params})
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    background_tasks.add_task(run_lesson_ai_job, job.id)
+    return JobAccepted(job_id=job.id, status=job.status)
+
+
+@router.post("/blocks/{lesson_id}/ai/plan", response_model=JobAccepted, status_code=202,
+             dependencies=[Depends(require_llm_configured)])
+def lesson_ai_plan(
+    lesson_id: UUID, payload: LessonAiPlanRequest, background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> JobAccepted:
+    """«AI στο μάθημα» → «Φτιάξε πλάνο». Read-only; the plan lands on
+    `job.progress["plan"]` (poll `GET /jobs/{id}`) — nothing on the lesson
+    changes until `apply` below is called with the tutor's ticked sections."""
+    return _enqueue_lesson_ai(db, background_tasks, lesson_id, {
+        "mode": "plan", "instruction": payload.instruction, "note": payload.note})
+
+
+@router.post("/blocks/{lesson_id}/ai/apply", response_model=JobAccepted, status_code=202,
+             dependencies=[Depends(require_llm_configured)])
+def lesson_ai_apply(
+    lesson_id: UUID, payload: LessonAiApplyRequest, background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> JobAccepted:
+    """«Εφαρμογή» — the ticked sections are rewritten around the rest, in one
+    draft call. A section key the lesson does not have is a 422 HERE, before any
+    job row exists — a stale plan card (the lesson changed underneath it) must
+    fail fast, not spend a model call and fail minutes later."""
+    lesson = _get_block_or_404(db, lesson_id)
+    if lesson.kind != "lesson":
+        raise HTTPException(status_code=404, detail="not a lesson")
+    known = {(s.meta or {}).get("section") or s.title for s in db.scalars(
+        select(Block).where(Block.parent_id == lesson_id, Block.kind == "segment")).all()}
+    bad = [p.section for p in payload.sections if p.section not in known]
+    if bad:
+        raise HTTPException(status_code=422, detail=f"unknown sections: {bad}")
+    return _enqueue_lesson_ai(db, background_tasks, lesson_id, {
+        "mode": "apply", "instruction": payload.instruction, "note": payload.note,
+        "sections": [p.model_dump() for p in payload.sections]})
 
 
 @router.post("/blocks/{module_id}/lessons", response_model=BlockTreeOut, status_code=201)
