@@ -5,6 +5,16 @@ of prose; `json.dumps(..., ensure_ascii=True)` made that 2,310,878 chars of
 `\\uXXXX`, and the next model call was "~1,826,053 tokens (limit 1,000,000)".
 """
 from app.agent import loop
+from app.routers import chat
+
+
+def test_chat_router_shares_loops_stringify():
+    # 2026-09-12 review: chat.py had its own `_stringify` copy — "mirrors
+    # loop.py's own `_stringify` exactly" — that never got the ensure_ascii
+    # fix or the cap, so the mutation-approval path still built unbounded,
+    # ASCII-escaped tool messages. One source of truth now: chat.py imports
+    # loop's `_stringify` rather than defining its own.
+    assert chat._stringify is loop._stringify
 
 
 def test_stringify_keeps_greek_as_greek():

@@ -33,7 +33,7 @@ from sqlalchemy.orm import Session
 
 from app.agent.guards import CURRICULUM_CONTEXT_SENTINEL, PLANNING_CONTEXT_SENTINEL
 from app.agent.handoff import FIRST_TURN_HANDOFF
-from app.agent.loop import AgentResult, run_agent_turn, stream_plain_turn
+from app.agent.loop import AgentResult, _stringify, run_agent_turn, stream_plain_turn
 from app.agent.tools import TOOLS, with_locale
 from app.agent.transcript import messages_to_wire, persist_new_messages, window_wire
 from app.curriculum.revise import compact_tree_text, compute_impact, validate_ops
@@ -192,16 +192,6 @@ def _new_tail(result_messages: list[dict], prior_wire: list[dict]) -> list[dict]
     if messages and messages[0].get("role") == "system":
         messages = messages[1:]
     return messages[len(prior_wire):]
-
-
-def _stringify(result) -> str:
-    """Mirrors `loop.py`'s own `_stringify` exactly (small deliberate
-    duplication rather than importing a `_`-prefixed helper from another
-    module, per this codebase's established precedent) — turns a mutation
-    fn's plain JSON-serializable result into the tool message's `content`
-    string. `default=str` covers non-JSON-native fields (`UUID`, `datetime`).
-    """
-    return json.dumps(result, default=str)
 
 
 _RESULT_REF_MAX = 255  # ApprovalRequest.result_ref is String(255)

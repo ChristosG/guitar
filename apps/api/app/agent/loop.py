@@ -562,7 +562,9 @@ def _stringify(result) -> str:
     tokens, which is how one `get_curriculum` call blew a 1M-token window on
     2026-09-11. Capped at `TOOL_RESULT_MAX_CHARS` for the same reason — the
     persisted transcript stores exactly this string, so a cap here bounds every
-    later turn too.
+    later turn too. A truncated result is no longer valid JSON — that's fine,
+    because tool message `content` is never re-parsed; `transcript.py` treats
+    it as an opaque string.
     """
     text = json.dumps(result, default=str, ensure_ascii=False)
     if len(text) > TOOL_RESULT_MAX_CHARS:
