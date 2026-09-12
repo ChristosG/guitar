@@ -349,6 +349,15 @@ def apply_lesson_change(db, lesson_id: uuid.UUID, *, instruction: str, note: str
     the ones he left alone. Three separate calls would each see the old text of
     the other two and write three rewrites that do not meet in the middle.
 
+    THE INSTRUCTION IS RECORDED AS `meta.ai_instruction`, NOT `revise_instruction`,
+    and the difference is not cosmetic: `jobs/curriculum_draft._claim` treats
+    `revise_instruction` as a ONE-SHOT flag — it scrubs it off the row and folds it
+    into that draft's objective. Written here it would sit on a `ready` lesson until
+    the tutor's next Deepen or Redraft, which would then silently re-apply this
+    panel's instruction (and rebuild `revise_current` around it) to a full redraft
+    nobody asked to revise. `ai_instruction` is history: display-only, for
+    «Τι άλλαξε;» to say what was asked, read by nothing that drafts.
+
     NO CONNECTION IS HELD ACROSS THE MODEL CALL — `jobs/curriculum_draft.py:
     _draft_one`'s discipline, for the same reason: this runs on the request path
     and the board is polling. Everything the call needs is read first, the
@@ -423,7 +432,7 @@ def apply_lesson_change(db, lesson_id: uuid.UUID, *, instruction: str, note: str
     # snapshot the rewrite. `drafting` is the claim: the board shows the spinner,
     # and a second apply on the same lesson is visible rather than silent.
     lesson.meta = {**lesson_meta, "prev_segments": snapshot_of(db, lesson),
-                   "revise_instruction": full_instruction, "draft_status": "drafting",
+                   "ai_instruction": full_instruction, "draft_status": "drafting",
                    "error": None}
     db.commit()
 

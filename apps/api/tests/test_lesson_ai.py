@@ -241,7 +241,11 @@ def test_apply_rewrites_only_ticked_sections_keeps_ids_and_snapshots(lesson, mon
     l = db.get(Block, les.id)
     assert l.meta["draft_status"] == "ready"
     assert [s["section"] for s in l.meta["prev_segments"]][1] == "theory"     # snapshot taken
-    assert l.meta["revise_instruction"].startswith("Ενημέρωσε")
+    assert l.meta["ai_instruction"].startswith("Ενημέρωσε")
+    # NOT `revise_instruction`: the draft worker's `_claim` consumes that key as a
+    # one-shot redraft instruction, so leaving it here would make the tutor's next
+    # Deepen silently re-apply this panel's instruction to the whole lesson.
+    assert "revise_instruction" not in l.meta
     assert out["rewritten"] == ["warm_up", "exercises"]
 
 
