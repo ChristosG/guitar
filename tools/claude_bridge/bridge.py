@@ -227,6 +227,12 @@ def _classify(exit_code: int, stderr: str, payload: dict | None) -> str | None:
     blob = "\n".join(parts).lower()
 
     if exit_code != 0 or payload.get("is_error"):
+        # A context overflow is neither transient nor the tutor's key: the
+        # conversation itself is too big. Its own kind, so the app can tell him
+        # to start a new chat instead of "the model failed".
+        if any(s in blob for s in ("prompt is too long", "context length",
+                                   "too many tokens", "exceeds the model")):
+            return "too_long"
         # The 5-hour / weekly subscription cap. This is THE failure mode that
         # separates a subscription from an API key, and the one the tutor will
         # actually hit. It is temporary by definition — never `failed`.

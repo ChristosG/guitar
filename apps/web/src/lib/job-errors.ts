@@ -15,15 +15,15 @@ export interface JobErrorLike {
   error_kind: string | null;
 }
 
-const LOCALIZED_KINDS = new Set(["auth", "rate_limit", "timeout"]);
+const LOCALIZED_KINDS = new Set(["auth", "rate_limit", "timeout", "too_long"]);
 
 export function jobErrorText(
   job: JobErrorLike,
-  t: (key: "auth" | "rate_limit" | "timeout" | "generic") => string,
+  t: (key: "auth" | "rate_limit" | "timeout" | "too_long" | "generic") => string,
 ): string {
   const kind = job.error_kind ?? "";
   if (LOCALIZED_KINDS.has(kind)) {
-    return t(kind as "auth" | "rate_limit" | "timeout");
+    return t(kind as "auth" | "rate_limit" | "timeout" | "too_long");
   }
   return job.error || t("generic");
 }

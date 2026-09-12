@@ -337,3 +337,23 @@ def test_a_request_with_no_breakpoint_never_warns(caplog):
     with caplog.at_level("WARNING", logger="app.llm.claude"):
         _guided(p, [{"role": "user", "content": "a small question"}])
     assert not caplog.records
+
+
+# ---------------------------------------------------------------------------
+# 6. `_mapped_errors` — a context overflow is `too_long`, not the generic
+#    `BadRequestError` -> 400 or the `upstream` bucket. See errors.py's kind list.
+# ---------------------------------------------------------------------------
+
+def test_bad_request_prompt_too_long_maps_to_too_long(monkeypatch):
+    import anthropic
+    import httpx
+
+    from app.llm.claude import _mapped_errors
+
+    resp = httpx.Response(400, request=httpx.Request("POST", "https://x"),
+                          json={"error": {"message": "prompt is too long: 1200000 tokens > 1000000 maximum"}})
+    err = anthropic.BadRequestError("prompt is too long: 1200000 tokens > 1000000 maximum", response=resp, body=None)
+    with pytest.raises(LLMError) as ei:
+        with _mapped_errors():
+            raise err
+    assert ei.value.kind == "too_long"

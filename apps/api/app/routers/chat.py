@@ -733,6 +733,12 @@ def post_message(session_id: UUID, payload: ChatMessageIn, db: Session = Depends
         # needed to wait out. The user's message row is already persisted
         # (above), so after the wait his Send simply retries the turn. The
         # status codes match the taxonomy the frontend already translates.
+        if e.kind == "too_long":
+            raise HTTPException(
+                status_code=413,
+                detail={"code": "conversation_too_long",
+                        "message": "the conversation is too large for the model — start a new chat"},
+            ) from e
         status = {"rate_limit": 429, "auth": 409, "timeout": 504}.get(e.kind, 502)
         raise HTTPException(
             status_code=status,

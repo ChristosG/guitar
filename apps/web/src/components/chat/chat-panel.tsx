@@ -483,6 +483,10 @@ export function ChatPanel({ sessionId, rootId, blockTitles, onJobDone, seedDraft
       applyTurn(turn);
     } catch (err) {
       if (!streamedAnything) setMessages((prev) => prev.filter((m) => m.id !== streamId));
+      if (err instanceof ApiError && err.code === "conversation_too_long") {
+        setComposerError(t("conversationTooLong"));
+        return;
+      }
       if (err instanceof ApiError) {
         setComposerError(err.detail || t("error"));
       } else {

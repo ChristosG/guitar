@@ -30,6 +30,8 @@ class LLMError(Exception):
                       curriculum dies because the tutor generated it too fast.
       "timeout"    -> the network/model didn't answer in time. 504.
       "upstream"   -> the model answered with something unusable. 502.
+      "too_long"   -> the conversation/prompt exceeds the model window. 413.
+                      The fix is a new chat, or a smaller ask.
     """
 
     def __init__(self, kind: str, message: str = "") -> None:

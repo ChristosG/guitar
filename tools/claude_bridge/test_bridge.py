@@ -191,6 +191,14 @@ def test_classify_reads_error_text_and_never_the_payloads_numbers():
     assert bridge._classify(0, "", {"duration_ms": 4291}) is None       # success stays success
 
 
+def test_classify_prompt_too_long_is_its_own_kind():
+    """A context overflow is neither transient nor the tutor's key — it is the
+    conversation itself being too big. Misclassified as `upstream` -> 502, the
+    tutor sees nothing useful; this needs its own kind so the app can tell him
+    to start a new chat instead of "the model failed"."""
+    assert bridge._classify(1, "Prompt is too long · the request is ~1826053 tokens (limit 1000000)", None) == "too_long"
+
+
 # --- /v1/vision -------------------------------------------------------------
 #
 # `/v1/complete` runs `claude -p --tools ""` — every built-in tool disabled,

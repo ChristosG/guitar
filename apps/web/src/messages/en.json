@@ -679,6 +679,7 @@
     "auth": "Your Anthropic API key is missing or was rejected. Open Settings and check your key, then try again.",
     "rate_limit": "The model is rate-limited right now. Wait a minute, then try again.",
     "timeout": "The model took too long to answer. Try again.",
+    "too_long": "The conversation or text is too large for the model. Start a new chat or ask for something smaller.",
     "generic": "This failed unexpectedly. Try again."
   },
   "chat": {
@@ -689,6 +690,7 @@
     "empty": "Say hello to get started — the copilot can look things up or, with your approval, make changes.",
     "sessionError": "Could not start a chat session.",
     "error": "Could not send that message.",
+    "conversationTooLong": "This conversation grew too large for the model. Use “Clear chat” to start a new one.",
     "streamInterrupted": "The connection dropped mid-answer. If the answer isn't shown above, press Send to try again.",
     "roleUser": "You",
     "roleAssistant": "Copilot",

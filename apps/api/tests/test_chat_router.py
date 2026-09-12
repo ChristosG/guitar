@@ -902,3 +902,20 @@ def test_resolve_approve_segment_block_with_many_sessions_does_not_overflow_resu
 
     # And the session is not bricked: no longer pending.
     assert client.get(f"/chat/{session_id}/pending").json() is None
+
+
+def test_too_long_turn_is_a_413_with_a_code(monkeypatch):
+    """A context overflow used to fall into the generic `upstream` -> 502
+    bucket and the tutor saw nothing useful. It gets its own kind and its own
+    status so the frontend can tell him to start a new chat."""
+    from app.llm.errors import LLMError
+
+    session = client.post("/chat", json={"locale": "el"}).json()["session_id"]
+
+    def boom(*a, **k):
+        raise LLMError("too_long", "prompt is too long")
+
+    monkeypatch.setattr(chat_router, "run_agent_turn", boom)
+    r = client.post(f"/chat/{session}/messages", json={"content": "γεια"})
+    assert r.status_code == 413
+    assert r.json()["detail"]["code"] == "conversation_too_long"

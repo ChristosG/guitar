@@ -459,6 +459,18 @@ class _mapped_errors:
             return False
         import anthropic
 
+        if isinstance(exc, anthropic.BadRequestError):
+            # A context overflow ("Prompt is too long", "...exceeds the
+            # model's...maximum context length") is neither the tutor's key
+            # nor a transient upstream hiccup — the conversation itself is
+            # too big. Checked FIRST, ahead of every other clause, so it
+            # takes precedence over the generic >=500 upstream mapping below
+            # (a 400 wouldn't hit that anyway) and over falling through
+            # unmapped. Any other `BadRequestError` still propagates
+            # unchanged, exactly as before this branch existed.
+            msg = str(exc).lower()
+            if "too long" in msg or "too many tokens" in msg or ("context" in msg and "exceed" in msg):
+                raise LLMError("too_long", str(exc)) from exc
         if isinstance(exc, anthropic.AuthenticationError):
             raise LLMError(
                 "auth",
