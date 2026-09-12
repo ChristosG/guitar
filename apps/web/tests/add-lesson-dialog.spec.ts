@@ -24,7 +24,13 @@ import { test, expect, type Page, type Route } from "@playwright/test";
 //     closes and the BOARD refetches — that refetch is what re-arms the draft
 //     progress bar over the new `queued` lesson.
 //  5. THE OLD BEHAVIOUR SURVIVES. «Κενό μάθημα» still POSTs the plain
-//     `/blocks/{module}/lessons` — sometimes he just wants a container.
+//     `/blocks/{module}/lessons` — sometimes he just wants a container — and
+//     it lands WHERE HE POINTED: the «Θέση» select is above both buttons, so a
+//     blank lesson that ignored it and appended would be a silently wrong
+//     answer to a question the form asked him.
+//  6. IT NEVER TRAPS HIM. The job runs on the server, not in this dialog, so
+//     closing it mid-run cancels nothing: the poll keeps going, the tree still
+//     refreshes when the lesson lands, and the board's progress bar takes over.
 //
 // Same route-interception convention as the cockpit specs next door
 // (`lesson-ai-panel.spec.ts`, `tutor-edited.spec.ts`): anchored to
@@ -233,6 +239,9 @@ test.describe("«Προσθήκη μαθήματος» — the brief, the positi
     // THE STATUS LINE CHANGES UNDER HIM.
     const status = dialog.getByTestId("add-lesson-status");
     await expect(status).toContainText("Σχεδιάζω", { timeout: 10_000 });
+    // And it says he is free to go — the job is the server's, not this
+    // dialog's, and a tutor held hostage by a 10-minute spinner is the bug.
+    await expect(dialog.getByTestId("add-lesson-close-hint")).toBeVisible();
     await expect(status).toContainText("Γράφεται", { timeout: 10_000 });
     // Nothing to retry while the job runs — a second POST is a second lesson.
     await expect(generate).toBeDisabled();
@@ -259,14 +268,14 @@ test.describe("«Προσθήκη μαθήματος» — the brief, the positi
     expect(api.unexpected).toEqual([]);
   });
 
-  test("«Κενό μάθημα» still creates the blank lesson", async ({ page }) => {
+  test("«Κενό μάθημα» creates the blank lesson where he pointed", async ({ page }) => {
     const rootId = randomUUID();
     const moduleId = randomUUID();
     const lessonIds = [randomUUID(), randomUUID()];
 
     const api = await mockCurriculaApi(page, rootId, moduleId, lessonIds);
 
-    const blankBodies: { title: string }[] = [];
+    const blankBodies: { title: string; after: string | null }[] = [];
     let generateCalls = 0;
 
     await page.route(`${API_ORIGIN}/blocks/**`, async (route: Route) => {
@@ -277,7 +286,7 @@ test.describe("«Προσθήκη μαθήματος» — the brief, the positi
         return;
       }
       if (pathname === `/blocks/${moduleId}/lessons` && req.method() === "POST") {
-        blankBodies.push(req.postDataJSON() as { title: string });
+        blankBodies.push(req.postDataJSON() as { title: string; after: string | null });
         await route.fulfill({
           status: 201, contentType: "application/json", headers: CORS_HEADERS,
           body: JSON.stringify({
@@ -300,13 +309,98 @@ test.describe("«Προσθήκη μαθήματος» — the brief, the positi
 
     // No brief needed for a blank box — that button is alive from the start.
     await expect(dialog.getByTestId("add-lesson-empty")).toBeEnabled();
+    // «Θέση» is ONE control above TWO buttons: it has to mean the same thing
+    // for both. A blank lesson that appended after he picked a position would
+    // be the form ignoring an answer it asked for.
+    await dialog.getByTestId("add-lesson-after").selectOption(lessonIds[0]);
     await dialog.getByTestId("add-lesson-empty").click();
 
     await expect(dialog).toBeHidden({ timeout: 10_000 });
     expect(blankBodies).toHaveLength(1);
     expect(blankBodies[0].title).toBe("Νέο μάθημα");
+    expect(blankBodies[0].after).toBe(lessonIds[0]);
     expect(generateCalls).toBe(0);
     expect(api.counts.tree).toBeGreaterThan(treeCallsBefore);
+    expect(api.unexpected).toEqual([]);
+  });
+
+  test("closing the dialog mid-job cancels nothing — the lesson still lands", async ({ page }) => {
+    const rootId = randomUUID();
+    const moduleId = randomUUID();
+    const lessonIds = [randomUUID(), randomUUID()];
+    const jobId = randomUUID();
+
+    const api = await mockCurriculaApi(page, rootId, moduleId, lessonIds);
+
+    let generateCalls = 0;
+    let polls = 0;
+
+    await page.route(`${API_ORIGIN}/blocks/**`, async (route: Route) => {
+      const req = route.request();
+      const { pathname } = new URL(req.url());
+      if (req.method() === "OPTIONS") {
+        await route.fulfill({ status: 204, headers: CORS_HEADERS });
+        return;
+      }
+      if (pathname === `/blocks/${moduleId}/lessons/generate` && req.method() === "POST") {
+        generateCalls++;
+        await route.fulfill({
+          status: 202, contentType: "application/json", headers: CORS_HEADERS,
+          body: JSON.stringify({ job_id: jobId, status: "pending" }),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 500, contentType: "application/json", headers: CORS_HEADERS,
+        body: JSON.stringify({ detail: "unmocked request in test" }),
+      });
+    });
+
+    await page.route(`${API_ORIGIN}/jobs/**`, async (route: Route) => {
+      const req = route.request();
+      if (req.method() === "OPTIONS") {
+        await route.fulfill({ status: 204, headers: CORS_HEADERS });
+        return;
+      }
+      polls++;
+      // Four `running` ticks — long enough that the dialog is CLOSED for most
+      // of this job's life, which is the whole point of the test.
+      const done = polls >= 5;
+      const now = new Date().toISOString();
+      await route.fulfill({
+        status: 200, contentType: "application/json", headers: CORS_HEADERS,
+        body: JSON.stringify({
+          id: jobId, kind: "lesson_generate", status: done ? "succeeded" : "running",
+          result_root_id: done ? rootId : null, error: null, error_kind: null,
+          progress: { phase: "planning" },
+          created_at: now, updated_at: now,
+        }),
+      });
+    });
+
+    const dialog = await openAddLessonDialog(page, rootId);
+    const treeCallsBefore = api.counts.tree;
+
+    await dialog.getByTestId("add-lesson-brief").fill(BRIEF);
+    await dialog.getByTestId("add-lesson-generate").click();
+    await expect(dialog.getByTestId("add-lesson-status")).toBeVisible({ timeout: 10_000 });
+
+    // THE WAY OUT IS OPEN while the job runs. The dialog's X is the control;
+    // a disabled one here would pin him to a ten-minute wait for work that is
+    // not even happening in his browser.
+    const close = dialog.locator('[data-slot="dialog-close"]').first();
+    await expect(close).toBeEnabled();
+    await close.click();
+    await expect(dialog).toBeHidden();
+
+    // …and the job it started keeps going: the poll survives the close, and
+    // the tree is refetched when the lesson lands, which is what puts the new
+    // `queued` row (and the progress bar) on the board.
+    await expect
+      .poll(() => api.counts.tree, { timeout: 25_000 })
+      .toBeGreaterThan(treeCallsBefore);
+    expect(polls).toBeGreaterThanOrEqual(5);
+    expect(generateCalls).toBe(1);
     expect(api.unexpected).toEqual([]);
   });
 });

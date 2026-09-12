@@ -53,9 +53,14 @@ interface AddLessonDialogProps {
  * /blocks/{module}/lessons/generate`), and the lesson arrives titled, aimed and
  * drafted from his library.
  *
- * TWO DOORS, ON PURPOSE. «Κενό μάθημα» keeps the old behaviour verbatim —
- * sometimes he wants a container to fill himself, and taking that away to sell
- * the AI path would be a downgrade.
+ * TWO DOORS, ON PURPOSE. «Κενό μάθημα» still plants the empty box — sometimes
+ * he wants a container to fill himself, and taking that away to sell the AI
+ * path would be a downgrade. Both doors obey «Θέση».
+ *
+ * AND IT NEVER TRAPS HIM: the job belongs to the server, so closing this
+ * dialog mid-run cancels nothing. The poll keeps going (this component stays
+ * mounted under the module card — only the popup leaves the screen), the tree
+ * still refreshes when the lesson lands, and the status line says so out loud.
  *
  * WHY A JOB AND NOT A REQUEST: the planning call reads the whole library
  * (20-60s) and the draft chained behind it is minutes more — this dies at the
@@ -102,17 +107,23 @@ export function AddLessonDialog({
     setError(null);
   }
 
+  /** Done with this dialog: the form goes back to empty and it leaves the
+   * screen. Called when an action FINISHES — never when he simply closes it
+   * mid-job, which must leave the running state alone (see `onOpenChange`). */
   function close() {
     reset();
     onOpenChange(false);
   }
 
-  /** The old behaviour, untouched: a blank lesson called «Νέο μάθημα». */
+  /** The blank box — no model, no job — but it lands where «Θέση» says, same
+   * as the AI one. One select above two buttons has to mean the same thing for
+   * both; appending regardless would be the form ignoring an answer it asked
+   * him for. */
   async function handleEmpty() {
     setPhase("empty");
     setError(null);
     try {
-      await addLesson(moduleId, { title: tTree("newLessonTitle") });
+      await addLesson(moduleId, { title: tTree("newLessonTitle"), after: after || null });
       onAdded();
       close();
     } catch {
@@ -167,11 +178,13 @@ export function AddLessonDialog({
     <Dialog
       open={open}
       onOpenChange={(next) => {
-        // A generate in flight owns the dialog: closing it mid-job would leave
-        // the poll loop writing into an unmounted form while the lesson lands
-        // on the board anyway.
-        if (busy) return;
-        if (!next) reset();
+        // HE CAN ALWAYS LEAVE. The job is the server's, not this dialog's —
+        // closing mid-run cancels nothing, the poll below keeps running (this
+        // component stays mounted; only the popup leaves the screen), and the
+        // tree still refreshes when the lesson lands. So the state is left
+        // exactly as it is while something is in flight: reopening shows the
+        // same status line, and the finishing action resets the form itself.
+        if (!next && !busy) reset();
         onOpenChange(next);
       }}
     >
@@ -233,16 +246,24 @@ export function AddLessonDialog({
           </div>
 
           {phase === "planning" || phase === "drafting" ? (
-            <p
-              // The one line that CHANGES while he waits (planning → writing),
-              // so it is announced rather than silently swapped.
-              aria-live="polite"
-              className="flex items-center gap-2 text-sm text-muted-foreground"
-              data-testid="add-lesson-status"
-            >
-              <Loader2 className="size-4 shrink-0 animate-spin" aria-hidden />
-              {t(phase)}
-            </p>
+            <div className="flex flex-col gap-1">
+              <p
+                // The one line that CHANGES while he waits (planning →
+                // writing), so it is announced rather than silently swapped.
+                aria-live="polite"
+                className="flex items-center gap-2 text-sm text-muted-foreground"
+                data-testid="add-lesson-status"
+              >
+                <Loader2 className="size-4 shrink-0 animate-spin" aria-hidden />
+                {t(phase)}
+              </p>
+              {/* SAID OUT LOUD, because a spinner in a dialog reads as "wait
+                  here" and this one means nothing of the sort — the work is
+                  happening on the server and the board is where it lands. */}
+              <p className="text-xs text-muted-foreground" data-testid="add-lesson-close-hint">
+                {t("closeHint")}
+              </p>
+            </div>
           ) : null}
 
           {error && (
