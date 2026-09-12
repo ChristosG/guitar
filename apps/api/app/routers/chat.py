@@ -854,6 +854,19 @@ def post_message_stream(session_id: UUID, payload: ChatMessageIn, db: Session = 
             detail="an approval is pending — resolve it before sending a new message",
         )
 
+    # And the same `chat_turn`-job guard, for the same reason: the streaming
+    # door must not be the side door around it. A running job will window this
+    # transcript and persist its own tail; a stream started against the same
+    # history would interleave two answers on one transcript — and this
+    # endpoint DOES persist (atomically, on `"done"`). Refused before anything
+    # is written, so a blocked message leaves no trace.
+    if has_running_turn(db, session_id):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "turn_running",
+                    "message": "the previous message is still being answered"},
+        )
+
     prior_wire = window_wire(messages_to_wire(_ordered_messages(db, session_id)))
     user_wire = {"role": "user", "content": payload.content}
     wire = _inject_curriculum_context(db, session, prior_wire + [user_wire])

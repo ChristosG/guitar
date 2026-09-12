@@ -1404,7 +1404,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: SUGGESTIONS_SYSTEM,
         build=_build_chat_suggestions,
-        call_sites=("routers/chat.py:1151",),
+        call_sites=("routers/chat.py:1164",),
         slices=(
             Slice(
                 id=SUGGESTIONS_SLICE_ID,

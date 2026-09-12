@@ -101,6 +101,17 @@ def test_second_async_turn_while_one_runs_is_409(monkeypatch):
     assert r2.status_code == 409
 
 
+def test_stream_door_refuses_while_a_turn_job_runs(monkeypatch):
+    """The SSE endpoint persists too (atomically, on "done") — so it must
+    refuse for the same reason `post_message` does, or it is a side door
+    around the guard."""
+    monkeypatch.setattr(chat_router, "run_chat_turn_job", lambda job_id: None)  # stays pending
+    session = client.post("/chat", json={"locale": "el"}).json()["session_id"]
+    assert client.post(f"/chat/{session}/messages?async=1", json={"content": "α"}).status_code == 202
+    r = client.post(f"/chat/{session}/messages/stream", json={"content": "β"})
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "turn_running"
+
+
 def test_llm_error_in_the_job_is_recorded_with_its_kind(monkeypatch):
     from app.llm.errors import LLMError
     def boom(db, wire, **kw):

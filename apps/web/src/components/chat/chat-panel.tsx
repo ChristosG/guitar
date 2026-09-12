@@ -487,6 +487,15 @@ export function ChatPanel({ sessionId, rootId, blockTitles, onJobDone, seedDraft
         setComposerError(t("conversationTooLong"));
         return;
       }
+      if (err instanceof ApiError && err.code === "turn_running") {
+        // The PREVIOUS turn is still being answered off the request path (a
+        // `chat_turn` job) and the API refused this one before persisting a
+        // thing. Nothing is in flight for THIS message, so the slow-turn
+        // history poll below would be waiting on an answer that belongs to
+        // someone else's question — say so plainly instead.
+        setComposerError(t("turnRunning"));
+        return;
+      }
       if (err instanceof ApiError) {
         setComposerError(err.detail || t("error"));
       } else {

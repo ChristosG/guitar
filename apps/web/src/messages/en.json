@@ -763,7 +763,8 @@
     },
     "distill": "Draft the instruction",
     "distillFailed": "Could not distill the conversation — try again.",
-    "slowTurn": "The assistant is taking longer than usual — the reply is still being written and will appear here as soon as it's ready."
+    "slowTurn": "The assistant is taking longer than usual — the reply is still being written and will appear here as soon as it's ready.",
+    "turnRunning": "The previous answer is still being written — wait for it before sending again."
   },
   "login": {
     "title": "Angel OS",
