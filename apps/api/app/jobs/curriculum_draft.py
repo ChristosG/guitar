@@ -506,6 +506,16 @@ def run_curriculum_draft_job(job_id: uuid.UUID) -> None:
         prompt_overrides = overrides.snapshot(db)
 
         lesson_ids = _queued_lesson_ids(db, root_id)
+        # `lesson_ids` on params (Unit 3): draft ONLY these, when they are
+        # queued. `None`/absent = every queued lesson (today's Resume). Used by
+        # the guided add-lesson chain so one new lesson does not drag every
+        # other straggler into the same fan-out. The rate-limit backoff passes
+        # below already intersect with `started = set(lesson_ids)`, so they
+        # inherit this filter for free.
+        only = job.params.get("lesson_ids")
+        if only:
+            wanted = {uuid.UUID(str(x)) for x in only}
+            lesson_ids = [lid for lid in lesson_ids if lid in wanted]
         positions = _positions(db, root_id)
 
         plan = {
@@ -582,7 +592,28 @@ def run_curriculum_draft_job(job_id: uuid.UUID) -> None:
             return
         job.progress = {"phase": "done", **report}
         job.result_root_id = root_id
-        if report["failed"] and report["ready"] == 0:
+
+        # `report` above is ALWAYS the whole root — the board's progress poll
+        # (`draft_progress`) never narrows to `lesson_ids`. But when THIS job
+        # was scoped to specific lessons (Unit 3), whether THIS job succeeded
+        # or failed is judged on those lessons alone: a job asked to draft one
+        # new lesson must not be marked `failed` just because some unrelated
+        # straggler under the same root is still `queued` — and, symmetrically,
+        # must not be marked `succeeded` on the strength of lessons it never
+        # touched.
+        only = job.params.get("lesson_ids")
+        if only:
+            wanted = {uuid.UUID(str(x)) for x in only}
+            rows = db.execute(
+                select(Block.meta).where(Block.id.in_(wanted))
+            ).all()
+            mine_failed = bool(rows) and all(
+                (meta or {}).get("draft_status") == "failed" for (meta,) in rows
+            )
+        else:
+            mine_failed = report["failed"] and report["ready"] == 0
+
+        if mine_failed:
             job.status = "failed"
             job.error_kind = "upstream"
             job.error = "No lesson could be drafted. Check Settings, then Resume."

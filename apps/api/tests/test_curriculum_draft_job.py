@@ -817,3 +817,102 @@ def test_a_revise_redraft_does_not_send_a_kept_section_twice(db, monkeypatch):
     assert captured["fixed_sections"] == {"theory": TUTOR_THEORY}
     assert "theory" not in captured["revise_current"], "shown as fixed, not as 'current'"
     assert "exercises" in captured["revise_current"], "the rest of the lesson is still shown"
+
+
+# ---------------------------------------------------------------------------
+# `lesson_ids` (Unit 3) — a draft job pointed at specific lessons, so the
+# guided add-lesson chain can draft ONE new lesson without dragging every
+# other straggler under the same root into the same fan-out.
+# ---------------------------------------------------------------------------
+
+SMALL_SHAPE = plan_shape(2, 1, 50)  # 2 lessons / 1 module
+
+
+def _small_outline() -> dict:
+    return {
+        "title": "Tone Fundamentals",
+        "modules": [
+            {
+                "title": "Module 0", "objective": "o", "tier": "library",
+                "coverage_note": "p.19",
+                "lessons": [
+                    {"title": f"L0.{j}", "objective": "o", "est_minutes": 50}
+                    for j in range(2)
+                ],
+            },
+        ],
+    }
+
+
+def _small_course(db) -> uuid.UUID:
+    source = _book(db)
+    return materialize_outline(
+        db, _small_outline(), title="Tone Fundamentals", language="en", shape=SMALL_SHAPE,
+        library=build_library_context(db, [source.id]), source_ids=[source.id],
+    )
+
+
+def _job_for(db, root_id, **extra_params) -> uuid.UUID:
+    job = GenerationJob(
+        kind="curriculum_draft", status="pending",
+        params={"root_id": str(root_id), **extra_params},
+    )
+    db.add(job)
+    db.commit()
+    return job.id
+
+
+def test_lesson_ids_restricts_the_fan_out_to_only_those_lessons(db, _provider):
+    root_id = _small_course(db)
+    l1, l2 = _lessons(db, root_id)
+
+    job_id = _job_for(db, root_id, lesson_ids=[str(l2.id)])
+    run_curriculum_draft_job(job_id)
+
+    db.expire_all()
+    l1_after = db.get(Block, l1.id)
+    l2_after = db.get(Block, l2.id)
+    assert l1_after.meta.get("draft_status") == "queued", "l1 was not in lesson_ids"
+    assert l2_after.meta["draft_status"] == "ready"
+    assert any("L0.1" in sent for sent in _provider.drafted)
+    assert not any("L0.0" in sent for sent in _provider.drafted)
+
+    job = db.get(GenerationJob, job_id)
+    assert job.status == "succeeded"
+
+    # The report still counts the WHOLE root, not just the wanted lesson(s).
+    progress = draft_progress(db, root_id)
+    assert progress["queued"] == 1
+
+
+def test_lesson_ids_finalize_fails_only_when_every_wanted_lesson_failed(db, monkeypatch):
+    """The root still has an un-attempted (queued) lesson, so the fan-out did not
+    finish the whole curriculum — but the finalize verdict is scoped to
+    `lesson_ids`, not the whole root: the ONE lesson the job was asked to draft
+    failing is what makes THIS job `failed`, not the untouched sibling."""
+
+    class _FailingProvider:
+        def guided_json(self, messages, schema, *, temperature=0.2, role="spec", max_tokens=None):
+            raise LLMError("upstream", "the model answered with garbage")
+
+        def count_tokens(self, text: str) -> int:
+            return len(text) // 3 + 1
+
+    provider = _FailingProvider()
+    monkeypatch.setattr(draft_mod, "get_provider", lambda: provider)
+    monkeypatch.setattr(corpus_mod, "get_provider", lambda: provider)
+
+    root_id = _small_course(db)
+    l1, l2 = _lessons(db, root_id)
+
+    job_id = _job_for(db, root_id, lesson_ids=[str(l2.id)])
+    run_curriculum_draft_job(job_id)
+
+    db.expire_all()
+    l1_after = db.get(Block, l1.id)
+    l2_after = db.get(Block, l2.id)
+    assert l1_after.meta.get("draft_status") == "queued", "never attempted — not in lesson_ids"
+    assert l2_after.meta["draft_status"] == "failed"
+
+    job = db.get(GenerationJob, job_id)
+    assert job.status == "failed"
