@@ -205,6 +205,24 @@ def _fixed_body(text: str | None) -> str:
     return t[:FIXED_SECTION_CHAR_LIMIT] + FIXED_SECTION_TRUNCATION_MARKER
 
 
+# WHAT MUST CHANGE, SECTION BY SECTION (Task 2.2, the lesson AI panel's APPLY).
+# The fixed block above says what must NOT change; this one says, for each section
+# the model IS writing, the one line the planner produced (and the tutor read and
+# approved) about what has to be different this time. Without it the apply call
+# would carry only the tutor's overall instruction, and a section ticked for a
+# reason the planner spelled out — "it now contradicts the new theory" — would be
+# rewritten from the general instruction alone, i.e. from less than the tutor was
+# shown on the card he approved.
+#
+# Rendered AFTER the fixed block, appended to the same `revise_block` value: the
+# briefs are about the sections being written, so they read last, closest to the
+# task. Empty/absent renders nothing — byte-identical to before this existed.
+LESSON_SECTION_BRIEFS_BLOCK = (
+    "\n\nΓια κάθε ενότητα που ξαναγράφεις, αυτό ακριβώς πρέπει να αλλάξει:\n{briefs}"
+)
+LESSON_SECTION_BRIEFS_SLICE_ID = "lesson.section_briefs"
+
+
 LESSON_DEEPEN_BLOCK = (
     "\n\nYOUR PREVIOUS DRAFT CAME BACK AT {total_words} WORDS — "
     "under the {floor}-word floor. Rewrite it in full, keeping "
@@ -230,6 +248,7 @@ def build_lesson_messages(
     previous: dict | None = None,
     revise_current: dict | None = None,
     fixed_sections: dict[str, str] | None = None,
+    section_briefs: dict[str, str] | None = None,
     source=None,
 ) -> list[dict]:
     """The messages for one lesson draft. Pure.
@@ -258,6 +277,11 @@ def build_lesson_messages(
     Rendered by APPENDING to `revise_block`, not through a placeholder of its own
     — `LESSON_TAIL` is untouched, so a tutor override of `lesson.draft` written
     before this existed still renders it. `None`/`{}` is byte-identical to before.
+
+    `section_briefs` is `{section_key: one line}` for the sections the model IS
+    writing — the lesson AI panel's plan, as the tutor approved it. Appended after
+    the fixed block for the same reason and with the same guarantee: keys with an
+    empty brief are dropped, and an absent (or all-empty) map renders nothing.
     """
     messages = prefix_messages(library, source)
 
@@ -299,6 +323,18 @@ def build_lesson_messages(
             fixed=json.dumps({k: _fixed_body(v) for k, v in fixed_sections.items()}, ensure_ascii=False),
         )
 
+    briefs_block = ""
+    # Empty briefs are dropped BEFORE the emptiness check, not after: a plan whose
+    # every brief came back blank has nothing to say, and rendering the heading
+    # over a bare `{}` would be an instruction that instructs nothing.
+    briefs = {k: v for k, v in (section_briefs or {}).items() if v}
+    if briefs:
+        import json
+
+        briefs_block = resolve(
+            source, LESSON_SECTION_BRIEFS_SLICE_ID, LESSON_SECTION_BRIEFS_BLOCK,
+        ).format(briefs=json.dumps(briefs, ensure_ascii=False))
+
     content = resolve(source, LESSON_SLICE_ID, LESSON_TAIL).format(
         course_title=ctx.course_title,
         module_title=ctx.module_title,
@@ -328,7 +364,7 @@ def build_lesson_messages(
         # Appended to the EXISTING placeholder rather than given one of its own:
         # `LESSON_TAIL` stays byte-identical, so a `lesson.draft` override the
         # tutor saved before today still renders the fixed block.
-        revise_block=revise_block + fixed_block,
+        revise_block=revise_block + fixed_block + briefs_block,
         deepen_block=deepen_block,
         answer_in=answer_in(language, source),
     )
@@ -435,6 +471,7 @@ def draft_lesson(
     revise_current: dict | None = None,
     fixed_sections: dict[str, str] | None = None,
     exclude_sections: set[str] | frozenset[str] = frozenset(),
+    section_briefs: dict[str, str] | None = None,
 ) -> tuple[dict, Measurement]:
     """One lesson: draft -> validate citations (one repair) -> measure -> at most
     one deepen pass. Returns `(lesson, measurement)`.
@@ -452,6 +489,11 @@ def draft_lesson(
     the drafted sections PLUS the fixed ones — a lesson whose theory the tutor wrote
     is not a thin lesson, and deepening it against a count that pretends his 900
     words do not exist would burn a model call to pad sections that are fine.
+
+    `section_briefs` rides with them on the lesson AI panel's apply: `{key: one
+    line}` for the sections that ARE being written, threaded to every
+    `build_lesson_messages` call below — a deepen pass must still know what it was
+    asked to change. `None` on every other draft path.
 
     `db` IS ONLY TOUCHED FOR THE RETRIEVAL FALLBACK, and only when the library did
     not fit whole. In the normal (full-context) path this function performs NO
@@ -494,7 +536,8 @@ def draft_lesson(
     messages = build_lesson_messages(
         ctx=ctx, library=library, language=language, blueprint=bp,
         student_brief=student_brief, course_brief=course_brief, retrieved=retrieved,
-        revise_current=revise_current, fixed_sections=fixed_sections, source=prompts,
+        revise_current=revise_current, fixed_sections=fixed_sections,
+        section_briefs=section_briefs, source=prompts,
     )
     lesson = provider.guided_json(messages, schema, role="draft")
 
@@ -546,7 +589,7 @@ def draft_lesson(
                 student_brief=student_brief, course_brief=course_brief,
                 retrieved=retrieved, deepen=m, previous=lesson,
                 revise_current=revise_current, fixed_sections=fixed_sections,
-                source=prompts,
+                section_briefs=section_briefs, source=prompts,
             ),
             schema, role="draft",
         )

@@ -27,12 +27,18 @@ import uuid
 from sqlalchemy import select
 
 from app.curriculum import blueprint as bp_mod
-from app.curriculum.depth import count_words, target_words
+from app.curriculum.corpus import build_retrieval_context
+from app.curriculum.depth import count_words, floor_words, target_words
+from app.curriculum.draft import LessonContext, draft_lesson, persist_lesson
 from app.curriculum.ground import ground_topic
-from app.curriculum.tutor_edit import tutor_edited_sections
+from app.curriculum.outline import TIER_GENERAL
+from app.curriculum.restore import snapshot_of
+from app.curriculum.tutor_edit import recompute_lesson_words, tutor_edited_sections
 from app.i18n import answer_in, curriculum_style, language_directive
+from app.jobs.curriculum_draft import _lesson_size  # the ONE sizing rule, shared with the fan-out
 from app.llm.factory import get_provider
 from app.models.block import Block
+from app.prompts import overrides
 from app.prompts.overrides import resolve
 
 log = logging.getLogger(__name__)
@@ -210,10 +216,24 @@ def _lesson_sections(db, lesson: Block) -> list[dict]:
              "id": str(s.id)} for s in segs]
 
 
-def _blueprint_lines(bp: dict, language: str) -> str:
+def _blueprint_lines(bp: dict, language: str, keys: set[str] | frozenset[str]) -> str:
+    """The blueprint's enabled sections, FILTERED to the keys this lesson actually
+    has rows for.
+
+    `keys` is not optional and the filter is not cosmetic. The prompt ends with
+    "return one entry per section key listed above — no more, no fewer", and the
+    block right below these lines is the lesson's ACTUAL sections. A course whose
+    blueprint gained a section after this lesson was drafted (or a lesson drafted
+    before a section was enabled) would otherwise list a key with no text under
+    it and then demand a verdict on it — the model either invents one, which
+    `validate_plan` drops as unknown, or obeys the sections block and is "wrong"
+    about the count. Two instructions that cannot both be satisfied is a prompt
+    that teaches the model to pick one, which is not a thing to leave lying in a
+    planner the tutor reads the output of.
+    """
     labels = bp_mod.section_labels(bp, language if language in ("el", "en") else "el")
     return "\n".join(f"- {s['key']} — {labels.get(s['key'], s['key'])} — {s.get('weight', 0):.2f}"
-                     for s in bp_mod.enabled_sections(bp))
+                     for s in bp_mod.enabled_sections(bp) if s["key"] in keys)
 
 
 def validate_plan(raw: dict, existing: list[dict]) -> dict:
@@ -305,7 +325,8 @@ def plan_lesson_change(db, lesson_id: uuid.UUID, *, instruction: str, note: str 
         module_title=module.title, module_objective=(module.meta or {}).get("objective") or "",
         neighbours=neighbours_text(db, lesson), lesson_title=lesson.title,
         lesson_objective=(lesson.meta or {}).get("objective") or lesson.body or "",
-        blueprint_lines=_blueprint_lines(bp, language), sections=sections, edited=edited,
+        blueprint_lines=_blueprint_lines(bp, language, {s["section"] for s in sections}),
+        sections=sections, edited=edited,
         retrieved=retrieved, instruction=instruction, note=note, language=language, source=db,
     )
     raw = get_provider().guided_json(messages, LESSON_PLAN_SCHEMA, role="plan")
@@ -314,3 +335,120 @@ def plan_lesson_change(db, lesson_id: uuid.UUID, *, instruction: str, note: str 
     target = int((lesson.meta or {}).get("target_words") or target_words(int(minutes)))
     plan["impact"] = _impact(plan, sections, bp, target)
     return plan
+
+
+def apply_lesson_change(db, lesson_id: uuid.UUID, *, instruction: str, note: str | None,
+                        sections: list[dict]) -> dict:
+    """ONE draft call with the schema restricted to `sections`; everything else
+    is fixed text. Snapshot first (`prev_segments` — the same lesson-level undo
+    the revise engine uses), write in place, recount. Commits. On a model error
+    the lesson goes back to `ready` untouched and the error propagates.
+
+    ONE CALL, NOT ONE PER SECTION, and that is the design rather than a saving:
+    the sections the tutor ticked have to agree with EACH OTHER as well as with
+    the ones he left alone. Three separate calls would each see the old text of
+    the other two and write three rewrites that do not meet in the middle.
+
+    NO CONNECTION IS HELD ACROSS THE MODEL CALL — `jobs/curriculum_draft.py:
+    _draft_one`'s discipline, for the same reason: this runs on the request path
+    and the board is polling. Everything the call needs is read first, the
+    snapshot-and-claim is committed, `db.close()` hands the connection back
+    (`expire_on_commit=False` keeps the attributes read above valid), and the
+    lesson is re-fetched afterwards for the write.
+    """
+    lesson, module, course = _lesson_or_raise(db, lesson_id)
+    existing = _lesson_sections(db, lesson)
+    known = {s["section"] for s in existing}
+    # Deduplicated, in the order he ticked them: `keep` and the schema are sets
+    # either way, so a repeated key would change nothing except the `rewritten`
+    # list this returns — and that list is read back to the tutor.
+    ticked = list(dict.fromkeys(str(s.get("section") or "") for s in sections))
+    briefs = {str(s.get("section") or ""): str(s.get("brief") or "") for s in sections}
+    if not ticked:
+        raise LessonAiError("no sections selected")
+    unknown = [k for k in ticked if k not in known]
+    if unknown:
+        raise LessonAiError(f"unknown sections: {unknown}")
+    keep = known - set(ticked)
+    # A kept section with no text is NOT shown as fixed — «αυτό δεν αλλάζει» over
+    # an empty string is an instruction to write around nothing. Its key still
+    # leaves the schema (`exclude_sections=keep`) and `persist_lesson(keep=...)`
+    # still leaves the row alone: unticked means untouched either way.
+    fixed = {s["section"]: s["body"] for s in existing
+             if s["section"] in keep and s["body"].strip()}
+
+    meta = course.meta or {}
+    bp = bp_mod.blueprint_from_course_meta(meta)
+    raw_sources = meta.get("source_ids")
+    source_ids = None if raw_sources is None else [uuid.UUID(s) for s in raw_sources]
+    shape = meta.get("shape") or {}
+    minutes_per_lesson = shape.get("minutes_per_lesson") or DEFAULT_MINUTES_PER_LESSON
+    lesson_meta = lesson.meta or {}
+    # Exactly the four keys `_lesson_size` reads — the ONE sizing rule, shared with
+    # the drafting fan-out, so an apply cannot write a lesson to a different length
+    # than a redraft of the same lesson would. 50 means 50: the whole booked slot is
+    # teaching time, so `teaching_minutes` is `minutes_per_lesson`, not a share of it.
+    size = _lesson_size(
+        lesson,
+        {"minutes_per_lesson": minutes_per_lesson,
+         "teaching_minutes": minutes_per_lesson,
+         "target_words": lesson_meta.get("target_words") or target_words(int(minutes_per_lesson)),
+         "floor_words": lesson_meta.get("floor_words") or floor_words(int(minutes_per_lesson))},
+        deepen=False,
+    )
+    full_instruction = instruction.strip() + (f"\n{note.strip()}" if note and note.strip() else "")
+    objective = lesson_meta.get("objective") or lesson.body or ""
+    # The same fold `_draft_one` performs for a `modify_lesson` revision, word for
+    # word: the instruction rides the VOLATILE objective, after the cached library
+    # prefix, so it costs no cache write.
+    objective = f"{objective}\n\nΑναθεώρηση από τον καθηγητή: {full_instruction}"
+    ctx = LessonContext(
+        lesson_title=lesson.title, lesson_objective=objective,
+        module_title=module.title, module_objective=(module.meta or {}).get("objective") or "",
+        course_title=course.title, tier=(module.meta or {}).get("tier") or TIER_GENERAL,
+        # THE NEIGHBOURS RIDE `position` FOR NOW. `LessonContext` has no
+        # `neighbours` field yet, so the `POSITION:` line reads «PREVIOUS LESSON:
+        # …» on this path — honest, and strictly more than the fan-out's "lesson 3
+        # of 4" tells the model. Task 3.2 gives `build_lesson_messages` a proper
+        # `neighbours=` parameter and this line goes back to a position string.
+        position=neighbours_text(db, lesson),
+        minutes=size["minutes"], teaching_minutes=size["teaching_minutes"],
+        target_words=size["target_words"], floor_words=size["floor_words"],
+    )
+    language = lesson.language or course.language or "el"
+
+    # SNAPSHOT AND CLAIM, ONE TRANSACTION, COMMITTED BEFORE THE MODEL CALL. The
+    # snapshot is what «Τι άλλαξε;» and the restore toggle read, so it has to be
+    # the segments as they stand THIS INSTANT — taken after the call, it would
+    # snapshot the rewrite. `drafting` is the claim: the board shows the spinner,
+    # and a second apply on the same lesson is visible rather than silent.
+    lesson.meta = {**lesson_meta, "prev_segments": snapshot_of(db, lesson),
+                   "revise_instruction": full_instruction, "draft_status": "drafting",
+                   "error": None}
+    db.commit()
+
+    library = build_retrieval_context(db, source_ids)
+    prompts = overrides.snapshot(db)
+    db.close()  # hand the connection back — see the docstring
+    try:
+        drafted, m = draft_lesson(
+            db, ctx=ctx, library=library, language=language, blueprint=bp,
+            student_brief=None, course_brief=meta.get("brief"), source_ids=source_ids,
+            prompts=prompts, revise_current=None, fixed_sections=fixed or None,
+            exclude_sections=keep, section_briefs=briefs,
+        )
+    except Exception:
+        # Back to `ready` with the content UNCHANGED — nothing was written yet.
+        # `prev_segments` may stay: it still describes the lesson exactly as it
+        # is, so the restore toggle is a no-op rather than a lie.
+        db.rollback()
+        lesson = db.get(Block, lesson_id)
+        lesson.meta = {**(lesson.meta or {}), "draft_status": "ready"}
+        db.commit()
+        raise
+    lesson = db.get(Block, lesson_id)
+    persist_lesson(db, lesson, drafted, m, library, bp,
+                   teaching_minutes=size["teaching_minutes"], keep=keep)
+    words = recompute_lesson_words(db, lesson)
+    db.commit()
+    return {"rewritten": list(ticked), "word_count": words}

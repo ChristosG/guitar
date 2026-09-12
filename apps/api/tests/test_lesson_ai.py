@@ -202,3 +202,109 @@ def test_the_planner_prompt_is_registered_and_renders(lesson):
     assert entry.source_of_truth() is lesson_ai.build_plan_messages
     rendered = registry.render("lesson.ai.plan", "el")
     assert "EDITED BY HAND" in rendered.text          # the sample lesson has one
+
+
+def test_apply_rewrites_only_ticked_sections_keeps_ids_and_snapshots(lesson, monkeypatch):
+    db, course, module, les = lesson
+    import app.curriculum.lesson_ai as mod
+    captured = {}
+
+    def fake_draft_lesson(db_, *, ctx, library, language, blueprint=None, student_brief=None,
+                          course_brief=None, source_ids=None, prompts=None, revise_current=None,
+                          fixed_sections=None, exclude_sections=frozenset(), section_briefs=None):
+        captured.update(fixed=fixed_sections, exclude=set(exclude_sections), briefs=section_briefs,
+                        objective=ctx.lesson_objective)
+        from app.curriculum.depth import Measurement
+        drafted = {"title": les.title, "summary": "νέα περίληψη",
+                   "warm_up": {"body": "νέο ζέσταμα", "citations": []},
+                   "exercises": {"body": "νέες ασκήσεις", "items": [], "citations": []}}
+        return drafted, Measurement(total_words=50, target=2750, floor=2200, per_section={}, thin_sections=[])
+    monkeypatch.setattr(mod, "draft_lesson", fake_draft_lesson)
+
+    before_ids = {(s.meta or {}).get("section"): s.id for s in
+                  db.scalars(select(Block).where(Block.parent_id == les.id)).all()}
+    out = lesson_ai.apply_lesson_change(
+        db, les.id, instruction="Ενημέρωσε", note="πιο απλά",
+        sections=[{"section": "warm_up", "brief": "αναφορά στη Strat"},
+                  {"section": "exercises", "brief": "ασκήσεις με tremolo"}])
+    db.expire_all()
+    assert captured["exclude"] == {"theory", "demonstration", "common_mistakes", "recap",
+                                   "homework", "qa_prompts"}
+    assert "Η Strat έχει τρεις μαγνήτες" in captured["fixed"]["theory"]
+    assert captured["briefs"] == {"warm_up": "αναφορά στη Strat", "exercises": "ασκήσεις με tremolo"}
+    assert "Ενημέρωσε" in captured["objective"] and "πιο απλά" in captured["objective"]
+    rows = {(s.meta or {}).get("section"): s for s in
+            db.scalars(select(Block).where(Block.parent_id == les.id)).all()}
+    assert rows["warm_up"].body == "νέο ζέσταμα" and rows["warm_up"].id == before_ids["warm_up"]
+    assert rows["theory"].body.startswith("Η Strat") and "tutor_edited" in rows["theory"].meta
+    assert rows["recap"].body == "κείμενο recap"
+    l = db.get(Block, les.id)
+    assert l.meta["draft_status"] == "ready"
+    assert [s["section"] for s in l.meta["prev_segments"]][1] == "theory"     # snapshot taken
+    assert l.meta["revise_instruction"].startswith("Ενημέρωσε")
+    assert out["rewritten"] == ["warm_up", "exercises"]
+
+
+def test_apply_with_unknown_or_empty_sections_raises(lesson):
+    db, course, module, les = lesson
+    with pytest.raises(lesson_ai.LessonAiError):
+        lesson_ai.apply_lesson_change(db, les.id, instruction="x", note=None, sections=[])
+    with pytest.raises(lesson_ai.LessonAiError):
+        lesson_ai.apply_lesson_change(db, les.id, instruction="x", note=None,
+                                      sections=[{"section": "ghost", "brief": ""}])
+
+
+def test_apply_restores_ready_when_the_model_fails(lesson, monkeypatch):
+    from app.llm.errors import LLMError
+    db, course, module, les = lesson
+    import app.curriculum.lesson_ai as mod
+
+    def boom(*a, **k):
+        raise LLMError("upstream", "no")
+    monkeypatch.setattr(mod, "draft_lesson", boom)
+    with pytest.raises(LLMError):
+        lesson_ai.apply_lesson_change(db, les.id, instruction="x", note=None,
+                                      sections=[{"section": "recap", "brief": ""}])
+    db.expire_all()
+    assert db.get(Block, les.id).meta["draft_status"] == "ready"
+
+
+def test_the_section_briefs_block_renders_only_when_given(lesson):
+    """The apply call's per-section briefs. Absent/empty must be byte-identical
+    to before the parameter existed — the same pin `lesson.fixed` carries."""
+    from app.curriculum.corpus import LibraryContext
+    from app.curriculum.draft import LessonContext, build_lesson_messages
+
+    lib = LibraryContext(text="", token_count=0, fits=True)
+    ctx = LessonContext(lesson_title="Μ", lesson_objective="ο", module_title="Ξ", module_objective="",
+                        course_title="Ή", tier="general_knowledge",
+                        position="lesson 1 of 1 in module 1 of 1", minutes=50, teaching_minutes=50,
+                        target_words=2750, floor_words=2200)
+    base = build_lesson_messages(ctx=ctx, library=lib, language="el", student_brief=None,
+                                 course_brief=None)
+    same = build_lesson_messages(ctx=ctx, library=lib, language="el", student_brief=None,
+                                 course_brief=None, section_briefs={})
+    empty_values = build_lesson_messages(ctx=ctx, library=lib, language="el", student_brief=None,
+                                         course_brief=None, section_briefs={"recap": ""})
+    assert base[-1]["content"] == same[-1]["content"]
+    # A plan whose every brief came back blank says nothing — and renders nothing.
+    assert base[-1]["content"] == empty_values[-1]["content"]
+    with_briefs = build_lesson_messages(ctx=ctx, library=lib, language="el", student_brief=None,
+                                        course_brief=None,
+                                        fixed_sections={"theory": "Ο σφένδαμος."},
+                                        section_briefs={"recap": "πιο σύντομο", "homework": ""})
+    text_ = with_briefs[-1]["content"]
+    assert "πιο σύντομο" in text_
+    assert '"homework"' not in text_                      # an empty brief says nothing
+    assert text_.index("Ο σφένδαμος.") < text_.index("πιο σύντομο")   # after the fixed block
+    assert "πιο σύντομο" not in empty_values[-1]["content"]
+
+
+def test_the_section_briefs_fragment_is_registered_and_renders(lesson):
+    from app.prompts import registry
+
+    entry = registry.REGISTRY["lesson.section_briefs"]
+    assert entry.flow == "lesson" and entry.kind == "fragment"
+    assert {s.id for s in entry.slices} == {"lesson.section_briefs"}
+    rendered = registry.render("lesson.section_briefs", "el")
+    assert "ξαναγράφεις" in rendered.text

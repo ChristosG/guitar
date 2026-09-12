@@ -128,6 +128,8 @@ from app.curriculum.draft import (
     LESSON_RETRIEVED_SLICE_ID,
     LESSON_REVISE_BLOCK,
     LESSON_REVISE_SLICE_ID,
+    LESSON_SECTION_BRIEFS_BLOCK,
+    LESSON_SECTION_BRIEFS_SLICE_ID,
     LESSON_SLICE_ID,
     LESSON_TAIL,
     REPAIR_MESSAGE,
@@ -737,6 +739,13 @@ _SAMPLE_FIXED_SECTIONS = {
     "theory": "Το σχήμα C ξεκινάει από τη ρίζα στην πέμπτη χορδή, τρίτο τάστο.",
 }
 
+# Task 2.2: the per-section briefs from the lesson AI panel's plan — the lines the
+# tutor read on the plan card before he ticked the sections. His DATA (the plan he
+# approved), never a prompt this file authors.
+_SAMPLE_SECTION_BRIEFS = {
+    "exercises": "Πρόσθεσε μια άσκηση που ονομάζει τη ρίζα σε κάθε θέση.",
+}
+
 
 # ---------------------------------------------------------------------------
 # Builders — each one calls the SAME function the live call path calls
@@ -1156,6 +1165,30 @@ def _build_lesson_fixed(locale: str, db, course_language=None) -> _Built:
     ]
 
 
+def _build_lesson_section_briefs(locale: str, db, course_language=None) -> _Built:
+    # Rendered WITH the fixed block, because that is the only call that produces
+    # it: the lesson AI panel's apply sends both halves of the same decision —
+    # the sections he left alone, and what must change in the ones he ticked.
+    lang = _course_language(locale, course_language)
+    built = build_lesson_messages(
+        ctx=_SAMPLE_LESSON_CTX, library=_SAMPLE_LIBRARY, language=lang,
+        student_brief=_sample_student_brief(db), course_brief=_SAMPLE_COURSE_BRIEF,
+        fixed_sections=_SAMPLE_FIXED_SECTIONS, section_briefs=_SAMPLE_SECTION_BRIEFS,
+        source=db,
+    )
+    return _msgs(built), [
+        (*_LIBRARY, _SAMPLE_LIBRARY_TEXT),
+        (*_STUDENT, _sample_student_brief(db)),
+        ("fixed_sections", "Οι ενότητες που έγραψες εσύ",
+         json.dumps(_SAMPLE_FIXED_SECTIONS, ensure_ascii=False)),
+        # The live builder json-dumps the briefs, same reasoning as the two spans
+        # above it.
+        ("section_briefs", "Τι πρέπει να αλλάξει σε κάθε ενότητα που ξαναγράφεται",
+         json.dumps(_SAMPLE_SECTION_BRIEFS, ensure_ascii=False)),
+        (*_ANSWER_IN_FROM_COURSE, answer_in(lang, db)),
+    ]
+
+
 def _build_lesson_retrieved(locale: str, db, course_language=None) -> _Built:
     # Its OWN entry rather than a second slice on `lesson.draft`, and that is P1's
     # precedent, not a new idea: `curriculum.no_library`, `curriculum.library_too_large`
@@ -1221,8 +1254,10 @@ _SAMPLE_LESSON_AI_INSTRUCTION = (
 # A blueprint cut down to the sample lesson's own two sections, so the "sections
 # listed" block and the "current text of every section" block agree. The default
 # blueprint's eight lines against a two-section lesson would show him a prompt
-# that contradicts itself — the live call never does, because both halves come
-# from the same lesson.
+# that contradicts itself — the live call never does, because `_blueprint_lines`
+# filters to the keys the lesson has rows for (both halves come from the same
+# lesson). The cut-down blueprint is kept so the sample says the same thing twice
+# rather than relying on that filter alone.
 _SAMPLE_LESSON_AI_BLUEPRINT = default_blueprint()
 for _s in _SAMPLE_LESSON_AI_BLUEPRINT["sections"]:
     _s["enabled"] = _s["key"] in ("theory", "exercises")
@@ -1237,7 +1272,10 @@ def _build_lesson_ai_plan(locale: str, db, course_language=None) -> _Built:
         neighbours=_SAMPLE_LESSON_AI_NEIGHBOURS,
         lesson_title=_SAMPLE_LESSON_CTX.lesson_title,
         lesson_objective=_SAMPLE_LESSON_CTX.lesson_objective,
-        blueprint_lines=_lesson_ai_blueprint_lines(_SAMPLE_LESSON_AI_BLUEPRINT, lang),
+        blueprint_lines=_lesson_ai_blueprint_lines(
+            _SAMPLE_LESSON_AI_BLUEPRINT, lang,
+            {s["section"] for s in _SAMPLE_LESSON_AI_SECTIONS},
+        ),
         sections=_SAMPLE_LESSON_AI_SECTIONS, edited=_SAMPLE_LESSON_AI_EDITED,
         retrieved=_SAMPLE_HITS[0].text, instruction=_SAMPLE_LESSON_AI_INSTRUCTION,
         note=None, language=lang, source=db,
@@ -1925,7 +1963,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="lesson",
         kind="prompt",
-        source_ref="app/curriculum/draft.py:220",
+        source_ref="app/curriculum/draft.py:238",
         title_el="Η συγγραφή ενός μαθήματος",
         what_it_does_el=(
             "Ζητάει το ίδιο το μάθημα — τις σελίδες που θα διδάξεις, όχι ένα "
@@ -1941,7 +1979,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: build_lesson_messages,
         build=_build_lesson_draft,
-        call_sites=("curriculum/draft.py:499",),
+        call_sites=("curriculum/draft.py:542",),
         slices=(
             Slice(
                 id=LESSON_SLICE_ID,
@@ -1957,7 +1995,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="lesson",
         kind="prompt",
-        source_ref="app/curriculum/draft.py:220",
+        source_ref="app/curriculum/draft.py:238",
         title_el="Το ξαναγράψιμο ενός κοντού μαθήματος",
         what_it_does_el=(
             "Αν το μάθημα βγήκε πιο κοντό από το όριο, γυρίζει πίσω με την "
@@ -1971,7 +2009,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: build_lesson_messages,
         build=_build_lesson_deepen,
-        call_sites=("curriculum/draft.py:543",),
+        call_sites=("curriculum/draft.py:586",),
         slices=(
             Slice(
                 id=LESSON_DEEPEN_SLICE_ID,
@@ -1986,7 +2024,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="lesson",
         kind="fragment",
-        source_ref="app/curriculum/draft.py:220",
+        source_ref="app/curriculum/draft.py:238",
         title_el="Όταν αναθεωρείς ένα μάθημα: το τρέχον περιεχόμενό του",
         what_it_does_el=(
             "Μπαίνει στη συγγραφή του μαθήματος όταν ζητάς μια αναθεώρηση σε ένα "
@@ -2017,7 +2055,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="lesson",
         kind="fragment",
-        source_ref="app/curriculum/draft.py:220",
+        source_ref="app/curriculum/draft.py:238",
         title_el="Όταν κάποιες ενότητες είναι δικές σου: τι μένει σταθερό",
         what_it_does_el=(
             "Κρατάει έξω από τα χέρια του βοηθού τις ενότητες που έγραψες ή "
@@ -2038,6 +2076,36 @@ _ENTRIES = [
                 id=LESSON_FIXED_SLICE_ID,
                 label_el="Το κείμενο της οδηγίας",
                 default=LESSON_FIXED_BLOCK,
+                kind="replace",
+            ),
+        ),
+    ),
+    PromptEntry(
+        id="lesson.section_briefs",
+        language_from_course=True,
+        flow="lesson",
+        kind="fragment",
+        source_ref="app/curriculum/draft.py:238",
+        title_el="Όταν εγκρίνεις πλάνο AI: τι πρέπει να αλλάξει σε κάθε ενότητα",
+        what_it_does_el=(
+            "Στο πλαίσιο AI ενός μαθήματος, το πλάνο σού λέει για κάθε ενότητα "
+            "τι θα αλλάξει και γιατί. Όταν το εγκρίνεις, αυτές ακριβώς οι "
+            "γραμμές — μία ανά ενότητα που τσέκαρες — ταξιδεύουν μαζί με την "
+            "οδηγία σου στη συγγραφή, ώστε κάθε ενότητα να ξαναγράφεται για τον "
+            "λόγο που διάβασες εσύ στην κάρτα, όχι από τη γενική οδηγία και "
+            "μόνο. Μπαίνει αμέσως μετά τις ενότητες που μένουν σταθερές."
+        ),
+        when_it_runs_el=(
+            "Όταν πατάς «Εφαρμογή» σε ένα πλάνο AI μαθήματος, για τις ενότητες "
+            "που άφησες τσεκαρισμένες."
+        ),
+        source_of_truth=lambda: build_lesson_messages,
+        build=_build_lesson_section_briefs,
+        slices=(
+            Slice(
+                id=LESSON_SECTION_BRIEFS_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=LESSON_SECTION_BRIEFS_BLOCK,
                 kind="replace",
             ),
         ),
@@ -2077,7 +2145,7 @@ _ENTRIES = [
         curriculum_group=True,
         flow="lesson",
         kind="prompt",
-        source_ref="app/curriculum/draft.py:404",
+        source_ref="app/curriculum/draft.py:440",
         title_el="Όταν παραπέμπει σε σελίδα που δεν υπάρχει",
         what_it_does_el=(
             "Η εφαρμογή ελέγχει κάθε παραπομπή σε σελίδα που γράφει ο βοηθός. "
@@ -2090,7 +2158,7 @@ _ENTRIES = [
         when_it_runs_el="Μόνο όταν πιαστεί λάθος παραπομπή. Το πολύ μία φορά ανά μάθημα.",
         source_of_truth=lambda: _repair_message,
         build=_build_lesson_repair,
-        call_sites=("curriculum/draft.py:505",),
+        call_sites=("curriculum/draft.py:548",),
         slices=(
             Slice(
                 id=REPAIR_SLICE_ID,
@@ -2217,7 +2285,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="lesson",
         kind="prompt",
-        source_ref="app/curriculum/lesson_ai.py:148",
+        source_ref="app/curriculum/lesson_ai.py:154",
         title_el="Το πλάνο του AI για ένα μάθημα",
         what_it_does_el=(
             "Του δείχνει ΟΛΟΚΛΗΡΟ το μάθημα — κάθε ενότητα με το πλήρες κείμενό "
@@ -2235,7 +2303,7 @@ _ENTRIES = [
         when_it_runs_el="Όταν πατάς «Φτιάξε πλάνο» στο πλαίσιο AI ενός μαθήματος.",
         source_of_truth=lambda: build_plan_messages,
         build=_build_lesson_ai_plan,
-        call_sites=("curriculum/lesson_ai.py:311",),
+        call_sites=("curriculum/lesson_ai.py:332",),
         slices=(
             Slice(
                 id=LESSON_AI_PLAN_SLICE_ID,
