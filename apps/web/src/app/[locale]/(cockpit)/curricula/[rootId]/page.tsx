@@ -8,6 +8,7 @@ import { ArrowLeft, FileDown, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CurriculumActionsMenu } from "@/components/curriculum/curriculum-actions-menu";
 import { ReviseDrawer } from "@/components/curriculum/revise-drawer";
+import { LessonAiPanel } from "@/components/curriculum/lesson-ai-panel";
 import { LessonAiScopeProvider } from "@/components/curriculum/lesson-ai-scope";
 import { ReviseScopeProvider } from "@/components/curriculum/revise-scope";
 import { TreeBoard } from "@/components/curriculum/tree-board";
@@ -140,6 +141,12 @@ export default function CurriculumDetailPage() {
         </Link>
 
         {tree && <ReviseDrawer rootId={rootId} tree={tree} onApplied={refreshTree} />}
+        {/* A SIBLING of the drawer, not a child of the board: it is a side
+            panel of its own, opened from a lesson row through the scope
+            context above. It renders nothing until a row asks it to. `tree` is
+            THIS page's copy — refetched by `refreshTree` after an apply, which
+            is how the panel's done state sees the new segments. */}
+        {tree && <LessonAiPanel tree={tree} onApplied={refreshTree} />}
       </div>
 
       {tree && title && (

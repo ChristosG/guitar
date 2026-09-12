@@ -738,6 +738,14 @@ export interface BlockMeta {
    * time, exactly like `prev_body`. */
   prev_segments?: { title: string; body: string | null; section?: string | null }[];
   revise_instruction?: string;
+  /** The same thing as `revise_instruction` for the tutor's eyes — what he
+   * asked for, shown above the diff — but written by the LESSON PANEL's apply
+   * («AI στο μάθημα»), not by the curriculum revise engine. Deliberately a
+   * SECOND key rather than a reuse: `revise_instruction` is the revise chain's
+   * own record and something may yet key off it, while this one is
+   * display-only. Readers should prefer `ai_instruction ?? revise_instruction`
+   * so a lesson touched by either path still says what was asked. */
+  ai_instruction?: string;
   // course
   brief?: string | null;
   gap_policy?: string;
@@ -976,6 +984,75 @@ export function undoRefine(blockId: string): Promise<BlockNode> {
  * the confirm copy can promise that. */
 export function restoreLessonSegments(lessonId: string): Promise<BlockNode> {
   return request<BlockNode>(`/blocks/${lessonId}/restore-segments`, { method: "POST" });
+}
+
+/** One row of the lesson planner's verdict — a SECTION, and what it proposes to
+ * do about it. `action` is the whole point: the planner is expected to say
+ * `keep` for most of a lesson, because «AI στο μάθημα» exists to change the two
+ * sections that need it rather than regenerate 2.750 words the tutor already
+ * read. `brief` is the one-line instruction that rides back to `apply` for a
+ * ticked section; it is empty on a `keep`. `tutor_edited` is the planner
+ * REPEATING what it saw on the lesson, so the card can show "δική σου" beside a
+ * section he wrote himself instead of quietly proposing to overwrite it. */
+export interface LessonPlanSection {
+  section: string;
+  title: string;
+  action: "rewrite" | "keep";
+  reason: string;
+  brief: string;
+  tutor_edited: boolean;
+}
+
+/** `job.progress.plan` after a `lesson_ai` plan job succeeds. `dropped` is the
+ * safety net's own report — sections the planner asked for that the lesson does
+ * not have — kept visible for the same reason the revise card shows its dropped
+ * ops: a silently shrunken plan is worse than a plan that admits what it lost. */
+export interface LessonPlan {
+  summary: string;
+  sections: LessonPlanSection[];
+  note_to_tutor: string;
+  dropped: { section: string; reason: string }[];
+  impact: { rewrite_count: number; est_words: number };
+}
+
+/** «Φτιάξε πλάνο» — READ-ONLY. Returns 202 immediately and nothing on the
+ * lesson changes; the planner runs `claude -p` over the lesson, its siblings
+ * and its sources off the request path (minutes, not seconds — an in-request
+ * answer would die at the Cloudflare edge at ~100s).
+ *
+ * THE CALLER MUST POLL `getJob(job_id)` until the status is terminal. On
+ * `succeeded` the plan is on `progress.plan` (a `LessonPlan`); on `failed`,
+ * translate `error_kind` through `jobErrorText`. A 409 whose `code` is
+ * `lesson_busy` means this lesson already has a `lesson_ai` job in flight (or
+ * is mid-draft) — the right answer is "wait", not "retry". */
+export function planLessonAi(
+  lessonId: string,
+  input: { instruction: string; note?: string },
+): Promise<JobAccepted> {
+  return request<JobAccepted>(`/blocks/${lessonId}/ai/plan`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+/** «Εφαρμογή» — the ticked sections only, rewritten around the rest in one
+ * draft call. Same 202-then-poll contract as `planLessonAi`: on `succeeded` the
+ * job reports `{phase: "done", rewritten: [...], word_count}` and the CALLER
+ * must refetch the tree, because the lesson's segments changed underneath it.
+ *
+ * A section key the lesson does not have is a 422 before any job row exists —
+ * that is a STALE PLAN CARD (the lesson changed since the plan was made), and
+ * it must fail fast rather than spend a model call. The applied instruction is
+ * stamped on the lesson as `meta.ai_instruction` (display-only) alongside the
+ * `meta.prev_segments` snapshot that makes «Τι άλλαξε;» and restore possible. */
+export function applyLessonAi(
+  lessonId: string,
+  input: { instruction: string; note?: string; sections: { section: string; brief: string }[] },
+): Promise<JobAccepted> {
+  return request<JobAccepted>(`/blocks/${lessonId}/ai/apply`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
 }
 
 export interface BlockUpdateInput {

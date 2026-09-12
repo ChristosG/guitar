@@ -372,6 +372,27 @@
       "scopedTo": "Only the module “{title}”",
       "scopeClear": "Revise the whole curriculum",
       "scopedSeed": "In the module “{title}” (id: {id}) I want "
+    },
+    "lessonAi": {
+      "heading": "AI on this lesson",
+      "description": "Say what you want changed in this lesson. You'll see a per-section plan first — nothing changes until you press Apply.",
+      "scopedTo": "{lesson} · {module}",
+      "editedStrip": "You edited by hand:",
+      "chipsHeading": "Quick instructions",
+      "chipPropagate": "Bring the other sections in line with my changes",
+      "chipHarder": "Make the exercises harder",
+      "chipExamples": "Add examples to the theory",
+      "placeholder": "e.g. I rewrote the theory — bring the other sections in line with it",
+      "plan": "Make a plan",
+      "planning": "Reading the lesson and drawing up a plan…",
+      "applying": "Rewriting the sections…",
+      "done": "Done — check “What changed?”, or put it back if you don't like it.",
+      "again": "Another change",
+      "error": "Something went wrong — try again.",
+      "busy": "This lesson is already being worked on — wait for it to finish.",
+      "close": "Close",
+      "expand": "Expand to full screen",
+      "collapse": "Collapse to side panel"
     }
   },
   "library": {

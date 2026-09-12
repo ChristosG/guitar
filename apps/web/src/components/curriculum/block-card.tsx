@@ -705,7 +705,12 @@ export function BlockCard({
           lessonId={node.id}
           prevSegments={meta.prev_segments}
           liveSegments={contentChildren.filter((c) => c.kind === "segment")}
-          instruction={meta.revise_instruction}
+          // Two writers, one question. The revise engine stamps
+          // `revise_instruction`; the lesson panel's apply stamps
+          // `ai_instruction` (display-only, deliberately a separate key — see
+          // `BlockMeta`). Whichever touched this lesson last, the diff still
+          // opens with what was actually asked for.
+          instruction={meta.ai_instruction ?? meta.revise_instruction}
           onRestored={onChanged}
         />
       )}
