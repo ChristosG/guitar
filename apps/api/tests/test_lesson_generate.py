@@ -274,14 +274,20 @@ def test_the_lesson_planner_prompt_is_registered(tree):
 
 
 # ---------------------------------------------------------------------------
-# Task 4.3 Fix B — THE CHAINED DRAFT'S GROUNDING DEPENDS ON WHO IS PAYING
+# Task 4.4 — THE CHAINED DRAFT NEVER PICKS THE GROUNDING. THE DRAFT JOB DOES.
 #
-# Live, 2026-09-12: the planning call took 26s, and the `curriculum_draft`
-# chained behind it went in with the full-library prefix — 277,165 chars — and
-# died on the bridge's 1200s cap: «claude -p exceeded 1200s», lesson `failed`.
-# The same call took 617s at 07:04 UTC, so under the subscription CLI it is a
-# coin flip. On the real API the prefix is CACHED and the same draft is 2-4
-# minutes, so the full library is exactly right there and only there.
+# Task 4.3 made this chain ask for `grounding="retrieval"` on `claude_cli`, to
+# dodge the bridge's cap. Live, 2026-09-12, that was measured and it was WRONG on
+# both counts: the retrieval-grounded lesson came out 2,348 words against 3,798
+# for the same brief read against the whole library, and it had LOST the woods,
+# the profile, the dead spots and the nut — exactly what the tutor's brief had
+# asked for. Nor was it faster: 636s for the draft plus a 369s citation-repair
+# re-draft, 17 minutes, against 617s in ONE call for the full-library draft of
+# the same brief that morning.
+#
+# So the key is absent on every provider and the `curriculum_draft` job's own
+# router (library / canon / retrieval) decides, as it did before 4.3. What the
+# CLI needed was a longer cap and no repair re-draft, not thinner material.
 # ---------------------------------------------------------------------------
 
 def _chained_params(module, monkeypatch) -> dict:
@@ -314,27 +320,16 @@ def _chained_params(module, monkeypatch) -> dict:
     return recorded
 
 
-def test_the_chained_draft_grounds_by_retrieval_on_the_subscription_cli(tree, monkeypatch):
-    """`claude_cli` re-reads the WHOLE library on every call at full price and
-    dies at the bridge's 1200s cap — which is what killed the tutor's first
-    brief-driven lesson. So the chain asks for per-lesson retrieval instead."""
+@pytest.mark.parametrize("provider", ["claude_cli", "claude"])
+def test_the_chained_draft_never_carries_a_grounding_key(tree, monkeypatch, provider):
+    """On EITHER provider the chain hands over the root and the one lesson, and
+    says nothing about grounding — the draft job routes it. Measured 2026-09-12:
+    forcing retrieval here made the lesson shorter, thinner AND slower."""
     db, course, module, other, l1, l2, foreign = tree
-    monkeypatch.setattr("app.config.settings.llm_provider", "claude_cli")
-
-    recorded = _chained_params(module, monkeypatch)
-
-    assert recorded["grounding"] == "retrieval"
-    assert recorded["root_id"] == str(course.id)
-    assert len(recorded["lesson_ids"]) == 1          # still narrowed to this lesson
-
-
-def test_the_chained_draft_keeps_the_full_library_on_the_api(tree, monkeypatch):
-    """On `claude` the prefix is cached, so the full library costs one read and
-    is strictly better material. Absence of the key is the signal — the draft
-    job's own router does the rest."""
-    db, course, module, other, l1, l2, foreign = tree
-    monkeypatch.setattr("app.config.settings.llm_provider", "claude")
+    monkeypatch.setattr("app.config.settings.llm_provider", provider)
 
     recorded = _chained_params(module, monkeypatch)
 
     assert "grounding" not in recorded
+    assert recorded["root_id"] == str(course.id)
+    assert len(recorded["lesson_ids"]) == 1          # still narrowed to this lesson

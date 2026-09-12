@@ -21,7 +21,6 @@ from __future__ import annotations
 import logging
 import uuid
 
-from app.config import settings
 from app.curriculum.corpus import CurriculumContextError
 from app.curriculum.extend import ExtendError, generate_lesson
 from app.db import SessionLocal
@@ -100,32 +99,21 @@ def run_lesson_generate_job(job_id: uuid.UUID) -> None:
     # the ordinary Resume path.
     db = SessionLocal()
     try:
-        # GROUNDING DEPENDS ON WHO IS PAYING, AND HOW (Task 4.3).
-        #
-        # On `claude_cli` — the webapp, on the tutor's subscription — every call
-        # re-reads the whole library at full price: there is no prompt cache
-        # behind `claude -p`. Live, 2026-09-12: the planner took 26s, and the
-        # draft chained behind it went in with the full-library prefix (277,165
-        # chars) and died on the bridge's 1200s cap — «claude -p exceeded 1200s»,
-        # the lesson `failed`. The same call took 617s earlier that morning, so
-        # it is a coin flip against the cap, not a bad afternoon.
-        #
-        # So the CLI gets `grounding="retrieval"` (`jobs/curriculum_draft.py`
-        # honours it exactly as the revise chain's does): the lesson is still
-        # drafted with its `LESSON_TUTOR_BRIEF_BLOCK`, its neighbours and the
-        # `ground_topic` passages retrieval found for it (k=6) — the brief is
-        # what this lesson is FOR and none of that is dropped, only the
-        # whole-library read is.
-        #
-        # On `claude` — the desktop app, on the API — the prefix is CACHED, the
-        # same draft is 2-4 minutes, and the full library is strictly better
-        # material. The key is left ABSENT there, so the draft job's own router
-        # (library / canon / retrieval) decides exactly as it does today.
-        params: dict = {"root_id": str(root_id), "lesson_ids": [str(lesson_id)]}
-        if settings.llm_provider == "claude_cli":
-            params["grounding"] = "retrieval"
+        # NO `grounding` KEY HERE, ON ANY PROVIDER — the `curriculum_draft` job's
+        # own router (library / canon / retrieval) decides, exactly as it does for
+        # every other draft. Task 4.3 briefly forced `grounding="retrieval"` on
+        # `claude_cli` to dodge the bridge's cap; measured live on 2026-09-12 that
+        # was worse on both counts. The retrieval-grounded lesson came out 2,348
+        # words against 3,798 for the same brief read against the whole library,
+        # and it had lost the woods, the profile, the dead spots and the nut — the
+        # very things the tutor's brief asked for. And it was not faster: 636s of
+        # draft plus a 369s citation-repair re-draft, 17 minutes, against 617s in
+        # ONE call for the full-library draft that morning. What the CLI needed was
+        # a longer cap and no repair re-draft (both in this task), not thinner
+        # material to read.
         draft_job = GenerationJob(
-            kind="curriculum_draft", status="pending", params=params,
+            kind="curriculum_draft", status="pending",
+            params={"root_id": str(root_id), "lesson_ids": [str(lesson_id)]},
         )
         db.add(draft_job)
         db.commit()
