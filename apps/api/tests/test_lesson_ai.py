@@ -212,7 +212,8 @@ def test_apply_rewrites_only_ticked_sections_keeps_ids_and_snapshots(lesson, mon
     def fake_draft_lesson(db_, *, ctx, library, language, blueprint=None, student_brief=None,
                           course_brief=None, neighbours=None, tutor_brief=None, source_ids=None,
                           prompts=None, revise_current=None, fixed_sections=None,
-                          exclude_sections=frozenset(), section_briefs=None):
+                          exclude_sections=frozenset(), section_briefs=None,
+                          repair_citations=True):
         captured.update(fixed=fixed_sections, exclude=set(exclude_sections), briefs=section_briefs,
                         objective=ctx.lesson_objective, neighbours=neighbours,
                         position=ctx.position)
@@ -329,11 +330,12 @@ def _fake_draft_lesson(captured, les):
     def fake(db_, *, ctx, library, language, blueprint=None, student_brief=None,
              course_brief=None, neighbours=None, tutor_brief=None, source_ids=None,
              prompts=None, revise_current=None, fixed_sections=None,
-             exclude_sections=frozenset(), section_briefs=None):
+             exclude_sections=frozenset(), section_briefs=None,
+             repair_citations=True):
         captured.update(fixed=fixed_sections, exclude=set(exclude_sections),
                         briefs=section_briefs, objective=ctx.lesson_objective,
                         neighbours=neighbours, position=ctx.position,
-                        tutor_brief=tutor_brief)
+                        tutor_brief=tutor_brief, repair_citations=repair_citations)
         from app.curriculum.depth import Measurement
         return ({"title": les.title, "summary": "νέα περίληψη",
                  "warm_up": {"body": "νέο ζέσταμα", "citations": []}},
@@ -425,3 +427,26 @@ def test_apply_refuses_a_lesson_that_is_already_drafting(lesson):
     with pytest.raises(lesson_ai.LessonAiError):
         lesson_ai.apply_lesson_change(db, les.id, instruction="x", note=None,
                                       sections=[{"section": "recap", "brief": ""}])
+
+
+def test_apply_never_buys_a_citation_repair_re_draft(lesson, monkeypatch):
+    """Task 4.3 Fix A. Live, 2026-09-12: an apply drafted for 390s, the model
+    cited one page it had never been shown, and the repair retry drafted the whole
+    lesson AGAIN — 726s, 19 minutes in total, past the panel's poll cap, so the
+    tutor watched «Το AI δουλεύει ακόμα» and saw nothing change.
+
+    On THIS path the second call buys nothing: the grounding is per-lesson
+    retrieval, the tutor's own text is the authority, and `strip_invalid_citations`
+    — where the repair already falls back to — keeps the prose and drops the false
+    chip. Every other caller (the fan-out, which drafts from the whole library and
+    where a clickable page number is the point) keeps the default."""
+    db, course, module, les = lesson
+    import app.curriculum.lesson_ai as mod
+
+    captured = {}
+    monkeypatch.setattr(mod, "draft_lesson", _fake_draft_lesson(captured, les))
+
+    lesson_ai.apply_lesson_change(db, les.id, instruction="Ενημέρωσε", note=None,
+                                  sections=[{"section": "recap", "brief": ""}])
+
+    assert captured["repair_citations"] is False

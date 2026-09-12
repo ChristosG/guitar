@@ -205,3 +205,96 @@ def test_the_tutor_s_brief_for_this_lesson_is_carried_whole():
 def test_no_brief_and_a_blank_brief_both_render_nothing():
     assert _lesson_prompt() == _lesson_prompt(tutor_brief=None)
     assert _lesson_prompt() == _lesson_prompt(tutor_brief="   ")
+
+
+# ---------------------------------------------------------------------------
+# Task 4.3 Fix A — THE PANEL'S APPLY NEVER PAYS FOR A CITATION-REPAIR RE-DRAFT
+#
+# Live, 2026-09-12: an apply with seven sections ticked made its draft call
+# (32,138 chars in) in 390s, the model cited one page it had never been shown,
+# and `draft_lesson` bought a SECOND full call to fix the page number — 726s,
+# 19 minutes in total, past the panel's poll cap, for a chip nobody had asked
+# for. On this path the tutor's text is the authority and the grounding is
+# retrieval, so the existing after-repair fallback (drop the bad citation, keep
+# the prose) is the whole answer and the second call buys nothing.
+# ---------------------------------------------------------------------------
+
+class _ScriptedProvider:
+    """Scripted `guided_json`, recording every call — the same seam
+    `test_curriculum_grounding.py` uses, kept local because this file's other
+    fake answers the SELECTION drafter's schema, not a curriculum lesson's."""
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls: list[dict] = []
+
+    def guided_json(self, messages, schema, *, temperature=0.2, role="spec", max_tokens=None):
+        self.calls.append({"messages": messages, "schema": schema, "role": role})
+        return self._responses[min(len(self.calls) - 1, len(self._responses) - 1)]
+
+    def count_tokens(self, text_: str) -> int:
+        return len(text_) // 3 + 1
+
+
+def _shown_library() -> LibraryContext:
+    """A library that FITS (so `draft_lesson` touches no database at all) and
+    whose `page_index` is the contract citations are validated against: S1 was
+    shown pages 19 and 20, and nothing else."""
+    return LibraryContext(
+        text="[p.19] ... [p.20] ...", token_count=10, fits=True,
+        sources=[{"ref": "S1", "title": "Getting Great Guitar Sounds", "pages": 2, "chars": 20}],
+        page_index={"S1": {19, 20}},
+    )
+
+
+def _long_lesson(citations=None) -> dict:
+    """One drafted lesson, long enough that no deepen pass can fire — this is a
+    test about the REPAIR call, and a deepen call would be counted too."""
+    from app.curriculum import blueprint as bp_mod
+
+    body = " ".join(["λέξη"] * 500)
+    lesson = {"title": "Το σχήμα C", "summary": "Δύο προτάσεις."}
+    for name in bp_mod.section_keys(bp_mod.default_blueprint()):
+        lesson[name] = {"body": body, "citations": list(citations or [])}
+    return lesson
+
+
+def test_a_bad_citation_is_stripped_without_a_second_call_when_repair_is_off(monkeypatch):
+    """`repair_citations=False`: ONE model call, and the citation the model was
+    never shown is dropped by the same fallback the second call already fell back
+    to. The lesson panel's apply is minutes per call — a page number is not worth
+    another one."""
+    import app.curriculum.draft as draft_mod
+
+    provider = _ScriptedProvider([_long_lesson(citations=[{"source_id": "S1", "page": 412}])])
+    monkeypatch.setattr(draft_mod, "get_provider", lambda: provider)
+
+    lesson, _m = draft_mod.draft_lesson(
+        None, ctx=_curriculum_ctx(), library=_shown_library(), language="el",
+        repair_citations=False,
+    )
+
+    assert len(provider.calls) == 1, "no repair call — the fallback is the answer here"
+    assert draft_mod.invalid_citations(lesson, _shown_library()) == []
+    assert lesson["theory"]["citations"] == []
+    assert lesson["theory"]["body"], "the prose survives — only the false chip goes"
+
+
+def test_the_default_still_buys_exactly_one_repair(monkeypatch):
+    """Every other caller keeps the old behaviour: the fan-out drafts from the
+    whole library, where a page number the tutor can click is the point."""
+    import app.curriculum.draft as draft_mod
+
+    provider = _ScriptedProvider([
+        _long_lesson(citations=[{"source_id": "S1", "page": 412}]),   # fabricated
+        _long_lesson(citations=[{"source_id": "S1", "page": 19}]),    # repaired
+    ])
+    monkeypatch.setattr(draft_mod, "get_provider", lambda: provider)
+
+    lesson, _m = draft_mod.draft_lesson(
+        None, ctx=_curriculum_ctx(), library=_shown_library(), language="el",
+    )
+
+    assert len(provider.calls) == 2, "one draft + one repair, unchanged"
+    assert "412" in provider.calls[1]["messages"][-1]["content"]
+    assert lesson["theory"]["citations"] == [{"source_id": "S1", "page": 19}]

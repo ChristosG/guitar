@@ -2099,7 +2099,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: build_lesson_messages,
         build=_build_lesson_draft,
-        call_sites=("curriculum/draft.py:609",),
+        call_sites=("curriculum/draft.py:622",),
         slices=(
             Slice(
                 id=LESSON_SLICE_ID,
@@ -2129,7 +2129,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: build_lesson_messages,
         build=_build_lesson_deepen,
-        call_sites=("curriculum/draft.py:664",),
+        call_sites=("curriculum/draft.py:684",),
         slices=(
             Slice(
                 id=LESSON_DEEPEN_SLICE_ID,
@@ -2338,7 +2338,7 @@ _ENTRIES = [
         when_it_runs_el="Μόνο όταν πιαστεί λάθος παραπομπή. Το πολύ μία φορά ανά μάθημα.",
         source_of_truth=lambda: _repair_message,
         build=_build_lesson_repair,
-        call_sites=("curriculum/draft.py:615",),
+        call_sites=("curriculum/draft.py:635",),
         slices=(
             Slice(
                 id=REPAIR_SLICE_ID,

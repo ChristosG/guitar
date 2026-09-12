@@ -533,6 +533,7 @@ def draft_lesson(
     fixed_sections: dict[str, str] | None = None,
     exclude_sections: set[str] | frozenset[str] = frozenset(),
     section_briefs: dict[str, str] | None = None,
+    repair_citations: bool = True,
 ) -> tuple[dict, Measurement]:
     """One lesson: draft -> validate citations (one repair) -> measure -> at most
     one deepen pass. Returns `(lesson, measurement)`.
@@ -578,6 +579,18 @@ def draft_lesson(
     workers a plain dict — exactly what it already does with `student_brief`.
 
     `None` means the code defaults, which is what an un-edited install sends.
+
+    `repair_citations=False` BUYS NO SECOND FULL CALL FOR A PAGE NUMBER. A bad
+    cite then goes straight to `strip_invalid_citations` — where the repair
+    already falls back to on its second miss — so the prose is kept and the false
+    chip is dropped, in one call instead of two. Passed by
+    `curriculum/lesson_ai.py:apply_lesson_change` and nowhere else: 2026-09-12,
+    live, an apply drafted for 390s, cited one page it had never been shown, and
+    re-drafted the whole lesson to fix it (726s — 19 minutes in total, past the
+    panel's poll cap, so the tutor was told «Το AI δουλεύει ακόμα» and saw
+    nothing change). On that path the tutor's own text is the authority and the
+    grounding is per-lesson retrieval; on the fan-out, which drafts from the
+    whole library and where a clickable page is the point, the repair stays.
     """
     provider = get_provider()
 
@@ -609,7 +622,14 @@ def draft_lesson(
     lesson = provider.guided_json(messages, schema, role="draft")
 
     bad = invalid_citations(lesson, library, bp)
-    if bad:
+    if bad and not repair_citations:
+        # The fallback, without paying for the retry that would have landed on it
+        # anyway. See `repair_citations` in the docstring.
+        log.warning("lesson %r cited %d page(s) it was never shown — dropping them "
+                    "instead of re-drafting (repair_citations=False)",
+                    ctx.lesson_title, len(bad))
+        lesson = strip_invalid_citations(lesson, library, bp)
+    elif bad:
         log.warning("lesson %r cited %d page(s) it was never shown — repairing",
                     ctx.lesson_title, len(bad))
         repaired = provider.guided_json(

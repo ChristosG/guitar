@@ -514,6 +514,17 @@ def apply_lesson_change(db, lesson_id: uuid.UUID, *, instruction: str, note: str
             neighbours=neighbours, tutor_brief=tutor_brief, source_ids=source_ids,
             prompts=prompts, revise_current=None, fixed_sections=fixed or None,
             exclude_sections=excluded, section_briefs=briefs,
+            # NO CITATION-REPAIR RE-DRAFT ON THIS PATH (Task 4.3). A repair is a
+            # SECOND full draft call, and here that is 6-12 minutes for a page
+            # number: 2026-09-12, live, an apply took 390s to draft, cited one
+            # page it had never been shown, and spent 726s re-drafting the whole
+            # lesson to fix it — 19 minutes, past the panel's poll cap, so the
+            # tutor was told «Το AI δουλεύει ακόμα» and saw nothing change. A bad
+            # cite is dropped instead (`strip_invalid_citations`, where the repair
+            # already falls back to): the tutor's own text is the authority on an
+            # apply and the grounding is per-lesson retrieval, so an uncited
+            # paragraph costs him nothing he had. The fan-out keeps the repair.
+            repair_citations=False,
         )
     except Exception:
         # Back to `ready` with the content UNCHANGED — nothing was written yet.
