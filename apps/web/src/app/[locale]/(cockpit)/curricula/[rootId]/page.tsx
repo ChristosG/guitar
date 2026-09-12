@@ -8,6 +8,7 @@ import { ArrowLeft, FileDown, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CurriculumActionsMenu } from "@/components/curriculum/curriculum-actions-menu";
 import { ReviseDrawer } from "@/components/curriculum/revise-drawer";
+import { LessonAiScopeProvider } from "@/components/curriculum/lesson-ai-scope";
 import { ReviseScopeProvider } from "@/components/curriculum/revise-scope";
 import { TreeBoard } from "@/components/curriculum/tree-board";
 import {
@@ -122,6 +123,11 @@ export default function CurriculumDetailPage() {
     // reach the drawer. See `revise-scope.tsx` for why this is a context
     // rather than a prop threaded through the recursion.
     <ReviseScopeProvider>
+    {/* The lesson-level twin of the scope above, and the same argument for it:
+        Task 2.5's «AI στο μάθημα» panel is a SIBLING of the board, so the
+        button inside the recursive card needs a channel upwards. Nested INSIDE
+        the revise provider so both are in scope for the same subtree. */}
+    <LessonAiScopeProvider>
     <div className="flex flex-col gap-6">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <Link
@@ -216,6 +222,7 @@ export default function CurriculumDetailPage() {
         />
       )}
     </div>
+    </LessonAiScopeProvider>
     </ReviseScopeProvider>
   );
 }

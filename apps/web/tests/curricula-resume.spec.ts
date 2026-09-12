@@ -225,7 +225,11 @@ test.describe("draft progress bar — resume (mocked API)", () => {
     fixture.advanceToReady();
     await expect(page.getByTestId("draft-progress")).toHaveAttribute("data-done", "true", { timeout: 5_000 });
     await expect(page.getByTestId("draft-progress-count")).toContainText("2 of 2");
-    await expect(otherLesson.getByTestId("lesson-status")).toHaveAttribute("data-status", "ready");
+    // The pill DISAPPEARS on `ready` (Task 1.5: ready is the resting state, and
+    // a badge on every settled row is noise) — its absence is the assertion,
+    // and the enabled AI button is the positive half of the same claim.
+    await expect(otherLesson.getByTestId("lesson-status")).toHaveCount(0);
+    await expect(otherLesson.getByTestId("lesson-ai")).toBeEnabled();
 
     expect(curricula.unexpected).toEqual([]);
   });

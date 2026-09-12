@@ -32,7 +32,9 @@ import { AttachArtifactDialog } from "@/components/curriculum/attach-artifact-di
 import { SegmentDialog } from "@/components/curriculum/segment-dialog";
 import { ExtendWithChat } from "@/components/curriculum/extend-with-chat";
 import { LessonWhatChanged } from "@/components/curriculum/lesson-what-changed";
+import { useLessonAiScope } from "@/components/curriculum/lesson-ai-scope";
 import { useReviseScope } from "@/components/curriculum/revise-scope";
+import { WhatChanged } from "@/components/curriculum/what-changed";
 import { LessonSources } from "@/components/curriculum/lesson-sources";
 import { TierBadge } from "@/components/curriculum/tier-badge";
 import {
@@ -111,6 +113,11 @@ const SEGMENT_STATUS_CLASS: Record<Exclude<SegmentStatus, "done">, string> = {
 interface BlockCardProps {
   node: BlockNode;
   locale: string;
+  /** The title of the block that rendered this one, threaded one level down by
+   * the recursion. A lesson needs it because «AI στο μάθημα» has to tell the
+   * panel which MODULE it is working inside — the card has `node.title` but no
+   * way to look upwards otherwise. */
+  parentTitle?: string;
   isRoot?: boolean;
   index?: number;
   siblingCount?: number;
@@ -148,6 +155,7 @@ interface BlockCardProps {
 export function BlockCard({
   node,
   locale,
+  parentTitle,
   isRoot = false,
   index = 0,
   siblingCount = 1,
@@ -175,11 +183,16 @@ export function BlockCard({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [added, setAdded] = useState<ArtifactOut[]>([]);
+  /** The segment's own «Τι άλλαξε;» — local, because the chip and the dialog
+   * are both this card's and nothing above it needs to know it is open. */
+  const [tutorDiffOpen, setTutorDiffOpen] = useState(false);
 
   const meta = node.meta ?? {};
   // null outside the curriculum board (no provider) — the module's
   // restructure item simply does not render there.
   const reviseScope = useReviseScope();
+  // Same deal for the lesson row's «AI στο μάθημα»: no provider, no button.
+  const lessonAi = useLessonAiScope();
   const isSegment = node.kind === "segment";
   const isLesson = node.kind === "lesson";
   const isModule = node.kind === "module";
@@ -400,7 +413,12 @@ export function BlockCard({
         </Badge>
       )}
 
-      {isLesson && draftStatus && (
+      {/* NO PILL FOR «Έτοιμο». "Ready" is the resting state of every lesson on
+          a finished board, so a pill for it was a green sticker on every row —
+          decoration the eye learns to skip, which is exactly what makes the
+          `queued`/`drafting`/`failed` pills beside it worth seeing. The pill
+          now means "this row is NOT settled yet". */}
+      {isLesson && draftStatus && draftStatus !== "ready" && (
         <span
           data-testid="lesson-status"
           data-status={draftStatus}
@@ -428,17 +446,10 @@ export function BlockCard({
         </span>
       )}
 
-      {isLesson && typeof wordCount === "number" && wordCount > 0 && (
-        <Badge
-          variant="outline"
-          data-testid="lesson-word-count"
-          className={cn(
-            meta.meets_floor === false && "border-amber-500/50 text-amber-600 dark:text-amber-400",
-          )}
-        >
-          {t("wordCount", { count: wordCount })}
-        </Badge>
-      )}
+      {/* The word count used to sit here as a badge. It moved INTO the opened
+          lesson (`lesson-words-line`), next to its target — a bare "2.340" on a
+          collapsed row is a number with nothing to be measured against, and the
+          row's job is to be scannable. */}
 
       {!isLesson && node.est_minutes != null && (
         <Badge variant="outline" data-testid="block-card-minutes">
@@ -450,6 +461,21 @@ export function BlockCard({
         className="ml-auto flex shrink-0 items-center gap-1"
         onClick={(e) => e.stopPropagation()}
       >
+        {/* ONE DOOR for everything AI on a lesson. Disabled while the lesson
+            is still being written — there is nothing to talk about yet, and
+            the panel's actions all rewrite text a worker is mid-way through. */}
+        {isLesson && lessonAi && (
+          <Button
+            type="button" variant="ghost" size="sm"
+            data-testid="lesson-ai"
+            disabled={draftStatus === "drafting" || draftStatus === "queued"}
+            onClick={() => lessonAi.openForLesson(node.id, node.title, parentTitle ?? "")}
+          >
+            <Sparkles />
+            {t("lessonAi")}
+          </Button>
+        )}
+
         {isLesson && (
           <Button
             type="button" variant="ghost" size="sm"
@@ -623,6 +649,24 @@ export function BlockCard({
         )
       )}
 
+      {/* THE COUNT, WHERE IT MEANS SOMETHING. Inside the opened lesson and
+          beside its target, so "2.340 λέξεις · στόχος ~2.750" is a judgement
+          the tutor can make at a glance instead of a bare number on a row. It
+          re-renders from `meta.word_count` on every tree refetch, so it tracks
+          a deepen or a revise without a reload. Amber when the lesson is under
+          its floor — the one case where the number is asking for something. */}
+      {isLesson && typeof wordCount === "number" && (
+        <p
+          data-testid="lesson-words-line"
+          className={cn(
+            "text-xs text-muted-foreground",
+            meta.meets_floor === false && "text-amber-600 dark:text-amber-400",
+          )}
+        >
+          {t("wordsLine", { count: wordCount, target: meta.target_words ?? 0 })}
+        </p>
+      )}
+
       {isLesson && !editingBody && (
         <LessonSources citations={meta.citations} locale={locale} lessonTitle={node.title} />
       )}
@@ -689,6 +733,30 @@ export function BlockCard({
               onRefined={onChanged}
             />
           )}
+          {/* «Επεξεργασμένο από σένα». The tutor's OWN edit, admitted by the
+              row and diffable — the AI's rewrites have said what they changed
+              since the diff panel landed, and his own hand was the one change
+              on the board with no record at all. `prev_body` here is the one
+              the API stamped at save time, so the answer survives the session
+              in which he would still have remembered. */}
+          {isSegment && meta.tutor_edited && (
+            <>
+              <Button
+                type="button" size="sm" variant="ghost"
+                data-testid="segment-tutor-edited"
+                onClick={() => setTutorDiffOpen(true)}
+              >
+                <Pencil />
+                {t("tutorEdited")}
+              </Button>
+              <WhatChanged
+                open={tutorDiffOpen}
+                onOpenChange={setTutorDiffOpen}
+                before={meta.tutor_edited.prev_body}
+                after={node.body ?? ""}
+              />
+            </>
+          )}
         </div>
       )}
 
@@ -716,6 +784,7 @@ export function BlockCard({
               key={child.id}
               node={child}
               locale={locale}
+              parentTitle={node.title}
               index={i}
               siblingCount={contentChildren.length}
               onChanged={onChanged}
@@ -735,6 +804,7 @@ export function BlockCard({
                 key={child.id}
                 node={child}
                 locale={locale}
+                parentTitle={node.title}
                 index={i}
                 siblingCount={deliveryChildren.length}
                 onChanged={onChanged}

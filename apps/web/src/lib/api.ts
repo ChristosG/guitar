@@ -724,6 +724,13 @@ export interface BlockMeta {
    * read to answer. */
   refine_instruction?: string;
   refined?: boolean;
+  /** Stamped by the API when the TUTOR himself saved this block's body (the
+   * Edit door, not the AI one). It carries the text he replaced, so the row can
+   * both admit the edit happened and show the diff — answering "did I change
+   * this, or did the AI?" after the session that would remember is long over.
+   * `count` is how many times he has done it, not a revision depth: like
+   * `prev_body`, only ONE level of history is kept. */
+  tutor_edited?: { at: string; prev_body: string; count: number } | null;
   /** LESSON ONLY. `modify_lesson` does not edit text — it requeues the lesson
    * and a worker rewrites every segment from scratch — so the "before" is a
    * whole segment SET, captured at apply time, and there is no single block

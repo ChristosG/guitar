@@ -668,11 +668,17 @@ async function startToStep(
  * expanded and a chaos" — only the course root opens expanded), and its
  * `CollapsibleContent` does not just hide a closed card's children, it does not
  * mount them at all. So every assertion below that reaches into a LESSON's own
- * badges (`lesson-status`, `lesson-word-count`, `lesson-deepen` — all rendered
- * in the card's header, unconditionally once the card itself exists) needs its
+ * row controls (`lesson-ai`, `lesson-deepen`, and the `lesson-status` pill on a
+ * lesson that is NOT yet ready — all rendered in the card's header) needs its
  * MODULE expanded first; reaching into a SEGMENT (the extend controls) or the
- * LESSON's own body (`lesson-sources-trigger`) needs the LESSON expanded too,
- * one level further in. */
+ * LESSON's own body (`lesson-sources-trigger`, `lesson-words-line`) needs the
+ * LESSON expanded too, one level further in.
+ *
+ * TASK 1.5 MOVED TWO OF THOSE. A `ready` lesson shows NO status pill (ready is
+ * the resting state; the pill now means "not settled yet"), and the word count
+ * left the row for `lesson-words-line` inside the opened lesson. So "is this
+ * lesson drafted?" is asked here as "is its one AI button enabled / does it
+ * have no pill", not as "does it say Έτοιμο". */
 async function expandModule(page: Page, index = 0) {
   const modules = page.locator('[data-testid="block-card"][data-kind="module"]');
   await modules.nth(index).getByTestId("block-card-toggle").click();
@@ -684,7 +690,12 @@ async function expandFirstLesson(page: Page, moduleIndex = 0) {
   const modules = page.locator('[data-testid="block-card"][data-kind="module"]');
   const lessons = modules.nth(moduleIndex).locator('[data-testid="block-card"][data-kind="lesson"]');
   const first = lessons.first();
-  await expect(first.getByTestId("lesson-status")).toHaveAttribute("data-status", "ready");
+  // Ready == the AI button is live (it is disabled while `queued`/`drafting`)
+  // and the row carries no pill. Both only settle once the tree refetch that
+  // brought the segments in has landed, which is what the toggle needs.
+  await expect(first.getByTestId("lesson-ai")).toBeEnabled();
+  await expect(first.getByTestId("lesson-status")).toHaveCount(0);
+  await expect(first.getByTestId("block-card-toggle")).toBeVisible();
   await first.getByTestId("block-card-toggle").click();
 }
 
@@ -934,8 +945,11 @@ test.describe("the guided interview, v2 (mocked API)", () => {
 
     // He reads module 1 while the rest is still being written. THE FLAGSHIP CLAIM.
     await expandModule(page, 0);
-    await expect(page.getByTestId("lesson-status").first()).toHaveAttribute("data-status", "ready");
-    await expect(page.getByTestId("lesson-word-count").first()).toContainText("2,340");
+    const readLesson = page.locator('[data-testid="block-card"][data-kind="lesson"]').first();
+    await expect(readLesson.getByTestId("lesson-ai")).toBeEnabled();  // drafted
+    await expect(readLesson.getByTestId("lesson-status")).toHaveCount(0); // ready -> no pill
+    await readLesson.getByTestId("block-card-toggle").click();
+    await expect(readLesson.getByTestId("lesson-words-line")).toContainText("2,340");
     await expect(page.getByTestId("draft-progress")).toHaveAttribute("data-done", "false");
 
     // ...and then the rest lands, without a reload.
@@ -986,14 +1000,24 @@ test.describe("the guided interview, v2 (mocked API)", () => {
     await page.getByTestId("interview-confirm-submit").click();
     await expandModule(page, 0);
 
-    // By KIND, not just by "a card containing a word count": BlockCards nest inside
-    // one another (that is what makes the indentation work), so the course card also
-    // "contains" every lesson's word count — and `.first()` would hand back the root.
+    // By KIND, not just by "a card that looks drafted": BlockCards nest inside
+    // one another (that is what makes the indentation work), so the course card
+    // also "contains" every lesson's controls — and `.first()` would hand back
+    // the root. The DRAFTED one is now the one with NO status pill (Task 1.5:
+    // `ready` is the resting state and gets no badge); the still-queued
+    // siblings all carry one.
+    // POSITIONAL, not "the row that looks drafted": this fixture drafts module
+    // 0 / lesson 0 first, and a `hasNot` filter would be re-evaluated after the
+    // deepen put the pill BACK — pointing at a different row mid-test.
     const drafted = page
+      .locator('[data-testid="block-card"][data-kind="module"]')
+      .first()
       .locator('[data-testid="block-card"][data-kind="lesson"]')
-      .filter({ has: page.getByTestId("lesson-word-count") })
       .first();
     await expect(drafted).toBeVisible();
+    // Wait for it to actually finish drafting — the pill is there while it is
+    // `queued` and vanishes when it goes `ready`.
+    await expect(drafted.getByTestId("lesson-status")).toHaveCount(0);
 
     await drafted.getByTestId("lesson-deepen").click();
 
@@ -1037,8 +1061,11 @@ test.describe("the guided interview, v2 (mocked API)", () => {
 
     await expect(page.getByTestId("tree-board")).toBeVisible();
     await expandModule(page, 0);
-    await expect(page.getByTestId("lesson-status").first()).toHaveAttribute("data-status", "ready");
-    await expect(page.getByTestId("lesson-word-count").first()).toBeVisible();
+    const row = page.locator('[data-testid="block-card"][data-kind="lesson"]').first();
+    await expect(row.getByTestId("lesson-ai")).toBeEnabled();          // not queued
+    await expect(row.getByTestId("lesson-status")).toHaveCount(0);     // ready -> no pill
+    await row.getByTestId("block-card-toggle").click();
+    await expect(row.getByTestId("lesson-words-line")).toBeVisible();
     expect(mock.unexpected).toEqual([]);
   });
 
