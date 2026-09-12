@@ -24,7 +24,7 @@ authorize against anybody else.
 import json
 import logging
 from datetime import datetime, timezone
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -481,6 +481,120 @@ def _revalidate_revision_args_for_resolve(db: Session, args: dict) -> dict:
     return {**args, "plan": validated}
 
 
+_PROPOSE_TOOL = "propose_curriculum_revision"
+_APPLY_TOOL = "apply_curriculum_revision"
+
+
+def _wire_call_arguments(call: dict) -> dict:
+    """One wire-shape tool_call's `arguments` as a dict. The OpenAI wire shape
+    says JSON STRING (`loop._wire_assistant_message` always writes one, and
+    `claude_cli.py` `json.loads`es one back), but a persisted row round-tripped
+    through `sa.JSON` — or a test fixture — can just as well hold the dict
+    itself, so both are accepted, exactly as `loop.py` tolerates both. Anything
+    unparseable degrades to `{}`; this is a best-effort recovery path, never a
+    place to raise."""
+    raw = (call.get("function") or {}).get("arguments")
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _synthesize_apply_from_plan(tail: list[dict]) -> dict | None:
+    """THE COMPUTED PLAN ALWAYS BECOMES A CARD (silent failure S5, 2026-09-12).
+
+    Live run, session 97f38a82: `propose_curriculum_revision` ran for 307 s and
+    returned 7 `edit_segment` ops — and the model's final hop NARRATED the plan
+    («Ετοίμασα το πλάνο αναθεώρησης — …») instead of calling
+    `apply_curriculum_revision`. The turn ended `answer`, `GET .../pending`
+    returned null, and the tutor was left reading a description of work he had
+    no way to apply: five minutes of planner time, and a dead end.
+
+    Given a turn's NEW tail, this returns the `pending_tool` dict the model
+    SHOULD have produced — `{tool_call_id, name, arguments}`, the exact shape
+    `AgentResult.pending_tool` carries — or None when there is nothing to
+    recover. The plan is taken verbatim from the tool RESULT (the server's own
+    validated planner output), never re-derived from the model's prose, and
+    `root_id`/`scope_module_id` come from the propose call's own arguments, so
+    a module-scoped proposal cannot silently widen into a whole-course apply.
+
+    Returns None — i.e. leaves an ordinary answer alone — when:
+      * no tool result in this tail answers a `propose_curriculum_revision`
+        call made in this same tail (nothing was computed this turn);
+      * the result is not parseable JSON (`loop._stringify` caps a tool result
+        at `TOOL_RESULT_MAX_CHARS`, and a cut result is no longer valid JSON —
+        better a plain answer than a card built on a guess);
+      * the parsed result has no `ops` (an empty plan, or the planner's
+        graceful `{"error": ...}` shape) or carries no `root_id`.
+    """
+    proposals: dict[str, dict] = {}          # propose tool_call_id -> its arguments
+    found: tuple[str, dict] | None = None    # (tool result content, propose arguments)
+    for message in tail:
+        role = message.get("role")
+        if role == "assistant":
+            for call in (message.get("tool_calls") or []):
+                if (call.get("function") or {}).get("name") == _PROPOSE_TOOL and call.get("id"):
+                    proposals[call["id"]] = _wire_call_arguments(call)
+        elif role == "tool":
+            propose_args = proposals.get(message.get("tool_call_id"))
+            if propose_args is not None:
+                # Keep walking: the LAST plan of the turn is the live one.
+                found = (message.get("content") or "", propose_args)
+    if found is None:
+        return None
+
+    content, propose_args = found
+    try:
+        plan = json.loads(content)
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return None
+    if not isinstance(plan, dict) or not plan.get("ops"):
+        return None
+    root_id = propose_args.get("root_id")
+    if not root_id:
+        return None
+
+    arguments = {"root_id": root_id, "plan": plan}
+    scope_module_id = propose_args.get("scope_module_id")
+    if scope_module_id:
+        arguments["scope_module_id"] = scope_module_id
+    return {
+        "tool_call_id": f"synth-{uuid4().hex[:12]}",
+        "name": _APPLY_TOOL,
+        "arguments": arguments,
+    }
+
+
+def _tail_with_synthetic_call(tail: list[dict], pending: dict, content: str | None) -> list[dict]:
+    """`tail` with `pending` hung off its LAST assistant row as a wire-shape
+    tool_call, so the persisted transcript ends in exactly the shape a
+    model-emitted suspend leaves behind: an assistant `tool_calls` row that
+    `resolve_approval` later answers with the matching `role="tool"` result.
+    Without this the wire rebuilt from the transcript would carry an approval
+    nothing ever asked for — and with it, no dangling call survives a resolve.
+
+    Returns a NEW list with a NEW dict for the one row it changes (`tail`'s own
+    dicts are `AgentResult.messages` entries the caller still holds). A tail
+    that does not end on an assistant row (the `max_steps` degenerate shape)
+    gets a fresh assistant row carrying the narration instead."""
+    call = {
+        "id": pending["tool_call_id"],
+        "type": "function",
+        "function": {
+            "name": pending["name"],
+            "arguments": json.dumps(pending["arguments"], ensure_ascii=False, default=str),
+        },
+    }
+    if tail and tail[-1].get("role") == "assistant":
+        return [*tail[:-1], {**tail[-1], "content": content, "tool_calls": [call]}]
+    return [*tail, {"role": "assistant", "content": content, "tool_calls": [call]}]
+
+
 def _respond_to_turn(db: Session, session_id: UUID, prior_wire: list[dict], result: AgentResult) -> ChatTurnOut:
     """Shared response-shaping for every call site that runs (or resumes)
     `run_agent_turn` and must react to its outcome: the very first turn
@@ -496,16 +610,57 @@ def _respond_to_turn(db: Session, session_id: UUID, prior_wire: list[dict], resu
     than silently discarding that new pending call's trackability (it would
     otherwise persist as an unanswered tool_call with no `ApprovalRequest`
     row and no way to ever resolve it via `GET .../pending`).
+
+    A COMPUTED PLAN ALWAYS BECOMES A CARD (task 0.7, silent failure S5):
+    an `answer` turn whose tail carries a `propose_curriculum_revision` result
+    with real `ops` gets the `apply_curriculum_revision` call the model
+    forgot to make SYNTHESIZED here (`_synthesize_apply_from_plan`) and hung
+    off the tail's last assistant row (`_tail_with_synthetic_call`), so the
+    turn ends `awaiting_approval` with a real `ApprovalRequest` instead of a
+    paragraph about work the tutor cannot apply. Being here — and not in
+    `run_agent_turn` — is the point: all three doors into a turn (sync
+    `post_message`, the `chat_turn` job via `run_turn_core`, and
+    resume-after-resolve) pass through this one function.
     """
     tail = _new_tail(result.messages, prior_wire)
-    persist_new_messages(db, session_id, tail, citations=result.citations)
 
+    pending: dict | None = None
     if result.status == "awaiting_approval":
         pending = result.pending_tool
         # Approved == applied, EXACT: validate an apply_curriculum_revision plan
         # (in place on `pending`) BEFORE it is stored/rendered — a dropped op must
         # never reach the card. No-op for every other tool.
         _validate_pending_revision(db, pending)
+    elif result.status == "answer":
+        # S5: the model computed a plan and then only TALKED about it. Recover
+        # the apply call it omitted (None for every turn that didn't compute a
+        # plan, i.e. almost all of them — the pure, DB-free scan runs first so
+        # the ordinary answer turn pays nothing but a walk of its own tail).
+        # Skipped outright while an approval is already open: one unanswered
+        # mutation call at a time is the whole protocol `post_message`'s 409
+        # guard and `_open_pending_approval` defend; a second would strand both.
+        synthesized = _synthesize_apply_from_plan(tail)
+        if synthesized is not None and _open_pending_approval(db, session_id) is None:
+            # Same approved==applied gate as the suspend path above — run
+            # BEFORE the call is written into the transcript, so the persisted
+            # arguments ARE the validated plan the card and the job will see.
+            _validate_pending_revision(db, synthesized)
+            ops = (synthesized["arguments"].get("plan") or {}).get("ops") or []
+            if ops:
+                pending = synthesized
+                tail = _tail_with_synthetic_call(tail, pending, result.content)
+                log.info(
+                    "chat: synthesized apply_curriculum_revision card for session "
+                    "%s (%d ops) — the model narrated instead of calling it",
+                    session_id, len(ops),
+                )
+            # Validation emptying the plan lands here: nothing left to approve,
+            # so this stays the plain answer it already was (same rule as an
+            # empty `ops` straight off the planner).
+
+    persist_new_messages(db, session_id, tail, citations=result.citations)
+
+    if pending is not None:
         approval = ApprovalRequest(
             session_id=session_id,
             tool_name=pending["name"],
