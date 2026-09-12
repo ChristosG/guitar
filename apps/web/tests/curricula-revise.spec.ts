@@ -843,7 +843,12 @@ test.describe("curriculum revise drawer (mocked API)", () => {
     await expect(
       page.getByTestId("chat-message").filter({ hasText: "writing the new lessons failed" }),
     ).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByTestId("chat-message").filter({ hasText: draftError })).toBeVisible();
+    // The REASON is the localized one, never the job's own English string:
+    // `jobErrorText` maps `error_kind: "upstream"` to `jobErrors.generic`.
+    await expect(
+      page.getByTestId("chat-message").filter({ hasText: "This failed unexpectedly. Try again." }),
+    ).toBeVisible();
+    await expect(page.getByTestId("chat-message").filter({ hasText: draftError })).toHaveCount(0);
     // ...and never the plain success narration.
     await expect(
       page.getByTestId("chat-message").filter({ hasText: "Done — the curriculum below now reflects this revision." }),

@@ -99,7 +99,8 @@
         "closeHint": "You can close this — it will appear on the board once it is ready.",
         "timeout": "Taking longer than expected — the lesson will appear on the board once it is ready.",
         "error": "The lesson could not be created.",
-        "tooShort": "Write at least one sentence."
+        "tooShort": "Write at least one sentence.",
+        "tooLong": "The text is too long — keep it under 20,000 characters."
       },
       "newModuleTitle": "New module",
       "newLessonTitle": "New lesson",
@@ -112,6 +113,7 @@
       "redraftError": "Could not start the re-draft.",
       "lessonAi": "AI on this lesson",
       "wordsLine": "{count, number} words · target ~{target, number}",
+      "wordsLineNoTarget": "{count, number} words",
       "tutorEdited": "Edited by you — what changed?",
       "citation": "{source}, p. {page}",
       "sourcesButton": "Sources",

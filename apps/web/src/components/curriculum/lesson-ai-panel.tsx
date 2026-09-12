@@ -15,6 +15,7 @@ import {
   getJob,
   planLessonAi,
   type BlockNode,
+  type JobOut,
   type LessonPlan,
 } from "@/lib/api";
 import { jobErrorText } from "@/lib/job-errors";
@@ -29,6 +30,9 @@ import { cn } from "@/lib/utils";
  * regardless (the cap ends THIS component's wait, not the work). */
 const POLL_INTERVAL_MS = 2000;
 const MAX_POLLS = 300;
+/** Consecutive unanswered polls before `waitForJob` gives up — see its own
+ * comment: one blink is not a failed job. */
+const MAX_POLL_MISSES = 3;
 
 /** Where the panel is in the one flow it has. `idle` is also where a failed
  * plan lands, so the box he typed in is the thing he gets back. */
@@ -179,15 +183,37 @@ export function LessonAiPanel({ tree, onApplied }: LessonAiPanelProps) {
     setOpen(true);
   }, [scope?.openRequest]);
 
-  /** Poll one job to a terminal status, or to the cap. */
-  const waitForJob = useCallback(async (jobId: string) => {
-    let job = await getJob(jobId);
-    let polls = 1;
-    while (job.status !== "succeeded" && job.status !== "failed" && polls < MAX_POLLS) {
-      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
-      job = await getJob(jobId);
-      polls++;
+  /** Poll one job to a terminal status, or to the cap.
+   *
+   * ONE FAILED POLL IS NOT A FAILED JOB. A plan is a 20-60s model call and an
+   * apply is minutes; over that window a single `GET /jobs/{id}` will
+   * occasionally not answer (the laptop slept, the wifi blinked, the tunnel in
+   * front of the API recycled a connection). The job never noticed — it is
+   * running in the API process, and the next poll would have found it done.
+   * Throwing on the first rejection turned that blink into «κάτι πήγε στραβά»
+   * on a plan that was about to land, and — worse here than in the chat — a
+   * retry then hits a 409 `lesson_busy`, because the job he was just told had
+   * failed is still holding the lesson. So a rejection is a MISS: wait and ask
+   * again, giving up only after MAX_POLL_MISSES in a row (a connection that is
+   * gone, not blinking). The counter resets on every answer. */
+  const waitForJob = useCallback(async (jobId: string): Promise<JobOut> => {
+    let misses = 0;
+    let job: JobOut | undefined;
+    for (let polls = 0; polls < MAX_POLLS; polls++) {
+      if (polls > 0) await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+      try {
+        job = await getJob(jobId);
+        misses = 0;
+      } catch (err) {
+        if (++misses >= MAX_POLL_MISSES) throw err;
+        continue;
+      }
+      if (job.status === "succeeded" || job.status === "failed") return job;
     }
+    // The cap, with the last status a poll actually returned. `job` is always
+    // set here: reaching the cap means polls were answering, since
+    // MAX_POLL_MISSES unanswered ones in a row throw above.
+    if (!job) throw new Error("no poll ever answered");
     return job;
   }, []);
 

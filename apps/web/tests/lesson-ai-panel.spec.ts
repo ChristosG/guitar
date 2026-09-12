@@ -483,4 +483,89 @@ test.describe("«AI στο μάθημα» panel — scope, the tutor-edited stri
     expect(planBodies[1].note).toBe("χωρίς ασκήσεις");
     expect(api.unexpected).toEqual([]);
   });
+
+  test("one unanswered poll does not kill the plan — the next one lands it", async ({ page }) => {
+    // A plan is minutes of `claude -p`, and over minutes one `GET /jobs/{id}`
+    // will occasionally not answer: the laptop slept, the wifi blinked, the
+    // tunnel in front of the API recycled a connection. The JOB never noticed.
+    // The panel used to read that single 502 as "this failed", show «κάτι πήγε
+    // στραβά» over a plan that was one second away, and send him to a retry
+    // that 409s `lesson_busy` — because the job it told him had failed is still
+    // holding the lesson. So: a miss is a miss, and the next poll decides.
+    const rootId = randomUUID();
+    const moduleId = randomUUID();
+    const lessonId = randomUUID();
+    const sessionId = randomUUID();
+    const jobId = randomUUID();
+
+    const api = await mockCurriculaApi(page, rootId, moduleId, lessonId, sessionId);
+
+    await page.route(`${API_ORIGIN}/blocks/**`, async (route: Route) => {
+      const req = route.request();
+      const { pathname } = new URL(req.url());
+      if (req.method() === "OPTIONS") {
+        await route.fulfill({ status: 204, headers: CORS_HEADERS });
+        return;
+      }
+      if (pathname === `/blocks/${lessonId}/ai/plan` && req.method() === "POST") {
+        await route.fulfill({
+          status: 202, contentType: "application/json", headers: CORS_HEADERS,
+          body: JSON.stringify({ job_id: jobId, status: "pending" }),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 500, contentType: "application/json", headers: CORS_HEADERS,
+        body: JSON.stringify({ detail: "unmocked request in test" }),
+      });
+    });
+
+    let polls = 0;
+    await page.route(`${API_ORIGIN}/jobs/**`, async (route: Route) => {
+      const req = route.request();
+      if (req.method() === "OPTIONS") {
+        await route.fulfill({ status: 204, headers: CORS_HEADERS });
+        return;
+      }
+      polls++;
+      // Poll 1: the blink. Poll 2: the job was done all along.
+      if (polls === 1) {
+        await route.fulfill({
+          status: 502, contentType: "application/json", headers: CORS_HEADERS,
+          body: JSON.stringify({ detail: "bad gateway" }),
+        });
+        return;
+      }
+      const now = new Date().toISOString();
+      await route.fulfill({
+        status: 200, contentType: "application/json", headers: CORS_HEADERS,
+        body: JSON.stringify({
+          id: jobId, kind: "lesson_ai", status: "succeeded",
+          result_root_id: null, error: null, error_kind: null,
+          progress: { phase: "done", plan: plan() },
+          created_at: now, updated_at: now,
+        }),
+      });
+    });
+
+    await page.goto(`/el/curricula/${rootId}`);
+    await expect(page.getByTestId("tree-board")).toBeVisible();
+    await page
+      .locator('[data-testid="block-card"][data-kind="module"]')
+      .getByTestId("block-card-toggle")
+      .click();
+    await page.getByTestId("lesson-ai").first().click();
+
+    const panel = page.getByTestId("lesson-ai-panel");
+    await panel.getByTestId("lesson-ai-chip-harder").click();
+    await panel.getByTestId("lesson-ai-plan").click();
+
+    // The card lands, and no error was ever shown on the way there.
+    await expect(panel.getByTestId("lesson-plan-card")).toContainText("Θα ξαναγράψω 3 ενότητες.", {
+      timeout: 15_000,
+    });
+    await expect(panel.getByTestId("lesson-ai-error")).toHaveCount(0);
+    expect(polls).toBeGreaterThanOrEqual(2);
+    expect(api.unexpected).toEqual([]);
+  });
 });

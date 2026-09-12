@@ -667,7 +667,14 @@ export function BlockCard({
             meta.meets_floor === false && "text-amber-600 dark:text-amber-400",
           )}
         >
-          {t("wordsLine", { count: wordCount, target: meta.target_words ?? 0 })}
+          {/* NO TARGET, NO «στόχος». `meta.target_words` is written by the
+              drafter, so a lesson that has never been drafted (or one imported
+              from chat) has a word count and no target — and `?? 0` printed
+              "στόχος ~0", a judgement that is both wrong and impossible to
+              meet. The half of the line that has no data simply is not said. */}
+          {typeof meta.target_words === "number" && meta.target_words > 0
+            ? t("wordsLine", { count: wordCount, target: meta.target_words })
+            : t("wordsLineNoTarget", { count: wordCount })}
         </p>
       )}
 

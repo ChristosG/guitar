@@ -25,6 +25,7 @@ import {
   type ChatCitation,
   type ChatMessageOut,
   type ChatTurnOut,
+  type JobOut,
   type RevisionPlan,
 } from "@/lib/api";
 import { jobErrorText } from "@/lib/job-errors";
@@ -46,6 +47,10 @@ const POLL_INTERVAL_MS = 2000;
  * `claude -p` planner turn was measured at 6-8 minutes — a cap of 5 would
  * have given up on answers that were about to land. */
 const MAX_POLLS = 300;
+/** Consecutive unanswered polls before `waitForJob` gives up. Three, not one:
+ * see its own comment — a single blink is not a failed job, and three in a row
+ * (~6s of nothing) is a connection that is actually gone. */
+const MAX_POLL_MISSES = 3;
 
 interface PendingApprovalState {
   approvalId: string;
@@ -287,14 +292,37 @@ export function ChatPanel({ sessionId, rootId, blockTitles, onJobDone, seedDraft
   // Extracted so the revise flow can wait on TWO jobs in sequence: the
   // curriculum_revise row (does the apply happen?) and then its chained
   // curriculum_draft row (did the new lessons actually get written?).
-  async function waitForJob(jobId: string) {
-    let job = await getJob(jobId);
-    let polls = 1;
-    while (job.status !== "succeeded" && job.status !== "failed" && polls < MAX_POLLS) {
-      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
-      job = await getJob(jobId);
-      polls++;
+  //
+  // ONE FAILED POLL IS NOT A FAILED JOB. These turns run for minutes, and over
+  // minutes a single `GET /jobs/{id}` will occasionally not answer: the laptop
+  // slept, the wifi blinked, the tunnel in front of the API recycled a
+  // connection, the dev server restarted. The job itself never noticed — it is
+  // running in the API process, and the very next poll would have found it
+  // `succeeded`. Throwing on the first rejection turned that blink into "this
+  // failed, try again" and threw away a turn that was about to land. So a
+  // rejection is a MISS: wait the same interval and ask again, and only give up
+  // after MAX_POLL_MISSES in a row — at which point the connection is genuinely
+  // gone, not blinking, and the existing error path is the right one. The
+  // counter resets on every answer, so a flaky hour of one-off misses never
+  // accumulates into a false failure.
+  async function waitForJob(jobId: string): Promise<JobOut> {
+    let misses = 0;
+    let job: JobOut | undefined;
+    for (let polls = 0; polls < MAX_POLLS; polls++) {
+      if (polls > 0) await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+      try {
+        job = await getJob(jobId);
+        misses = 0;
+      } catch (err) {
+        if (++misses >= MAX_POLL_MISSES) throw err;
+        continue;
+      }
+      if (job.status === "succeeded" || job.status === "failed") return job;
     }
+    // The cap, reported with the last status a poll actually returned. `job` is
+    // always set here: reaching the cap means polls were answering, since
+    // MAX_POLL_MISSES unanswered ones in a row throw above.
+    if (!job) throw new Error("no poll ever answered");
     return job;
   }
 

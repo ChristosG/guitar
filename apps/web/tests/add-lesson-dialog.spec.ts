@@ -230,8 +230,21 @@ test.describe("«Προσθήκη μαθήματος» — the brief, the positi
     await expect(generate).toBeDisabled();
     await expect(dialog.getByTestId("add-lesson-too-short")).toBeVisible();
 
+    // The counter is always on screen, so the ceiling is a number he can see
+    // before he is over it: "8/20000" while he is nine characters in.
+    await expect(dialog.getByTestId("add-lesson-brief-count")).toHaveText("8/20000");
+
+    // THE CEILING. This box takes PASTED text — a syllabus, a chat log — so it
+    // is reachable, and reaching it silently would mean a long paste, a click,
+    // and the API's 422 (whose English detail this dialog refuses to show him).
+    await dialog.getByTestId("add-lesson-brief").fill("α".repeat(20_001));
+    await expect(dialog.getByTestId("add-lesson-brief-count")).toHaveText("20001/20000");
+    await expect(dialog.getByTestId("add-lesson-too-long")).toBeVisible();
+    await expect(generate).toBeDisabled();
+
     await dialog.getByTestId("add-lesson-brief").fill(BRIEF);
     await expect(dialog.getByTestId("add-lesson-too-short")).toHaveCount(0);
+    await expect(dialog.getByTestId("add-lesson-too-long")).toHaveCount(0);
     await expect(generate).toBeEnabled();
 
     // THE POSITION. «Μετά από: Πρώτη θέση» — between the two, not appended.

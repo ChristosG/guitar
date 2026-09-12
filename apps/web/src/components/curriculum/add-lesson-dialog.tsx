@@ -14,18 +14,29 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { cn } from "@/lib/utils";
 import { jobErrorText } from "@/lib/job-errors";
-import { addLesson, generateLesson, getJob } from "@/lib/api";
+import { addLesson, generateLesson, getJob, type JobOut } from "@/lib/api";
 
 /** The API's own floor (`LessonGenerateRequest.brief`, `min_length=10`),
  * enforced here so he learns it from the form instead of from a 422. */
 const MIN_BRIEF = 10;
+/** The API's own ceiling (`LessonGenerateRequest.brief`, `max_length=20000`).
+ * This box takes PASTED text — a syllabus, a chat log, someone's notes — so the
+ * ceiling is one he can actually reach, and reaching it silently would mean a
+ * long paste, a click, and a 422 whose English detail this dialog refuses to
+ * show him. The counter below is always there, so the limit is a number he can
+ * see before he is over it rather than a wall he hits. */
+const MAX_BRIEF = 20000;
 
 // Same cadence as the board's add-module poll. The deadline is longer because
 // this job does MORE: a planning call over the whole library, and then the
 // chained draft of the lesson it just planted, in the same thread.
 const POLL_INTERVAL_MS = 2000;
 const POLL_DEADLINE_MS = 10 * 60_000;
+/** Consecutive unanswered polls before the loop gives up — see `handleGenerate`:
+ * one blink is not a failed job. */
+const MAX_POLL_MISSES = 3;
 
 const SELECT_CLASS =
   "h-8 w-full min-w-0 rounded-lg border border-input bg-transparent px-2.5 text-base outline-none transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50 md:text-sm dark:bg-input/30";
@@ -109,6 +120,7 @@ export function AddLessonDialog({
   // Nothing typed yet is not a mistake — the hint appears once he has started
   // and stopped too early, which is the only moment it explains anything.
   const tooShort = trimmedBrief.length > 0 && !longEnough;
+  const tooLong = trimmedBrief.length > MAX_BRIEF;
 
   function reset() {
     setBrief("");
@@ -154,8 +166,29 @@ export function AddLessonDialog({
         after: after || null,
       });
       const deadline = performance.now() + POLL_DEADLINE_MS;
+      // ONE FAILED POLL IS NOT A FAILED JOB. The wait here is minutes long (a
+      // planning call over the whole library, then the chained draft), and over
+      // minutes a single `GET /jobs/{id}` will occasionally not answer: the
+      // laptop slept, the wifi blinked, the tunnel in front of the API recycled
+      // a connection. The job never noticed — it is running in the API process,
+      // and the next poll would have found it `succeeded`. Letting that
+      // rejection fall to the `catch` below said «δεν ήταν δυνατή η δημιουργία
+      // του μαθήματος» about a lesson that was about to appear on the board.
+      // So a rejection is a MISS: wait the same interval and ask again, giving
+      // up only after MAX_POLL_MISSES in a row (a connection that is gone, not
+      // blinking) — which rethrows into that same `catch` and its Greek line.
+      // The counter resets on every answer.
+      let misses = 0;
       while (performance.now() < deadline) {
-        const job = await getJob(accepted.job_id);
+        let job: JobOut;
+        try {
+          job = await getJob(accepted.job_id);
+          misses = 0;
+        } catch (err) {
+          if (++misses >= MAX_POLL_MISSES) throw err;
+          await sleep(POLL_INTERVAL_MS);
+          continue;
+        }
         if (job.status === "succeeded") {
           // The lesson exists (`progress.lesson_id`) and the chained draft is
           // already writing it. Nothing left for this dialog to narrate: the
@@ -226,6 +259,24 @@ export function AddLessonDialog({
                 {t("tooShort")}
               </p>
             )}
+            {tooLong && (
+              <p className="text-xs text-destructive" data-testid="add-lesson-too-long">
+                {t("tooLong")}
+              </p>
+            )}
+            {/* Always visible, and only RED once he is over — a counter that
+                appears at the limit is a counter that warns too late. Two bare
+                numbers and a slash: there is no sentence here to translate, and
+                the one sentence that IS one («πολύ μεγάλο») is the line above. */}
+            <p
+              className={cn(
+                "self-end text-xs tabular-nums",
+                tooLong ? "text-destructive" : "text-muted-foreground",
+              )}
+              data-testid="add-lesson-brief-count"
+            >
+              {trimmedBrief.length}/{MAX_BRIEF}
+            </p>
           </div>
 
           <div className="flex flex-col gap-1.5">
@@ -306,7 +357,7 @@ export function AddLessonDialog({
           <Button
             type="button"
             data-testid="add-lesson-generate"
-            disabled={busy || !longEnough}
+            disabled={busy || !longEnough || tooLong}
             onClick={handleGenerate}
           >
             {phase === "planning" ? (
