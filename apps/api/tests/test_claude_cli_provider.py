@@ -34,7 +34,7 @@ import httpx
 import pytest
 
 from app.config import settings
-from app.llm.claude_cli import _TOOL_TURN_SCHEMA, ClaudeCLIProvider
+from app.llm.claude_cli import _TOOL_TURN_SCHEMA, ClaudeCLIProvider, _tool_system_prompt
 from app.llm.errors import GuidedJSONError, LLMError, ToolArgsError
 
 TOOLS = [
@@ -444,3 +444,19 @@ def test_vision_allows_far_more_time_than_a_chat_turn(vision_bridge):
     _provider().vision(PAGE, "transcribe")
 
     assert sent["body"]["timeout_s"] >= 120
+
+
+def test_tool_system_prompt_disclaims_native_tools():
+    """2026-09-12: the model inside `claude -p` (run with `--tools ""`, i.e. NO
+    native tools) attempted a native tool call anyway, got "no such tool
+    available" from the CLI harness, and answered the tutor with nothing —
+    zero emulated tool calls in that turn. The prompt must say, explicitly,
+    that native tool calls do not exist here and the only way in is the
+    "tool_calls" field of the JSON reply."""
+    prompt = _tool_system_prompt(TOOLS, "auto")
+
+    assert (
+        'You have NO native tools in this environment and must never attempt a '
+        'native tool call — the ONLY way to call one of the tools below is to '
+        'list it in the "tool_calls" field of your JSON reply.'
+    ) in prompt

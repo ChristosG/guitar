@@ -589,7 +589,11 @@ def _tool_system_prompt(tools: list[dict], tool_choice: str) -> str:
     What claws most of that back is that the *reply* is still schema-validated —
     the model cannot return a malformed turn even if it misreads a tool.
     """
-    lines = ["AVAILABLE TOOLS — call them by name, with arguments matching the JSON Schema shown."]
+    lines = [
+        "AVAILABLE TOOLS — call them by name, with arguments matching the JSON Schema shown.",
+        "You have NO native tools in this environment and must never attempt a native tool call — "
+        'the ONLY way to call one of the tools below is to list it in the "tool_calls" field of your JSON reply.',
+    ]
     for t in tools:
         fn = t.get("function", t)
         params = json.dumps(fn.get("parameters") or {}, ensure_ascii=False)
