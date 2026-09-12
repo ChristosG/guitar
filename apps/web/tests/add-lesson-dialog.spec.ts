@@ -1,0 +1,312 @@
+import { randomUUID } from "node:crypto";
+import { test, expect, type Page, type Route } from "@playwright/test";
+
+// Task 3.4 — «Προσθήκη μαθήματος» asks what the lesson should teach.
+//
+// The module's ⋯ menu used to plant a blank box called «Νέο μάθημα» and leave
+// the tutor to write it himself. It now opens a dialog with ONE question —
+// "what do you want this lesson to teach?" — and hands his words to the
+// planner. What this spec pins down:
+//
+//  1. THE DOOR. The menu item opens the dialog instead of POSTing. A menu item
+//     that silently created a row was the whole complaint.
+//  2. THE FLOOR. «Δημιουργία με AI» is dead until the brief is a real
+//     sentence (the API's own `min_length=10`), and the dialog SAYS why rather
+//     than leaving a disabled button unexplained. A 422 on a three-word brief
+//     would be a server round trip to learn what the form already knows.
+//  3. THE BODY. What is POSTed is exactly what he filled in: the brief, a
+//     `title` of null when he left it to the AI, and the sibling he picked in
+//     «Θέση» — a position that silently appended would move his lesson.
+//  4. THE JOB. 202 → poll. The planning call reads the library (20-60s) and
+//     the draft that chains behind it is minutes more, so the status line has
+//     to change UNDER him: «Σχεδιάζω…» while the planner runs, «Γράφεται…»
+//     once the lesson exists and the chained draft has it. Then the dialog
+//     closes and the BOARD refetches — that refetch is what re-arms the draft
+//     progress bar over the new `queued` lesson.
+//  5. THE OLD BEHAVIOUR SURVIVES. «Κενό μάθημα» still POSTs the plain
+//     `/blocks/{module}/lessons` — sometimes he just wants a container.
+//
+// Same route-interception convention as the cockpit specs next door
+// (`lesson-ai-panel.spec.ts`, `tutor-edited.spec.ts`): anchored to
+// `API_ORIGIN`, explicit CORS + OPTIONS, and an unmocked-request catch-all so
+// a routing mistake fails loudly instead of hanging.
+const API_ORIGIN = "http://localhost:8791";
+
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "http://localhost:3100",
+  "Access-Control-Allow-Credentials": "true",
+  "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
+  "Access-Control-Allow-Headers": "content-type,x-app-locale",
+};
+
+/** Chris's own words for a lesson about the neck — the first lines of the
+ * outline he wrote by hand. Greek on purpose: `el` is the product's default
+ * locale, and the brief is the one field that goes to the model verbatim. */
+const BRIEF = [
+  "Θέλω ένα μάθημα για τον λαιμό της κιθάρας.",
+  "Πρώτα οι νότες στις πρώτες πέντε θέσεις, με ονόματα, όχι μόνο σχήματα.",
+  "Μετά πώς δένουν τα σχήματα CAGED μεταξύ τους πάνω στην ταστιέρα.",
+].join("\n");
+
+/** A Greek course → one module → two READY lessons. Two, not one, because the
+ * «Θέση» select is the point: with a single sibling a broken `after` would
+ * still look right. */
+function tree(rootId: string, moduleId: string, lessonIds: string[]) {
+  return {
+    id: rootId, kind: "course", title: "Ήχος και τεχνική", body: null, est_minutes: null,
+    order: 0, language: "el", plane: "content", student_id: null, meta: {},
+    children: [{
+      id: moduleId, kind: "module", title: "Ο λαιμός", body: "Στόχος της ενότητας",
+      est_minutes: null, order: 0, language: "el", plane: "content", student_id: null, meta: {},
+      children: lessonIds.map((id, i) => ({
+        id, kind: "lesson", title: i === 0 ? "Πρώτη θέση" : "Σχήματα CAGED",
+        body: "Περίληψη", est_minutes: 50, order: i, language: "el", plane: "content",
+        student_id: null,
+        meta: { draft_status: "ready", word_count: 2400, target_words: 2750, meets_floor: true },
+        children: [],
+      })),
+    }],
+  };
+}
+
+function progress(rootId: string) {
+  return {
+    root_id: rootId, total: 2, queued: 0, drafting: 0, ready: 2, failed: 0,
+    done: true, draft_error: null,
+  };
+}
+
+/** The board's own calls. `treeCalls` is counted because the refetch after the
+ * job is what puts the new lesson on the board at all. */
+async function mockCurriculaApi(page: Page, rootId: string, moduleId: string, lessonIds: string[]) {
+  const unexpected: string[] = [];
+  const counts = { tree: 0 };
+
+  await page.route(`${API_ORIGIN}/curricula/**`, async (route: Route) => {
+    const req = route.request();
+    const method = req.method();
+    const { pathname } = new URL(req.url());
+
+    if (method === "OPTIONS") {
+      await route.fulfill({ status: 204, headers: CORS_HEADERS });
+      return;
+    }
+    const json = (body: unknown) =>
+      route.fulfill({
+        status: 200, contentType: "application/json", headers: CORS_HEADERS,
+        body: JSON.stringify(body),
+      });
+
+    if (pathname === `/curricula/${rootId}/chat-session` && method === "GET") {
+      return json({ session_id: randomUUID() });
+    }
+    if (pathname === `/curricula/${rootId}/progress` && method === "GET") {
+      return json(progress(rootId));
+    }
+    if (pathname === `/curricula/${rootId}` && method === "GET") {
+      counts.tree++;
+      return json(tree(rootId, moduleId, lessonIds));
+    }
+
+    unexpected.push(`${method} ${pathname}`);
+    await route.fulfill({
+      status: 500, contentType: "application/json", headers: CORS_HEADERS,
+      body: JSON.stringify({ detail: "unmocked request in test" }),
+    });
+  });
+
+  return { unexpected, counts };
+}
+
+/** Open the board, expand nothing, and open the MODULE's ⋯ → «Προσθήκη
+ * μαθήματος». The module row is visible with the root expanded; its lessons
+ * are not, and do not need to be. */
+async function openAddLessonDialog(page: Page, rootId: string) {
+  await page.goto(`/el/curricula/${rootId}`);
+  await expect(page.getByTestId("tree-board")).toBeVisible();
+
+  const moduleCard = page.locator('[data-testid="block-card"][data-kind="module"]');
+  await moduleCard.getByTestId("block-card-menu").click();
+  await page.getByTestId("menu-add-lesson").click();
+
+  const dialog = page.getByTestId("add-lesson-dialog");
+  await expect(dialog).toBeVisible();
+  return dialog;
+}
+
+test.describe("«Προσθήκη μαθήματος» — the brief, the position, and the job (mocked API)", () => {
+  test("the dialog asks for a brief, POSTs it, and polls the job to the board", async ({ page }) => {
+    const rootId = randomUUID();
+    const moduleId = randomUUID();
+    const lessonIds = [randomUUID(), randomUUID()];
+    const jobId = randomUUID();
+
+    const api = await mockCurriculaApi(page, rootId, moduleId, lessonIds);
+
+    let generateCalls = 0;
+    let blankCalls = 0;
+    let polls = 0;
+    let sent: { brief: string; title: string | null; after: string | null } | null = null;
+
+    await page.route(`${API_ORIGIN}/blocks/**`, async (route: Route) => {
+      const req = route.request();
+      const { pathname } = new URL(req.url());
+      if (req.method() === "OPTIONS") {
+        await route.fulfill({ status: 204, headers: CORS_HEADERS });
+        return;
+      }
+      if (pathname === `/blocks/${moduleId}/lessons/generate` && req.method() === "POST") {
+        generateCalls++;
+        sent = req.postDataJSON() as typeof sent;
+        await route.fulfill({
+          status: 202, contentType: "application/json", headers: CORS_HEADERS,
+          body: JSON.stringify({ job_id: jobId, status: "pending" }),
+        });
+        return;
+      }
+      if (pathname === `/blocks/${moduleId}/lessons` && req.method() === "POST") {
+        blankCalls++;
+        await route.fulfill({
+          status: 500, contentType: "application/json", headers: CORS_HEADERS,
+          body: JSON.stringify({ detail: "the AI path must not POST the blank lesson" }),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 500, contentType: "application/json", headers: CORS_HEADERS,
+        body: JSON.stringify({ detail: "unmocked request in test" }),
+      });
+    });
+
+    await page.route(`${API_ORIGIN}/jobs/**`, async (route: Route) => {
+      const req = route.request();
+      if (req.method() === "OPTIONS") {
+        await route.fulfill({ status: 204, headers: CORS_HEADERS });
+        return;
+      }
+      polls++;
+      // THE TWO PHASES, in the order the runner writes them: `planning` while
+      // the library call runs, then `drafting` the moment the lesson row
+      // exists and the chained `curriculum_draft` job has it. The middle tick
+      // is `running` with `phase: "drafting"` on purpose — the status line
+      // must follow `progress.phase`, not `status`.
+      const phase = polls < 2 ? "planning" : "drafting";
+      const done = polls >= 3;
+      const now = new Date().toISOString();
+      await route.fulfill({
+        status: 200, contentType: "application/json", headers: CORS_HEADERS,
+        body: JSON.stringify({
+          id: jobId, kind: "lesson_generate", status: done ? "succeeded" : "running",
+          result_root_id: done ? rootId : null, error: null, error_kind: null,
+          progress: phase === "planning"
+            ? { phase: "planning" }
+            : { phase: "drafting", lesson_id: randomUUID(), draft_job_id: randomUUID() },
+          created_at: now, updated_at: now,
+        }),
+      });
+    });
+
+    const dialog = await openAddLessonDialog(page, rootId);
+    const treeCallsBefore = api.counts.tree;
+
+    // THE FLOOR. Empty: dead, and no scolding yet — he has not typed anything.
+    const generate = dialog.getByTestId("add-lesson-generate");
+    await expect(generate).toBeDisabled();
+    await expect(dialog.getByTestId("add-lesson-too-short")).toHaveCount(0);
+
+    // Nine characters: still dead, and NOW it says why.
+    await dialog.getByTestId("add-lesson-brief").fill("ο λαιμός");
+    await expect(generate).toBeDisabled();
+    await expect(dialog.getByTestId("add-lesson-too-short")).toBeVisible();
+
+    await dialog.getByTestId("add-lesson-brief").fill(BRIEF);
+    await expect(dialog.getByTestId("add-lesson-too-short")).toHaveCount(0);
+    await expect(generate).toBeEnabled();
+
+    // THE POSITION. «Μετά από: Πρώτη θέση» — between the two, not appended.
+    const after = dialog.getByTestId("add-lesson-after");
+    await expect(after.locator("option")).toHaveCount(3); // «Στο τέλος» + two lessons
+    await after.selectOption(lessonIds[0]);
+
+    await generate.click();
+
+    // THE STATUS LINE CHANGES UNDER HIM.
+    const status = dialog.getByTestId("add-lesson-status");
+    await expect(status).toContainText("Σχεδιάζω", { timeout: 10_000 });
+    await expect(status).toContainText("Γράφεται", { timeout: 10_000 });
+    // Nothing to retry while the job runs — a second POST is a second lesson.
+    await expect(generate).toBeDisabled();
+
+    // It closes on `succeeded`, and the board refetches: the new lesson is
+    // `queued`, which is what re-arms the draft progress bar.
+    await expect(dialog).toBeHidden({ timeout: 15_000 });
+    await expect(dialog.getByTestId("add-lesson-error")).toHaveCount(0);
+    expect(api.counts.tree).toBeGreaterThan(treeCallsBefore);
+    expect(api.counts.tree).toBeGreaterThanOrEqual(2);
+
+    // EXACTLY ONE POST, with exactly what he filled in.
+    expect(generateCalls).toBe(1);
+    expect(blankCalls).toBe(0);
+    const body = sent as unknown as { brief: string; title: string | null; after: string | null };
+    expect(body.brief).toBe(BRIEF);
+    // He left the title to the AI — an empty string here would become a lesson
+    // literally called "".
+    expect(body.title).toBeNull();
+    expect(body.after).toBe(lessonIds[0]);
+
+    // It POLLED — the 202 was not mistaken for the answer.
+    expect(polls).toBeGreaterThanOrEqual(3);
+    expect(api.unexpected).toEqual([]);
+  });
+
+  test("«Κενό μάθημα» still creates the blank lesson", async ({ page }) => {
+    const rootId = randomUUID();
+    const moduleId = randomUUID();
+    const lessonIds = [randomUUID(), randomUUID()];
+
+    const api = await mockCurriculaApi(page, rootId, moduleId, lessonIds);
+
+    const blankBodies: { title: string }[] = [];
+    let generateCalls = 0;
+
+    await page.route(`${API_ORIGIN}/blocks/**`, async (route: Route) => {
+      const req = route.request();
+      const { pathname } = new URL(req.url());
+      if (req.method() === "OPTIONS") {
+        await route.fulfill({ status: 204, headers: CORS_HEADERS });
+        return;
+      }
+      if (pathname === `/blocks/${moduleId}/lessons` && req.method() === "POST") {
+        blankBodies.push(req.postDataJSON() as { title: string });
+        await route.fulfill({
+          status: 201, contentType: "application/json", headers: CORS_HEADERS,
+          body: JSON.stringify({
+            id: randomUUID(), kind: "lesson", title: "Νέο μάθημα", body: null,
+            est_minutes: null, order: 2, language: "el", plane: "content",
+            student_id: null, meta: { draft_status: "queued" }, children: [],
+          }),
+        });
+        return;
+      }
+      if (pathname === `/blocks/${moduleId}/lessons/generate`) generateCalls++;
+      await route.fulfill({
+        status: 500, contentType: "application/json", headers: CORS_HEADERS,
+        body: JSON.stringify({ detail: "unmocked request in test" }),
+      });
+    });
+
+    const dialog = await openAddLessonDialog(page, rootId);
+    const treeCallsBefore = api.counts.tree;
+
+    // No brief needed for a blank box — that button is alive from the start.
+    await expect(dialog.getByTestId("add-lesson-empty")).toBeEnabled();
+    await dialog.getByTestId("add-lesson-empty").click();
+
+    await expect(dialog).toBeHidden({ timeout: 10_000 });
+    expect(blankBodies).toHaveLength(1);
+    expect(blankBodies[0].title).toBe("Νέο μάθημα");
+    expect(generateCalls).toBe(0);
+    expect(api.counts.tree).toBeGreaterThan(treeCallsBefore);
+    expect(api.unexpected).toEqual([]);
+  });
+});

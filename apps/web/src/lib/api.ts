@@ -811,6 +811,10 @@ export interface JobOut {
   progress: {
     phase?: string;
     module_id?: string;
+    /** Add-lesson's counterpart to `module_id`: the lesson the
+     * `lesson_generate` job planted, set the moment it exists (`phase:
+     * "drafting"`) — see `generateLesson`'s polling contract. */
+    lesson_id?: string;
     draft_job_id?: string;
     turn?: unknown;
   } | null;
@@ -922,6 +926,45 @@ export function generateModule(rootId: string, input: GenerateModuleInput): Prom
 
 export function addLesson(moduleId: string, input: AddLessonInput): Promise<BlockNode> {
   return request<BlockNode>(`/blocks/${moduleId}/lessons`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export interface GenerateLessonInput {
+  /** WHAT THE LESSON SHOULD TEACH, in the tutor's own words — required, and
+   * the API's own floor is 10 characters (a three-word brief steers nothing
+   * and still costs a full planning call). The dialog enforces the same floor
+   * so he learns it from the form, not from a 422. */
+  brief: string;
+  /** His title, which wins over the model's. Omitted/null = the AI names it. */
+  title?: string | null;
+  /** Place the new lesson after this sibling. Omitted/null = at the end. */
+  after?: string | null;
+}
+
+/** AI ADD-LESSON. 202 + a job to poll — the planning call reads the whole
+ * library (20-60s) and the draft chained behind it is minutes more, so nothing
+ * about this fits in a request.
+ *
+ * THE POLLING CONTRACT (`GET /jobs/{id}`, `kind: "lesson_generate"`):
+ *  - `running` with `progress.phase === "planning"` — the planner is choosing
+ *    the title and objective from the module's siblings and the library.
+ *  - `progress.phase === "drafting"` — the lesson EXISTS (`progress.lesson_id`)
+ *    and sits `queued`; the chained `curriculum_draft` job
+ *    (`progress.draft_job_id`) is writing it.
+ *  - `succeeded` — the lesson is on the tree. Refetch the curriculum: the new
+ *    `queued` row is what re-arms the board's draft progress bar, which is the
+ *    surface that reports the DRAFT's outcome from here on. Do NOT poll or
+ *    surface the chained draft job's own `error` — it is a whole-run string
+ *    (it can carry a root-wide count) and says nothing about this lesson.
+ *  - `failed` — localize `error_kind` through `jobErrorText`, never `error` raw.
+ *
+ * 404 = not a module, 422 = `after` is not a lesson of this module, and a 409
+ * `llm_not_configured` arrives before any job exists.
+ */
+export function generateLesson(moduleId: string, input: GenerateLessonInput): Promise<JobAccepted> {
+  return request<JobAccepted>(`/blocks/${moduleId}/lessons/generate`, {
     method: "POST",
     body: JSON.stringify(input),
   });

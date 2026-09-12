@@ -28,6 +28,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useConfirm } from "@/components/ui/confirm";
+import { AddLessonDialog } from "@/components/curriculum/add-lesson-dialog";
 import { AttachArtifactDialog } from "@/components/curriculum/attach-artifact-dialog";
 import { SegmentDialog } from "@/components/curriculum/segment-dialog";
 import { ExtendWithChat } from "@/components/curriculum/extend-with-chat";
@@ -39,7 +40,6 @@ import { LessonSources } from "@/components/curriculum/lesson-sources";
 import { TierBadge } from "@/components/curriculum/tier-badge";
 import {
   ApiError,
-  addLesson,
   deepenLesson,
   deleteBlock,
   deleteCurriculum,
@@ -186,6 +186,9 @@ export function BlockCard({
   /** The segment's own «Τι άλλαξε;» — local, because the chip and the dialog
    * are both this card's and nothing above it needs to know it is open. */
   const [tutorDiffOpen, setTutorDiffOpen] = useState(false);
+  /** Module-only: «Προσθήκη μαθήματος». Local for the same reason — the ⋯ item
+   * that opens it and the dialog it opens are both this card's. */
+  const [addLessonOpen, setAddLessonOpen] = useState(false);
 
   const meta = node.meta ?? {};
   // null outside the curriculum board (no provider) — the module's
@@ -315,13 +318,6 @@ export function BlockCard({
       await reorderBlock(node.id, direction);
       onRefresh?.();
     }, t("reorderError"));
-  }
-
-  async function handleAddLesson() {
-    await run(async () => {
-      await addLesson(node.id, { title: t("newLessonTitle") });
-      onRefresh?.();
-    }, t("addLessonError"));
   }
 
   async function handleDeepen() {
@@ -561,8 +557,16 @@ export function BlockCard({
                 </DropdownMenuItem>
               </>
             )}
+            {/* IT ASKS FIRST NOW. This used to POST a blank lesson called
+                «Νέο μάθημα» on click and leave the whole thing to be written
+                by hand; it opens the dialog, which asks what the lesson should
+                teach and hands that to the planner. The blank box is still one
+                click away, inside. */}
             {isModule && (
-              <DropdownMenuItem data-testid="menu-add-lesson" onClick={handleAddLesson}>
+              <DropdownMenuItem
+                data-testid="menu-add-lesson"
+                onClick={() => setAddLessonOpen(true)}
+              >
                 <Plus />
                 {t("addLesson")}
               </DropdownMenuItem>
@@ -773,6 +777,22 @@ export function BlockCard({
     </div>
   );
 
+  /** RENDERED OUTSIDE THE COLLAPSIBLE, deliberately: a module with lessons
+   * mounts collapsed, and a dialog living inside `CollapsibleContent` would be
+   * unmounted at the exact moment its own ⋯ item is reachable. */
+  const addLessonDialog = isModule ? (
+    <AddLessonDialog
+      moduleId={node.id}
+      moduleTitle={node.title}
+      siblings={contentChildren
+        .filter((c) => c.kind === "lesson")
+        .map((c) => ({ id: c.id, title: c.title }))}
+      open={addLessonOpen}
+      onOpenChange={setAddLessonOpen}
+      onAdded={() => onRefresh?.()}
+    />
+  ) : null;
+
   const children = (
     <>
       {contentChildren.length > 0 && (
@@ -833,6 +853,7 @@ export function BlockCard({
       <section className={shell} data-testid="block-card" data-kind={node.kind}>
         {header}
         {body}
+        {addLessonDialog}
       </section>
     );
   }
@@ -848,6 +869,7 @@ export function BlockCard({
           </div>
         </CollapsibleContent>
       </Collapsible>
+      {addLessonDialog}
     </section>
   );
 }
