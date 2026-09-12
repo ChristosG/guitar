@@ -1314,7 +1314,7 @@ _ENTRIES = [
         when_it_runs_el="Σε κάθε μήνυμα που γράφεις στη συνομιλία.",
         source_of_truth=lambda: SYSTEM_PROMPT,
         build=_build_chat_system,
-        call_sites=("agent/loop.py:738", "agent/loop.py:989"),
+        call_sites=("agent/loop.py:759", "agent/loop.py:1010"),
         slices=(
             Slice(
                 id=SYSTEM_SLICE_ID,
@@ -1404,7 +1404,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: SUGGESTIONS_SYSTEM,
         build=_build_chat_suggestions,
-        call_sites=("routers/chat.py:1090",),
+        call_sites=("routers/chat.py:1080",),
         slices=(
             Slice(
                 id=SUGGESTIONS_SLICE_ID,
@@ -1442,7 +1442,7 @@ _ENTRIES = [
         when_it_runs_el="Σε κάθε μήνυμα που γράφεις στη συνομιλία.",
         source_of_truth=lambda: TOOLS,
         build=_build_tools_descriptions,
-        call_sites=("agent/loop.py:738", "agent/loop.py:989"),
+        call_sites=("agent/loop.py:759", "agent/loop.py:1010"),
     ),
     # ---- curriculum ----
     PromptEntry(
