@@ -33,6 +33,7 @@ from app.curriculum.refine import refine_block, undo_refine
 from app.curriculum.restore import restore_lesson_segments
 from app.curriculum.revise import validate_ops
 from app.curriculum.segment import segment_block
+from app.curriculum.tutor_edit import mark_tutor_edit, recompute_lesson_words
 from app.db import get_db
 from app.i18n import locale_dep
 from app.jobs.curriculum_draft import resume_queued_segments, run_curriculum_draft_job
@@ -1095,8 +1096,17 @@ def update_block(block_id: UUID, payload: BlockUpdate, db: Session = Depends(get
     if updates.get("est_minutes") == 0:
         updates.pop("est_minutes")
         block.est_minutes = None
+    previous_body = block.body
     for field, value in updates.items():
         setattr(block, field, value)
+    if "body" in updates and (updates["body"] or "") != (previous_body or ""):
+        if block.kind in ("segment", "lesson"):
+            mark_tutor_edit(block, previous_body)
+        lesson = block if block.kind == "lesson" else (
+            db.get(Block, block.parent_id) if block.kind == "segment" else None
+        )
+        if lesson is not None and lesson.kind == "lesson":
+            recompute_lesson_words(db, lesson)
     db.commit()
     return block_to_tree(block)
 

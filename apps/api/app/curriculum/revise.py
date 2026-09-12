@@ -958,19 +958,11 @@ def _slug(title: str) -> str:
 
 
 def _recompute_lesson_word_count(db, lesson: Block) -> None:
-    """After ANY segment op on `lesson`, its `word_count`/`meets_floor` meta must
-    reflect the segments as they now stand — a queued segment's body is "" until
-    the (later) generation job fills it in, so this undercounts until then, same
-    as any other queued lesson. WHOLE-DICT reassignment (Constraint #4)."""
-    segments = db.scalars(
-        select(Block).where(Block.parent_id == lesson.id, Block.kind == "segment")
-    ).all()
-    word_count = sum(len((s.body or "").split()) for s in segments)
-    meta = {**(lesson.meta or {}), "word_count": word_count}
-    floor_words = meta.get("floor_words")
-    if floor_words is not None:
-        meta["meets_floor"] = word_count >= floor_words
-    lesson.meta = meta
+    """Delegates to `tutor_edit.recompute_lesson_words` — one counter for the
+    whole engine (`depth.count_words`). Kept under its old name for the callers
+    in this module, `segment_generate.py` and `restore.py`."""
+    from app.curriculum.tutor_edit import recompute_lesson_words
+    recompute_lesson_words(db, lesson)
 
 
 def apply_revision(db, root_id: uuid.UUID, plan: dict) -> dict:
