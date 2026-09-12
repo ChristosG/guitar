@@ -145,6 +145,16 @@ from app.curriculum.draft import (
 )
 from app.curriculum.extend import MODULE_SLICE_ID, MODULE_TAIL, build_module_messages
 from app.curriculum.interview import DISTILL_SLICE_ID, DISTILL_SYSTEM
+from app.curriculum.lesson_ai import (
+    LESSON_AI_PLAN_SLICE_ID,
+    LESSON_AI_PLAN_SYSTEM,
+    LESSON_AI_PLAN_USER,
+    LESSON_AI_PLAN_USER_SLICE_ID,
+    _blueprint_lines as _lesson_ai_blueprint_lines,
+    build_plan_messages,
+    edited_json,
+    sections_json,
+)
 from app.curriculum.revise import (
     REVISE_DISTILL_SLICE_ID,
     REVISE_DISTILL_SYSTEM,
@@ -1185,6 +1195,73 @@ def _build_lesson_from_selection(locale: str, db, course_language=None) -> _Buil
     ]
 
 
+# The lesson panel's planner. The sample lesson is TWO sections, one of them
+# hand-edited, because the whole point of this prompt is the before/after block —
+# a preview built from an all-AI lesson would render the one prompt in the app
+# whose defining half is missing, and he would read it as the prompt.
+_SAMPLE_LESSON_AI_SECTIONS = [
+    {"section": "theory", "title": "Θεωρία",
+     "body": "Το σχήμα C είναι ένα από τα πέντε μετακινούμενα σχήματα του CAGED."},
+    {"section": "exercises", "title": "Ασκήσεις",
+     "body": "Παίξε το σχήμα C στη 2η, 5η και 7η θέση, ονομάζοντας τη ρίζα."},
+]
+_SAMPLE_LESSON_AI_EDITED = {
+    "theory": {"prev_body": "Το σχήμα C είναι ένα σχήμα συγχορδίας."},
+}
+_SAMPLE_LESSON_AI_NEIGHBOURS = (
+    "PREVIOUS LESSON: Οι ανοιχτές συγχορδίες — ο μαθητής παίζει C, A, G, E, D\n"
+    "NEXT LESSON: Το σχήμα A — μετακίνηση του σχήματος προς τα πάνω\n"
+    "OTHER LESSONS IN THIS MODULE: Οι ανοιχτές συγχορδίες, Το σχήμα A"
+)
+_SAMPLE_LESSON_AI_INSTRUCTION = (
+    "Ξαναέγραψα τη θεωρία με τα δικά μου λόγια — ενημέρωσε τις υπόλοιπες ενότητες "
+    "ώστε να συμφωνούν."
+)
+
+# A blueprint cut down to the sample lesson's own two sections, so the "sections
+# listed" block and the "current text of every section" block agree. The default
+# blueprint's eight lines against a two-section lesson would show him a prompt
+# that contradicts itself — the live call never does, because both halves come
+# from the same lesson.
+_SAMPLE_LESSON_AI_BLUEPRINT = default_blueprint()
+for _s in _SAMPLE_LESSON_AI_BLUEPRINT["sections"]:
+    _s["enabled"] = _s["key"] in ("theory", "exercises")
+
+
+def _build_lesson_ai_plan(locale: str, db, course_language=None) -> _Built:
+    lang = _course_language(locale, course_language)
+    built = build_plan_messages(
+        course_title=_SAMPLE_COURSE_TITLE, course_brief=_SAMPLE_COURSE_BRIEF,
+        module_title=_SAMPLE_LESSON_CTX.module_title,
+        module_objective=_SAMPLE_LESSON_CTX.module_objective,
+        neighbours=_SAMPLE_LESSON_AI_NEIGHBOURS,
+        lesson_title=_SAMPLE_LESSON_CTX.lesson_title,
+        lesson_objective=_SAMPLE_LESSON_CTX.lesson_objective,
+        blueprint_lines=_lesson_ai_blueprint_lines(_SAMPLE_LESSON_AI_BLUEPRINT, lang),
+        sections=_SAMPLE_LESSON_AI_SECTIONS, edited=_SAMPLE_LESSON_AI_EDITED,
+        retrieved=_SAMPLE_HITS[0].text, instruction=_SAMPLE_LESSON_AI_INSTRUCTION,
+        note=None, language=lang, source=db,
+    )
+    return _msgs(built), [
+        ("course_title", "Ο τίτλος του προγράμματος", _SAMPLE_COURSE_TITLE),
+        ("course_brief", "Τι ζήτησες, με τα δικά σου λόγια", _SAMPLE_COURSE_BRIEF),
+        ("neighbours", "Το προηγούμενο και το επόμενο μάθημα, για συνέχεια",
+         _SAMPLE_LESSON_AI_NEIGHBOURS),
+        # `sections_json`/`edited_json` are the LIVE helpers `build_plan_messages`
+        # itself calls — not a second `json.dumps` with the same indent, which
+        # would drift the day either changes and leave the chip pointing at text
+        # that is no longer there.
+        ("sections", "Ολόκληρο το κείμενο κάθε ενότητας του μαθήματος",
+         sections_json(_SAMPLE_LESSON_AI_SECTIONS)),
+        ("edited", "Οι ενότητες που άλλαξες με το χέρι — τι έγραφε πριν ο AI",
+         edited_json(_SAMPLE_LESSON_AI_EDITED)),
+        (*_RETRIEVED, _SAMPLE_HITS[0].text),
+        ("instruction", "Η οδηγία σου", _SAMPLE_LESSON_AI_INSTRUCTION),
+        (*_LANG_FROM_COURSE, language_directive(lang, db)),
+        (*_ANSWER_IN_FROM_COURSE, answer_in(lang, db)),
+    ]
+
+
 def _tier_fragment(tier: str):
     def build(locale: str, db, course_language=None) -> _Built:
         return [RenderedMessage(role="user", content=_tier_directive(tier, db))], []
@@ -2130,6 +2207,46 @@ _ENTRIES = [
                 id=SELECTION_USER_SLICE_ID,
                 label_el="Πώς παρουσιάζεται το κείμενο που διάλεξες",
                 default=SELECTION_USER,
+                kind="replace",
+            ),
+        ),
+    ),
+
+    PromptEntry(
+        id="lesson.ai.plan",
+        language_from_course=True,
+        flow="lesson",
+        kind="prompt",
+        source_ref="app/curriculum/lesson_ai.py:148",
+        title_el="Το πλάνο του AI για ένα μάθημα",
+        what_it_does_el=(
+            "Του δείχνει ΟΛΟΚΛΗΡΟ το μάθημα — κάθε ενότητα με το πλήρες κείμενό "
+            "της — και, για όσες ενότητες άλλαξες εσύ με το χέρι, ΚΑΙ το τι "
+            "έγραφε πριν ο AI, ώστε να βλέπει ακριβώς τι πείραξες. Μαζί πάνε ο "
+            "σκελετός του μαθήματος, το προηγούμενο και το επόμενο μάθημα, και "
+            "ό,τι σχετικό βρέθηκε στη βιβλιοθήκη σου. Τελευταία — για να "
+            "βαραίνει πιο πολύ — μπαίνει η οδηγία σου. Του ζητάει να αποφασίσει "
+            "για ΚΑΘΕ ενότητα ένα από τα δύο: ξαναγράφεται ή μένει ως έχει, με "
+            "μια πρόταση εξήγηση και μια γραμμή για το τι πρέπει να αλλάξει. "
+            "Του λέει ρητά να είναι φειδωλός — μια ενότητα μένει εκτός αν πλέον "
+            "αντιφάσκει ή δεν πατάει πάνω σε ό,τι άλλαξε — και να ΜΗΝ προτείνει "
+            "ποτέ ξαναγράψιμο ενότητας που έγραψες εσύ, εκτός αν το ζητήσεις."
+        ),
+        when_it_runs_el="Όταν πατάς «Φτιάξε πλάνο» στο πλαίσιο AI ενός μαθήματος.",
+        source_of_truth=lambda: build_plan_messages,
+        build=_build_lesson_ai_plan,
+        call_sites=("curriculum/lesson_ai.py:311",),
+        slices=(
+            Slice(
+                id=LESSON_AI_PLAN_SLICE_ID,
+                label_el="Η οδηγία προς το μοντέλο",
+                default=LESSON_AI_PLAN_SYSTEM,
+                kind="replace",
+            ),
+            Slice(
+                id=LESSON_AI_PLAN_USER_SLICE_ID,
+                label_el="Πώς παρουσιάζεται το μάθημα και η οδηγία σου",
+                default=LESSON_AI_PLAN_USER,
                 kind="replace",
             ),
         ),
