@@ -103,6 +103,11 @@ class ChatTurnOut(BaseModel):
       - "awaiting_approval": `approval_id`, `tool_name`, `tool_args`, `description`.
       - "job_pending" (resolve only): `job_id`.
 
+    `POST .../messages?async=1` does NOT return this model at all — it returns
+    a 202 `JobAccepted` and the finished `ChatTurnOut` lands on the job row's
+    `progress["turn"]` (`app/jobs/chat_turn.py`), so the poller reads the very
+    same shape a synchronous turn would have returned.
+
     One flat model (every field beyond `status` optional) rather than 3
     separate response_models: FastAPI favors a single concrete response_model
     per route, and all 3 shapes are fundamentally "a turn just happened,

@@ -26,8 +26,8 @@ import logging
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -39,6 +39,7 @@ from app.agent.transcript import messages_to_wire, persist_new_messages, window_
 from app.curriculum.revise import compact_tree_text, compute_impact, validate_ops
 from app.db import get_db
 from app.i18n import normalize_locale
+from app.jobs.chat_turn import run_chat_turn_job
 from app.jobs.curriculum_revise import run_curriculum_revise_job
 from app.jobs.runner import run_curriculum_job, run_lesson_job
 from app.llm.errors import LLMError
@@ -62,6 +63,7 @@ from app.schemas.chat import (
     PendingApprovalOut,
     SuggestionsOut,
 )
+from app.schemas.jobs import JobAccepted
 
 log = logging.getLogger(__name__)
 
@@ -674,8 +676,43 @@ def get_pending_approval(session_id: UUID, db: Session = Depends(get_db)) -> Pen
     return PendingApprovalOut.model_validate(approval, from_attributes=True)
 
 
-@router.post("/chat/{session_id}/messages", response_model=ChatTurnOut)
-def post_message(session_id: UUID, payload: ChatMessageIn, db: Session = Depends(get_db)) -> ChatTurnOut:
+def has_running_turn(db: Session, session_id: UUID) -> bool:
+    """A `chat_turn` job for this session that has not finished. Same reason
+    `_open_pending_approval` guards a new turn: two turns interleaving on one
+    transcript is an out-of-protocol shape that gets PERSISTED."""
+    return db.scalar(
+        select(GenerationJob.id).where(
+            GenerationJob.kind == "chat_turn",
+            GenerationJob.status.in_(("pending", "running")),
+            GenerationJob.params["session_id"].as_string() == str(session_id),
+        ).limit(1)
+    ) is not None
+
+
+def run_turn_core(db: Session, session: ChatSession, content: str, *, precomputed=None) -> ChatTurnOut:
+    """Everything a turn does AFTER its user row is persisted: window, inject,
+    run the loop, persist the tail, open an approval if the loop suspended.
+    Shared verbatim by the synchronous `post_message` and the `chat_turn` job
+    (`app/jobs/chat_turn.py`) — the job is the same turn off the request path,
+    so this is the one place a turn is defined. Raises `LLMError` through."""
+    wire = window_wire(messages_to_wire(_ordered_messages(db, session.id)))
+    wire = _inject_curriculum_context(db, session, wire)
+    wire = _inject_interview_context(db, session, wire)
+    result = run_agent_turn(
+        db, wire, locale=session.locale, raw_user_text=content,
+        precomputed_first=precomputed,
+    )
+    return _respond_to_turn(db, session.id, wire, result)
+
+
+@router.post("/chat/{session_id}/messages", response_model=ChatTurnOut | JobAccepted)
+def post_message(
+    session_id: UUID,
+    payload: ChatMessageIn,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    async_: bool = Query(False, alias="async"),
+):
     session = _get_session_or_404(db, session_id)
 
     # Refuse a new turn while an approval is still open (409, same vocabulary
@@ -703,13 +740,46 @@ def post_message(session_id: UUID, payload: ChatMessageIn, db: Session = Depends
             detail="an approval is pending — resolve it before sending a new message",
         )
 
+    # And refuse while the PREVIOUS turn of this session is still being
+    # answered off the request path (a `chat_turn` job). Same corruption the
+    # approval guard above prevents, by the other door: the running job will
+    # window the transcript and persist its own tail, so a second turn started
+    # against the same history would interleave two answers on one transcript.
+    # Checked before the user row is persisted, so a refused message never
+    # lands in history — and checked for the SYNC path too, because "which
+    # door the second message came through" doesn't change the corruption.
+    if has_running_turn(db, session_id):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "turn_running",
+                    "message": "the previous message is still being answered"},
+        )
+
     # Flushed by `persist_new_messages`'s own commit, on the same Session.
     _ensure_title(session, payload.content)
     persist_new_messages(db, session_id, [{"role": "user", "content": payload.content}])
 
-    wire = window_wire(messages_to_wire(_ordered_messages(db, session_id)))
-    wire = _inject_curriculum_context(db, session, wire)
-    wire = _inject_interview_context(db, session, wire)
+    if async_:
+        # THE DRAWER'S DOOR. A revise turn runs the planner inline and can take
+        # minutes under claude -p; every proxy in front of this process cuts a
+        # request long before that. Off the request path, nothing can cut it.
+        # The stashed streamed first response is discarded rather than handed
+        # to the job: the handoff is a same-request, immediate-resend protocol
+        # (CORE_DECISIONS.md §3), and this turn is neither.
+        FIRST_TURN_HANDOFF.discard(session_id)
+        job = GenerationJob(
+            kind="chat_turn", status="pending",
+            params={"session_id": str(session_id), "content": payload.content},
+        )
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+        background_tasks.add_task(run_chat_turn_job, job.id)
+        return JSONResponse(
+            status_code=202,
+            content=JobAccepted(job_id=job.id, status=job.status).model_dump(mode="json"),
+        )
+
     # CORE_DECISIONS.md §3 (the tool-turn double-billing fix): if this very
     # turn already ran its first model call on the STREAMING endpoint and fell
     # back here, claim that response and let the loop consume it instead of
@@ -723,10 +793,7 @@ def post_message(session_id: UUID, payload: ChatMessageIn, db: Session = Depends
     # replaying against a transcript the failed attempt half-advanced.
     precomputed = FIRST_TURN_HANDOFF.claim(session_id, payload.content)
     try:
-        result = run_agent_turn(
-            db, wire, locale=session.locale, raw_user_text=payload.content,
-            precomputed_first=precomputed,
-        )
+        return run_turn_core(db, session, payload.content, precomputed=precomputed)
     except LLMError as e:
         # A provider failure mid-turn used to escape as a raw 500 — "Internal
         # Server Error" in a non-technical user's browser for a 429 he only
@@ -744,8 +811,6 @@ def post_message(session_id: UUID, payload: ChatMessageIn, db: Session = Depends
             status_code=status,
             detail=str(e) or f"the model provider failed ({e.kind}) — try again",
         ) from e
-
-    return _respond_to_turn(db, session_id, wire, result)
 
 
 @router.post("/chat/{session_id}/messages/stream")
