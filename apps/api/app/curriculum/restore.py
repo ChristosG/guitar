@@ -80,6 +80,7 @@ def restore_lesson_segments(db: Session, lesson: Block) -> bool:
         db.delete(seg)
     db.flush()
 
+    # A restored body is an AI-era body: no tutor_edited marker rides along.
     # 3. Recreate the stashed set, in order.
     for i, spec in enumerate(stored):
         seg_meta: dict = {"segment_status": "ready"}

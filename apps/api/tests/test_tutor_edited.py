@@ -85,3 +85,47 @@ def test_clear_and_sections_helpers(lesson_with_two_segments):
     tutor_edit.clear_tutor_edit(theory)
     db.commit()
     assert tutor_edit.tutor_edited_sections(db, lesson) == {}
+
+
+def test_refine_clears_the_tutor_marker(lesson_with_two_segments, monkeypatch):
+    from app.curriculum import refine as refine_mod
+    db, lesson, theory, warm = lesson_with_two_segments
+    tutor_edit.mark_tutor_edit(theory, previous_body=theory.body); db.commit()
+
+    class P:
+        def guided_json(self, messages, schema, role="draft"):
+            return {"title": "Θεωρία", "body": "Ξαναγραμμένο από το AI."}
+    monkeypatch.setattr(refine_mod, "get_provider", lambda: P())
+    # `search` is imported LOCALLY inside `refine_block` (`from app.brain.retrieve
+    # import search`), so this patch never actually intercepts the call — it is
+    # here (with `raising=False`, matching `test_curriculum_editing.py`'s same
+    # patch of a name `refine_mod` doesn't hold) only so a future refactor that
+    # promotes the import to module scope doesn't silently start hitting the real
+    # embedder. The real `search()` runs against this test's empty corpus, returns
+    # no hits (or raises into `refine_block`'s own try/except), and either way
+    # `context` ends up `None` — irrelevant to what this test checks.
+    monkeypatch.setattr(refine_mod, "search", lambda *a, **k: [], raising=False)
+    refine_mod.refine_block(db, theory, "κάν' το πιο απλό"); db.commit()
+    db.expire_all()
+    meta = db.get(Block, theory.id).meta
+    assert "tutor_edited" not in meta and meta["prev_body"]
+
+
+def test_generate_segment_clears_the_tutor_marker(lesson_with_two_segments, monkeypatch):
+    from app.curriculum import segment_generate as sg
+    db, lesson, theory, warm = lesson_with_two_segments
+    tutor_edit.mark_tutor_edit(warm, previous_body=warm.body)
+    warm.meta = {**warm.meta, "segment_status": "queued", "segment_instruction": "πιο ζωντανό"}
+    db.commit()
+
+    class P:
+        def guided_json(self, messages, schema, role="draft"):
+            return {"title": "Ζέσταμα", "body": "Νέο ζέσταμα."}
+    monkeypatch.setattr(sg, "get_provider", lambda: P())
+    monkeypatch.setattr(sg, "ground_topic", lambda *a, **k: [])
+    # Real signature is `generate_segment(db, segment: Block) -> None`, mutates
+    # and does NOT commit (same contract as `refine_block`) — the caller commits.
+    sg.generate_segment(db, warm)
+    db.commit()
+    db.expire_all()
+    assert "tutor_edited" not in db.get(Block, warm.id).meta

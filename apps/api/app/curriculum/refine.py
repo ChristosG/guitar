@@ -172,7 +172,7 @@ def refine_block(db, block, instruction: str) -> dict:
     block.body = strip_inline_citations(result.get("body")) or block.body
     # WHOLE-DICT REASSIGNMENT — Block.meta is plain sa.JSON with no MutableDict.
     block.meta = {
-        **meta,
+        **{k: v for k, v in meta.items() if k != "tutor_edited"},
         "prev_body": prev_body,
         "prev_title": prev_title,
         "refined": True,

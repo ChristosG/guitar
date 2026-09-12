@@ -260,7 +260,7 @@ def generate_segment(db, segment: Block) -> None:
     # before: what actually grounded THIS generation, never a stale citation
     # left over from an earlier edit.
     segment.meta = {
-        **{k: v for k, v in meta.items() if k != "segment_instruction"},
+        **{k: v for k, v in meta.items() if k not in ("segment_instruction", "tutor_edited")},
         "segment_status": "done",
         "citations": citations,
     }
