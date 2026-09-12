@@ -191,7 +191,16 @@ export function LessonAiPanel({ tree, onApplied }: LessonAiPanelProps) {
         setPhase(plan ? "card" : "idle");
         return;
       }
-      setPlan((job.progress as { plan?: LessonPlan } | null)?.plan ?? null);
+      // A job that succeeded WITHOUT a plan on `progress` is a bug on the
+      // other side, and the one thing it must not do is leave him staring at a
+      // panel that went quiet. Treated as a failure, in words.
+      const planned = (job.progress as { plan?: LessonPlan } | null)?.plan ?? null;
+      if (!planned) {
+        setError(t("error"));
+        setPhase(plan ? "card" : "idle");
+        return;
+      }
+      setPlan(planned);
       setPhase("card");
     } catch (err) {
       if (lessonIdRef.current !== target) return;
