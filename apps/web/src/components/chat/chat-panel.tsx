@@ -20,6 +20,7 @@ import {
   getPendingApproval,
   resolveApproval,
   sendChatMessage,
+  sendChatMessageAsync,
   streamChatMessage,
   type ChatCitation,
   type ChatMessageOut,
@@ -40,7 +41,11 @@ import { jobErrorText } from "@/lib/job-errors";
  * rather than introducing a new shared module for one 10-line loop used in
  * exactly two places. */
 const POLL_INTERVAL_MS = 2000;
-const MAX_POLLS = 150;
+/** ~10 minutes. Was 150 (~5) when the only thing polled here was a
+ * `generate_curriculum` job; the drawer's own turn is a job now too, and a
+ * `claude -p` planner turn was measured at 6-8 minutes — a cap of 5 would
+ * have given up on answers that were about to land. */
+const MAX_POLLS = 300;
 
 interface PendingApprovalState {
   approvalId: string;
@@ -434,6 +439,43 @@ export function ChatPanel({ sessionId, rootId, blockTitles, onJobDone, seedDraft
     let streamedAnything = false;
 
     try {
+      if (rootId) {
+        // THE DRAWER NEVER STREAMS. Its turns are tool-heavy by definition
+        // (`propose_curriculum_revision` runs the planner over the whole
+        // library) so the SSE endpoint declines every one of them anyway,
+        // and the REST resend that follows is exactly the multi-minute
+        // request the Cloudflare edge cuts at ~100s. Send it as a
+        // `chat_turn` job instead and poll it home: nothing in front of a
+        // job can cut it. The empty placeholder bubble goes — the drawer
+        // renders its own "planning the revision…" status for this window.
+        setMessages((prev) => prev.filter((m) => m.id !== streamId));
+        setJobPending(true);
+        try {
+          const accepted = await sendChatMessageAsync(sessionId, content);
+          const job = await waitForJob(accepted.job_id);
+          if (job.status === "failed") {
+            setComposerError(jobErrorText(job, tJobErrors));
+          } else if (job.status !== "succeeded") {
+            setComposerError(t("job.stillGenerating"));
+          }
+          // Hydrate in EVERY case, terminal or not: the turn is persisted
+          // server-side, so history (and any approval the turn opened) is
+          // the truth here — and a job that failed or outran the cap may
+          // still have written part of it.
+          await hydrate();
+          const turn = job.progress?.turn as ChatTurnOut | undefined;
+          // `awaiting_approval` needs nothing: `hydrate` above already read
+          // the open approval off `/pending` and moved the model's narration
+          // into the card. The other two statuses have no server-side trace
+          // to hydrate FROM, so they are driven from the turn itself.
+          if (turn?.status === "job_pending" && turn.job_id) void pollJob(turn.job_id);
+          if (turn?.status === "answer") fetchSuggestions();
+        } finally {
+          setJobPending(false);
+        }
+        return;
+      }
+
       const outcome = await streamChatMessage(sessionId, content, (text) => {
         streamedAnything = true;
         setMessages((prev) =>
@@ -641,7 +683,10 @@ export function ChatPanel({ sessionId, rootId, blockTitles, onJobDone, seedDraft
         </div>
       )}
 
-      {jobPending && (
+      {/* Suppressed while the drawer's own "planning the revision…" row is
+          up (a drawer turn is now a job, so both conditions hold at once) —
+          one honest status row, not two spinners saying different things. */}
+      {jobPending && !(sending && rootId) && (
         <div
           role="status"
           data-testid="chat-job-pending"

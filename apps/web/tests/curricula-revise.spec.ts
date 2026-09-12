@@ -207,6 +207,57 @@ function sseBody(events: Array<{ event: string; data: unknown }>): string {
   return events.map((e) => `event: ${e.event}\ndata: ${JSON.stringify(e.data)}\n\n`).join("");
 }
 
+/** Task 0.6 — a drawer turn is a JOB now: the composer POSTs `?async=1`, gets
+ * a 202, and polls `GET /jobs/{id}` until the finished `ChatTurnOut` comes
+ * back on `progress.turn`. This store is what keeps that indirection
+ * invisible to the tests below, which still script a turn with
+ * `setNextMessage` and assert on what reaches the screen: `accept()` mints a
+ * job id for the scripted turn, and `body()` answers the poll with it.
+ *
+ * Shared with the `/jobs` mocks further down rather than owned by
+ * `mockChatApi` alone, because a later `page.route("/jobs/**")` takes
+ * priority over an earlier one — whichever mock ends up owning that route has
+ * to answer the turn job too, or the drawer polls a job nobody knows about.
+ * Terminal on the FIRST poll: the pending-vs-terminal cadence is the revise
+ * job's subject, not this one's (`revise-async.spec.ts` covers the polling
+ * itself). */
+function createTurnJobStore() {
+  const turns = new Map<string, Record<string, unknown>>();
+  return {
+    accept(turn: Record<string, unknown>): string {
+      const id = randomUUID();
+      turns.set(id, turn);
+      return id;
+    },
+    /** The `GET /jobs/{id}` body for a turn job, or `null` if `id` is some
+     * other job entirely (a `curriculum_revise` row, say) — the caller then
+     * handles it as it always did. */
+    body(id: string) {
+      const turn = turns.get(id);
+      if (!turn) return null;
+      const now = new Date().toISOString();
+      return {
+        id, kind: "chat_turn", status: "succeeded", result_root_id: null,
+        error: null, error_kind: null, progress: { phase: "done", turn },
+        created_at: now, updated_at: now,
+      };
+    },
+  };
+}
+
+type TurnJobStore = ReturnType<typeof createTurnJobStore>;
+
+/** `GET /jobs/{id}` for a `chat_turn` row, when `id` is one. Returns true if
+ * it answered, so every `/jobs` mock can open with one line. */
+async function serveTurnJob(route: Route, id: string | undefined, turnJobs?: TurnJobStore) {
+  const body = id ? turnJobs?.body(id) : null;
+  if (!body) return false;
+  await route.fulfill({
+    status: 200, contentType: "application/json", headers: CORS_HEADERS, body: JSON.stringify(body),
+  });
+  return true;
+}
+
 /** Trimmed-down mock of the Chat API — same shape as `chat.spec.ts`'s own
  * `mockChatApi`, cut to just what this drawer exercises: session creation
  * (capturing the `root_id` the drawer must pass), the stream-falls-back-to-
@@ -239,6 +290,14 @@ async function mockChatApi(
   const lastBody: { create?: unknown; resolve?: unknown } = {};
   const unexpected: string[] = [];
   const history = new Map<string, Array<{ id: string; role: string; content: string | null; created_at: string }>>();
+  // The open approval a turn left behind, per session — what `GET
+  // /chat/{id}/pending` answers with. It matters now that a drawer turn runs
+  // as a job: the panel no longer applies the turn it got back, it re-hydrates
+  // from the server, so an `awaiting_approval` turn has to be VISIBLE there
+  // the way the real API makes it (`_respond_to_turn` opens the row before the
+  // turn returns).
+  const pendingApprovals = new Map<string, Record<string, unknown>>();
+  const turnJobs = createTurnJobStore();
 
   let nextMessage: Record<string, unknown> = { status: "answer", content: "OK." };
   let nextMessageDelayMs = 0;
@@ -312,10 +371,33 @@ async function mockChatApi(
     const messagesMatch = pathname.match(/^\/chat\/([^/]+)\/messages$/);
     if (messagesMatch && method === "POST") {
       calls.message++;
+      const sessionId = messagesMatch[1];
       const body = req.postDataJSON() as { content: string };
-      record(messagesMatch[1], "user", body.content);
+      record(sessionId, "user", body.content);
       if (nextMessageDelayMs > 0) await new Promise((r) => setTimeout(r, nextMessageDelayMs));
-      if (typeof nextMessage.content === "string") record(messagesMatch[1], "assistant", nextMessage.content);
+      // The server persists the model's narration as the trailing assistant
+      // row whichever shape the turn took — a plain answer's text, or the
+      // sentence that introduces a proposed mutation (which is where the
+      // approval card's description comes from on a hydrate).
+      const narration =
+        typeof nextMessage.content === "string" ? nextMessage.content
+        : typeof nextMessage.description === "string" ? nextMessage.description
+        : null;
+      if (narration !== null) record(sessionId, "assistant", narration);
+      if (nextMessage.status === "awaiting_approval") {
+        pendingApprovals.set(sessionId, {
+          id: nextMessage.approval_id,
+          tool_name: nextMessage.tool_name,
+          tool_args: nextMessage.tool_args,
+          created_at: new Date().toISOString(),
+        });
+      }
+      // The drawer's door (Task 0.6): `?async=1` gets a 202 and the scripted
+      // turn rides home on the job. Every turn sent from this drawer takes it.
+      if (new URL(req.url()).searchParams.get("async") === "1") {
+        await json({ job_id: turnJobs.accept(nextMessage), status: "pending" }, 202);
+        return;
+      }
       await json(nextMessage);
       return;
     }
@@ -324,6 +406,7 @@ async function mockChatApi(
     if (resolveMatch && method === "POST") {
       calls.resolve++;
       lastBody.resolve = req.postDataJSON();
+      pendingApprovals.delete(resolveMatch[1]);
       onResolve?.(resolveMatch[2]);
       await json(nextResolve);
       return;
@@ -332,7 +415,7 @@ async function mockChatApi(
     const pendingMatch = pathname.match(/^\/chat\/([^/]+)\/pending$/);
     if (pendingMatch && method === "GET") {
       calls.pending++;
-      await json(null);
+      await json(pendingApprovals.get(pendingMatch[1]) ?? null);
       return;
     }
 
@@ -352,11 +435,30 @@ async function mockChatApi(
 
   await page.route(`${API_ORIGIN}/chat`, handler);
   await page.route(`${API_ORIGIN}/chat/**`, handler);
+  // Every turn is a job, so every test in this file polls `/jobs` — including
+  // the ones with no `mockJobsApi` of their own. A test that DOES register one
+  // registers it later and therefore wins this route; that mock delegates back
+  // through `serveTurnJob`.
+  await page.route(`${API_ORIGIN}/jobs/**`, async (route) => {
+    const req = route.request();
+    if (req.method() === "OPTIONS") {
+      await route.fulfill({ status: 204, headers: CORS_HEADERS });
+      return;
+    }
+    const { pathname } = new URL(req.url());
+    if (await serveTurnJob(route, pathname.match(/^\/jobs\/([^/]+)$/)?.[1], turnJobs)) return;
+    unexpected.push(`${req.method()} ${pathname}`);
+    await route.fulfill({
+      status: 500, contentType: "application/json", headers: CORS_HEADERS,
+      body: JSON.stringify({ detail: "unmocked request in test" }),
+    });
+  });
 
   return {
     calls,
     lastBody,
     unexpected,
+    turnJobs,
     setNextMessage(value: Record<string, unknown>, delayMs = 0) {
       nextMessage = value;
       nextMessageDelayMs = delayMs;
@@ -374,13 +476,16 @@ async function mockChatApi(
 
 /** `GET /jobs/{id}` only — same "pending once, then terminal" shape
  * `chat.spec.ts`'s own `mockJobsApi` uses, trimmed to this file's one job. */
-async function mockJobsApi(page: Page, { pendingPolls = 1 } = {}) {
+async function mockJobsApi(page: Page, { pendingPolls = 1, turnJobs }: { pendingPolls?: number; turnJobs?: TurnJobStore } = {}) {
   let polls = 0;
   const calls = { job: 0 };
 
   await page.route(`${API_ORIGIN}/jobs/**`, async (route) => {
     const { pathname } = new URL(route.request().url());
     const match = pathname.match(/^\/jobs\/([^/]+)$/);
+    // A `chat_turn` row first — it is not this mock's job and must not spend
+    // its pending/terminal cadence or show up in `calls.job`.
+    if (await serveTurnJob(route, match?.[1], turnJobs)) return;
     if (!match) {
       await route.fulfill({
         status: 500, contentType: "application/json", headers: CORS_HEADERS,
@@ -416,13 +521,15 @@ async function mockJobsApi(page: Page, { pendingPolls = 1 } = {}) {
  * `failed` — the exact silent-"queued" shape the fix surfaces. */
 async function mockJobsRevisePlusFailedDraft(
   page: Page,
-  { reviseJobId, draftJobId, draftError }: { reviseJobId: string; draftJobId: string; draftError: string },
+  { reviseJobId, draftJobId, draftError, turnJobs }:
+    { reviseJobId: string; draftJobId: string; draftError: string; turnJobs?: TurnJobStore },
 ) {
   const calls = { revise: 0, draft: 0 };
   await page.route(`${API_ORIGIN}/jobs/**`, async (route) => {
     const { pathname } = new URL(route.request().url());
     const match = pathname.match(/^\/jobs\/([^/]+)$/);
     const id = match?.[1];
+    if (await serveTurnJob(route, id, turnJobs)) return;
     const base = { created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
     const json = (body: unknown) =>
       route.fulfill({ status: 200, contentType: "application/json", headers: CORS_HEADERS, body: JSON.stringify(body) });
@@ -467,13 +574,15 @@ async function mockJobsRevisePlusFailedDraft(
  * like). */
 async function mockJobsReviseePlusSucceededDraft(
   page: Page,
-  { reviseJobId, draftJobId }: { reviseJobId: string; draftJobId: string },
+  { reviseJobId, draftJobId, turnJobs }:
+    { reviseJobId: string; draftJobId: string; turnJobs?: TurnJobStore },
 ) {
   const calls = { revise: 0, draft: 0 };
   await page.route(`${API_ORIGIN}/jobs/**`, async (route) => {
     const { pathname } = new URL(route.request().url());
     const match = pathname.match(/^\/jobs\/([^/]+)$/);
     const id = match?.[1];
+    if (await serveTurnJob(route, id, turnJobs)) return;
     const base = { created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
     const json = (body: unknown) =>
       route.fulfill({ status: 200, contentType: "application/json", headers: CORS_HEADERS, body: JSON.stringify(body) });
@@ -520,7 +629,7 @@ test.describe("curriculum revise drawer (mocked API)", () => {
     const chatSessionStore = createChatSessionStore();
     const curricula = await mockCurriculaApi(page, fixture, chatSessionStore);
     const chat = await mockChatApi(page, () => fixture.markApplied(), chatSessionStore);
-    const jobs = await mockJobsApi(page, { pendingPolls: 1 });
+    const jobs = await mockJobsApi(page, { pendingPolls: 1, turnJobs: chat.turnJobs });
 
     await page.goto(`/en/curricula/${rootId}`);
     await expect(page.getByTestId("tree-board")).toBeVisible();
@@ -699,7 +808,7 @@ test.describe("curriculum revise drawer (mocked API)", () => {
       fixture.markApplied();
       fixture.markDraftFailed(draftError);
     }, chatSessionStore);
-    await mockJobsRevisePlusFailedDraft(page, { reviseJobId, draftJobId, draftError });
+    await mockJobsRevisePlusFailedDraft(page, { reviseJobId, draftJobId, draftError, turnJobs: chat.turnJobs });
 
     await page.goto(`/en/curricula/${rootId}`);
     await page.getByTestId("revise-open").click();
@@ -1264,7 +1373,7 @@ test.describe("curriculum revise drawer — accurate applied status (mocked API)
     const chatSessionStore = createChatSessionStore();
     await mockCurriculaApi(page, fixture, chatSessionStore);
     const chat = await mockChatApi(page, () => fixture.markApplied(), chatSessionStore);
-    await mockJobsReviseePlusSucceededDraft(page, { reviseJobId, draftJobId });
+    await mockJobsReviseePlusSucceededDraft(page, { reviseJobId, draftJobId, turnJobs: chat.turnJobs });
 
     await page.goto(`/en/curricula/${rootId}`);
     await page.getByTestId("revise-open").click();

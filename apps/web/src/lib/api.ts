@@ -788,8 +788,17 @@ export interface JobOut {
    * or add-module's `{phase: "drafting", module_id: "..."}` (the id of the module
    * it just planted, so the board can highlight it). `draft_job_id` is the revise
    * chain's chained `curriculum_draft` row: the revise job succeeds the moment the
-   * tree is right, and the chat polls this to surface a drafting failure. */
-  progress: { phase?: string; module_id?: string; draft_job_id?: string } | null;
+   * tree is right, and the chat polls this to surface a drafting failure.
+   * `turn` is the `chat_turn` job's own payload (`{phase: "done", turn:
+   * ChatTurnOut}`) — how a turn run off the request path gets its result back
+   * to the browser; typed loosely here because `ChatTurnOut` is declared far
+   * below, and narrowed at the one place that reads it (`chat-panel.tsx`). */
+  progress: {
+    phase?: string;
+    module_id?: string;
+    draft_job_id?: string;
+    turn?: unknown;
+  } | null;
   created_at: string;
   updated_at: string;
 }
@@ -1699,6 +1708,24 @@ export function deleteChatSession(sessionId: string): Promise<void> {
  * for exactly that window. */
 export function sendChatMessage(sessionId: string, content: string): Promise<ChatTurnOut> {
   return request<ChatTurnOut>(`/chat/${sessionId}/messages`, {
+    method: "POST",
+    body: JSON.stringify({ content }),
+  });
+}
+
+/** The revise drawer's door: the SAME turn as `sendChatMessage`, run as a
+ * `chat_turn` job so nothing between the browser and the process can cut a
+ * multi-minute planner call (measured live at 6-8 minutes under `claude -p`;
+ * the Cloudflare edge gives up at ~100s). Poll `getJob(job_id)`; on
+ * `succeeded` the finished `ChatTurnOut` rides home on `progress.turn`, and
+ * the caller re-hydrates history + pending approval from the server rather
+ * than trusting its own optimistic state.
+ *
+ * Refused with a 409 `turn_running` while a previous turn of this session is
+ * still being answered — the server will not let two turns interleave on one
+ * transcript, through this door or any other. */
+export function sendChatMessageAsync(sessionId: string, content: string): Promise<JobAccepted> {
+  return request<JobAccepted>(`/chat/${sessionId}/messages?async=1`, {
     method: "POST",
     body: JSON.stringify({ content }),
   });
