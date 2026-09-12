@@ -541,14 +541,33 @@ def _wire_assistant_message(content: str | None, tool_calls: list[ToolCall]) -> 
     return message
 
 
+# One read tool's result, as the model sees it and as the transcript stores it.
+# 60K chars ≈ 15-20K tokens of Greek — a whole lesson with room to spare, and
+# never a whole course (that is what `get_curriculum`'s body-free shape and
+# `get_lesson` are for). The marker names the cut in Greek, because the model is
+# writing Greek and must not mistake a cut for "that is all there was".
+TOOL_RESULT_MAX_CHARS = 60_000
+TOOL_RESULT_TRUNCATION_MARKER = "\n…[το αποτέλεσμα περικόπηκε — ζήτα ένα μικρότερο κομμάτι]"
+
+
 def _stringify(result) -> str:
     """Every tool `fn` returns a plain JSON-serializable Python object (see
     `tools.py`'s docstring) — turning that into the tool message's `content`
     string is this loop's job, not each tool's. `default=str` covers the
     handful of non-JSON-native types the registry's results carry (`UUID`,
     `datetime`) without every tool needing to stringify its own fields.
+
+    `ensure_ascii=False` IS LOAD-BEARING. The default escapes every Greek letter
+    to six ASCII characters (`Η` -> `\\u0397`): 5x the characters and ~10x the
+    tokens, which is how one `get_curriculum` call blew a 1M-token window on
+    2026-09-11. Capped at `TOOL_RESULT_MAX_CHARS` for the same reason — the
+    persisted transcript stores exactly this string, so a cap here bounds every
+    later turn too.
     """
-    return json.dumps(result, default=str)
+    text = json.dumps(result, default=str, ensure_ascii=False)
+    if len(text) > TOOL_RESULT_MAX_CHARS:
+        return text[:TOOL_RESULT_MAX_CHARS] + TOOL_RESULT_TRUNCATION_MARKER
+    return text
 
 
 def _dispatch_read_call(db, call: ToolCall, messages: list[dict]) -> None:
