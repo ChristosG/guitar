@@ -96,16 +96,19 @@ def test_refine_clears_the_tutor_marker(lesson_with_two_segments, monkeypatch):
         def guided_json(self, messages, schema, role="draft"):
             return {"title": "Θεωρία", "body": "Ξαναγραμμένο από το AI."}
     monkeypatch.setattr(refine_mod, "get_provider", lambda: P())
-    # `search` is imported LOCALLY inside `refine_block` (`from app.brain.retrieve
-    # import search`), so this patch never actually intercepts the call — it is
-    # here (with `raising=False`, matching `test_curriculum_editing.py`'s same
-    # patch of a name `refine_mod` doesn't hold) only so a future refactor that
-    # promotes the import to module scope doesn't silently start hitting the real
-    # embedder. The real `search()` runs against this test's empty corpus, returns
-    # no hits (or raises into `refine_block`'s own try/except), and either way
-    # `context` ends up `None` — irrelevant to what this test checks.
-    monkeypatch.setattr(refine_mod, "search", lambda *a, **k: [], raising=False)
+    # `search` is a module-level import in `refine.py`, so this patch actually
+    # intercepts the call (unlike the pre-existing, out-of-scope no-op pattern in
+    # `test_curriculum_editing.py`, where `refine_mod` never held a `search`
+    # attribute in the first place). The counter proves the stub — not the real
+    # embedder/translator/live API — is what `refine_block` actually called.
+    calls = 0
+    def fake_search(*a, **k):
+        nonlocal calls
+        calls += 1
+        return []
+    monkeypatch.setattr(refine_mod, "search", fake_search)
     refine_mod.refine_block(db, theory, "κάν' το πιο απλό"); db.commit()
+    assert calls == 1
     db.expire_all()
     meta = db.get(Block, theory.id).meta
     assert "tutor_edited" not in meta and meta["prev_body"]

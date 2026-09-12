@@ -23,6 +23,7 @@ uncited general-knowledge one that still has the citation chip attached.
 """
 from __future__ import annotations
 
+from app.brain.retrieve import search
 from app.curriculum.sanitize import strip_inline_citations
 from app.i18n import answer_in, curriculum_style, language_directive
 from app.prompts.overrides import resolve
@@ -131,8 +132,6 @@ def refine_block(db, block, instruction: str) -> dict:
     the original back is asking for version control, and version control over
     lesson prose is a different feature with a different UI.
     """
-    from app.brain.retrieve import search
-
     meta = block.meta or {}
     citations = meta.get("citations") or []
 

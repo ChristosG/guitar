@@ -1617,7 +1617,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/refine.py:82",
+        source_ref="app/curriculum/refine.py:83",
         title_el="Η διόρθωση ενός κομματιού",
         what_it_does_el=(
             "Του δίνει το κείμενο που θέλεις να αλλάξει, από πού γράφτηκε, και "
@@ -1628,7 +1628,7 @@ _ENTRIES = [
         when_it_runs_el="Όταν ζητάς αλλαγή σε ένα κομμάτι μαθήματος.",
         source_of_truth=lambda: build_refine_messages,
         build=_build_curriculum_refine,
-        call_sites=("curriculum/refine.py:153",),
+        call_sites=("curriculum/refine.py:152",),
         slices=(
             Slice(
                 id=REFINE_SYSTEM_SLICE_ID,
