@@ -1,5 +1,7 @@
 import uuid
 import pytest
+from app.curriculum.corpus import LibraryContext
+from app.curriculum.draft import LessonContext, build_lesson_messages
 from app.lessons.draft import draft_lesson_from_selection
 from app.models.block import Block
 from app.models.knowledge import KnowledgeSource
@@ -136,3 +138,70 @@ def test_missing_page_range_and_page_no_is_rejected(db, monkeypatch):
     src = _source(db)
     with pytest.raises(ValueError):
         draft_lesson_from_selection(db, source_id=src.id, text="x")
+
+
+# ---------------------------------------------------------------------------
+# Task 3.2 — THE CURRICULUM DRAFTER'S NEIGHBOURS AND THE TUTOR'S BRIEF
+#
+# (`app.curriculum.draft.build_lesson_messages` — the prompt every lesson of a
+# CURRICULUM is written from, a different drafter from the selection-based one
+# above, and the other half of "the lesson prompt" this file is named for.)
+#
+# Until now a lesson was told only «lesson 3 of 4 in module 2 of 5» and was
+# ordered not to re-teach what came before — without ever being shown WHAT came
+# before. It cannot obey an instruction it has no data for, so lessons re-taught
+# each other. The neighbours block is the data; the tutor brief block is what he
+# asked for THIS lesson, honoured whole.
+# ---------------------------------------------------------------------------
+
+_NEIGHBOURS = {"prev": "Τα ξύλα — ξύλα", "next": "—", "siblings": "Μαγνήτες"}
+
+
+def _curriculum_ctx() -> LessonContext:
+    return LessonContext(
+        lesson_title="Το σχήμα C", lesson_objective="Βρες τη ρίζα.",
+        module_title="CAGED", module_objective="Βλέπε το μπράτσο σε σχήματα.",
+        course_title="Τόνος", tier="library", position="lesson 2 of 3 in module 1 of 2",
+        minutes=50, teaching_minutes=50, target_words=2750, floor_words=2200,
+    )
+
+
+def _lesson_prompt(**kwargs) -> str:
+    kw = {"student_brief": None, "course_brief": None, **kwargs}
+    return build_lesson_messages(
+        ctx=_curriculum_ctx(), library=LibraryContext(text="", token_count=0, fits=True),
+        language="el", **kw,
+    )[-1]["content"]
+
+
+def test_the_draft_is_shown_the_lessons_on_either_side_of_it():
+    text = _lesson_prompt(neighbours=_NEIGHBOURS)
+    assert "ΠΡΟΗΓΟΥΜΕΝΟ ΜΑΘΗΜΑ: Τα ξύλα — ξύλα" in text
+    assert "ΕΠΟΜΕΝΟ ΜΑΘΗΜΑ: —" in text                  # an edge lesson says so honestly
+    assert "ΣΤΗΝ ΙΔΙΑ ΕΝΟΤΗΤΑ: Μαγνήτες" in text
+    # Immediately after the POSITION line it explains: "do not re-teach" needs to
+    # be read next to the thing that was taught.
+    assert text.index("POSITION:") < text.index("ΠΡΟΗΓΟΥΜΕΝΟ ΜΑΘΗΜΑ:")
+    assert text.index("ΠΡΟΗΓΟΥΜΕΝΟ ΜΑΘΗΜΑ:") < text.index("LENGTH IS NOT OPTIONAL")
+
+
+def test_no_neighbours_renders_nothing_at_all():
+    """The lesson AI panel and every old caller pass nothing — those prompts must
+    be byte-identical to before this parameter existed."""
+    assert _lesson_prompt() == _lesson_prompt(neighbours=None)
+    assert "ΠΡΟΗΓΟΥΜΕΝΟ ΜΑΘΗΜΑ" not in _lesson_prompt()
+
+
+def test_the_tutor_s_brief_for_this_lesson_is_carried_whole():
+    text = _lesson_prompt(course_brief="Θέλω μάθημα για ερασιτέχνες.",
+                          tutor_brief="Ξύλο μπράτσου: Maple έναντι Mahogany.")
+    assert "Ξύλο μπράτσου: Maple έναντι Mahogany." in text
+    assert "Ο ΚΑΘΗΓΗΤΗΣ ΖΗΤΗΣΕ ΡΗΤΑ" in text
+    # After the COURSE brief: what he asked of the whole course is the context,
+    # what he asked of THIS lesson is the instruction, and it reads second.
+    assert text.index("Θέλω μάθημα για ερασιτέχνες.") < text.index("Ο ΚΑΘΗΓΗΤΗΣ ΖΗΤΗΣΕ ΡΗΤΑ")
+
+
+def test_no_brief_and_a_blank_brief_both_render_nothing():
+    assert _lesson_prompt() == _lesson_prompt(tutor_brief=None)
+    assert _lesson_prompt() == _lesson_prompt(tutor_brief="   ")

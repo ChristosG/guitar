@@ -210,10 +210,12 @@ def test_apply_rewrites_only_ticked_sections_keeps_ids_and_snapshots(lesson, mon
     captured = {}
 
     def fake_draft_lesson(db_, *, ctx, library, language, blueprint=None, student_brief=None,
-                          course_brief=None, source_ids=None, prompts=None, revise_current=None,
-                          fixed_sections=None, exclude_sections=frozenset(), section_briefs=None):
+                          course_brief=None, neighbours=None, tutor_brief=None, source_ids=None,
+                          prompts=None, revise_current=None, fixed_sections=None,
+                          exclude_sections=frozenset(), section_briefs=None):
         captured.update(fixed=fixed_sections, exclude=set(exclude_sections), briefs=section_briefs,
-                        objective=ctx.lesson_objective)
+                        objective=ctx.lesson_objective, neighbours=neighbours,
+                        position=ctx.position)
         from app.curriculum.depth import Measurement
         drafted = {"title": les.title, "summary": "νέα περίληψη",
                    "warm_up": {"body": "νέο ζέσταμα", "citations": []},
@@ -233,6 +235,12 @@ def test_apply_rewrites_only_ticked_sections_keeps_ids_and_snapshots(lesson, mon
     assert "Η Strat έχει τρεις μαγνήτες" in captured["fixed"]["theory"]
     assert captured["briefs"] == {"warm_up": "αναφορά στη Strat", "exercises": "ασκήσεις με tremolo"}
     assert "Ενημέρωσε" in captured["objective"] and "πιο απλά" in captured["objective"]
+    # Task 3.2: the neighbours are a parameter of their own now, and POSITION is a
+    # position line again rather than the three neighbour lines stuffed into it.
+    assert captured["neighbours"] == {"prev": "Τα ξύλα — ξύλα", "next": "Μαγνήτες — pickups",
+                                      "siblings": "Τα ξύλα, Μαγνήτες"}
+    assert captured["position"] == "lesson 2 of 3 in module"
+    assert "ΠΡΟΗΓΟΥΜΕΝΟ" not in captured["position"] and "PREVIOUS" not in captured["position"]
     rows = {(s.meta or {}).get("section"): s for s in
             db.scalars(select(Block).where(Block.parent_id == les.id)).all()}
     assert rows["warm_up"].body == "νέο ζέσταμα" and rows["warm_up"].id == before_ids["warm_up"]
@@ -319,10 +327,12 @@ def _fake_draft_lesson(captured, les):
     a parameter added to the live function fails these tests loudly rather than
     being swallowed by a `**kwargs` stand-in."""
     def fake(db_, *, ctx, library, language, blueprint=None, student_brief=None,
-             course_brief=None, source_ids=None, prompts=None, revise_current=None,
-             fixed_sections=None, exclude_sections=frozenset(), section_briefs=None):
+             course_brief=None, neighbours=None, tutor_brief=None, source_ids=None,
+             prompts=None, revise_current=None, fixed_sections=None,
+             exclude_sections=frozenset(), section_briefs=None):
         captured.update(fixed=fixed_sections, exclude=set(exclude_sections),
-                        briefs=section_briefs, objective=ctx.lesson_objective)
+                        briefs=section_briefs, objective=ctx.lesson_objective,
+                        neighbours=neighbours, position=ctx.position)
         from app.curriculum.depth import Measurement
         return ({"title": les.title, "summary": "νέα περίληψη",
                  "warm_up": {"body": "νέο ζέσταμα", "citations": []}},

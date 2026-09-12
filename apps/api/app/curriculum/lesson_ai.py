@@ -31,6 +31,7 @@ from app.curriculum.corpus import build_retrieval_context
 from app.curriculum.depth import count_words, floor_words, target_words
 from app.curriculum.draft import LessonContext, draft_lesson, persist_lesson
 from app.curriculum.ground import ground_topic
+from app.curriculum.neighbours import neighbours_of
 from app.curriculum.outline import TIER_GENERAL
 from app.curriculum.restore import snapshot_of
 from app.curriculum.tutor_edit import recompute_lesson_words, tutor_edited_sections
@@ -185,26 +186,49 @@ def build_plan_messages(
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
-def neighbours_text(db, lesson: Block) -> str:
-    """«ΠΡΟΗΓΟΥΜΕΝΟ / ΕΠΟΜΕΝΟ ΜΑΘΗΜΑ» + the module's other lesson titles — so a
-    rewrite knows what the lesson before already taught and what the one after
-    is going to."""
+def _siblings(db, lesson: Block) -> tuple[list[Block], int | None]:
+    """The module's lessons in teaching order, and where this one sits in them."""
     siblings = db.scalars(
         select(Block).where(Block.parent_id == lesson.parent_id, Block.kind == "lesson")
         .order_by(Block.order)
     ).all()
-    idx = next((i for i, s in enumerate(siblings) if s.id == lesson.id), None)
+    return list(siblings), next((i for i, s in enumerate(siblings) if s.id == lesson.id), None)
 
-    def line(b: Block | None) -> str:
-        if b is None:
-            return "—"
-        return f"{b.title} — {(b.meta or {}).get('objective') or ''}".rstrip(" —")
 
-    prev = siblings[idx - 1] if idx not in (None, 0) else None
-    nxt = siblings[idx + 1] if idx is not None and idx + 1 < len(siblings) else None
-    others = ", ".join(s.title for s in siblings if s.id != lesson.id) or "—"
-    return (f"PREVIOUS LESSON: {line(prev)}\nNEXT LESSON: {line(nxt)}\n"
-            f"OTHER LESSONS IN THIS MODULE: {others}")
+def neighbours_dict(db, lesson: Block) -> dict[str, str]:
+    """`{"prev", "next", "siblings"}` for ONE lesson — what the lesson before it
+    already taught and what the one after it is going to.
+
+    The dict IS the interface now (Task 3.2): `draft.build_lesson_messages` takes
+    it and renders `LESSON_NEIGHBOURS_BLOCK` from it, so the apply path and the
+    drafting fan-out show the model the same three lines. `neighbours_text` below
+    is the same data rendered for the PLAN prompt, which interpolates one string.
+    """
+    siblings, idx = _siblings(db, lesson)
+    return neighbours_of(siblings, idx)
+
+
+def neighbours_text(db, lesson: Block) -> str:
+    """The plan prompt's `{neighbours}` — `neighbours_dict` as one block of text.
+
+    Byte-identical to what this function returned when it did the walking itself:
+    `LESSON_AI_PLAN_USER` interpolates a single string, and the planner's prompt is
+    not what this task set out to change.
+    """
+    n = neighbours_dict(db, lesson)
+    return (f"PREVIOUS LESSON: {n['prev']}\nNEXT LESSON: {n['next']}\n"
+            f"OTHER LESSONS IN THIS MODULE: {n['siblings']}")
+
+
+def position_text(db, lesson: Block) -> str:
+    """«lesson 2 of 4 in module» — the POSITION line for a single-lesson call.
+
+    No module index: this path knows the lesson's module, not how many modules the
+    course has, and counting them would be a query to say something the neighbours
+    block says better.
+    """
+    siblings, idx = _siblings(db, lesson)
+    return f"lesson {(idx or 0) + 1} of {len(siblings) or 1} in module"
 
 
 def _lesson_sections(db, lesson: Block) -> list[dict]:
@@ -426,12 +450,10 @@ def apply_lesson_change(db, lesson_id: uuid.UUID, *, instruction: str, note: str
         lesson_title=lesson.title, lesson_objective=objective,
         module_title=module.title, module_objective=(module.meta or {}).get("objective") or "",
         course_title=course.title, tier=(module.meta or {}).get("tier") or TIER_GENERAL,
-        # THE NEIGHBOURS RIDE `position` FOR NOW. `LessonContext` has no
-        # `neighbours` field yet, so the `POSITION:` line reads «PREVIOUS LESSON:
-        # …» on this path — honest, and strictly more than the fan-out's "lesson 3
-        # of 4" tells the model. Task 3.2 gives `build_lesson_messages` a proper
-        # `neighbours=` parameter and this line goes back to a position string.
-        position=neighbours_text(db, lesson),
+        # A plain position line again (Task 3.2): the neighbours no longer ride
+        # `position` as a stopgap — they go to `draft_lesson(neighbours=...)`
+        # below, which renders them in their own block under this line.
+        position=position_text(db, lesson),
         minutes=size["minutes"], teaching_minutes=size["teaching_minutes"],
         target_words=size["target_words"], floor_words=size["floor_words"],
     )
@@ -442,9 +464,12 @@ def apply_lesson_change(db, lesson_id: uuid.UUID, *, instruction: str, note: str
     # it, a failure in either (an unindexed source, a database hiccup) would leave
     # the lesson stranded at `drafting` with `error: None` — a spinner the board
     # never takes down and nothing ever clears, for a call that was never made.
-    # Neither read needs a transaction of its own.
+    # Neither read needs a transaction of its own. The neighbours are read here for
+    # the same reason — they are the last thing on this path that touches the
+    # lesson's siblings, and after `db.close()` there is no session to read them on.
     library = build_retrieval_context(db, source_ids)
     prompts = overrides.snapshot(db)
+    neighbours = neighbours_dict(db, lesson)
 
     # SNAPSHOT AND CLAIM, ONE TRANSACTION, COMMITTED BEFORE THE MODEL CALL. The
     # snapshot is what «Τι άλλαξε;» and the restore toggle read, so it has to be
@@ -460,7 +485,8 @@ def apply_lesson_change(db, lesson_id: uuid.UUID, *, instruction: str, note: str
     try:
         drafted, m = draft_lesson(
             db, ctx=ctx, library=library, language=language, blueprint=bp,
-            student_brief=None, course_brief=meta.get("brief"), source_ids=source_ids,
+            student_brief=None, course_brief=meta.get("brief"),
+            neighbours=neighbours, source_ids=source_ids,
             prompts=prompts, revise_current=None, fixed_sections=fixed or None,
             exclude_sections=excluded, section_briefs=briefs,
         )

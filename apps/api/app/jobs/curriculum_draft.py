@@ -55,6 +55,7 @@ from app.curriculum.corpus import (
 from app.curriculum.depth import floor_words, target_words
 from app.curriculum.blueprint import blueprint_from_course_meta
 from app.curriculum.draft import LessonContext, draft_lesson, draft_progress, persist_lesson
+from app.curriculum.neighbours import neighbours_of
 from app.curriculum.outline import TIER_GENERAL
 from app.curriculum.segment_generate import drain_queued_segments
 from app.curriculum.tutor_edit import tutor_edited_sections
@@ -336,6 +337,13 @@ def _draft_one(lesson_id: uuid.UUID, plan: dict) -> None:
             target_words=size["target_words"],
             floor_words=size["floor_words"],
         )
+        # `.get`, not `[...]`: a plan built before this key existed (an in-flight
+        # job on a restarted server, and `test_surgical_revise.py`'s hand-built
+        # plans) drafts without neighbours rather than dying in the worker.
+        neighbours = plan.get("neighbours", {}).get(str(lesson_id))
+        # What the tutor asked of THIS lesson. Read here, while the connection is
+        # still open — see `db.close()` below.
+        tutor_brief = (lesson.meta or {}).get("brief")
         library = plan["library"]
         language = lesson.language
         source_ids = plan["source_ids"]
@@ -361,6 +369,7 @@ def _draft_one(lesson_id: uuid.UUID, plan: dict) -> None:
             db, ctx=ctx, library=library, language=language,
             blueprint=plan["blueprint"],
             student_brief=student_brief, course_brief=course_brief,
+            neighbours=neighbours, tutor_brief=tutor_brief,
             source_ids=source_ids, prompts=prompts,
             revise_current=revise_current,
             fixed_sections=fixed_sections, exclude_sections=keep,
@@ -517,6 +526,10 @@ def run_curriculum_draft_job(job_id: uuid.UUID) -> None:
             wanted = {uuid.UUID(str(x)) for x in only}
             lesson_ids = [lid for lid in lesson_ids if lid in wanted]
         positions = _positions(db, root_id)
+        # What sits on either side of each lesson — computed HERE, once, for the
+        # same reason as `positions`: a worker that queried its own siblings would
+        # hold a connection to do it (see `_draft_one`'s `db.close()`).
+        neighbours = _neighbours(db, root_id)
 
         plan = {
             "library": library,
@@ -526,6 +539,7 @@ def run_curriculum_draft_job(job_id: uuid.UUID) -> None:
             "course_brief": meta.get("brief"),
             "source_ids": source_ids,
             "positions": positions,
+            "neighbours": neighbours,
             # 50 means 50 (shape.py): teaching time IS the whole booked slot,
             # derived from minutes_per_lesson rather than read from the stored
             # shape — a course materialized under the old 40+10 carve-out would
@@ -696,6 +710,37 @@ def _positions(db, root_id: uuid.UUID) -> dict[str, str]:
             out[str(lesson.id)] = (
                 f"lesson {l_i} of {len(lessons)} in module {m_i} of {len(modules)}"
             )
+    return out
+
+
+def _neighbours(db, root_id: uuid.UUID) -> dict[str, dict]:
+    """`{lesson_id: {"prev": "title — objective", "next": ..., "siblings": "t1, t2"}}`.
+
+    `_positions` above tells a lesson WHERE it stands and then orders it not to
+    re-teach what earlier lessons covered. This is what it needs to obey that: the
+    lesson before it, the lesson after it, and the module's other titles. Built in
+    Phase A with the same two loops and the same one short transaction, because
+    twenty workers each querying their own siblings across a model call is twenty
+    connections held for no reason.
+
+    The rendering of each entry is `curriculum.neighbours.neighbours_of` — the same
+    function the lesson panel builds ITS dict with, so «—» means the same thing on
+    both paths.
+    """
+    modules = db.scalars(
+        select(Block)
+        .where(Block.parent_id == root_id, Block.kind == "module")
+        .order_by(Block.order)
+    ).all()
+    out: dict[str, dict] = {}
+    for module in modules:
+        lessons = db.scalars(
+            select(Block)
+            .where(Block.parent_id == module.id, Block.kind == "lesson")
+            .order_by(Block.order)
+        ).all()
+        for i, lesson in enumerate(lessons):
+            out[str(lesson.id)] = neighbours_of(lessons, i)
     return out
 
 

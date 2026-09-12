@@ -132,6 +132,7 @@ LESSON_TAIL = (
     "LESSON: {lesson_title} — {lesson_objective}\n"
     "POSITION: {position}. Do not re-teach what earlier lessons covered; "
     "build on it.\n"
+    "{neighbours_block}"
     "\nLENGTH IS NOT OPTIONAL. This lesson is {teaching_minutes} minutes "
     "of teaching, and it must run to about "
     "{target_words} words in total across its sections — roughly four to "
@@ -143,6 +144,7 @@ LESSON_TAIL = (
     "\n{language_directive}\n"
     "\n{style_directive}"
     "{course_brief_block}"
+    "{tutor_brief_block}"
     "{student_brief_block}"
     "{retrieved_block}"
     "{revise_block}"
@@ -153,6 +155,33 @@ LESSON_SLICE_ID = "lesson.draft"
 
 LESSON_COURSE_BRIEF_BLOCK = "\n\nWHAT THE TUTOR WANTS FROM THIS COURSE:\n{course_brief}"
 LESSON_STUDENT_BRIEF_BLOCK = "\n\n{student_brief}"
+
+# THE LESSONS ON EITHER SIDE (Task 3.2). «POSITION: lesson 3 of 4» told the model
+# WHERE it was standing and then ordered it not to re-teach what earlier lessons
+# covered — without ever telling it what those lessons were. That is an instruction
+# with no data behind it, and the model obeyed it the only way it could: by guessing,
+# which is how a course ends up teaching the CAGED shapes three times. This is the
+# data. It is rendered on EVERY fan-out draft, «—» included, because "there is no
+# previous lesson" is itself information — the first lesson of a module must know it
+# is the first one.
+LESSON_NEIGHBOURS_BLOCK = (
+    "\nΠΡΟΗΓΟΥΜΕΝΟ ΜΑΘΗΜΑ: {prev}\n"
+    "ΕΠΟΜΕΝΟ ΜΑΘΗΜΑ: {next}\n"
+    "ΣΤΗΝ ΙΔΙΑ ΕΝΟΤΗΤΑ: {siblings}\n"
+)
+LESSON_NEIGHBOURS_SLICE_ID = "lesson.draft.neighbours"
+
+# WHAT THE TUTOR ASKED OF **THIS** LESSON (Task 3.2). The course brief above says
+# what he wants from the whole course; this is the note he wrote on one lesson —
+# `lesson.meta.brief`. It reads AFTER the course brief because it is the narrower
+# instruction and recency is the only priority signal a prompt has, and it says
+# "with the depth it deserves" because a brief silently satisfied by one sentence
+# is a brief he will think was honoured until he reads the lesson.
+LESSON_TUTOR_BRIEF_BLOCK = (
+    "\n\nΟ ΚΑΘΗΓΗΤΗΣ ΖΗΤΗΣΕ ΡΗΤΑ αυτό το μάθημα να καλύπτει:\n{brief}\n"
+    "Κάλυψε κάθε σημείο του με το βάθος που του αξίζει και συμπλήρωσε ό,τι λείπει."
+)
+LESSON_TUTOR_BRIEF_SLICE_ID = "lesson.draft.brief"
 
 # The oversized-library fallback: the whole book did not fit, so this lesson gets the
 # passages retrieval found for it instead. The tutor is told this on the board
@@ -243,6 +272,8 @@ def build_lesson_messages(
     blueprint: dict | None = None,
     student_brief: str | None,
     course_brief: str | None,
+    neighbours: dict | None = None,
+    tutor_brief: str | None = None,
     retrieved: str | None = None,
     deepen: Measurement | None = None,
     previous: dict | None = None,
@@ -282,6 +313,15 @@ def build_lesson_messages(
     writing — the lesson AI panel's plan, as the tutor approved it. Appended after
     the fixed block for the same reason and with the same guarantee: keys with an
     empty brief are dropped, and an absent (or all-empty) map renders nothing.
+
+    `neighbours` is `{"prev", "next", "siblings"}` (`curriculum.neighbours.
+    neighbours_of`) — the lessons around this one, so "do not re-teach what earlier
+    lessons covered" is an instruction the model has the data to obey. The fan-out
+    passes it for EVERY lesson, edges included («—»); `None` — the lesson panel's
+    apply, and every caller written before this existed — renders nothing.
+
+    `tutor_brief` is `lesson.meta.brief`: what he asked of THIS lesson, in his own
+    words, rendered whole after the course brief. Empty/blank renders nothing.
     """
     messages = prefix_messages(library, source)
 
@@ -342,6 +382,25 @@ def build_lesson_messages(
         lesson_title=ctx.lesson_title,
         lesson_objective=ctx.lesson_objective,
         position=ctx.position,
+        # Keyed explicitly, with the same «—» the edges use as the fallback, rather
+        # than `.format(**neighbours)`: a map that arrived short of a key would raise
+        # a `KeyError` from inside `str.format` — in a worker, mid fan-out, for a
+        # decoration. A missing neighbour is what «—» already means.
+        neighbours_block=(
+            resolve(
+                source, LESSON_NEIGHBOURS_SLICE_ID, LESSON_NEIGHBOURS_BLOCK,
+            ).format(
+                prev=neighbours.get("prev") or "—",
+                next=neighbours.get("next") or "—",
+                siblings=neighbours.get("siblings") or "—",
+            ) if neighbours else ""
+        ),
+        tutor_brief_block=(
+            resolve(
+                source, LESSON_TUTOR_BRIEF_SLICE_ID, LESSON_TUTOR_BRIEF_BLOCK,
+            ).format(brief=tutor_brief.strip())
+            if tutor_brief and tutor_brief.strip() else ""
+        ),
         teaching_minutes=ctx.teaching_minutes,
         target_words=f"{ctx.target_words:,}",
         floor_words=f"{ctx.floor_words:,}",
@@ -466,6 +525,8 @@ def draft_lesson(
     blueprint: dict | None = None,
     student_brief: str | None = None,
     course_brief: str | None = None,
+    neighbours: dict | None = None,
+    tutor_brief: str | None = None,
     source_ids: list[uuid.UUID] | None = None,
     prompts: dict[str, str] | None = None,
     revise_current: dict | None = None,
@@ -494,6 +555,11 @@ def draft_lesson(
     line}` for the sections that ARE being written, threaded to every
     `build_lesson_messages` call below — a deepen pass must still know what it was
     asked to change. `None` on every other draft path.
+
+    `neighbours`/`tutor_brief` (Task 3.2) travel to every `build_lesson_messages`
+    call below for the same reason: a deepen pass rewrites the lesson IN FULL, so a
+    pass that had lost sight of the lesson before it — or of what the tutor asked of
+    this one — would undo on the second call exactly what the first one got right.
 
     `db` IS ONLY TOUCHED FOR THE RETRIEVAL FALLBACK, and only when the library did
     not fit whole. In the normal (full-context) path this function performs NO
@@ -535,7 +601,8 @@ def draft_lesson(
 
     messages = build_lesson_messages(
         ctx=ctx, library=library, language=language, blueprint=bp,
-        student_brief=student_brief, course_brief=course_brief, retrieved=retrieved,
+        student_brief=student_brief, course_brief=course_brief,
+        neighbours=neighbours, tutor_brief=tutor_brief, retrieved=retrieved,
         revise_current=revise_current, fixed_sections=fixed_sections,
         section_briefs=section_briefs, source=prompts,
     )
@@ -587,6 +654,7 @@ def draft_lesson(
             build_lesson_messages(
                 ctx=ctx, library=library, language=language, blueprint=bp,
                 student_brief=student_brief, course_brief=course_brief,
+                neighbours=neighbours, tutor_brief=tutor_brief,
                 retrieved=retrieved, deepen=m, previous=lesson,
                 revise_current=revise_current, fixed_sections=fixed_sections,
                 section_briefs=section_briefs, source=prompts,

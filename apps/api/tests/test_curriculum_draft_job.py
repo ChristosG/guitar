@@ -874,8 +874,12 @@ def test_lesson_ids_restricts_the_fan_out_to_only_those_lessons(db, _provider):
     l2_after = db.get(Block, l2.id)
     assert l1_after.meta.get("draft_status") == "queued", "l1 was not in lesson_ids"
     assert l2_after.meta["draft_status"] == "ready"
-    assert any("L0.1" in sent for sent in _provider.drafted)
-    assert not any("L0.0" in sent for sent in _provider.drafted)
+    # On the LESSON: line — the drafted lesson's own identity. L0.0 DOES appear in
+    # L0.1's prompt since Task 3.2, as its previous lesson, which is the point of
+    # the neighbours block and not a second lesson being drafted.
+    assert any("LESSON: L0.1" in sent for sent in _provider.drafted)
+    assert not any("LESSON: L0.0" in sent for sent in _provider.drafted)
+    assert any("ΠΡΟΗΓΟΥΜΕΝΟ ΜΑΘΗΜΑ: L0.0" in sent for sent in _provider.drafted)
 
     job = db.get(GenerationJob, job_id)
     assert job.status == "succeeded"
@@ -916,3 +920,57 @@ def test_lesson_ids_finalize_fails_only_when_every_wanted_lesson_failed(db, monk
 
     job = db.get(GenerationJob, job_id)
     assert job.status == "failed"
+
+
+# ---------------------------------------------------------------------------
+# Task 3.2 — THE NEIGHBOURS MAP AND THE TUTOR'S PER-LESSON BRIEF
+#
+# `_positions` told every lesson WHERE it sits and ordered it not to re-teach
+# what came before — without ever showing it what that was. `_neighbours` is the
+# missing half: the titles and objectives on either side, and the module's other
+# lessons, computed once in Phase A exactly like the positions map.
+# ---------------------------------------------------------------------------
+
+def test_neighbours_gives_each_lesson_the_titles_on_either_side_of_it(db):
+    root_id = _course(db)
+    lessons = _lessons(db, root_id)          # 2 modules x 4, in teaching order
+
+    n = fanout_mod._neighbours(db, root_id)
+
+    middle = n[str(lessons[1].id)]           # L0.1
+    assert middle["prev"] == "L0.0 — o"
+    assert middle["next"] == "L0.2 — o"
+    assert middle["siblings"] == "L0.0, L0.2, L0.3"
+    # The edges say «—» rather than pretending a lesson is there.
+    assert n[str(lessons[0].id)]["prev"] == "—"
+    assert n[str(lessons[3].id)]["next"] == "—"
+    # A module's lessons never see the next module's — that is what POSITION is for.
+    assert n[str(lessons[4].id)]["prev"] == "—"
+    assert "L0.3" not in n[str(lessons[4].id)]["siblings"]
+
+
+def test_the_fanout_hands_every_worker_its_neighbours_and_the_tutors_brief(db, monkeypatch):
+    """What Phase A computed reaches the drafting call — the neighbours for THIS
+    lesson, and the brief the tutor wrote on it (`meta.brief`)."""
+    root_id = _course(db)
+    run_curriculum_draft_job(_job(db, root_id))
+    db.expire_all()
+
+    lesson = _lessons(db, root_id)[1]        # L0.1, a lesson with both neighbours
+    lesson.meta = {**(lesson.meta or {}), "draft_status": "queued",
+                   "brief": "Ξύλο μπράτσου: Maple έναντι Mahogany."}
+    db.commit()
+
+    captured: dict = {}
+    real_draft_lesson = fanout_mod.draft_lesson
+
+    def _capture(db_, **kwargs):
+        captured.update(kwargs)
+        return real_draft_lesson(db_, **kwargs)
+
+    monkeypatch.setattr(fanout_mod, "draft_lesson", _capture)
+    run_curriculum_draft_job(_job(db, root_id))
+
+    assert captured["tutor_brief"] == "Ξύλο μπράτσου: Maple έναντι Mahogany."
+    assert captured["neighbours"] == {"prev": "L0.0 — o", "next": "L0.2 — o",
+                                      "siblings": "L0.0, L0.2, L0.3"}

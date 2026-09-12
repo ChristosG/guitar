@@ -124,6 +124,8 @@ from app.curriculum.draft import (
     LESSON_DEEPEN_SLICE_ID,
     LESSON_FIXED_BLOCK,
     LESSON_FIXED_SLICE_ID,
+    LESSON_NEIGHBOURS_BLOCK,
+    LESSON_NEIGHBOURS_SLICE_ID,
     LESSON_RETRIEVED_BLOCK,
     LESSON_RETRIEVED_SLICE_ID,
     LESSON_REVISE_BLOCK,
@@ -132,6 +134,8 @@ from app.curriculum.draft import (
     LESSON_SECTION_BRIEFS_SLICE_ID,
     LESSON_SLICE_ID,
     LESSON_TAIL,
+    LESSON_TUTOR_BRIEF_BLOCK,
+    LESSON_TUTOR_BRIEF_SLICE_ID,
     REPAIR_MESSAGE,
     REPAIR_SLICE_ID,
     TIER_GENERAL_DIRECTIVE,
@@ -739,6 +743,22 @@ _SAMPLE_FIXED_SECTIONS = {
     "theory": "Το σχήμα C ξεκινάει από τη ρίζα στην πέμπτη χορδή, τρίτο τάστο.",
 }
 
+# Task 3.2: the lessons on either side of the sample one, and the note the tutor
+# wrote on it. HIS DATA — the titles of his own lessons and his own words — never a
+# prompt this file authors. The sample is a MIDDLE lesson deliberately: an edge one
+# would render «—» twice and the tutor would not learn from the preview what the
+# block actually carries.
+_SAMPLE_NEIGHBOURS = {
+    "prev": "Το σχήμα E και η ρίζα του — Ο μαθητής βρίσκει τη ρίζα του σχήματος E.",
+    "next": "Το σχήμα A — Ο μαθητής συνδέει το A με το C πάνω στο μπράτσο.",
+    "siblings": "Το σχήμα E και η ρίζα του, Το σχήμα A, Τα πέντε σχήματα μαζί",
+}
+
+_SAMPLE_LESSON_BRIEF = (
+    "Θέλω να μπει και το σχήμα C με barre, και μια άσκηση που ονομάζει τη ρίζα "
+    "δυνατά σε κάθε θέση."
+)
+
 # Task 2.2: the per-section briefs from the lesson AI panel's plan — the lines the
 # tutor read on the plan card before he ticked the sections. His DATA (the plan he
 # approved), never a prompt this file authors.
@@ -1096,17 +1116,54 @@ def _build_revise_distill(locale: str, db, course_language=None) -> _Built:
 
 
 def _build_lesson_draft(locale: str, db, course_language=None) -> _Built:
+    # `neighbours=` is passed because the live fan-out passes it on EVERY lesson it
+    # drafts (the edges render «—», never nothing). A preview without it would be a
+    # prompt the tutor never actually sends — the one thing this viewer exists not
+    # to do. The two builders below it pass it for the same reason; `lesson.deepen`,
+    # `lesson.revise` and `lesson.fixed` are left as they were, each showing only
+    # the one conditional block it is the card for.
     lang = _course_language(locale, course_language)
     built = build_lesson_messages(
         ctx=_SAMPLE_LESSON_CTX, library=_SAMPLE_LIBRARY, language=lang,
         student_brief=_sample_student_brief(db), course_brief=_SAMPLE_COURSE_BRIEF,
-        source=db,
+        neighbours=_SAMPLE_NEIGHBOURS, source=db,
     )
     return _msgs(built), [
         (*_LIBRARY, _SAMPLE_LIBRARY_TEXT),
         ("course_brief", "Τι ζήτησες, με τα δικά σου λόγια", _SAMPLE_COURSE_BRIEF),
+        ("neighbours", "Τα μαθήματα γύρω από αυτό", _SAMPLE_NEIGHBOURS["prev"]),
         (*_STUDENT, _sample_student_brief(db)),
         (*_LANG_FROM_COURSE, language_directive(lang, db)),
+        (*_ANSWER_IN_FROM_COURSE, answer_in(lang, db)),
+    ]
+
+
+def _build_lesson_neighbours(locale: str, db, course_language=None) -> _Built:
+    lang = _course_language(locale, course_language)
+    built = build_lesson_messages(
+        ctx=_SAMPLE_LESSON_CTX, library=_SAMPLE_LIBRARY, language=lang,
+        student_brief=_sample_student_brief(db), course_brief=_SAMPLE_COURSE_BRIEF,
+        neighbours=_SAMPLE_NEIGHBOURS, source=db,
+    )
+    return _msgs(built), [
+        (*_LIBRARY, _SAMPLE_LIBRARY_TEXT),
+        ("neighbours", "Τα μαθήματα γύρω από αυτό", _SAMPLE_NEIGHBOURS["prev"]),
+        (*_STUDENT, _sample_student_brief(db)),
+        (*_ANSWER_IN_FROM_COURSE, answer_in(lang, db)),
+    ]
+
+
+def _build_lesson_tutor_brief(locale: str, db, course_language=None) -> _Built:
+    lang = _course_language(locale, course_language)
+    built = build_lesson_messages(
+        ctx=_SAMPLE_LESSON_CTX, library=_SAMPLE_LIBRARY, language=lang,
+        student_brief=_sample_student_brief(db), course_brief=_SAMPLE_COURSE_BRIEF,
+        neighbours=_SAMPLE_NEIGHBOURS, tutor_brief=_SAMPLE_LESSON_BRIEF, source=db,
+    )
+    return _msgs(built), [
+        (*_LIBRARY, _SAMPLE_LIBRARY_TEXT),
+        ("lesson_brief", "Η σημείωσή σου πάνω σε αυτό το μάθημα", _SAMPLE_LESSON_BRIEF),
+        (*_STUDENT, _sample_student_brief(db)),
         (*_ANSWER_IN_FROM_COURSE, answer_in(lang, db)),
     ]
 
@@ -1963,7 +2020,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="lesson",
         kind="prompt",
-        source_ref="app/curriculum/draft.py:238",
+        source_ref="app/curriculum/draft.py:267",
         title_el="Η συγγραφή ενός μαθήματος",
         what_it_does_el=(
             "Ζητάει το ίδιο το μάθημα — τις σελίδες που θα διδάξεις, όχι ένα "
@@ -1979,7 +2036,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: build_lesson_messages,
         build=_build_lesson_draft,
-        call_sites=("curriculum/draft.py:542",),
+        call_sites=("curriculum/draft.py:609",),
         slices=(
             Slice(
                 id=LESSON_SLICE_ID,
@@ -1995,7 +2052,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="lesson",
         kind="prompt",
-        source_ref="app/curriculum/draft.py:238",
+        source_ref="app/curriculum/draft.py:267",
         title_el="Το ξαναγράψιμο ενός κοντού μαθήματος",
         what_it_does_el=(
             "Αν το μάθημα βγήκε πιο κοντό από το όριο, γυρίζει πίσω με την "
@@ -2009,7 +2066,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: build_lesson_messages,
         build=_build_lesson_deepen,
-        call_sites=("curriculum/draft.py:586",),
+        call_sites=("curriculum/draft.py:653",),
         slices=(
             Slice(
                 id=LESSON_DEEPEN_SLICE_ID,
@@ -2024,7 +2081,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="lesson",
         kind="fragment",
-        source_ref="app/curriculum/draft.py:238",
+        source_ref="app/curriculum/draft.py:267",
         title_el="Όταν αναθεωρείς ένα μάθημα: το τρέχον περιεχόμενό του",
         what_it_does_el=(
             "Μπαίνει στη συγγραφή του μαθήματος όταν ζητάς μια αναθεώρηση σε ένα "
@@ -2055,7 +2112,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="lesson",
         kind="fragment",
-        source_ref="app/curriculum/draft.py:238",
+        source_ref="app/curriculum/draft.py:267",
         title_el="Όταν κάποιες ενότητες είναι δικές σου: τι μένει σταθερό",
         what_it_does_el=(
             "Κρατάει έξω από τα χέρια του βοηθού τις ενότητες που έγραψες ή "
@@ -2085,7 +2142,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="lesson",
         kind="fragment",
-        source_ref="app/curriculum/draft.py:238",
+        source_ref="app/curriculum/draft.py:267",
         title_el="Όταν εγκρίνεις πλάνο AI: τι πρέπει να αλλάξει σε κάθε ενότητα",
         what_it_does_el=(
             "Στο πλαίσιο AI ενός μαθήματος, το πλάνο σού λέει για κάθε ενότητα "
@@ -2111,10 +2168,70 @@ _ENTRIES = [
         ),
     ),
     PromptEntry(
+        id="lesson.draft.neighbours",
+        language_from_course=True,
+        flow="lesson",
+        kind="fragment",
+        source_ref="app/curriculum/draft.py:389",
+        title_el="Τα μαθήματα γύρω από αυτό που γράφεται",
+        what_it_does_el=(
+            "Δείχνει στον βοηθό, σε κάθε μάθημα που γράφει, ποιο μάθημα "
+            "προηγείται, ποιο ακολουθεί και ποια άλλα μαθήματα έχει η ίδια "
+            "ενότητα — με τίτλο και στόχο. Χωρίς αυτό, η οδηγία «μην ξαναδιδάξεις "
+            "όσα κάλυψαν τα προηγούμενα μαθήματα» ήταν εντολή χωρίς στοιχεία: ο "
+            "βοηθός ήξερε ότι είναι το 3ο από 4, αλλά όχι τι λέει το 2ο. Έτσι τα "
+            "μαθήματα ξαναδίδασκαν το ένα το άλλο."
+        ),
+        when_it_runs_el=(
+            "Σε κάθε μάθημα που γράφεται από το πρόγραμμα. Στην αρχή ή στο τέλος "
+            "μιας ενότητας, η γραμμή που λείπει γράφει «—» — το ότι δεν υπάρχει "
+            "προηγούμενο μάθημα είναι κι αυτό πληροφορία."
+        ),
+        source_of_truth=lambda: build_lesson_messages,
+        build=_build_lesson_neighbours,
+        slices=(
+            Slice(
+                id=LESSON_NEIGHBOURS_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=LESSON_NEIGHBOURS_BLOCK,
+                kind="replace",
+            ),
+        ),
+    ),
+    PromptEntry(
+        id="lesson.draft.brief",
+        language_from_course=True,
+        flow="lesson",
+        kind="fragment",
+        source_ref="app/curriculum/draft.py:398",
+        title_el="Όταν έχεις γράψει σημείωση σε ένα μάθημα",
+        what_it_does_el=(
+            "Μεταφέρει αυτούσια τη σημείωση που έγραψες πάνω σε ΑΥΤΟ το μάθημα "
+            "και ζητάει να καλυφθεί κάθε σημείο της με το βάθος που του αξίζει. "
+            "Μπαίνει μετά από αυτό που ζήτησες για ΟΛΟ το πρόγραμμα: το γενικό "
+            "είναι το πλαίσιο, η σημείωση του μαθήματος είναι η οδηγία, και "
+            "διαβάζεται δεύτερη."
+        ),
+        when_it_runs_el=(
+            "Κάθε φορά που γράφεται ένα μάθημα που έχει δική σου σημείωση. "
+            "Μάθημα χωρίς σημείωση δεν αλλάζει σε τίποτα."
+        ),
+        source_of_truth=lambda: build_lesson_messages,
+        build=_build_lesson_tutor_brief,
+        slices=(
+            Slice(
+                id=LESSON_TUTOR_BRIEF_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=LESSON_TUTOR_BRIEF_BLOCK,
+                kind="replace",
+            ),
+        ),
+    ),
+    PromptEntry(
         id="lesson.retrieved",
         flow="lesson",
         kind="fragment",
-        source_ref="app/curriculum/draft.py:156",
+        source_ref="app/curriculum/draft.py:189",
         title_el="Όταν η βιβλιοθήκη σου δεν χώρεσε: τα αποσπάσματα του μαθήματος",
         what_it_does_el=(
             "Αν τα βιβλία που διάλεξες είναι πάρα πολλά για να διαβαστούν "
@@ -2145,7 +2262,7 @@ _ENTRIES = [
         curriculum_group=True,
         flow="lesson",
         kind="prompt",
-        source_ref="app/curriculum/draft.py:440",
+        source_ref="app/curriculum/draft.py:499",
         title_el="Όταν παραπέμπει σε σελίδα που δεν υπάρχει",
         what_it_does_el=(
             "Η εφαρμογή ελέγχει κάθε παραπομπή σε σελίδα που γράφει ο βοηθός. "
@@ -2158,7 +2275,7 @@ _ENTRIES = [
         when_it_runs_el="Μόνο όταν πιαστεί λάθος παραπομπή. Το πολύ μία φορά ανά μάθημα.",
         source_of_truth=lambda: _repair_message,
         build=_build_lesson_repair,
-        call_sites=("curriculum/draft.py:548",),
+        call_sites=("curriculum/draft.py:615",),
         slices=(
             Slice(
                 id=REPAIR_SLICE_ID,
@@ -2285,7 +2402,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="lesson",
         kind="prompt",
-        source_ref="app/curriculum/lesson_ai.py:154",
+        source_ref="app/curriculum/lesson_ai.py:155",
         title_el="Το πλάνο του AI για ένα μάθημα",
         what_it_does_el=(
             "Του δείχνει ΟΛΟΚΛΗΡΟ το μάθημα — κάθε ενότητα με το πλήρες κείμενό "
@@ -2303,7 +2420,7 @@ _ENTRIES = [
         when_it_runs_el="Όταν πατάς «Φτιάξε πλάνο» στο πλαίσιο AI ενός μαθήματος.",
         source_of_truth=lambda: build_plan_messages,
         build=_build_lesson_ai_plan,
-        call_sites=("curriculum/lesson_ai.py:332",),
+        call_sites=("curriculum/lesson_ai.py:356",),
         slices=(
             Slice(
                 id=LESSON_AI_PLAN_SLICE_ID,
