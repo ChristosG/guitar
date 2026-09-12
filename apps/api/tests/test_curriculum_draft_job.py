@@ -672,3 +672,111 @@ def test_build_retrieval_context_flags_too_large_but_keeps_an_empty_selection_em
 
     empty = build_retrieval_context(db, [])       # deliberately no sources
     assert empty.is_empty is True
+
+
+# ---------------------------------------------------------------------------
+# THE TUTOR'S SECTIONS SURVIVE A REDRAFT (Unit 1, Task 1.4)
+#
+# Deepen / Redraft / a `modify_lesson` re-draft all land in `_draft_one`. A
+# section he edited by hand is taken OUT of the schema, shown to the model as
+# fixed text, and left alone by `persist_lesson` — row, id and marker.
+# ---------------------------------------------------------------------------
+
+TUTOR_THEORY = "Αυτό το έγραψε ο καθηγητής με το χέρι και δεν το ξαναγράφει κανείς."
+
+
+def _hand_edit_theory(db, lesson) -> Block:
+    theory = db.scalars(
+        select(Block).where(Block.parent_id == lesson.id, Block.kind == "segment")
+    ).all()
+    seg = next(s for s in theory if (s.meta or {}).get("section") == "theory")
+    seg.body = TUTOR_THEORY
+    seg.meta = {**(seg.meta or {}),
+                "tutor_edited": {"at": "2026-09-12T10:00:00+00:00",
+                                 "prev_body": "ό,τι είχε γράψει το AI", "count": 1}}
+    return seg
+
+
+def test_draft_one_keeps_tutor_edited_sections_and_shows_them_as_fixed(db, monkeypatch):
+    """He rewrote the theory himself, then pressed Deepen. The model is told the
+    theory is HIS and is not given a slot to write it into; everything else is
+    rewritten to fit it, and his row comes out the other side unchanged."""
+    root_id = _course(db)
+    run_curriculum_draft_job(_job(db, root_id))          # a first, ordinary draft
+    db.expire_all()
+
+    lesson = _lessons(db, root_id)[0]
+    theory = _hand_edit_theory(db, lesson)
+    theory_id = theory.id
+    warm_up = next(
+        s for s in db.scalars(
+            select(Block).where(Block.parent_id == lesson.id, Block.kind == "segment")
+        ).all() if (s.meta or {}).get("section") == "warm_up"
+    )
+    warm_up.body = "ΠΑΛΙΟ warm_up"
+    # Deepen: the one lesson goes back to `queued`, everything else stays `ready`.
+    lesson.meta = {**(lesson.meta or {}), "draft_status": "queued", "deepen": True}
+    db.commit()
+
+    captured: dict = {}
+    real_draft_lesson = fanout_mod.draft_lesson
+
+    def _capture(db_, **kwargs):
+        captured.update(kwargs)
+        return real_draft_lesson(db_, **kwargs)
+
+    monkeypatch.setattr(fanout_mod, "draft_lesson", _capture)
+
+    run_curriculum_draft_job(_job(db, root_id))
+    db.expire_all()
+
+    # (1) The model was told which sections are his, and was not given a slot for them.
+    assert captured["exclude_sections"] == {"theory"}
+    assert captured["fixed_sections"] == {"theory": TUTOR_THEORY}
+
+    # (2) His row survived the redraft: same id, same body, still marked his.
+    segments = {
+        (s.meta or {}).get("section"): s
+        for s in db.scalars(
+            select(Block).where(Block.parent_id == lesson.id, Block.kind == "segment")
+        ).all()
+    }
+    assert segments["theory"].id == theory_id
+    assert segments["theory"].body == TUTOR_THEORY
+    assert "tutor_edited" in (segments["theory"].meta or {})
+
+    # (3) The rest of the lesson WAS rewritten, and lost the AI-write marker.
+    assert segments["warm_up"].body != "ΠΑΛΙΟ warm_up"
+    assert "tutor_edited" not in (segments["warm_up"].meta or {})
+    assert (db.get(Block, lesson.id).meta or {}).get("draft_status") == "ready"
+
+
+def test_a_revise_redraft_does_not_send_a_kept_section_twice(db, monkeypatch):
+    """`revise_current` is "here is what the lesson says now, keep the rest intact".
+    A kept section is already shown as FIXED text — sending it in both blocks would
+    pay for the tutor's theory twice on every revise re-draft."""
+    root_id = _course(db)
+    run_curriculum_draft_job(_job(db, root_id))
+    db.expire_all()
+
+    lesson = _lessons(db, root_id)[0]
+    _hand_edit_theory(db, lesson)
+    lesson.meta = {**(lesson.meta or {}), "draft_status": "queued",
+                   "revise_instruction": "κάνε τις ασκήσεις πιο δύσκολες"}
+    db.commit()
+
+    captured: dict = {}
+    real_draft_lesson = fanout_mod.draft_lesson
+
+    def _capture(db_, **kwargs):
+        captured.update(kwargs)
+        return real_draft_lesson(db_, **kwargs)
+
+    monkeypatch.setattr(fanout_mod, "draft_lesson", _capture)
+
+    run_curriculum_draft_job(_job(db, root_id))
+    db.expire_all()
+
+    assert captured["fixed_sections"] == {"theory": TUTOR_THEORY}
+    assert "theory" not in captured["revise_current"], "shown as fixed, not as 'current'"
+    assert "exercises" in captured["revise_current"], "the rest of the lesson is still shown"

@@ -57,6 +57,7 @@ from app.curriculum.blueprint import blueprint_from_course_meta
 from app.curriculum.draft import LessonContext, draft_lesson, draft_progress, persist_lesson
 from app.curriculum.outline import TIER_GENERAL
 from app.curriculum.segment_generate import drain_queued_segments
+from app.curriculum.tutor_edit import tutor_edited_sections
 from app.db import SessionLocal
 from app.llm.errors import LLMError, LLMNotConfigured
 from app.models.block import Block
@@ -269,6 +270,20 @@ def _draft_one(lesson_id: uuid.UUID, plan: dict) -> None:
         # the cached library prefix, so it costs no cache — and is consumed at claim
         # time above, so a later unrelated Resume never re-applies it.
         objective = (lesson.meta or {}).get("objective") or (lesson.body or "")
+        # THE TUTOR'S SECTIONS SURVIVE A REDRAFT. Any segment he edited by hand
+        # (`meta.tutor_edited`, Unit 1) is taken OUT of the guided-json schema
+        # (`exclude_sections`) and shown to the model as fixed text instead
+        # (`fixed_sections` -> `LESSON_FIXED_BLOCK`), so it writes the other
+        # sections TO FIT his; `persist_lesson(keep=...)` then leaves his row
+        # alone — body, meta, id and marker. Deepen, Redraft and a `modify_lesson`
+        # re-draft all come through this one function, so all three inherit it.
+        # Custom sections (`custom:*`) are already spared by `persist_lesson`'s
+        # customs rule; `keep` covers the blueprint keys (a custom key in `keep`
+        # is harmless — it is not a blueprint key, so nothing looks it up).
+        # Read while the connection is still open — see `db.close()` below.
+        edited = tutor_edited_sections(db, lesson)
+        keep = set(edited)
+        fixed_sections = {k: v["body"] for k, v in edited.items()} or None
         # `revise_current` (Spec D, "revise means revise, not regenerate"): the
         # lesson's LIVE segments, shown to the model alongside the instruction above
         # so the re-draft changes what the tutor asked and keeps the rest — instead
@@ -295,10 +310,17 @@ def _draft_one(lesson_id: uuid.UUID, plan: dict) -> None:
             # truncation marker so a cut section reads as "keep the rest", not as
             # "this is all there ever was". A freshly-queued placeholder segment
             # (`add_segment`, body="") is excluded — there's nothing yet to preserve.
-            current = {
-                (seg.meta or {}).get("section") or seg.title: _revise_current_body(seg.body)
-                for seg in segments if (seg.body or "").strip()
-            }
+            # A KEPT SECTION IS NOT LISTED HERE. It is already shown in full as
+            # FIXED text, and "current content, keep it intact" alongside it would
+            # send the tutor's theory to the model twice on every revise re-draft.
+            current = {}
+            for seg in segments:
+                if not (seg.body or "").strip():
+                    continue
+                key = (seg.meta or {}).get("section") or seg.title
+                if key in keep:
+                    continue
+                current[key] = _revise_current_body(seg.body)
             if current:
                 revise_current = current
         ctx = LessonContext(
@@ -341,6 +363,7 @@ def _draft_one(lesson_id: uuid.UUID, plan: dict) -> None:
             student_brief=student_brief, course_brief=course_brief,
             source_ids=source_ids, prompts=prompts,
             revise_current=revise_current,
+            fixed_sections=fixed_sections, exclude_sections=keep,
         )
     except LLMNotConfigured:
         # The key vanished mid-run (cleared in Settings, or ENCRYPTION_SECRET
@@ -376,7 +399,7 @@ def _draft_one(lesson_id: uuid.UUID, plan: dict) -> None:
             return
         persist_lesson(
             db, lesson_block, lesson_json, m, library, plan["blueprint"],
-            teaching_minutes=size["teaching_minutes"],
+            teaching_minutes=size["teaching_minutes"], keep=keep,
         )
         db.commit()
     except Exception:

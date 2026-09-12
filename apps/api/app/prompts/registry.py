@@ -1894,7 +1894,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: build_lesson_messages,
         build=_build_lesson_deepen,
-        call_sites=("curriculum/draft.py:529",),
+        call_sites=("curriculum/draft.py:543",),
         slices=(
             Slice(
                 id=LESSON_DEEPEN_SLICE_ID,

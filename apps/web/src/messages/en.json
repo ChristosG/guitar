@@ -92,7 +92,7 @@
       "deepenError": "Could not deepen this lesson.",
       "redraft": "Re-draft under the current structure",
       "redraftConfirmTitle": "Re-draft under the current structure?",
-      "redraftConfirmBody": "This rewrites {count, plural, one {# lesson} other {# lessons}} from scratch — including ones already drafted — so every one follows the current lesson structure. Anything you've edited by hand in a lesson is replaced.",
+      "redraftConfirmBody": "This rewrites {count, plural, one {# lesson} other {# lessons}} from scratch — including ones already drafted — so every one follows the current lesson structure. Anything you changed by hand in a section is KEPT — the other sections are rewritten to fit it.",
       "redraftConfirm": "Re-draft",
       "redraftError": "Could not start the re-draft.",
       "wordCount": "{count, number} words",

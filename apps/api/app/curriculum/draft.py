@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from app.curriculum.corpus import LibraryContext, prefix_messages
 from app.curriculum.depth import (
@@ -520,7 +520,21 @@ def draft_lesson(
             return d
         return {**d, **{k: {"body": v} for k, v in fixed_sections.items() if k not in d}}
 
-    m = measure(_with_fixed(lesson), bp, teaching_minutes=ctx.teaching_minutes)
+    # A FIXED SECTION IS NEVER "THIN". Its words are counted (above), but the key
+    # is struck from `thin_sections` — that list goes two places that both break
+    # otherwise: the deepen prompt, which would order the model to EXPAND a section
+    # it physically cannot return (it is not in the schema), and the persisted
+    # `meta.thin_sections`, which would show the tutor his own hand-written theory
+    # flagged as the thin part of his lesson.
+    def _measured(d: dict) -> Measurement:
+        m = measure(_with_fixed(d), bp, teaching_minutes=ctx.teaching_minutes)
+        if not fixed_sections:
+            return m
+        return replace(
+            m, thin_sections=[k for k in m.thin_sections if k not in fixed_sections],
+        )
+
+    m = _measured(lesson)
     passes = 0
     while m.needs_deepening and passes < DEEPEN_MAX_PASSES:
         passes += 1
@@ -538,7 +552,7 @@ def draft_lesson(
         )
         if invalid_citations(deeper, library, bp):
             deeper = strip_invalid_citations(deeper, library, bp)
-        deeper_m = measure(_with_fixed(deeper), bp, teaching_minutes=ctx.teaching_minutes)
+        deeper_m = _measured(deeper)
         # Keep the LONGER draft. A deepen pass that came back shorter has not
         # deepened anything, and silently accepting it would make the tutor's
         # "Deepen" button able to shrink his lesson.
@@ -661,8 +675,14 @@ def persist_lesson(
 
     bp = blueprint if blueprint is not None else _bp.default_blueprint()
 
+    # SEGMENTS ONLY. The stray sweep below deletes non-custom rows this function
+    # cannot address by key — which is right for a segment and catastrophic for a
+    # child of any other kind (an item, an attachment): it has nothing to do with
+    # the blueprint, and a redraft would silently eat it.
     children = db.scalars(
-        select(Block).where(Block.parent_id == lesson_block.id).order_by(Block.order)
+        select(Block)
+        .where(Block.parent_id == lesson_block.id, Block.kind == "segment")
+        .order_by(Block.order)
     ).all()
     customs = [b for b in children if (b.meta or {}).get("custom")]
     by_key: dict[str, Block] = {}
