@@ -111,11 +111,12 @@ def test_tool_schemas_now_exposes_both_read_and_mutation_tools_to_the_model():
     schemas = agent_loop._tool_schemas()
     names = {s["function"]["name"] for s in schemas}
     assert names == set(TOOLS.keys())
-    # 8 read (5 Plan 5 T2 + find_lesson, Plan 11 T2/C5 + search_concepts, C8 +
-    # propose_curriculum_revision, Unit D) + 9 mutation (4 Plan 5 T3 +
-    # 4 Plan 10 T3 + apply_curriculum_revision, Unit D) — the desktop build
-    # removed the 1 student read + 6 student/note mutations.
-    assert len(schemas) == 17
+    # 9 read (5 Plan 5 T2 + find_lesson, Plan 11 T2/C5 + search_concepts, C8 +
+    # propose_curriculum_revision, Unit D + get_lesson, the structure-only
+    # get_curriculum split) + 9 mutation (4 Plan 5 T3 + 4 Plan 10 T3 +
+    # apply_curriculum_revision, Unit D) — the desktop build removed the
+    # 1 student read + 6 student/note mutations.
+    assert len(schemas) == 18
 
 
 # ---------------------------------------------------------------------------
