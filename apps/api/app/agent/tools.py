@@ -334,29 +334,22 @@ def _list_artifacts(db, *, block_id: str | None = None, kind: str | None = None)
 
 
 def _block_tree(block: Block) -> dict:
-    """Recursive content-tree summary for `get_curriculum` — same shape
-    `routers/curriculum.py`'s `block_to_tree` returns, minus `order`/
-    `language`/`plane`/`student_id`/`meta`/`artifacts` (bookkeeping and
-    board-rendering payload the chat model has no use for; `order` in
-    particular is redundant once children are already returned pre-sorted,
-    and `student_id` is the Block column that outlived the removed students
-    UI, not something the model can act on). Deliberately NOT imported from
-    that module — see
-    this module's docstring for why. Faithfully mirrors `block_to_tree`'s
-    one quirk too: no `plane` filter on `block.children`, so a curriculum
-    that has already been segmented would show its delivery-plane child
-    alongside its content children here exactly as `GET /curricula/{id}`
-    does today — not "fixing" a pre-existing characteristic of the route
-    this tool mirrors while implementing an unrelated task.
-    """
-    return {
-        "id": block.id,
-        "kind": block.kind,
-        "title": block.title,
-        "body": block.body,
-        "est_minutes": block.est_minutes,
-        "children": [_block_tree(c) for c in sorted(block.children, key=lambda b: b.order)],
-    }
+    """Recursive STRUCTURE for `get_curriculum`: ids, kinds, titles, objectives,
+    section keys — no bodies below the course. A 25-lesson Greek course is
+    ~490K chars of prose; sending it as one tool result is what overflowed the
+    model on 2026-09-11. Prose is fetched per lesson with `get_lesson`."""
+    meta = block.meta or {}
+    node: dict = {"id": block.id, "kind": block.kind, "title": block.title}
+    if block.kind in ("course",) and block.body:
+        node["body"] = block.body
+    if meta.get("objective"):
+        node["objective"] = meta["objective"]
+    if block.kind == "segment" and meta.get("section"):
+        node["section"] = meta["section"]
+    if block.kind == "lesson" and meta.get("draft_status"):
+        node["draft_status"] = meta["draft_status"]
+    node["children"] = [_block_tree(c) for c in sorted(block.children, key=lambda b: b.order)]
+    return node
 
 
 def _get_curriculum(db, *, root_id: str) -> dict:
@@ -367,6 +360,40 @@ def _get_curriculum(db, *, root_id: str) -> dict:
     if block is None:
         return {"error": "curriculum not found"}
     return _block_tree(block)
+
+
+def _get_lesson(db, *, lesson_id: str) -> dict:
+    """ONE lesson with its section bodies — the only tool that returns prose,
+    bounded by construction (one lesson, and `loop.TOOL_RESULT_MAX_CHARS`)."""
+    parsed = _parse_uuid(lesson_id)
+    if parsed is None:
+        return {"error": f"invalid lesson_id: {lesson_id!r}"}
+    lesson = db.get(Block, parsed)
+    if lesson is None or lesson.kind != "lesson":
+        return {"error": f"no lesson with id {lesson_id}"}
+    module = db.get(Block, lesson.parent_id) if lesson.parent_id else None
+    segments = db.scalars(
+        select(Block)
+        .where(Block.parent_id == lesson.id, Block.kind == "segment")
+        .order_by(Block.order)
+    ).all()
+    meta = lesson.meta or {}
+    return {
+        "id": lesson.id,
+        "title": lesson.title,
+        "objective": meta.get("objective") or lesson.body or "",
+        "module_title": module.title if module else None,
+        "sections": [
+            {
+                "id": s.id,
+                "section": (s.meta or {}).get("section"),
+                "title": s.title,
+                "body": s.body or "",
+                "tutor_edited": bool((s.meta or {}).get("tutor_edited")),
+            }
+            for s in segments
+        ],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -945,10 +972,10 @@ TOOLS: dict[str, ToolEntry] = {
             "function": {
                 "name": "get_curriculum",
                 "description": (
-                    "Get the full content tree (course -> modules -> lessons -> "
-                    "segments, with titles/objectives/bodies) for one curriculum "
-                    "by its root id. Call list_curricula first if you don't "
-                    "already have the id."
+                    "Get the STRUCTURE of one curriculum (course -> modules -> "
+                    "lessons -> section titles) by its root id — ids, titles, "
+                    "objectives, no prose. Use get_lesson for a lesson's text. "
+                    "Call list_curricula first if you don't already have the id."
                 ),
                 "parameters": {
                     "type": "object",
@@ -963,6 +990,28 @@ TOOLS: dict[str, ToolEntry] = {
             },
         },
         fn=_get_curriculum,
+        kind="read",
+    ),
+    "get_lesson": ToolEntry(
+        schema={
+            "type": "function",
+            "function": {
+                "name": "get_lesson",
+                "description": (
+                    "Get ONE lesson's full text, section by section (theory, "
+                    "exercises, ...), with a flag on sections the tutor edited by "
+                    "hand. Use the lesson id from get_curriculum or find_lesson."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "lesson_id": {"type": "string", "description": "the lesson block id (UUID)"},
+                    },
+                    "required": ["lesson_id"],
+                },
+            },
+        },
+        fn=_get_lesson,
         kind="read",
     ),
     "propose_curriculum_revision": ToolEntry(

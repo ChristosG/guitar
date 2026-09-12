@@ -46,15 +46,16 @@ def test_registry_has_exactly_the_read_tools_registered_so_far():
     """`TOOLS` is a SHARED registry dict (Plan 5 Task 3 adds "mutation" entries
     into this same dict — see `test_agent_hitl.py`'s own registry test for
     those), so this only asserts the READ subset: the original six (Plan 5 Task
-    2), `find_lesson` (Plan 11 Task 2, C5), `search_concepts` (C8), and
-    `propose_curriculum_revision` (Unit D — the read-only revision planner) —
-    same registry, same "kind" convention, so this set grows rather than a new
-    one replacing it.
+    2), `find_lesson` (Plan 11 Task 2, C5), `search_concepts` (C8),
+    `propose_curriculum_revision` (Unit D — the read-only revision planner),
+    and `get_lesson` (Task 0.2 — `get_curriculum` went structure-only, so a
+    lesson's prose is fetched separately) — same registry, same "kind"
+    convention, so this set grows rather than a new one replacing it.
     """
     read_names = {name for name, entry in TOOLS.items() if entry.kind == "read"}
     assert read_names == {
         "search_knowledge", "explain_concept", "search_concepts",
-        "list_curricula", "list_artifacts", "get_curriculum",
+        "list_curricula", "list_artifacts", "get_curriculum", "get_lesson",
         "find_lesson", "propose_curriculum_revision",
     }
     for name in read_names:
@@ -131,7 +132,10 @@ def test_list_artifacts_invalid_block_id_returns_graceful_error_not_a_crash():
 def test_get_curriculum_returns_nested_tree_sorted_by_order():
     db = SessionLocal()
     try:
-        root = Block(kind="course", title="Course", language="en", is_template=True)
+        root = Block(
+            kind="course", title="Course", language="en", is_template=True,
+            body="course intro",
+        )
         db.add(root)
         db.commit()
         # inserted out of `order` sequence to genuinely exercise the sort,
@@ -154,8 +158,10 @@ def test_get_curriculum_returns_nested_tree_sorted_by_order():
         db2.close()
 
     assert tree["title"] == "Course"
+    # Task 0.2: the course keeps its body; everything below is structure-only.
+    assert tree["body"] == "course intro"
     assert [c["title"] for c in tree["children"]] == ["First", "Second"]
-    assert tree["children"][0]["body"] == "do this"
+    assert "body" not in tree["children"][0]
 
 
 def test_get_curriculum_unknown_root_id_returns_graceful_error_not_a_crash():
