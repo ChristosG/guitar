@@ -373,3 +373,45 @@ def test_citations_attach_to_the_last_assistant_row_even_when_tools_follow(db_se
         assert rows[0].citations == cites
     finally:
         db.close()
+
+
+from app.agent.transcript import window_wire, MAX_WIRE_CHARS
+
+
+def _char_turn(i: int, tool_chars: int = 0) -> list[dict]:
+    msgs = [{"role": "user", "content": f"ερώτηση {i}"}]
+    if tool_chars:
+        msgs.append({"role": "assistant", "content": "", "tool_calls": [
+            {"id": f"c{i}", "type": "function",
+             "function": {"name": "get_lesson", "arguments": "{}"}}]})
+        msgs.append({"role": "tool", "tool_call_id": f"c{i}", "content": "α" * tool_chars})
+    msgs.append({"role": "assistant", "content": f"απάντηση {i}"})
+    return msgs
+
+
+def test_window_drops_old_turns_when_chars_exceed_budget():
+    wire = [{"role": "system", "content": "sys"}]
+    for i in range(5):
+        wire += _char_turn(i, tool_chars=100_000)
+    out = window_wire(wire, max_chars=250_000)
+    assert out[0]["role"] == "system"
+    assert out[1]["role"] == "user"                      # clean left edge
+    assert sum(len(m.get("content") or "") for m in out) <= 250_000 + len("sys")
+    assert out[-1]["content"] == "απάντηση 4"          # newest kept
+
+
+def test_window_never_splits_a_tool_call_from_its_result():
+    wire = [{"role": "system", "content": "sys"}] + _char_turn(0, tool_chars=10) + _char_turn(1, tool_chars=200_000)
+    out = window_wire(wire, max_chars=150_000)
+    ids_called = {c["id"] for m in out if m.get("tool_calls") for c in m["tool_calls"]}
+    ids_answered = {m["tool_call_id"] for m in out if m.get("role") == "tool"}
+    assert ids_called == ids_answered
+
+
+def test_window_keeps_the_last_user_turn_even_if_alone_over_budget():
+    wire = [{"role": "user", "content": "α" * 300_000}]
+    assert window_wire(wire, max_chars=10) == wire
+
+
+def test_default_budget_is_240k():
+    assert MAX_WIRE_CHARS == 240_000

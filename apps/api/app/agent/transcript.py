@@ -29,24 +29,51 @@ from app.models.chat import Message
 # history as the poison.
 MAX_WIRE_MESSAGES = 60
 
+# A CHARACTER budget beside the message cap. 60 messages was the wrong unit:
+# one 2.3M-char tool result (2026-09-11) fit the cap and poisoned every later
+# turn until it aged out. 240K chars ≈ 60-80K tokens of Greek — comfortably
+# inside every provider window with the cached prefix on top.
+MAX_WIRE_CHARS = 240_000
 
-def window_wire(wire: list[dict], limit: int = MAX_WIRE_MESSAGES) -> list[dict]:
-    """The transcript's most recent `limit`-ish messages, starting at a clean
-    USER turn. Starting anywhere else can orphan a tool result from the
-    assistant tool_call it answers — `anthropic_wire.py` raises
-    `DanglingToolUseError` on exactly that — so the window's left edge advances
-    to the next plain user message. Old turns fall out of the model's context;
-    they remain in the DB and the UI untouched."""
-    if len(wire) <= limit:
-        return wire
-    start = len(wire) - limit
-    while start < len(wire) and wire[start].get("role") != "user":
+
+def window_wire(
+    wire: list[dict], limit: int = MAX_WIRE_MESSAGES, max_chars: int = MAX_WIRE_CHARS,
+) -> list[dict]:
+    """The transcript's most recent messages, starting at a clean USER turn,
+    within BOTH `limit` messages and `max_chars` characters. Starting anywhere
+    else can orphan a tool result from the assistant tool_call it answers —
+    `anthropic_wire.py` raises `DanglingToolUseError` on exactly that — so the
+    window's left edge advances to the next plain user message. A leading
+    system message is always kept and never counted. The newest user turn is
+    always kept, even alone over budget (better an oversized prompt the
+    provider can reject loudly than an empty one). Old turns fall out of the
+    model's context; they remain in the DB and the UI untouched."""
+    system: list[dict] = []
+    body = wire
+    if body and body[0].get("role") == "system":
+        system, body = [body[0]], body[1:]
+
+    # Left edge by message count (the old rule).
+    start = max(0, len(body) - limit)
+    # Left edge by characters: walk newest -> oldest accumulating content.
+    total = 0
+    char_start = len(body)
+    for i in range(len(body) - 1, -1, -1):
+        total += len(body[i].get("content") or "")
+        if total > max_chars:
+            break
+        char_start = i
+    start = max(start, char_start)
+    # Snap to a clean user turn (never inside a tool_call/result pair).
+    while start < len(body) and body[start].get("role") != "user":
         start += 1
-    if start >= len(wire):
-        # Degenerate transcript (no user row in the tail at all) — better the
-        # full history than an empty prompt.
-        return wire
-    return wire[start:]
+    if start >= len(body):
+        # Degenerate tail (no user row after the cut): keep the LAST user turn
+        # and everything after it, whatever its size.
+        last_user = next((i for i in range(len(body) - 1, -1, -1)
+                          if body[i].get("role") == "user"), None)
+        start = last_user if last_user is not None else 0
+    return system + body[start:]
 
 
 def messages_to_wire(rows: list[Message]) -> list[dict]:
