@@ -271,3 +271,70 @@ def test_the_lesson_planner_prompt_is_registered(tree):
     assert {s.id for s in entry.slices} == {extend_mod.LESSON_PLAN_SLICE_ID}
     rendered = registry.render("curriculum.extend.lesson", "el")
     assert "design ONE new lesson" in rendered.text
+
+
+# ---------------------------------------------------------------------------
+# Task 4.3 Fix B — THE CHAINED DRAFT'S GROUNDING DEPENDS ON WHO IS PAYING
+#
+# Live, 2026-09-12: the planning call took 26s, and the `curriculum_draft`
+# chained behind it went in with the full-library prefix — 277,165 chars — and
+# died on the bridge's 1200s cap: «claude -p exceeded 1200s», lesson `failed`.
+# The same call took 617s at 07:04 UTC, so under the subscription CLI it is a
+# coin flip. On the real API the prefix is CACHED and the same draft is 2-4
+# minutes, so the full library is exactly right there and only there.
+# ---------------------------------------------------------------------------
+
+def _chained_params(module, monkeypatch) -> dict:
+    """Run the route with the chain stubbed out, and hand back the params the
+    `curriculum_draft` row was actually created with."""
+    from app.curriculum.edit import _add_lesson
+
+    def fake_generate_lesson(db_, module_id, *, brief, title, after):
+        lesson = _add_lesson(db_, module_id, title=title or "Το μπράτσο",
+                             objective="Τι κάνει το μπράτσο.", after=after)
+        lesson.meta = {**(lesson.meta or {}), "brief": brief}
+        db_.commit()
+        db_.refresh(lesson)
+        return lesson
+
+    recorded: dict = {}
+
+    def fake_run_draft(draft_job_id):
+        s = SessionLocal()
+        try:
+            recorded.update(s.get(GenerationJob, draft_job_id).params)
+        finally:
+            s.close()
+
+    monkeypatch.setattr(job_mod, "generate_lesson", fake_generate_lesson)
+    monkeypatch.setattr(job_mod, "run_curriculum_draft_job", fake_run_draft)
+
+    r = client.post(f"/blocks/{module.id}/lessons/generate", json={"brief": BRIEF})
+    assert r.status_code == 202
+    return recorded
+
+
+def test_the_chained_draft_grounds_by_retrieval_on_the_subscription_cli(tree, monkeypatch):
+    """`claude_cli` re-reads the WHOLE library on every call at full price and
+    dies at the bridge's 1200s cap — which is what killed the tutor's first
+    brief-driven lesson. So the chain asks for per-lesson retrieval instead."""
+    db, course, module, other, l1, l2, foreign = tree
+    monkeypatch.setattr("app.config.settings.llm_provider", "claude_cli")
+
+    recorded = _chained_params(module, monkeypatch)
+
+    assert recorded["grounding"] == "retrieval"
+    assert recorded["root_id"] == str(course.id)
+    assert len(recorded["lesson_ids"]) == 1          # still narrowed to this lesson
+
+
+def test_the_chained_draft_keeps_the_full_library_on_the_api(tree, monkeypatch):
+    """On `claude` the prefix is cached, so the full library costs one read and
+    is strictly better material. Absence of the key is the signal — the draft
+    job's own router does the rest."""
+    db, course, module, other, l1, l2, foreign = tree
+    monkeypatch.setattr("app.config.settings.llm_provider", "claude")
+
+    recorded = _chained_params(module, monkeypatch)
+
+    assert "grounding" not in recorded
