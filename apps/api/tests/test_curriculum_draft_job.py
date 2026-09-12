@@ -400,8 +400,9 @@ def test_an_interrupted_rewrite_with_existing_text_goes_back_to_ready_not_queued
     db.expire_all()
     rewriting_after = db.get(Block, rewriting.id)
     assert rewriting_after.meta["draft_status"] == "ready"
-    assert "interrupted by a restart" in rewriting_after.meta["error"]
-    assert "press Resume" not in rewriting_after.meta["error"]
+    # NO error line on the finished lesson: its text survived the restart, and
+    # `meta.error` is rendered as a red sentence that nothing would ever clear.
+    assert rewriting_after.meta["error"] is None
 
     fresh_after = db.get(Block, drafting_fresh.id)
     assert fresh_after.meta["draft_status"] == "queued"

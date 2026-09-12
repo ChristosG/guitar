@@ -1615,7 +1615,7 @@ _ENTRIES = [
         id="chat.suggestions",
         flow="chat",
         kind="prompt",
-        source_ref="app/routers/chat.py:308",
+        source_ref="app/routers/chat.py:339",
         title_el="Οι προτάσεις «επόμενης κίνησης»",
         what_it_does_el=(
             "Αφού ο βοηθός απαντήσει, η εφαρμογή κάνει ΜΙΑ ξεχωριστή, γρήγορη "
@@ -2129,7 +2129,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: build_lesson_messages,
         build=_build_lesson_deepen,
-        call_sites=("curriculum/draft.py:653",),
+        call_sites=("curriculum/draft.py:664",),
         slices=(
             Slice(
                 id=LESSON_DEEPEN_SLICE_ID,
@@ -2483,7 +2483,7 @@ _ENTRIES = [
         when_it_runs_el="Όταν πατάς «Φτιάξε πλάνο» στο πλαίσιο AI ενός μαθήματος.",
         source_of_truth=lambda: build_plan_messages,
         build=_build_lesson_ai_plan,
-        call_sites=("curriculum/lesson_ai.py:356",),
+        call_sites=("curriculum/lesson_ai.py:375",),
         slices=(
             Slice(
                 id=LESSON_AI_PLAN_SLICE_ID,

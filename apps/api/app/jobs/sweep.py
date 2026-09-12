@@ -77,7 +77,16 @@ def sweep_interrupted_lessons(db) -> int:
         lesson.meta = {
             **(lesson.meta or {}),
             "draft_status": status,
-            "error": "interrupted by a restart" + ("" if has_text else " — press Resume"),
+            # AND THE `ready` BRANCH CARRIES NO ERROR AT ALL. The text underneath
+            # it is intact — that is the whole point of sending it to `ready` —
+            # so an "interrupted by a restart" line would paint a permanent red
+            # sentence (in English, to a Greek tutor) on a lesson with nothing
+            # wrong with it, for the rest of that lesson's life: nothing ever
+            # clears `meta.error` except the next successful draft, and a
+            # finished lesson is never drafted again. `queued` keeps its line
+            # because there it is an INSTRUCTION — the lesson really is unwritten
+            # and really does need Resume.
+            "error": None if has_text else "interrupted by a restart — press Resume",
         }
     db.commit()
     return len(stuck)

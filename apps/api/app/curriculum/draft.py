@@ -646,7 +646,18 @@ def draft_lesson(
 
     m = _measured(lesson)
     passes = 0
-    while m.needs_deepening and passes < DEEPEN_MAX_PASSES:
+    # NO THIN SECTION LEFT TO NAME MEANS NO DEEPEN PASS. The floor is aggregate
+    # (`Measurement.needs_deepening`), so a lesson can miss it while every
+    # section the model is ALLOWED to write is already over its own share —
+    # which is exactly what a kept `tutor_edited` section does: its short text
+    # is counted in the total (`_with_fixed`) but struck from `thin_sections`
+    # (`_measured`), so the whole shortfall sits in text the model cannot touch.
+    # The deepen prompt would then render `{thin}` as "all of them" and order a
+    # blanket re-expansion of sections that are all fine — a second full draft
+    # call, paid for, that can only make the lesson worse (and is kept only if
+    # it comes back longer). Nothing here can fix a shortfall in fixed text, so
+    # the honest move is not to ask.
+    while m.needs_deepening and m.thin_sections and passes < DEEPEN_MAX_PASSES:
         passes += 1
         log.info("lesson %r came back at %d words (floor %d) — deepen pass %d",
                  ctx.lesson_title, m.total_words, m.floor, passes)

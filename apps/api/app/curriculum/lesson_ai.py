@@ -328,6 +328,25 @@ def plan_lesson_change(db, lesson_id: uuid.UUID, *, instruction: str, note: str 
     Retrieval is best-effort on purpose: a course whose library is not indexed
     (or a `search` that raises) must still be plannable — the passages ground the
     rewrites, they do not authorise the plan.
+
+    THIS FUNCTION HOLDS A READ TRANSACTION ACROSS THE MODEL CALL, deliberately,
+    exactly as `revise.plan_revision` does. Every read it needs — the lesson, its
+    module and course, the sections, the tutor-edited flags, the retrieved
+    passages — happens while it builds the prompt, and the implicit SQLAlchemy
+    transaction those reads opened is still open when `guided_json` blocks for
+    the next 20-60 seconds. That is the Global Constraint's ONE exception
+    ("never hold a connection across a model call"), and it is allowed here for
+    the same reason it is allowed there: this planner WRITES NOTHING. There is
+    no lock to sit on, no row anyone else could be waiting for, and no work to
+    lose — the whole transaction is discardable by construction.
+
+    The exception is bounded by the caller, not left open-ended: the `lesson_ai`
+    job wrapper (`app/jobs/lesson_ai.py`) `db.rollback()`s the INSTANT this
+    returns and re-`db.get`s the job row before writing `progress` to it, so the
+    read transaction dies with the model call rather than living on into the
+    wrapper's own writes. `apply_lesson_change` below is the other half of that
+    discipline and takes the opposite route — it closes the connection before
+    its model call, because it does write.
     """
     lesson, module, course = _lesson_or_raise(db, lesson_id)
     meta = course.meta or {}

@@ -248,6 +248,15 @@ def test_route_422_when_after_is_not_a_sibling(tree):
     r = client.post(f"/blocks/{module.id}/lessons/generate", json={"brief": "λίγα"})
     assert r.status_code == 422
 
+    # ...and so is one too LARGE to be a brief: it goes into the planning prompt
+    # verbatim, so an unbounded field is an unbounded (paid-for) prompt. The
+    # dialog shows a counter so he never meets this 422 by accident.
+    r = client.post(f"/blocks/{module.id}/lessons/generate", json={"brief": "α" * 20_001})
+    assert r.status_code == 422
+    r = client.post(f"/blocks/{module.id}/lessons/generate",
+                    json={"brief": BRIEF, "title": "τ" * 201})
+    assert r.status_code == 422
+
     # And the route is about MODULES.
     r = client.post(f"/blocks/{l1.id}/lessons/generate", json={"brief": BRIEF})
     assert r.status_code == 404

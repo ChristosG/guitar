@@ -160,9 +160,16 @@ class LessonGenerateRequest(BaseModel):
     be, in his own words — required, and long enough to actually steer (a
     three-letter brief steers nothing and costs a full planning call). `title`
     is his, and wins over the model's; `after` places the lesson among its
-    siblings."""
-    brief: str = Field(min_length=10)
-    title: str | None = None
+    siblings.
+
+    BOTH CAPS ARE REAL LIMITS, not paranoia: `brief` is pasted text (a whole
+    syllabus, a chat log) and goes into the planning prompt verbatim, so an
+    unbounded field is an unbounded prompt — a 2MB paste would be paid for,
+    then rejected by the model with an English error. 20,000 characters is far
+    more than any brief needs and small enough to never be that. `title` is one
+    line on a board row."""
+    brief: str = Field(min_length=10, max_length=20000)
+    title: str | None = Field(default=None, max_length=200)
     after: UUID | None = None
 
 

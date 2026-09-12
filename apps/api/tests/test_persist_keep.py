@@ -193,6 +193,60 @@ def test_a_fixed_section_is_never_reported_thin(monkeypatch):
     assert "warm_up" in m.thin_sections, "the sections the model DID write are still measured"
 
 
+def test_a_shortfall_that_lives_only_in_a_fixed_section_skips_the_deepen_pass(monkeypatch):
+    """Nothing thin left to name => no deepen pass at all, not a blanket one.
+
+    The floor is AGGREGATE, so a lesson can miss it while every section the model
+    is allowed to write is already over its own share — which is what a kept
+    `tutor_edited` section does: its short text counts toward the total but is
+    struck from `thin_sections`. The deepen prompt renders an empty `{thin}` as
+    "all of them", so the old loop answered "the tutor's theory is 300 words
+    short" with a full second draft call ordering every OTHER section to expand.
+    A paid-for call that cannot fix the shortfall and can only make the rest
+    worse. So: don't ask."""
+    bp = bp_mod.default_blueprint()
+    keys = bp_mod.section_keys(bp)
+    weights = bp_mod.section_weights(bp)
+    target = 2750  # target_words(50) — the ctx below
+
+    # Each MODEL-WRITTEN section comes back just over its own thin threshold
+    # (`depth._SECTION_THIN_RATIO` x weight x target), so none of them is thin.
+    # They still sum to ~1,240 words against a 2,200 floor: the lesson genuinely
+    # needs deepening, and the only place the words are missing is fixed theory.
+    words = {k: int(0.6 * weights[k] * target) + 2 for k in keys if k != "theory"}
+
+    calls = []
+
+    class _EvenProvider:
+        def guided_json(self, messages, schema, *, temperature=0.2, role="spec", max_tokens=None):
+            calls.append(role)
+            out = {"title": "Μπράτσο", "summary": "μια περίληψη"}
+            for key, n in words.items():
+                out[key] = {"body": " ".join(["λέξη"] * n), "citations": []}
+                if key in ("exercises", "qa_prompts"):
+                    out[key]["items"] = []
+            return out
+
+        def count_tokens(self, text: str) -> int:
+            return len(text) // 3 + 1
+
+    monkeypatch.setattr(draft_mod, "get_provider", lambda: _EvenProvider())
+
+    ctx = LessonContext(lesson_title="Μπράτσο", lesson_objective="ο", module_title="Ξύλα",
+                        module_objective="", course_title="Ήχος", tier="general_knowledge",
+                        position="lesson 1 of 1 in module 1 of 1", minutes=50,
+                        teaching_minutes=50, target_words=2750, floor_words=2200)
+    _lesson, m = draft_mod.draft_lesson(
+        None, ctx=ctx, library=_empty_library(), language="el", blueprint=bp,
+        fixed_sections={"theory": "Ο σφένδαμος είναι σκληρός."},
+        exclude_sections={"theory"},
+    )
+
+    assert m.needs_deepening, "the setup must actually miss the floor"
+    assert m.thin_sections == [], "no section the model may write is thin"
+    assert calls == ["draft"], "ONE call: the deepen pass was skipped, not sprayed"
+
+
 def test_keeping_a_section_that_has_no_row_is_a_silent_no_op(drafted_lesson):
     """`keep={"theory"}` on a lesson with no theory row creates nothing and leaves
     no hole in the order — the model was not asked for it either, so there is
