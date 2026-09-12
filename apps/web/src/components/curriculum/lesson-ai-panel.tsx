@@ -5,6 +5,7 @@ import { useTranslations } from "next-intl";
 import { Loader2, Maximize2, Minimize2, Pencil, Sparkles, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { LessonPlanCard } from "@/components/curriculum/lesson-plan-card";
 import { LessonWhatChanged } from "@/components/curriculum/lesson-what-changed";
 import { WhatChanged } from "@/components/curriculum/what-changed";
 import { useLessonAiScope } from "@/components/curriculum/lesson-ai-scope";
@@ -85,6 +86,12 @@ export function LessonAiPanel({ tree, onApplied }: LessonAiPanelProps) {
   const [phase, setPhase] = useState<Phase>("idle");
   const [plan, setPlan] = useState<LessonPlan | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // A NEW PLAN IS A NEW CARD. The card holds the tutor's ticks, briefs and
+  // note in its own state; a re-plan must not leave the previous plan's ticks
+  // sitting on top of the new plan's rows. Bumping this counter into the
+  // card's `key` remounts it — React's documented way to reset all state when
+  // a prop changes, and the reason the card needs no reset effect of its own.
+  const [planKey, setPlanKey] = useState(0);
 
   const lessonId = scope?.lesson?.id ?? null;
   const lessonNode = useMemo(
@@ -96,6 +103,23 @@ export function LessonAiPanel({ tree, onApplied }: LessonAiPanelProps) {
     [lessonNode],
   );
   const edited = useMemo(() => segments.filter((s) => s.meta?.tutor_edited), [segments]);
+
+  // WHICH LESSON IS THE PANEL ON *NOW*. A plan job runs for minutes, and
+  // nothing stops him closing the panel and opening another lesson while it
+  // does. Without this, the old job's answer would land on the new lesson —
+  // its title above someone else's plan, and an apply that rewrites the wrong
+  // sections. Every handler captures the id it started on and refuses to write
+  // state once this ref has moved on. A ref and not state: it must be readable
+  // by an async closure without re-running it.
+  //
+  // Kept in step INSIDE the reset block below, not in an effect. A PASSIVE
+  // EFFECT IS TOO LATE: React flushes those in a scheduled task after paint,
+  // so between the commit that switched the panel to lesson B and the effect
+  // that caught the ref up there are milliseconds in which a poll resolving
+  // for lesson A still reads `A`, passes the guard, and writes A's plan into
+  // the panel now titled B — the exact confusion this ref exists to prevent.
+  // The guard has to move in the same breath as the panel.
+  const lessonIdRef = useRef(lessonId);
 
   // A PANEL POINTED AT A NEW LESSON IS A NEW PANEL. Without this, opening
   // «Μπράτσο» after «Καβαλάρης» would show the second lesson's title above the
@@ -112,8 +136,20 @@ export function LessonAiPanel({ tree, onApplied }: LessonAiPanelProps) {
   const [lastLessonId, setLastLessonId] = useState(lessonId);
   if (lessonId !== lastLessonId) {
     setLastLessonId(lessonId);
+    // `react-hooks/refs` forbids writing a ref during render because a ref
+    // written from render can make a component miss an update. This write
+    // cannot: it is IDEMPOTENT and derived purely from the current props, it
+    // is never read during render (only inside async job handlers), and
+    // nothing renders from it. If React ever throws this render away, the next
+    // one writes the same value again — and the worst a briefly-ahead guard
+    // can do is DISCARD a landing job's result, which is the safe direction.
+    // The alternative (an effect) is not safe in the other direction: see the
+    // note on the ref above.
+    // eslint-disable-next-line react-hooks/refs -- see above; write is idempotent, never read in render
+    lessonIdRef.current = lessonId;
     setInstruction("");
     setPlan(null);
+    setPlanKey(0);
     setPhase("idle");
     setError(null);
   }
@@ -143,18 +179,6 @@ export function LessonAiPanel({ tree, onApplied }: LessonAiPanelProps) {
     setOpen(true);
   }, [scope?.openRequest]);
 
-  // WHICH LESSON IS THE PANEL ON *NOW*. A plan job runs for minutes, and
-  // nothing stops him closing the panel and opening another lesson while it
-  // does. Without this, the old job's answer would land on the new lesson —
-  // its title above someone else's plan, and an apply that rewrites the wrong
-  // sections. Every handler captures the id it started on and refuses to write
-  // state once this ref has moved on. A ref and not state: it must be readable
-  // by an async closure without re-running it.
-  const lessonIdRef = useRef(lessonId);
-  useEffect(() => {
-    lessonIdRef.current = lessonId;
-  }, [lessonId]);
-
   /** Poll one job to a terminal status, or to the cap. */
   const waitForJob = useCallback(async (jobId: string) => {
     let job = await getJob(jobId);
@@ -175,6 +199,23 @@ export function LessonAiPanel({ tree, onApplied }: LessonAiPanelProps) {
     [t],
   );
 
+  /** A job that did not succeed — and the two very different reasons why.
+   *
+   * `failed` is a real failure: `error_kind` is the taxonomy the API maintains
+   * so the frontend can localize it, which is what `jobErrorText` does.
+   *
+   * ANYTHING ELSE means `waitForJob` hit its 300-poll cap while the job was
+   * still `running`. That is NOT a failure — the work continues server-side,
+   * only this component stopped waiting. Saying «δοκίμασε ξανά» there would be
+   * a lie AND a trap: a retry hits a 409 `lesson_busy`, because the job he was
+   * told to retry is still holding the lesson. So the panel says its own
+   * sentence: it is still working, come back in a bit. */
+  const jobFailureText = useCallback(
+    (job: { status: string; error: string | null; error_kind: string | null }) =>
+      job.status === "failed" ? jobErrorText(job, tJobErrors) : t("stillWorking"),
+    [t, tJobErrors],
+  );
+
   async function handlePlan(extraNote?: string) {
     const target = lessonId;
     if (!target) return;
@@ -185,7 +226,7 @@ export function LessonAiPanel({ tree, onApplied }: LessonAiPanelProps) {
       const job = await waitForJob(accepted.job_id);
       if (lessonIdRef.current !== target) return;
       if (job.status !== "succeeded") {
-        setError(jobErrorText(job, tJobErrors));
+        setError(jobFailureText(job));
         // Back to whatever he had: a re-plan that failed must not throw away
         // the plan he was already looking at.
         setPhase(plan ? "card" : "idle");
@@ -201,6 +242,7 @@ export function LessonAiPanel({ tree, onApplied }: LessonAiPanelProps) {
         return;
       }
       setPlan(planned);
+      setPlanKey((n) => n + 1);
       setPhase("card");
     } catch (err) {
       if (lessonIdRef.current !== target) return;
@@ -219,7 +261,7 @@ export function LessonAiPanel({ tree, onApplied }: LessonAiPanelProps) {
       const job = await waitForJob(accepted.job_id);
       if (lessonIdRef.current !== target) return;
       if (job.status !== "succeeded") {
-        setError(jobErrorText(job, tJobErrors));
+        setError(jobFailureText(job));
         setPhase("card");
         return;
       }
@@ -318,6 +360,9 @@ export function LessonAiPanel({ tree, onApplied }: LessonAiPanelProps) {
             back empty. */}
         {phase !== "done" && (
           <div className="flex flex-col gap-2">
+            {/* The chips are shortcuts, not the only way in — saying so keeps
+                the empty textarea underneath from reading as the hard part. */}
+            <p className="text-xs text-muted-foreground">{t("chipsHeading")}</p>
             <div className="flex flex-wrap gap-1.5">
               {/* Offered ONLY when something was hand-edited — otherwise it
                   would ask the model to propagate changes that do not exist,
@@ -382,12 +427,21 @@ export function LessonAiPanel({ tree, onApplied }: LessonAiPanelProps) {
           </p>
         )}
 
-        {phase === "card" && plan && (
+        {/* MOUNTED THROUGH THE WAIT, not just in the `card` phase. His ticks,
+            his briefs and his note live inside this component, so unmounting
+            it while an apply runs would throw all three away — and an apply
+            that FAILS comes straight back here, where "try again" has to mean
+            pressing the same button, not rebuilding the plan by hand. A
+            re-plan keeps it on screen too, under the status line, so he is
+            never left staring at an empty panel. The `key` is what resets it:
+            a genuinely new plan, and nothing else. */}
+        {plan && phase !== "idle" && phase !== "done" && (
           <LessonPlanCard
+            key={planKey}
             plan={plan}
             onReplan={(note) => void handlePlan(note)}
             onApply={(picks, note) => void handleApply(picks, note)}
-            busy={false}
+            busy={busy}
           />
         )}
 
@@ -481,30 +535,6 @@ function EditedChip({ segment }: { segment: BlockNode }) {
         after={segment.body ?? ""}
       />
     </>
-  );
-}
-
-interface LessonPlanCardProps {
-  plan: LessonPlan;
-  /** «Δεν μου αρέσει, ξανακάνε το» — replans with an extra note appended to
-   * the original instruction. */
-  onReplan: (note: string) => void;
-  /** The ticked sections, plus whatever he added in the card's note box. */
-  onApply: (picks: { section: string; brief: string }[], note: string) => void;
-  busy: boolean;
-}
-
-/** PLACEHOLDER — Task 2.6 replaces the body of this component with the real
- * per-section card (tick boxes, editable briefs, the impact line, the dropped
- * list). Its PROPS are already the ones that card takes, and the panel already
- * passes working handlers into them, so 2.6 is a body swap and not a rewiring
- * of the flow. What it renders today is the one line the tutor most needs from
- * a plan — the planner's own summary. */
-function LessonPlanCard({ plan }: LessonPlanCardProps) {
-  return (
-    <div data-testid="lesson-plan-card" className="rounded-lg border border-border p-3 text-sm">
-      {plan.summary}
-    </div>
   );
 }
 

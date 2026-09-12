@@ -390,9 +390,20 @@
       "again": "Another change",
       "error": "Something went wrong — try again.",
       "busy": "This lesson is already being worked on — wait for it to finish.",
+      "stillWorking": "The AI is still working — check back in a moment.",
       "close": "Close",
       "expand": "Expand to full screen",
-      "collapse": "Collapse to side panel"
+      "collapse": "Collapse to side panel",
+      "card": {
+        "yours": "yours",
+        "briefPlaceholder": "What exactly should change here?",
+        "impact": "{count, plural, =0 {No section will be rewritten} one {# section will be rewritten} other {# sections will be rewritten}} — the rest stay as they are.",
+        "notePlaceholder": "Anything else for the AI? (optional)",
+        "replan": "Make another plan",
+        "apply": "Apply",
+        "nothingTicked": "You haven't picked any sections.",
+        "dropped": "{count, plural, one {# suggestion was ignored} other {# suggestions were ignored}} by the safety check."
+      }
     }
   },
   "library": {
