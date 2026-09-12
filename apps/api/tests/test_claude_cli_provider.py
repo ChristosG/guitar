@@ -167,6 +167,22 @@ def test_the_compile_role_gets_a_whole_book_timeout_not_a_chat_one(bridge):
     )
 
 
+def test_the_draft_role_gets_2400s_because_617s_was_only_typical(bridge):
+    """A full-library lesson draft under `claude -p` re-reads the whole prefix on
+    every call — there is no prompt cache — and the time is VARIABLE, not slow:
+    617s for a 277K-char draft at 07:04 on 2026-09-12, and the same call past
+    1200s at 12:17, which killed the tutor's lesson with «claude -p exceeded
+    1200s». 2400s is headroom for that variance; a genuine hang still dies
+    there, it does not hang forever."""
+    sent, reply = bridge
+    reply.update({"ok": True, "structured": {"title": "Το σχήμα C"}})
+
+    _provider().guided_json([{"role": "user", "content": "the whole library"}],
+                            {"type": "object"}, role="draft")
+
+    assert sent["body"]["timeout_s"] == 2400
+
+
 def test_a_non_compile_guided_json_still_fails_fast_at_600s(bridge):
     """The long timeout is SCOPED to the compile path. A stuck spec/chat-shaped
     structured call must still die at the default 600s, not inherit the book-length

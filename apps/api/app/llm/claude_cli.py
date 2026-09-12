@@ -149,10 +149,19 @@ _GUIDED_TIMEOUT_S: dict[str, float] = {
     # and far worse when a "resume" stacks a second job -> ~4 concurrent). Under
     # that pressure `claude -p` crawled past the 600s default and the app gave up
     # with a ReadTimeout even though the model had actually finished — the bridge
-    # logged a Broken pipe writing the late response. 1200s covers the throttled
-    # case; a genuine hang still dies here. The real cure is the API key (no
-    # subscription throttle, true parallelism) — this is the claude -p stopgap.
-    "draft": 1200.0,
+    # logged a Broken pipe writing the late response.
+    #
+    # 1200s was not enough either, because the spread is what bites, not the mean:
+    # a 277,165-char full-library draft took 617s at 07:04 on 2026-09-12 and the
+    # SAME call blew through 1200s at 12:17 — «claude -p exceeded 1200s», the
+    # tutor's lesson `failed` with nothing on the board but a red pill. There is no
+    # prompt cache behind `claude -p`, so every one of those calls re-reads the
+    # whole library from scratch. 2400s is ~4x the typical case: headroom for the
+    # variance without hiding a hang forever — a genuinely stuck call still dies
+    # here and the bridge classifies it `timeout`. The real cure is the API key (no
+    # subscription throttle, a cached prefix, true parallelism) — this is the
+    # claude -p stopgap.
+    "draft": 2400.0,
     # The outline (`role="plan"`) reads the SAME cached library prefix a draft
     # does — up to a 300K-token whole-library read, or the canon block — and then
     # writes a 20-lesson outline. On 2026-07-20 a real outline died at exactly the
