@@ -428,6 +428,12 @@ def apply_lesson_change(db, lesson_id: uuid.UUID, *, instruction: str, note: str
     shape = meta.get("shape") or {}
     minutes_per_lesson = shape.get("minutes_per_lesson") or DEFAULT_MINUTES_PER_LESSON
     lesson_meta = lesson.meta or {}
+    # A lesson born from «Προσθήκη μαθήματος» carries the tutor's own brief for
+    # it (`meta.brief`, Task 3.3). It is what the lesson is FOR, so every draft
+    # of it — including this panel's — has to see it; dropped here, an apply
+    # would quietly rewrite the lesson without the sentence that asked for it.
+    # Read now, with everything else, because there is no session after the claim.
+    tutor_brief = lesson_meta.get("brief")
     # Exactly the four keys `_lesson_size` reads — the ONE sizing rule, shared with
     # the drafting fan-out, so an apply cannot write a lesson to a different length
     # than a redraft of the same lesson would. 50 means 50: the whole booked slot is
@@ -486,7 +492,7 @@ def apply_lesson_change(db, lesson_id: uuid.UUID, *, instruction: str, note: str
         drafted, m = draft_lesson(
             db, ctx=ctx, library=library, language=language, blueprint=bp,
             student_brief=None, course_brief=meta.get("brief"),
-            neighbours=neighbours, source_ids=source_ids,
+            neighbours=neighbours, tutor_brief=tutor_brief, source_ids=source_ids,
             prompts=prompts, revise_current=None, fixed_sections=fixed or None,
             exclude_sections=excluded, section_briefs=briefs,
         )

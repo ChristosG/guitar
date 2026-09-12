@@ -155,6 +155,17 @@ class LessonCreate(BaseModel):
     after: UUID | None = None
 
 
+class LessonGenerateRequest(BaseModel):
+    """«Προσθήκη μαθήματος» WITH a brief. `brief` is what he wants this lesson to
+    be, in his own words — required, and long enough to actually steer (a
+    three-letter brief steers nothing and costs a full planning call). `title`
+    is his, and wins over the model's; `after` places the lesson among its
+    siblings."""
+    brief: str = Field(min_length=10)
+    title: str | None = None
+    after: UUID | None = None
+
+
 class LessonFromChat(BaseModel):
     """The chat→curriculum bridge payload. `content` is the assistant answer the
     tutor is looking at, passed verbatim — the server stores it, it never goes

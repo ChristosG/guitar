@@ -15,6 +15,10 @@ at 0.1x each.
 
 Everything specific to THIS request — the existing modules, the topic, the course
 rhythm — sits in the volatile tail, after the breakpoint.
+
+THE SAME ARGUMENT, ONE LEVEL DOWN, lives at the bottom of this file: "Add a
+lesson" used to create a box titled «Νέο μάθημα». `plan_lesson_json` /
+`generate_lesson` give it the module's own lessons and the tutor's brief instead.
 """
 from __future__ import annotations
 
@@ -24,6 +28,7 @@ import uuid
 from sqlalchemy import select
 
 from app.curriculum.corpus import LibraryContext, prefix_messages
+from app.curriculum.edit import EditError, _add_lesson
 from app.curriculum.outline import (
     POLICY_GENERAL,
     TIER_GAP,
@@ -330,3 +335,199 @@ def generate_module(db, root_id: uuid.UUID, *, topic: str | None = None) -> Bloc
 
     module_json = generate_module_json(db, course=course, library=library, topic=topic)
     return materialize_module(db, course, module_json)
+
+
+# ---------------------------------------------------------------------------
+# ONE LESSON, from the tutor's own brief
+# ---------------------------------------------------------------------------
+#
+# «Προσθήκη μαθήματος» used to create a box titled «Νέο μάθημα» and hand the
+# whole job of making it fit back to the tutor — the same mistake add-module
+# made, one level down. Now he types what he wants the lesson to be, and ONE
+# planning call (the same cached library prefix) turns that into a title and an
+# objective that sit correctly among the module's existing lessons.
+#
+# The brief is NOT spent by the plan. It is stored on `meta.brief`, and
+# `draft.LESSON_TUTOR_BRIEF_BLOCK` renders it whole into the drafting call — so
+# the words he chose reach the model that actually writes the lesson, not just
+# the one that named it.
+
+LESSON_PLAN_SCHEMA_ONE: dict = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string", "description": "the lesson's title, in the course language"},
+        "objective": {"type": "string",
+                      "description": "one or two sentences: what the student can do after it"},
+        "est_minutes": {"type": "integer"},
+    },
+    "required": ["title", "objective", "est_minutes"],
+    "additionalProperties": False,
+}
+
+LESSON_PLAN_TAIL = (
+    "YOUR TASK: design ONE new lesson for an existing module — a title and a "
+    "one-to-two-sentence objective (it is drafted in full later, from the "
+    "tutor's brief below). It must fit the module's arc and must NOT repeat any "
+    "lesson the module already has.\n"
+    "\nCOURSE: {course_title}{course_brief_block}\n"
+    "\nTHE COURSE'S MODULES:\n{course_map}\n"
+    "\nTHE MODULE THIS LESSON JOINS: {module_title} — {module_objective}\n"
+    "ITS LESSONS, IN ORDER:\n{siblings}\n"
+    "\nΤΟ ΜΑΘΗΜΑ ΠΟΥ ΖΗΤΗΣΕ Ο ΚΑΘΗΓΗΤΗΣ, με τα δικά του λόγια:\n{brief}\n"
+    "{title_block}"
+    "\nSHAPE: {minutes_per_lesson} minutes, later drafted to ~{target_words} words.\n"
+    "\n{language_directive}\n"
+    "\n{style_directive}\n"
+    "\n{answer_in}"
+)
+LESSON_PLAN_SLICE_ID = "curriculum.extend.lesson"
+LESSON_PLAN_TITLE_BLOCK = "\nTHE TUTOR ALREADY CHOSE THE TITLE — keep it exactly: {title}\n"
+
+LESSON_NO_SIBLINGS = "(no lessons yet)"
+
+
+def _lesson_lines(db, module: Block) -> str:
+    """The module's lessons in teaching order, each with its objective — what the
+    new lesson must fit between and must not repeat."""
+    lessons = db.scalars(
+        select(Block)
+        .where(Block.parent_id == module.id, Block.kind == "lesson")
+        .order_by(Block.order)
+    ).all()
+    lines = [
+        f"{i}. {lesson.title} — {(lesson.meta or {}).get('objective') or ''}"
+        for i, lesson in enumerate(lessons, start=1)
+    ]
+    return "\n".join(lines) or LESSON_NO_SIBLINGS
+
+
+def build_lesson_plan_messages(
+    *,
+    course_title: str,
+    brief_course: str | None,
+    language: str,
+    course_map: str,
+    module_title: str,
+    module_objective: str,
+    siblings: str,
+    brief: str,
+    title: str | None,
+    minutes_per_lesson: int,
+    target_words: int,
+    library: LibraryContext,
+    source=None,
+) -> list[dict]:
+    """The messages for the add-lesson planning call. Pure, and riding the SAME
+    `prefix_messages` prefix as the outline, the drafts and add-module — so the
+    chained draft that follows reads a cache entry this call just warmed."""
+    messages = prefix_messages(library, source)
+
+    content = resolve(source, LESSON_PLAN_SLICE_ID, LESSON_PLAN_TAIL).format(
+        course_title=course_title,
+        course_brief_block=(
+            MODULE_COURSE_BRIEF_BLOCK.format(brief=brief_course) if brief_course else ""
+        ),
+        course_map=course_map,
+        module_title=module_title,
+        module_objective=module_objective,
+        siblings=siblings,
+        brief=brief,
+        title_block=(
+            LESSON_PLAN_TITLE_BLOCK.format(title=title.strip())
+            if title and title.strip() else ""
+        ),
+        minutes_per_lesson=minutes_per_lesson,
+        target_words=f"{target_words:,}",
+        language_directive=language_directive(language, source),
+        style_directive=curriculum_style(language, source),
+        answer_in=answer_in(language, source),
+    )
+
+    messages.append({"role": "user", "content": content})
+    return messages
+
+
+def plan_lesson_json(db, *, course: Block, module: Block, library: LibraryContext,
+                     brief: str, title: str | None) -> dict:
+    """ONE guided_json over the whole library -> `{title, objective, est_minutes}`.
+
+    A title the tutor typed WINS over the model's, and the prompt says so rather
+    than overruling him silently — a model told to keep his title writes the
+    objective FOR that title, where one that named its own would write the
+    objective for a lesson he is not getting.
+    """
+    meta = course.meta or {}
+    shape = meta.get("shape") or {}
+
+    messages = build_lesson_plan_messages(
+        course_title=course.title,
+        brief_course=meta.get("brief"),
+        language=course.language,
+        course_map=_module_lines(db, _existing_modules(db, course)),
+        module_title=module.title,
+        module_objective=(module.meta or {}).get("objective") or module.body or "",
+        siblings=_lesson_lines(db, module),
+        brief=brief.strip(),
+        title=title,
+        minutes_per_lesson=shape.get("minutes_per_lesson", 50),
+        target_words=shape.get("target_words_per_lesson", 2200),
+        library=library,
+        source=db,
+    )
+    planned = get_provider().guided_json(messages, LESSON_PLAN_SCHEMA_ONE, role="plan")
+
+    if title and title.strip():
+        planned["title"] = title.strip()
+    return planned
+
+
+def generate_lesson(db, module_id: uuid.UUID, *, brief: str, title: str | None = None,
+                    after: uuid.UUID | None = None) -> Block:
+    """Plan one lesson from the tutor's brief and persist it `queued`, in place.
+
+    `edit._add_lesson` is the ONE insertion path — the same renormalised sibling
+    order, the same `added_by_tutor` marking, the same minutes from the course
+    shape — so a lesson born from a brief is indistinguishable downstream from
+    one he typed a title for. The caller (the job) chains the draft.
+    """
+    module = db.get(Block, module_id)
+    if module is None:
+        raise ExtendError(f"module not found: {module_id}")
+    if module.kind != "module":
+        raise ExtendError(f"block {module_id} is a {module.kind!r}, not a module")
+    course = db.get(Block, module.parent_id) if module.parent_id else None
+    if course is None or course.kind != "course":
+        raise ExtendError(f"module {module_id} does not belong to a course")
+
+    from app.curriculum.corpus import build_curriculum_context
+
+    meta = course.meta or {}
+    # Same None-vs-[] rule as everywhere else: [] is the tutor's explicit "none
+    # of my sources" and must NOT widen to the whole library.
+    raw_sources = meta.get("source_ids")
+    source_ids = None if raw_sources is None else [uuid.UUID(s) for s in raw_sources]
+    library = build_curriculum_context(db, source_ids)
+
+    planned = plan_lesson_json(db, course=course, module=module, library=library,
+                               brief=brief, title=title)
+
+    shape = meta.get("shape") or {}
+    try:
+        lesson = _add_lesson(
+            db, module.id,
+            title=(title or planned.get("title") or "").strip() or "Νέο μάθημα",
+            objective=planned.get("objective") or "",
+            after=after,
+        )
+    except EditError as e:
+        # A structural refusal (`after` is not a lesson of this module) is the
+        # job's failure to report, not a 500 — same contract as `generate_module`.
+        raise ExtendError(str(e)) from e
+
+    lesson.est_minutes = _est_minutes(planned.get("est_minutes"),
+                                      shape.get("minutes_per_lesson", 50))
+    # WHOLE-DICT REASSIGNMENT — a mutated JSONB dict is not seen by SQLAlchemy.
+    lesson.meta = {**(lesson.meta or {}), "brief": brief.strip()}
+    db.commit()
+    db.refresh(lesson)
+    return lesson

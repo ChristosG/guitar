@@ -149,7 +149,14 @@ from app.curriculum.draft import (
     _tier_directive,
     build_lesson_messages,
 )
-from app.curriculum.extend import MODULE_SLICE_ID, MODULE_TAIL, build_module_messages
+from app.curriculum.extend import (
+    LESSON_PLAN_SLICE_ID,
+    LESSON_PLAN_TAIL,
+    MODULE_SLICE_ID,
+    MODULE_TAIL,
+    build_lesson_plan_messages,
+    build_module_messages,
+)
 from app.curriculum.interview import DISTILL_SLICE_ID, DISTILL_SYSTEM
 from app.curriculum.lesson_ai import (
     LESSON_AI_PLAN_SLICE_ID,
@@ -986,6 +993,35 @@ def _build_curriculum_extend(locale: str, db, course_language=None) -> _Built:
     ]
 
 
+_SAMPLE_NEW_LESSON_BRIEF = (
+    "Θέλω ένα μάθημα μόνο για το σχήμα A και πώς δένει με το C."
+)
+_SAMPLE_MODULE_LESSONS = (
+    "1. Το σχήμα C — η ρίζα του και πού πέφτει\n"
+    "2. Το σχήμα G — η μετάβαση από το C"
+)
+
+
+def _build_curriculum_extend_lesson(locale: str, db, course_language=None) -> _Built:
+    lang = _course_language(locale, course_language)
+    built = build_lesson_plan_messages(
+        course_title=_SAMPLE_COURSE_TITLE, brief_course=_SAMPLE_COURSE_BRIEF, language=lang,
+        course_map="1. Πρώτες συγχορδίες\n     - Το σχήμα C\n2. Ρυθμικά σχήματα",
+        module_title="Πρώτες συγχορδίες",
+        module_objective="Οι πέντε ανοιχτές συγχορδίες και οι μεταξύ τους μεταβάσεις",
+        siblings=_SAMPLE_MODULE_LESSONS, brief=_SAMPLE_NEW_LESSON_BRIEF, title=None,
+        minutes_per_lesson=50, target_words=2200, library=_SAMPLE_LIBRARY, source=db,
+    )
+    return _msgs(built), [
+        (*_LIBRARY, _SAMPLE_LIBRARY_TEXT),
+        ("siblings", "Τα μαθήματα που έχει ήδη η ενότητα", _SAMPLE_MODULE_LESSONS),
+        ("lesson_brief", "Τι ζήτησες για το μάθημα, με τα δικά σου λόγια",
+         _SAMPLE_NEW_LESSON_BRIEF),
+        (*_LANG_FROM_COURSE, language_directive(lang, db)),
+        (*_ANSWER_IN_FROM_COURSE, answer_in(lang, db)),
+    ]
+
+
 def _build_curriculum_refine(locale: str, db, course_language=None) -> _Built:
     lang = _course_language(locale, course_language)
     instruction = "Κάν' το πιο απλό, μιλάει σε δωδεκάχρονο."
@@ -1790,7 +1826,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="curriculum",
         kind="prompt",
-        source_ref="app/curriculum/extend.py:182",
+        source_ref="app/curriculum/extend.py:187",
         title_el="Η νέα ενότητα σε υπάρχον πρόγραμμα",
         what_it_does_el=(
             "Δείχνει στον βοηθό το πρόγραμμα όπως είναι σήμερα και ζητάει μία "
@@ -1801,12 +1837,39 @@ _ENTRIES = [
         when_it_runs_el="Όταν προσθέτεις ενότητα σε πρόγραμμα που ήδη υπάρχει.",
         source_of_truth=lambda: build_module_messages,
         build=_build_curriculum_extend,
-        call_sites=("curriculum/extend.py:247",),
+        call_sites=("curriculum/extend.py:252",),
         slices=(
             Slice(
                 id=MODULE_SLICE_ID,
                 label_el="Το κείμενο της οδηγίας",
                 default=MODULE_TAIL,
+                kind="replace",
+            ),
+        ),
+    ),
+    PromptEntry(
+        id="curriculum.extend.lesson",
+        language_from_course=True,
+        flow="curriculum",
+        kind="prompt",
+        source_ref="app/curriculum/extend.py:404",
+        title_el="Το νέο μάθημα μέσα σε μια ενότητα",
+        what_it_does_el=(
+            "Του δείχνει τα μαθήματα που έχει ήδη η ενότητα, πού κάθεται η "
+            "ενότητα μέσα στο πρόγραμμα, και — αυτούσια — αυτό που ζήτησες για "
+            "το μάθημα. Ζητάει τίτλο και σκοπό που να δένουν με τη ροή και να "
+            "μην επαναλαμβάνουν κανένα από τα διπλανά μαθήματα. Αν έχεις "
+            "γράψει εσύ τίτλο, του λέει να τον κρατήσει όπως είναι."
+        ),
+        when_it_runs_el="Όταν προσθέτεις μάθημα σε μια ενότητα γράφοντας τι θέλεις.",
+        source_of_truth=lambda: build_lesson_plan_messages,
+        build=_build_curriculum_extend_lesson,
+        call_sites=("curriculum/extend.py:477",),
+        slices=(
+            Slice(
+                id=LESSON_PLAN_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=LESSON_PLAN_TAIL,
                 kind="replace",
             ),
         ),

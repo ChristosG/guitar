@@ -332,7 +332,8 @@ def _fake_draft_lesson(captured, les):
              exclude_sections=frozenset(), section_briefs=None):
         captured.update(fixed=fixed_sections, exclude=set(exclude_sections),
                         briefs=section_briefs, objective=ctx.lesson_objective,
-                        neighbours=neighbours, position=ctx.position)
+                        neighbours=neighbours, position=ctx.position,
+                        tutor_brief=tutor_brief)
         from app.curriculum.depth import Measurement
         return ({"title": les.title, "summary": "νέα περίληψη",
                  "warm_up": {"body": "νέο ζέσταμα", "citations": []}},
@@ -362,6 +363,39 @@ def test_apply_excludes_every_unticked_blueprint_section_even_with_no_row(lesson
     assert captured["exclude"] == enabled - {"warm_up"}
     assert "demonstration" in captured["exclude"]      # enabled, no row, not ticked
     assert out["rewritten"] == ["warm_up"]
+
+
+def test_apply_carries_a_brief_born_lesson_s_own_brief_into_the_draft(lesson, monkeypatch):
+    """A lesson created by «Προσθήκη μαθήματος» carries the tutor's brief for it on
+    `meta.brief`, and `draft.LESSON_TUTOR_BRIEF_BLOCK` renders it whole. The panel's
+    apply is a DRAFT of that same lesson — dropping the brief here would rewrite it
+    without the sentence that asked for it in the first place."""
+    db, course, module, les = lesson
+    import app.curriculum.lesson_ai as mod
+
+    brief = "Μόνο για το μπράτσο και πώς αλλάζει τον ήχο."
+    les.meta = {**(les.meta or {}), "brief": brief}
+    db.commit()
+    captured = {}
+    monkeypatch.setattr(mod, "draft_lesson", _fake_draft_lesson(captured, les))
+
+    lesson_ai.apply_lesson_change(db, les.id, instruction="Ενημέρωσε", note=None,
+                                  sections=[{"section": "recap", "brief": ""}])
+
+    assert captured["tutor_brief"] == brief
+
+
+def test_apply_passes_no_tutor_brief_for_an_ordinary_lesson(lesson, monkeypatch):
+    """And a lesson with no brief passes None — not "", which would render an empty
+    block telling the model the tutor asked for nothing in particular."""
+    db, course, module, les = lesson
+    import app.curriculum.lesson_ai as mod
+
+    captured = {}
+    monkeypatch.setattr(mod, "draft_lesson", _fake_draft_lesson(captured, les))
+    lesson_ai.apply_lesson_change(db, les.id, instruction="Ενημέρωσε", note=None,
+                                  sections=[{"section": "recap", "brief": ""}])
+    assert captured["tutor_brief"] is None
 
 
 def test_apply_leaves_the_lesson_ready_when_the_library_read_fails(lesson, monkeypatch):

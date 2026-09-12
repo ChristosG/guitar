@@ -39,6 +39,7 @@ from app.i18n import locale_dep
 from app.jobs.curriculum_draft import resume_queued_segments, run_curriculum_draft_job
 from app.jobs.curriculum_revise import run_curriculum_revise_job
 from app.jobs.lesson_ai import run_lesson_ai_job
+from app.jobs.lesson_generate import run_lesson_generate_job
 from app.jobs.module_generate import run_module_generate_job
 from app.jobs.runner import run_curriculum_job, run_outline_job
 from app.llm.errors import LLMError
@@ -63,6 +64,7 @@ from app.schemas.curriculum import (
     LessonAiPlanRequest,
     LessonCreate,
     LessonFromChat,
+    LessonGenerateRequest,
     ModuleCreate,
     ModuleGenerateRequest,
     PlanningBriefIn,
@@ -880,6 +882,42 @@ def generate_curriculum_module(
     db.commit()
     db.refresh(job)
     background_tasks.add_task(run_module_generate_job, job.id)
+    return JobAccepted(job_id=job.id, status=job.status)
+
+
+@router.post("/blocks/{module_id}/lessons/generate", response_model=JobAccepted,
+             status_code=202, dependencies=[Depends(require_llm_configured)])
+def generate_module_lesson(
+    module_id: UUID, payload: LessonGenerateRequest,
+    background_tasks: BackgroundTasks, db: Session = Depends(get_db),
+) -> JobAccepted:
+    """«Προσθήκη μαθήματος» with a brief: plan title+objective from the module's
+    siblings and the tutor's words, store the brief on the lesson, draft it.
+
+    202 + a job id for the same reason add-module is: the planning call alone
+    runs over the whole library, and the draft that follows it in the same
+    thread is minutes more.
+    """
+    module = _get_block_or_404(db, module_id)
+    if module.kind != "module":
+        raise HTTPException(status_code=404, detail="not a module")
+    # Checked HERE, before the job row exists, so a misplaced `after` is a 422 he
+    # sees immediately rather than a failed job he has to go and read.
+    if payload.after is not None:
+        sib = db.get(Block, payload.after)
+        if sib is None or sib.parent_id != module.id:
+            raise HTTPException(status_code=422,
+                                detail="`after` is not a lesson of this module")
+    job = GenerationJob(
+        kind="lesson_generate", status="pending",
+        params={"module_id": str(module_id), "brief": payload.brief,
+                "title": payload.title,
+                "after": str(payload.after) if payload.after else None},
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    background_tasks.add_task(run_lesson_generate_job, job.id)
     return JobAccepted(job_id=job.id, status=job.status)
 
 
