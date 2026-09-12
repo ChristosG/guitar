@@ -366,6 +366,8 @@ def apply_lesson_change(db, lesson_id: uuid.UUID, *, instruction: str, note: str
     lesson is re-fetched afterwards for the write.
     """
     lesson, module, course = _lesson_or_raise(db, lesson_id)
+    if (lesson.meta or {}).get("draft_status") == "drafting":
+        raise LessonAiError("lesson is being drafted")
     existing = _lesson_sections(db, lesson)
     known = {s["section"] for s in existing}
     # Deduplicated, in the order he ticked them: `keep` and the schema are sets
@@ -381,13 +383,22 @@ def apply_lesson_change(db, lesson_id: uuid.UUID, *, instruction: str, note: str
     keep = known - set(ticked)
     # A kept section with no text is NOT shown as fixed — «αυτό δεν αλλάζει» over
     # an empty string is an instruction to write around nothing. Its key still
-    # leaves the schema (`exclude_sections=keep`) and `persist_lesson(keep=...)`
-    # still leaves the row alone: unticked means untouched either way.
+    # leaves the schema (`excluded` below) and `persist_lesson(keep=...)` still
+    # leaves the row alone: unticked means untouched either way.
     fixed = {s["section"]: s["body"] for s in existing
              if s["section"] in keep and s["body"].strip()}
 
     meta = course.meta or {}
     bp = bp_mod.blueprint_from_course_meta(meta)
+    # EVERYTHING HE DID NOT TICK LEAVES THE SCHEMA — not just the sections that
+    # have a row today. A blueprint key enabled on the course but missing from this
+    # lesson (drafted before the section was enabled, or its row deleted) is in
+    # neither `known` nor `keep`: left in the schema, the model would write a whole
+    # section nobody ticked, `persist_lesson` would create the row, and the
+    # `rewritten` list handed back to the tutor would not mention it. Custom keys
+    # carried in by `keep` are harmless — `build_lesson_schema` has no property to
+    # drop for them.
+    excluded = ({s["key"] for s in bp_mod.enabled_sections(bp)} - set(ticked)) | keep
     raw_sources = meta.get("source_ids")
     source_ids = None if raw_sources is None else [uuid.UUID(s) for s in raw_sources]
     shape = meta.get("shape") or {}
@@ -426,34 +437,44 @@ def apply_lesson_change(db, lesson_id: uuid.UUID, *, instruction: str, note: str
     )
     language = lesson.language or course.language or "el"
 
+    # THE LIBRARY AND THE PROMPT SNAPSHOT ARE READ BEFORE THE CLAIM, so that the
+    # claim is the LAST thing that happens on the request's transaction. Read after
+    # it, a failure in either (an unindexed source, a database hiccup) would leave
+    # the lesson stranded at `drafting` with `error: None` — a spinner the board
+    # never takes down and nothing ever clears, for a call that was never made.
+    # Neither read needs a transaction of its own.
+    library = build_retrieval_context(db, source_ids)
+    prompts = overrides.snapshot(db)
+
     # SNAPSHOT AND CLAIM, ONE TRANSACTION, COMMITTED BEFORE THE MODEL CALL. The
     # snapshot is what «Τι άλλαξε;» and the restore toggle read, so it has to be
     # the segments as they stand THIS INSTANT — taken after the call, it would
-    # snapshot the rewrite. `drafting` is the claim: the board shows the spinner,
-    # and a second apply on the same lesson is visible rather than silent.
+    # snapshot the rewrite. `drafting` is the claim, and the `draft_status` check
+    # at the top of this function is what reads it: an apply on a lesson that is
+    # already drafting is refused, not queued behind it.
     lesson.meta = {**lesson_meta, "prev_segments": snapshot_of(db, lesson),
                    "ai_instruction": full_instruction, "draft_status": "drafting",
                    "error": None}
     db.commit()
-
-    library = build_retrieval_context(db, source_ids)
-    prompts = overrides.snapshot(db)
     db.close()  # hand the connection back — see the docstring
     try:
         drafted, m = draft_lesson(
             db, ctx=ctx, library=library, language=language, blueprint=bp,
             student_brief=None, course_brief=meta.get("brief"), source_ids=source_ids,
             prompts=prompts, revise_current=None, fixed_sections=fixed or None,
-            exclude_sections=keep, section_briefs=briefs,
+            exclude_sections=excluded, section_briefs=briefs,
         )
     except Exception:
         # Back to `ready` with the content UNCHANGED — nothing was written yet.
         # `prev_segments` may stay: it still describes the lesson exactly as it
-        # is, so the restore toggle is a no-op rather than a lie.
+        # is, so the restore toggle is a no-op rather than a lie. The row may also
+        # be GONE (he deleted the lesson while it drafted): releasing a row that
+        # is not there must not raise over the error we are propagating.
         db.rollback()
         lesson = db.get(Block, lesson_id)
-        lesson.meta = {**(lesson.meta or {}), "draft_status": "ready"}
-        db.commit()
+        if lesson is not None:
+            lesson.meta = {**(lesson.meta or {}), "draft_status": "ready"}
+            db.commit()
         raise
     lesson = db.get(Block, lesson_id)
     persist_lesson(db, lesson, drafted, m, library, bp,

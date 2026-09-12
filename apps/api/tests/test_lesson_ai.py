@@ -312,3 +312,72 @@ def test_the_section_briefs_fragment_is_registered_and_renders(lesson):
     assert {s.id for s in entry.slices} == {"lesson.section_briefs"}
     rendered = registry.render("lesson.section_briefs", "el")
     assert "ξαναγράφεις" in rendered.text
+
+
+def _fake_draft_lesson(captured, les):
+    """The real `draft_lesson`'s signature, minus the model. Kept in one place so
+    a parameter added to the live function fails these tests loudly rather than
+    being swallowed by a `**kwargs` stand-in."""
+    def fake(db_, *, ctx, library, language, blueprint=None, student_brief=None,
+             course_brief=None, source_ids=None, prompts=None, revise_current=None,
+             fixed_sections=None, exclude_sections=frozenset(), section_briefs=None):
+        captured.update(fixed=fixed_sections, exclude=set(exclude_sections),
+                        briefs=section_briefs, objective=ctx.lesson_objective)
+        from app.curriculum.depth import Measurement
+        return ({"title": les.title, "summary": "νέα περίληψη",
+                 "warm_up": {"body": "νέο ζέσταμα", "citations": []}},
+                Measurement(total_words=50, target=2750, floor=2200, per_section={},
+                            thin_sections=[]))
+    return fake
+
+
+def test_apply_excludes_every_unticked_blueprint_section_even_with_no_row(lesson, monkeypatch):
+    """A blueprint key the course has enabled but THIS lesson has no row for is in
+    neither `known` nor `keep`. Left in the schema, the model writes a whole section
+    nobody ticked and the `rewritten` list read back to the tutor does not mention
+    it — so the exclusion is computed from the blueprint, not from the rows."""
+    db, course, module, les = lesson
+    import app.curriculum.lesson_ai as mod
+    for seg in db.scalars(select(Block).where(Block.parent_id == les.id)).all():
+        if (seg.meta or {}).get("section") not in ("warm_up", "theory", "recap"):
+            db.delete(seg)
+    db.commit()
+    captured = {}
+    monkeypatch.setattr(mod, "draft_lesson", _fake_draft_lesson(captured, les))
+
+    out = lesson_ai.apply_lesson_change(db, les.id, instruction="Ενημέρωσε", note=None,
+                                        sections=[{"section": "warm_up", "brief": "πιο σύντομο"}])
+
+    enabled = {s["key"] for s in bp_mod.enabled_sections(bp_mod.default_blueprint())}
+    assert captured["exclude"] == enabled - {"warm_up"}
+    assert "demonstration" in captured["exclude"]      # enabled, no row, not ticked
+    assert out["rewritten"] == ["warm_up"]
+
+
+def test_apply_leaves_the_lesson_ready_when_the_library_read_fails(lesson, monkeypatch):
+    """The claim is the LAST thing before the model call. A library read that blew
+    up after it would leave the lesson stranded at `drafting` with no error — a
+    spinner for a call that was never made."""
+    db, course, module, les = lesson
+    import app.curriculum.lesson_ai as mod
+
+    def boom(*a, **k):
+        raise RuntimeError("no index")
+    monkeypatch.setattr(mod, "build_retrieval_context", boom)
+    monkeypatch.setattr(mod, "draft_lesson", _fake_draft_lesson({}, les))
+    with pytest.raises(RuntimeError):
+        lesson_ai.apply_lesson_change(db, les.id, instruction="x", note=None,
+                                      sections=[{"section": "recap", "brief": ""}])
+    db.rollback(); db.expire_all()
+    meta = db.get(Block, les.id).meta
+    assert meta["draft_status"] == "ready"
+    assert "prev_segments" not in meta                 # nothing was claimed at all
+
+
+def test_apply_refuses_a_lesson_that_is_already_drafting(lesson):
+    db, course, module, les = lesson
+    les.meta = {**(les.meta or {}), "draft_status": "drafting"}
+    db.commit()
+    with pytest.raises(lesson_ai.LessonAiError):
+        lesson_ai.apply_lesson_change(db, les.id, instruction="x", note=None,
+                                      sections=[{"section": "recap", "brief": ""}])
