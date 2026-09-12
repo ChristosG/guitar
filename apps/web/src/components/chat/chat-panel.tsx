@@ -450,6 +450,10 @@ export function ChatPanel({ sessionId, rootId, blockTitles, onJobDone, seedDraft
         // renders its own "planning the revision…" status for this window.
         setMessages((prev) => prev.filter((m) => m.id !== streamId));
         setJobPending(true);
+        // Set when this turn ends by handing a SECOND job to `pollJob`, which
+        // owns `jobPending` for its own window — clearing the flag here would
+        // yank the spinner (and re-enable the composer) out from under it.
+        let handedOff = false;
         try {
           const accepted = await sendChatMessageAsync(sessionId, content);
           const job = await waitForJob(accepted.job_id);
@@ -468,10 +472,13 @@ export function ChatPanel({ sessionId, rootId, blockTitles, onJobDone, seedDraft
           // the open approval off `/pending` and moved the model's narration
           // into the card. The other two statuses have no server-side trace
           // to hydrate FROM, so they are driven from the turn itself.
-          if (turn?.status === "job_pending" && turn.job_id) void pollJob(turn.job_id);
+          if (turn?.status === "job_pending" && turn.job_id) {
+            handedOff = true;
+            void pollJob(turn.job_id);
+          }
           if (turn?.status === "answer") fetchSuggestions();
         } finally {
-          setJobPending(false);
+          if (!handedOff) setJobPending(false);
         }
         return;
       }

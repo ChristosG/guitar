@@ -116,6 +116,10 @@ async function mockChatApi(page: Page, sessionId: string) {
   const rows: Array<{ id: string; role: string; content: string | null; created_at: string; citations: null }> = [];
 
   const job: TurnJob = { id: null, runningPolls: 1 };
+  // The SECOND job a turn can hand back: `progress.turn` came home as
+  // `job_pending`, so the panel must go on polling THIS one — with the
+  // spinner and the disabled composer intact across the hand-off.
+  const chained = { id: randomUUID(), polls: 0, runningPolls: 1 };
   /** The turn body the job reports on success, and the assistant row the
    * server would have persisted for it — set per test. `answer: null` means
    * the job dies instead (nothing gets persisted). */
@@ -194,6 +198,23 @@ async function mockChatApi(page: Page, sessionId: string) {
       await route.fulfill({ status: 204, headers: CORS_HEADERS });
       return;
     }
+    const now0 = new Date().toISOString();
+    if (pathname === `/jobs/${chained.id}`) {
+      chained.polls++;
+      const chainedBase = {
+        id: chained.id, kind: "curriculum_revise", result_root_id: null,
+        error: null, error_kind: null, created_at: now0, updated_at: now0,
+      };
+      await route.fulfill({
+        status: 200, contentType: "application/json", headers: CORS_HEADERS,
+        body: JSON.stringify(
+          chained.polls <= chained.runningPolls
+            ? { ...chainedBase, status: "pending", progress: null }
+            : { ...chainedBase, status: "succeeded", progress: null },
+        ),
+      });
+      return;
+    }
     if (pathname !== `/jobs/${job.id}`) {
       unexpected.push(`GET ${pathname}`);
       await route.fulfill({
@@ -228,6 +249,8 @@ async function mockChatApi(page: Page, sessionId: string) {
 
   return {
     calls, unexpected, asyncFlags,
+    chainedJobId: chained.id,
+    chainedPolls: () => chained.polls,
     setRunningPolls(n: number) { job.runningPolls = n; },
     setNextTurn(value: Scripted) { scripted = value; },
     refuseNextSend() { refuseWith409 = true; },
@@ -305,6 +328,40 @@ test.describe("revise drawer — the turn runs as a job (mocked API)", () => {
     // Hydrated anyway: the half-written turn is on screen, not thrown away.
     await expect(page.getByTestId("chat-message").filter({ hasText: "Ξεκίνησα να απαντώ…" })).toBeVisible();
     await expect(page.getByTestId("chat-input")).toBeEnabled();
+    expect(chat.unexpected).toEqual([]);
+  });
+
+  test("a turn that hands back a second job keeps the spinner until THAT job lands", async ({ page }) => {
+    const rootId = randomUUID();
+    const sessionId = randomUUID();
+    await mockCurriculaApi(page, rootId, randomUUID(), randomUUID(), sessionId);
+    const chat = await mockChatApi(page, sessionId);
+    chat.setNextTurn({
+      turn: { status: "job_pending", job_id: chat.chainedJobId },
+      answer: "Ξεκινάω την αναθεώρηση.",
+    });
+
+    await page.goto(`/el/curricula/${rootId}`);
+    await page.getByTestId("revise-open").click();
+    await expect(page.getByTestId("chat-input")).toBeEnabled();
+
+    await page.getByTestId("chat-input").fill("Εφάρμοσε την αναθεώρηση.");
+    await page.getByTestId("chat-send").click();
+
+    // The hand-off must not drop the flag between the two waits: this is the
+    // window in which the composer would otherwise come back to life with a
+    // revision still being applied underneath it.
+    await expect(page.getByTestId("chat-job-pending")).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId("chat-input")).toBeDisabled();
+
+    await expect(
+      page.getByTestId("chat-message").filter({
+        hasText: "Έτοιμο — το πρόγραμμα παρακάτω αντικατοπτρίζει πλέον αυτή την αναθεώρηση.",
+      }),
+    ).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId("chat-job-pending")).toHaveCount(0);
+    await expect(page.getByTestId("chat-input")).toBeEnabled();
+    expect(chat.chainedPolls()).toBeGreaterThanOrEqual(2);
     expect(chat.unexpected).toEqual([]);
   });
 
