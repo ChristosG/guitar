@@ -17,12 +17,14 @@ import { test, expect, type Page, type Route } from "@playwright/test";
 //  3. THE BODY. What is POSTed is exactly what he filled in: the brief, a
 //     `title` of null when he left it to the AI, and the sibling he picked in
 //     «Θέση» — a position that silently appended would move his lesson.
-//  4. THE JOB. 202 → poll. The planning call reads the library (20-60s) and
-//     the draft that chains behind it is minutes more, so the status line has
-//     to change UNDER him: «Σχεδιάζω…» while the planner runs, «Γράφεται…»
-//     once the lesson exists and the chained draft has it. Then the dialog
-//     closes and the BOARD refetches — that refetch is what re-arms the draft
-//     progress bar over the new `queued` lesson.
+//  4. THE JOB. 202 → poll, with «Σχεδιάζω…» on screen while the planner reads
+//     the library (20-60s), then the dialog closes and the BOARD refetches —
+//     that refetch is what re-arms the draft progress bar over the new
+//     `queued` lesson. There is NO «Γράφεται…» step in this dialog and the
+//     mocks must not invent one: the runner commits `status="succeeded"` and
+//     `progress.phase="drafting"` in the SAME commit
+//     (`app/jobs/lesson_generate.py`), so no poll can see one without the
+//     other. The board's own status pill is what reports the draft.
 //  5. THE OLD BEHAVIOUR SURVIVES. «Κενό μάθημα» still POSTs the plain
 //     `/blocks/{module}/lessons` — sometimes he just wants a container — and
 //     it lands WHERE HE POINTED: the «Θέση» select is above both buttons, so a
@@ -31,6 +33,10 @@ import { test, expect, type Page, type Route } from "@playwright/test";
 //  6. IT NEVER TRAPS HIM. The job runs on the server, not in this dialog, so
 //     closing it mid-run cancels nothing: the poll keeps going, the tree still
 //     refreshes when the lesson lands, and the board's progress bar takes over.
+//  7. …AND BAD NEWS COMES BACK TO FIND HIM. Because he may have closed it, a
+//     failure written into an off-screen dialog would be a failure nobody ever
+//     reads — worst of all the one he can actually fix (no API key). The
+//     dialog reopens itself and says it in Greek.
 //
 // Same route-interception convention as the cockpit specs next door
 // (`lesson-ai-panel.spec.ts`, `tutor-edited.spec.ts`): anchored to
@@ -191,22 +197,21 @@ test.describe("«Προσθήκη μαθήματος» — the brief, the positi
         return;
       }
       polls++;
-      // THE TWO PHASES, in the order the runner writes them: `planning` while
-      // the library call runs, then `drafting` the moment the lesson row
-      // exists and the chained `curriculum_draft` job has it. The middle tick
-      // is `running` with `phase: "drafting"` on purpose — the status line
-      // must follow `progress.phase`, not `status`.
-      const phase = polls < 2 ? "planning" : "drafting";
-      const done = polls >= 3;
+      // EXACTLY THE TWO STATES THE RUNNER WRITES: `running` with `phase:
+      // "planning"` while the library call runs, then one commit that flips
+      // the job to `succeeded` AND writes `phase: "drafting"` with the lesson
+      // it just planted. A `running` tick carrying `phase: "drafting"` would
+      // be fiction, and a UI built on it would show a state nobody can reach.
+      const done = polls >= 2;
       const now = new Date().toISOString();
       await route.fulfill({
         status: 200, contentType: "application/json", headers: CORS_HEADERS,
         body: JSON.stringify({
           id: jobId, kind: "lesson_generate", status: done ? "succeeded" : "running",
           result_root_id: done ? rootId : null, error: null, error_kind: null,
-          progress: phase === "planning"
-            ? { phase: "planning" }
-            : { phase: "drafting", lesson_id: randomUUID(), draft_job_id: randomUUID() },
+          progress: done
+            ? { phase: "drafting", lesson_id: randomUUID(), draft_job_id: randomUUID() }
+            : { phase: "planning" },
           created_at: now, updated_at: now,
         }),
       });
@@ -236,13 +241,12 @@ test.describe("«Προσθήκη μαθήματος» — the brief, the positi
 
     await generate.click();
 
-    // THE STATUS LINE CHANGES UNDER HIM.
+    // THE WAIT IS NAMED, not a bare spinner.
     const status = dialog.getByTestId("add-lesson-status");
     await expect(status).toContainText("Σχεδιάζω", { timeout: 10_000 });
     // And it says he is free to go — the job is the server's, not this
     // dialog's, and a tutor held hostage by a 10-minute spinner is the bug.
     await expect(dialog.getByTestId("add-lesson-close-hint")).toBeVisible();
-    await expect(status).toContainText("Γράφεται", { timeout: 10_000 });
     // Nothing to retry while the job runs — a second POST is a second lesson.
     await expect(generate).toBeDisabled();
 
@@ -263,8 +267,9 @@ test.describe("«Προσθήκη μαθήματος» — the brief, the positi
     expect(body.title).toBeNull();
     expect(body.after).toBe(lessonIds[0]);
 
-    // It POLLED — the 202 was not mistaken for the answer.
-    expect(polls).toBeGreaterThanOrEqual(3);
+    // It POLLED — the 202 was not mistaken for the answer, and the `running`
+    // tick before it was not mistaken for a result either.
+    expect(polls).toBeGreaterThanOrEqual(2);
     expect(api.unexpected).toEqual([]);
   });
 
@@ -401,6 +406,89 @@ test.describe("«Προσθήκη μαθήματος» — the brief, the positi
       .toBeGreaterThan(treeCallsBefore);
     expect(polls).toBeGreaterThanOrEqual(5);
     expect(generateCalls).toBe(1);
+    expect(api.unexpected).toEqual([]);
+  });
+
+  test("a failure after he closed the dialog comes back and finds him", async ({ page }) => {
+    const rootId = randomUUID();
+    const moduleId = randomUUID();
+    const lessonIds = [randomUUID(), randomUUID()];
+    const jobId = randomUUID();
+
+    const api = await mockCurriculaApi(page, rootId, moduleId, lessonIds);
+
+    let polls = 0;
+
+    await page.route(`${API_ORIGIN}/blocks/**`, async (route: Route) => {
+      const req = route.request();
+      const { pathname } = new URL(req.url());
+      if (req.method() === "OPTIONS") {
+        await route.fulfill({ status: 204, headers: CORS_HEADERS });
+        return;
+      }
+      if (pathname === `/blocks/${moduleId}/lessons/generate` && req.method() === "POST") {
+        await route.fulfill({
+          status: 202, contentType: "application/json", headers: CORS_HEADERS,
+          body: JSON.stringify({ job_id: jobId, status: "pending" }),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 500, contentType: "application/json", headers: CORS_HEADERS,
+        body: JSON.stringify({ detail: "unmocked request in test" }),
+      });
+    });
+
+    await page.route(`${API_ORIGIN}/jobs/**`, async (route: Route) => {
+      const req = route.request();
+      if (req.method() === "OPTIONS") {
+        await route.fulfill({ status: 204, headers: CORS_HEADERS });
+        return;
+      }
+      polls++;
+      // The failure the tutor is MOST likely to hit and the only one he can
+      // act on himself: no key. `error_kind: "auth"` is the taxonomy the API
+      // maintains so this never reaches him as the runner's English prose.
+      const failed = polls >= 3;
+      const now = new Date().toISOString();
+      await route.fulfill({
+        status: 200, contentType: "application/json", headers: CORS_HEADERS,
+        body: JSON.stringify({
+          id: jobId, kind: "lesson_generate", status: failed ? "failed" : "running",
+          result_root_id: null,
+          error: failed ? "No API key is configured. Open Settings, add your key." : null,
+          error_kind: failed ? "auth" : null,
+          progress: { phase: "planning" },
+          created_at: now, updated_at: now,
+        }),
+      });
+    });
+
+    const dialog = await openAddLessonDialog(page, rootId);
+
+    await dialog.getByTestId("add-lesson-brief").fill(BRIEF);
+    await dialog.getByTestId("add-lesson-generate").click();
+    await expect(dialog.getByTestId("add-lesson-status")).toBeVisible({ timeout: 10_000 });
+
+    await dialog.locator('[data-slot="dialog-close"]').first().click();
+    await expect(dialog).toBeHidden();
+
+    // IT COMES BACK WITH THE BAD NEWS. An error painted into a closed dialog
+    // is an error nobody reads — and this one needs him to go and do
+    // something (paste a key), so silence would cost him the lesson twice.
+    await expect(dialog).toBeVisible({ timeout: 25_000 });
+    const error = dialog.getByTestId("add-lesson-error");
+    // The localized `auth` sentence from `jobErrors`, not the job's English
+    // `error` string.
+    await expect(error).toContainText("κλειδί API");
+    await expect(error).not.toContainText("No API key");
+    // And it is a form again, not a frozen spinner: he can retry right here.
+    await expect(dialog.getByTestId("add-lesson-status")).toHaveCount(0);
+    await expect(dialog.getByTestId("add-lesson-generate")).toBeEnabled();
+    // The brief he wrote is still in the box — retyping it would be the second
+    // punishment for someone else's missing key.
+    await expect(dialog.getByTestId("add-lesson-brief")).toHaveValue(BRIEF);
+
     expect(api.unexpected).toEqual([]);
   });
 });

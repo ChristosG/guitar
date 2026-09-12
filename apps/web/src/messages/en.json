@@ -96,7 +96,6 @@
         "generate": "Create with AI",
         "empty": "Blank lesson",
         "planning": "Planning the title and the objective from your library…",
-        "drafting": "Being written… it will appear on the board once it is ready.",
         "closeHint": "You can close this — it will appear on the board once it is ready.",
         "timeout": "Taking longer than expected — the lesson will appear on the board once it is ready.",
         "error": "The lesson could not be created.",

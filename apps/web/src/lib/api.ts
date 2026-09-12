@@ -949,11 +949,13 @@ export interface GenerateLessonInput {
  *
  * THE POLLING CONTRACT (`GET /jobs/{id}`, `kind: "lesson_generate"`):
  *  - `running` with `progress.phase === "planning"` — the planner is choosing
- *    the title and objective from the module's siblings and the library.
- *  - `progress.phase === "drafting"` — the lesson EXISTS (`progress.lesson_id`)
- *    and sits `queued`; the chained `curriculum_draft` job
- *    (`progress.draft_job_id`) is writing it.
- *  - `succeeded` — the lesson is on the tree. Refetch the curriculum: the new
+ *    the title and objective from the module's siblings and the library. This
+ *    is the ONLY intermediate state a poll can ever observe.
+ *  - `succeeded`, which ALWAYS arrives carrying `progress.phase === "drafting"`
+ *    plus `lesson_id` (and, a beat later, `draft_job_id`): the runner writes
+ *    both in ONE commit (`app/jobs/lesson_generate.py`), so "drafting" is not a
+ *    phase a caller can render — it is a fact about the lesson that already
+ *    exists. Do not build a UI state on it. Refetch the curriculum: the new
  *    `queued` row is what re-arms the board's draft progress bar, which is the
  *    surface that reports the DRAFT's outcome from here on. Do NOT poll or
  *    surface the chained draft job's own `error` — it is a whole-run string

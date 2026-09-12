@@ -64,14 +64,17 @@ interface AddLessonDialogProps {
  *
  * WHY A JOB AND NOT A REQUEST: the planning call reads the whole library
  * (20-60s) and the draft chained behind it is minutes more — this dies at the
- * edge as a sync request. So: 202, poll, and a status line that changes under
- * him («Σχεδιάζω…» → «Γράφεται…») so the wait is legible rather than a spinner.
+ * edge as a sync request. So: 202, poll, and a named wait («Σχεδιάζω τον τίτλο
+ * και τον στόχο…») instead of a bare spinner.
  *
- * WHAT THIS DIALOG DOES NOT REPORT: the chained draft job's outcome. Once the
- * lesson exists the BOARD owns that story — the refetched tree's `queued` row
- * re-arms the draft progress bar, and the row's own status chip is the truth.
- * The draft job's `error` is a whole-run string (it can carry a root-wide
- * count) and would be a lie about this one lesson.
+ * WHAT THIS DIALOG DOES NOT REPORT: anything after the lesson exists. The
+ * chained draft's outcome is the BOARD's story — the refetched tree's `queued`
+ * row re-arms the draft progress bar, and the row's own status pill is the
+ * truth. The draft job's `error` is a whole-run string (it can carry a
+ * root-wide count) and would be a lie about this one lesson.
+ *
+ * AND IT ONLY SAYS WHAT THE API CAN BACK: see `phase` below on why there is no
+ * «Γράφεται…» here — the runner never emits a state this poll could observe.
  */
 export function AddLessonDialog({
   moduleId,
@@ -88,8 +91,16 @@ export function AddLessonDialog({
   const [brief, setBrief] = useState("");
   const [title, setTitle] = useState("");
   const [after, setAfter] = useState("");
-  /** `null` = the form. The two busy phases are what the status line reads. */
-  const [phase, setPhase] = useState<"planning" | "drafting" | "empty" | null>(null);
+  /** `null` = the form; anything else = an action is in flight.
+   *
+   * THERE IS NO `drafting` PHASE HERE, and there cannot be: the runner commits
+   * `status="succeeded"` and `progress={"phase": "drafting", …}` in the SAME
+   * commit (`app/jobs/lesson_generate.py`), so no poll can ever observe one
+   * without the other. A «Γράφεται…» line in this dialog would be a state the
+   * API never emits — a story told to fill a gap. The board tells that part:
+   * after the refresh the new row carries its own `queued`/`drafting` pill and
+   * the draft progress bar counts it. */
+  const [phase, setPhase] = useState<"planning" | "empty" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const busy = phase !== null;
@@ -145,16 +156,19 @@ export function AddLessonDialog({
       const deadline = performance.now() + POLL_DEADLINE_MS;
       while (performance.now() < deadline) {
         const job = await getJob(accepted.job_id);
-        // The lesson EXISTS from this tick on, and the chained draft has it —
-        // so the sentence stops being about planning and starts being about
-        // the board, whether or not the job row has flipped to `succeeded`.
-        if (job.progress?.phase === "drafting") setPhase("drafting");
         if (job.status === "succeeded") {
+          // The lesson exists (`progress.lesson_id`) and the chained draft is
+          // already writing it. Nothing left for this dialog to narrate: the
+          // refreshed board shows the new row with its own status pill.
           onAdded();
           close();
           return;
         }
         if (job.status === "failed") {
+          // BAD NEWS FINDS HIM. He is allowed to close this dialog mid-job, so
+          // an error written into an off-screen popup would be an error nobody
+          // ever reads — and this is the one that can need him (a missing key).
+          onOpenChange(true);
           setError(jobErrorText(job, tJobErrors));
           setPhase(null);
           return;
@@ -162,7 +176,9 @@ export function AddLessonDialog({
         await sleep(POLL_INTERVAL_MS);
       }
       // NOT a failure: the job is still running on the server and the lesson
-      // will land on the board on its own. Only this dialog stopped waiting.
+      // will land on the board on its own. Only this dialog stopped waiting —
+      // and it comes back to say so, for the same reason as above.
+      onOpenChange(true);
       setError(t("timeout"));
       setPhase(null);
     } catch {
@@ -245,7 +261,7 @@ export function AddLessonDialog({
             </select>
           </div>
 
-          {phase === "planning" || phase === "drafting" ? (
+          {phase === "planning" ? (
             <div className="flex flex-col gap-1">
               <p
                 // The one line that CHANGES while he waits (planning →
@@ -293,7 +309,7 @@ export function AddLessonDialog({
             disabled={busy || !longEnough}
             onClick={handleGenerate}
           >
-            {phase === "planning" || phase === "drafting" ? (
+            {phase === "planning" ? (
               <Loader2 className="animate-spin" />
             ) : (
               <Sparkles />
