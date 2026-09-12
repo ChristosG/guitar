@@ -122,6 +122,8 @@ from app.curriculum.depth import Measurement
 from app.curriculum.draft import (
     LESSON_DEEPEN_BLOCK,
     LESSON_DEEPEN_SLICE_ID,
+    LESSON_FIXED_BLOCK,
+    LESSON_FIXED_SLICE_ID,
     LESSON_RETRIEVED_BLOCK,
     LESSON_RETRIEVED_SLICE_ID,
     LESSON_REVISE_BLOCK,
@@ -718,6 +720,13 @@ _SAMPLE_REVISE_CURRENT = {
     "exercises": "Παίξε το σχήμα C ανεβαίνοντας το μπράτσο ανά δύο τάστα.",
 }
 
+# Task 1.3: the sections the tutor wrote himself, shown to the model as FIXED while
+# it writes the rest around them. Same shape as `_SAMPLE_REVISE_CURRENT` and the same
+# reasoning — his DATA, never a prompt this file authors.
+_SAMPLE_FIXED_SECTIONS = {
+    "theory": "Το σχήμα C ξεκινάει από τη ρίζα στην πέμπτη χορδή, τρίτο τάστο.",
+}
+
 
 # ---------------------------------------------------------------------------
 # Builders — each one calls the SAME function the live call path calls
@@ -1115,6 +1124,24 @@ def _build_lesson_revise(locale: str, db, course_language=None) -> _Built:
         # `lesson.deepen`'s `previous_draft` span above.
         ("revise_current", "Το τρέχον περιεχόμενο του μαθήματος",
          json.dumps(_SAMPLE_REVISE_CURRENT, ensure_ascii=False)),
+        (*_ANSWER_IN_FROM_COURSE, answer_in(lang, db)),
+    ]
+
+
+def _build_lesson_fixed(locale: str, db, course_language=None) -> _Built:
+    lang = _course_language(locale, course_language)
+    built = build_lesson_messages(
+        ctx=_SAMPLE_LESSON_CTX, library=_SAMPLE_LIBRARY, language=lang,
+        student_brief=_sample_student_brief(db), course_brief=_SAMPLE_COURSE_BRIEF,
+        fixed_sections=_SAMPLE_FIXED_SECTIONS, source=db,
+    )
+    return _msgs(built), [
+        (*_LIBRARY, _SAMPLE_LIBRARY_TEXT),
+        (*_STUDENT, _sample_student_brief(db)),
+        # The live builder json-dumps the fixed sections, same reasoning as
+        # `lesson.revise`'s `revise_current` span above.
+        ("fixed_sections", "Οι ενότητες που έγραψες εσύ",
+         json.dumps(_SAMPLE_FIXED_SECTIONS, ensure_ascii=False)),
         (*_ANSWER_IN_FROM_COURSE, answer_in(lang, db)),
     ]
 
@@ -1821,7 +1848,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="lesson",
         kind="prompt",
-        source_ref="app/curriculum/draft.py:198",
+        source_ref="app/curriculum/draft.py:220",
         title_el="Η συγγραφή ενός μαθήματος",
         what_it_does_el=(
             "Ζητάει το ίδιο το μάθημα — τις σελίδες που θα διδάξεις, όχι ένα "
@@ -1837,7 +1864,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: build_lesson_messages,
         build=_build_lesson_draft,
-        call_sites=("curriculum/draft.py:446",),
+        call_sites=("curriculum/draft.py:499",),
         slices=(
             Slice(
                 id=LESSON_SLICE_ID,
@@ -1853,7 +1880,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="lesson",
         kind="prompt",
-        source_ref="app/curriculum/draft.py:198",
+        source_ref="app/curriculum/draft.py:220",
         title_el="Το ξαναγράψιμο ενός κοντού μαθήματος",
         what_it_does_el=(
             "Αν το μάθημα βγήκε πιο κοντό από το όριο, γυρίζει πίσω με την "
@@ -1867,7 +1894,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: build_lesson_messages,
         build=_build_lesson_deepen,
-        call_sites=("curriculum/draft.py:468",),
+        call_sites=("curriculum/draft.py:529",),
         slices=(
             Slice(
                 id=LESSON_DEEPEN_SLICE_ID,
@@ -1882,7 +1909,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="lesson",
         kind="fragment",
-        source_ref="app/curriculum/draft.py:198",
+        source_ref="app/curriculum/draft.py:220",
         title_el="Όταν αναθεωρείς ένα μάθημα: το τρέχον περιεχόμενό του",
         what_it_does_el=(
             "Μπαίνει στη συγγραφή του μαθήματος όταν ζητάς μια αναθεώρηση σε ένα "
@@ -1904,6 +1931,36 @@ _ENTRIES = [
                 id=LESSON_REVISE_SLICE_ID,
                 label_el="Το κείμενο της οδηγίας",
                 default=LESSON_REVISE_BLOCK,
+                kind="replace",
+            ),
+        ),
+    ),
+    PromptEntry(
+        id="lesson.fixed",
+        language_from_course=True,
+        flow="lesson",
+        kind="fragment",
+        source_ref="app/curriculum/draft.py:220",
+        title_el="Όταν κάποιες ενότητες είναι δικές σου: τι μένει σταθερό",
+        what_it_does_el=(
+            "Κρατάει έξω από τα χέρια του βοηθού τις ενότητες που έγραψες ή "
+            "διόρθωσες εσύ. Αυτές δεν του ζητούνται καν — φεύγουν από τη φόρμα "
+            "της απάντησής του, οπότε δεν μπορεί να τις ξαναγράψει — και του "
+            "δείχνονται εδώ ως δεδομένες, με την οδηγία να γράψει τις υπόλοιπες "
+            "ώστε να δένουν απόλυτα μαζί τους: ίδια ορολογία, ίδια παραδείγματα, "
+            "ίδια σειρά ιδεών, καμία αντίφαση."
+        ),
+        when_it_runs_el=(
+            "Όταν ξαναγράφεται μάθημα που έχει ενότητες αλλαγμένες από σένα, ή "
+            "όταν στο πλαίσιο AI του μαθήματος αφήνεις ενότητες ατσεκάριστες."
+        ),
+        source_of_truth=lambda: build_lesson_messages,
+        build=_build_lesson_fixed,
+        slices=(
+            Slice(
+                id=LESSON_FIXED_SLICE_ID,
+                label_el="Το κείμενο της οδηγίας",
+                default=LESSON_FIXED_BLOCK,
                 kind="replace",
             ),
         ),
@@ -1943,7 +2000,7 @@ _ENTRIES = [
         curriculum_group=True,
         flow="lesson",
         kind="prompt",
-        source_ref="app/curriculum/draft.py:361",
+        source_ref="app/curriculum/draft.py:404",
         title_el="Όταν παραπέμπει σε σελίδα που δεν υπάρχει",
         what_it_does_el=(
             "Η εφαρμογή ελέγχει κάθε παραπομπή σε σελίδα που γράφει ο βοηθός. "
@@ -1956,7 +2013,7 @@ _ENTRIES = [
         when_it_runs_el="Μόνο όταν πιαστεί λάθος παραπομπή. Το πολύ μία φορά ανά μάθημα.",
         source_of_truth=lambda: _repair_message,
         build=_build_lesson_repair,
-        call_sites=("curriculum/draft.py:452",),
+        call_sites=("curriculum/draft.py:505",),
         slices=(
             Slice(
                 id=REPAIR_SLICE_ID,

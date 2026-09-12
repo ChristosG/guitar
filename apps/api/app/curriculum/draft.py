@@ -183,6 +183,28 @@ LESSON_REVISE_BLOCK = (
 )
 LESSON_REVISE_SLICE_ID = "lesson.revise"
 
+# THE TUTOR'S SECTIONS, SHOWN AS FIXED. On a redraft that must keep his hand-
+# edited theory (or on the lesson panel, the sections he left unticked), those
+# sections are removed from the guided-json schema and shown here instead, so
+# the model writes the others TO FIT them. Per-section cap is generous — a
+# hand-written theory can run 16K chars and must be seen whole.
+LESSON_FIXED_BLOCK = (
+    "\n\nΟι παρακάτω ενότητες είναι ΤΟΥ ΚΑΘΗΓΗΤΗ και ΔΕΝ αλλάζουν — δεν τις "
+    "γράφεις ξανά. Γράψε τις υπόλοιπες ενότητες ώστε να δένουν απόλυτα με αυτές: "
+    "ίδια ορολογία, ίδια παραδείγματα, ίδια σειρά ιδεών, καμία αντίφαση.\n{fixed}"
+)
+LESSON_FIXED_SLICE_ID = "lesson.fixed"
+FIXED_SECTION_CHAR_LIMIT = 20_000
+FIXED_SECTION_TRUNCATION_MARKER = "\n…[το υπόλοιπο περικόπηκε — υπάρχει και ισχύει]"
+
+
+def _fixed_body(text: str | None) -> str:
+    t = (text or "").strip()
+    if len(t) <= FIXED_SECTION_CHAR_LIMIT:
+        return t
+    return t[:FIXED_SECTION_CHAR_LIMIT] + FIXED_SECTION_TRUNCATION_MARKER
+
+
 LESSON_DEEPEN_BLOCK = (
     "\n\nYOUR PREVIOUS DRAFT CAME BACK AT {total_words} WORDS — "
     "under the {floor}-word floor. Rewrite it in full, keeping "
@@ -207,6 +229,7 @@ def build_lesson_messages(
     deepen: Measurement | None = None,
     previous: dict | None = None,
     revise_current: dict | None = None,
+    fixed_sections: dict[str, str] | None = None,
     source=None,
 ) -> list[dict]:
     """The messages for one lesson draft. Pure.
@@ -226,6 +249,15 @@ def build_lesson_messages(
     `jobs/curriculum_draft.py:_draft_one` before the model call. `None`/falsy
     (a fresh lesson, or an instruction-less redraft) renders `LESSON_REVISE_BLOCK`
     empty — byte-identical to before this parameter existed.
+
+    `fixed_sections` is `{section_key: body}` for the sections the model must NOT
+    write this time — the tutor's hand-edited ones on a redraft, or the ones he
+    left unticked on the lesson AI panel. They are ALSO removed from the
+    guided-json schema (`build_lesson_schema(bp, exclude=...)`), so this block is
+    the only way their text reaches the model: it writes the rest to fit them.
+    Rendered by APPENDING to `revise_block`, not through a placeholder of its own
+    — `LESSON_TAIL` is untouched, so a tutor override of `lesson.draft` written
+    before this existed still renders it. `None`/`{}` is byte-identical to before.
     """
     messages = prefix_messages(library, source)
 
@@ -259,6 +291,14 @@ def build_lesson_messages(
             source, LESSON_REVISE_SLICE_ID, LESSON_REVISE_BLOCK,
         ).format(current=json.dumps(revise_current, ensure_ascii=False))
 
+    fixed_block = ""
+    if fixed_sections:
+        import json
+
+        fixed_block = resolve(source, LESSON_FIXED_SLICE_ID, LESSON_FIXED_BLOCK).format(
+            fixed=json.dumps({k: _fixed_body(v) for k, v in fixed_sections.items()}, ensure_ascii=False),
+        )
+
     content = resolve(source, LESSON_SLICE_ID, LESSON_TAIL).format(
         course_title=ctx.course_title,
         module_title=ctx.module_title,
@@ -285,7 +325,10 @@ def build_lesson_messages(
                 source, LESSON_RETRIEVED_SLICE_ID, LESSON_RETRIEVED_BLOCK,
             ).format(retrieved=retrieved) if retrieved else ""
         ),
-        revise_block=revise_block,
+        # Appended to the EXISTING placeholder rather than given one of its own:
+        # `LESSON_TAIL` stays byte-identical, so a `lesson.draft` override the
+        # tutor saved before today still renders the fixed block.
+        revise_block=revise_block + fixed_block,
         deepen_block=deepen_block,
         answer_in=answer_in(language, source),
     )
@@ -390,6 +433,8 @@ def draft_lesson(
     source_ids: list[uuid.UUID] | None = None,
     prompts: dict[str, str] | None = None,
     revise_current: dict | None = None,
+    fixed_sections: dict[str, str] | None = None,
+    exclude_sections: set[str] | frozenset[str] = frozenset(),
 ) -> tuple[dict, Measurement]:
     """One lesson: draft -> validate citations (one repair) -> measure -> at most
     one deepen pass. Returns `(lesson, measurement)`.
@@ -399,6 +444,14 @@ def draft_lesson(
     below (the first draft AND any deepen pass) so a `modify_lesson` re-draft
     keeps seeing what it is revising even if it also runs long/thin and needs
     deepening. `None` on every other draft path — see that function's docstring.
+
+    `fixed_sections`/`exclude_sections` are the two halves of drafting AROUND the
+    tutor's work, and they travel together: the excluded keys leave the guided-json
+    schema (the model physically cannot return them) and the same sections' text is
+    shown as `LESSON_FIXED_BLOCK` so the rest is written to fit. `measure()` counts
+    the drafted sections PLUS the fixed ones — a lesson whose theory the tutor wrote
+    is not a thin lesson, and deepening it against a count that pretends his 900
+    words do not exist would burn a model call to pad sections that are fine.
 
     `db` IS ONLY TOUCHED FOR THE RETRIEVAL FALLBACK, and only when the library did
     not fit whole. In the normal (full-context) path this function performs NO
@@ -426,7 +479,7 @@ def draft_lesson(
     from app.curriculum import blueprint as _bp
 
     bp = blueprint if blueprint is not None else _bp.default_blueprint()
-    schema = _bp.build_lesson_schema(bp)
+    schema = _bp.build_lesson_schema(bp, exclude=set(exclude_sections))
 
     retrieved = None
     if not library.fits and not library.is_empty:
@@ -441,7 +494,7 @@ def draft_lesson(
     messages = build_lesson_messages(
         ctx=ctx, library=library, language=language, blueprint=bp,
         student_brief=student_brief, course_brief=course_brief, retrieved=retrieved,
-        revise_current=revise_current, source=prompts,
+        revise_current=revise_current, fixed_sections=fixed_sections, source=prompts,
     )
     lesson = provider.guided_json(messages, schema, role="draft")
 
@@ -459,7 +512,15 @@ def draft_lesson(
                         "dropping the bad citations, keeping the prose", ctx.lesson_title)
             lesson = strip_invalid_citations(lesson, library, bp)
 
-    m = measure(lesson, bp, teaching_minutes=ctx.teaching_minutes)
+    # The fixed sections are part of the lesson even though the model did not write
+    # them this time; `measure` must see their words or the deepen loop fires on a
+    # lesson that is already long enough.
+    def _with_fixed(d: dict) -> dict:
+        if not fixed_sections:
+            return d
+        return {**d, **{k: {"body": v} for k, v in fixed_sections.items() if k not in d}}
+
+    m = measure(_with_fixed(lesson), bp, teaching_minutes=ctx.teaching_minutes)
     passes = 0
     while m.needs_deepening and passes < DEEPEN_MAX_PASSES:
         passes += 1
@@ -470,13 +531,14 @@ def draft_lesson(
                 ctx=ctx, library=library, language=language, blueprint=bp,
                 student_brief=student_brief, course_brief=course_brief,
                 retrieved=retrieved, deepen=m, previous=lesson,
-                revise_current=revise_current, source=prompts,
+                revise_current=revise_current, fixed_sections=fixed_sections,
+                source=prompts,
             ),
             schema, role="draft",
         )
         if invalid_citations(deeper, library, bp):
             deeper = strip_invalid_citations(deeper, library, bp)
-        deeper_m = measure(deeper, bp, teaching_minutes=ctx.teaching_minutes)
+        deeper_m = measure(_with_fixed(deeper), bp, teaching_minutes=ctx.teaching_minutes)
         # Keep the LONGER draft. A deepen pass that came back shorter has not
         # deepened anything, and silently accepting it would make the tutor's
         # "Deepen" button able to shrink his lesson.
@@ -555,33 +617,41 @@ def persist_lesson(
     blueprint: dict | None = None,
     *,
     teaching_minutes: int,
+    keep: set[str] | frozenset[str] = frozenset(),
 ) -> None:
-    """Replace `lesson_block`'s segments with the drafted lesson's sections, and
-    flip it to `ready`. Caller commits.
+    """Write the drafted sections onto `lesson_block`'s segments and flip it to
+    `ready`. Caller commits.
 
-    IDEMPOTENT — it deletes the existing segments first. That is what makes the
-    Deepen button, a re-draft, and a Resume that re-runs a lesson whose worker died
-    after the model call but before the commit all safe: none of them can leave a
-    lesson with two copies of its theory section.
+    IN PLACE, BY `meta.section`. A segment that already exists for a blueprint
+    key is UPDATED (same row, same id — an artifact attached to it stays
+    attached); a key with no row gets a new one; a row whose key the blueprint
+    no longer has is deleted. `keep` names sections that are NOT touched at all
+    (the tutor's hand-edited sections on a redraft; the unticked sections on the
+    lesson panel) — they keep body, meta and `tutor_edited`. Every rewritten
+    section loses its `tutor_edited` marker: the AI just wrote it.
+
+    STILL IDEMPOTENT, and that is what makes the Deepen button, a re-draft, and a
+    Resume that re-runs a lesson whose worker died after the model call but before
+    the commit all safe: writing by key can no more leave a lesson with two copies
+    of its theory than the old delete-all could.
 
     THE OLD SEGMENTS ARE FOUND BY QUERY, NOT VIA `lesson_block.children`. The
     relationship is a CACHED collection: a caller that touched `.children` before
     calling this (which the board and every test naturally do) gets the list as it
-    was AT LOAD TIME, so the delete loop sees nothing to delete and the new segments
-    are simply appended — eight sections become sixteen, and it looks fine until you
-    count. `app.lessons.edit` hit the same trap from the other direction (a stale
-    collection causing a delete-orphan cascade to eat re-parented items) and solved
-    it with `db.expire(..., ["children"])`; the same expire runs at the end here, so
-    the caller's next read of `.children` is fresh.
+    was AT LOAD TIME, so this function would see none of the rows it is meant to
+    write over and would simply append — eight sections become sixteen, and it
+    looks fine until you count. `app.lessons.edit` hit the same trap from the other
+    direction (a stale collection causing a delete-orphan cascade to eat re-parented
+    items) and solved it with `db.expire(..., ["children"])`; the same expire runs
+    at the end here, so the caller's next read of `.children` is fresh.
 
-    CUSTOM SEGMENTS SURVIVE THE DELETE (2026-07-20, Spec A). `revise.apply_revision`'s
+    CUSTOM SEGMENTS ARE NEVER DELETED (2026-07-20, Spec A). `revise.apply_revision`'s
     `add_segment` op can surgically add a segment outside the blueprint entirely
     (`meta.custom is True`) — a redraft that blew those away along with the
     regenerated blueprint sections would silently undo a tutor's surgical edit the
-    next time he re-drafted the lesson. So the delete-all below spares any child
-    carrying `meta.custom`, and they are re-appended AFTER the freshly-built
-    blueprint sections, in their prior relative order, with `order` continuing on
-    from where the new sections left off.
+    next time he re-drafted the lesson. So they are skipped by the key map below
+    and re-ordered AFTER the freshly-written blueprint sections, in their prior
+    relative order, with `order` continuing on from where those left off.
     """
     from sqlalchemy import select
 
@@ -595,11 +665,23 @@ def persist_lesson(
         select(Block).where(Block.parent_id == lesson_block.id).order_by(Block.order)
     ).all()
     customs = [b for b in children if (b.meta or {}).get("custom")]
-    custom_ids = {b.id for b in customs}
-    for old in children:
-        if old.id not in custom_ids:
-            db.delete(old)
-    db.flush()
+    by_key: dict[str, Block] = {}
+    # Non-custom rows this function cannot address BY KEY: no `meta.section` at all
+    # (`restore.restore_version` writes one when the snapshot had no section), or a
+    # second row for a key another already claimed (the eight-becomes-sixteen bug,
+    # if a pre-fix database still carries it). The delete-all this replaced took
+    # them; leaving them would leave a row that is never rewritten, never removed
+    # and never re-ordered — so its stale `order` would collide with a real section
+    # and the printed script would show two segments fighting for one slot.
+    strays: list[Block] = []
+    for b in children:
+        key = (b.meta or {}).get("section")
+        if (b.meta or {}).get("custom"):
+            continue
+        if key and key not in by_key:
+            by_key[key] = b
+        else:
+            strays.append(b)
 
     # Fallback is "el", not "en" — i18n.py's own rule: anything in this codebase
     # still defaulting to English is a bug. A student row carrying "el-GR" used
@@ -610,9 +692,19 @@ def persist_lesson(
     labels = _bp.section_labels(bp, lang)
     sections_by_key = {s["key"]: s for s in bp["sections"]}
     citations_all: list[dict] = []
+    seen: set[str] = set()
 
     order = 0
     for name in _bp.section_keys(bp):
+        if name in keep and name in by_key:
+            # Untouched: body, meta, `tutor_edited` and citations all stay his.
+            # Only `order` moves, so the blueprint's section order still holds.
+            existing = by_key[name]
+            existing.order = order
+            citations_all.extend((existing.meta or {}).get("citations") or [])
+            seen.add(name)
+            order += 1
+            continue
         section = lesson.get(name)
         if not isinstance(section, dict):
             continue
@@ -632,36 +724,58 @@ def persist_lesson(
             if isinstance(c, dict) and str(c.get("source_id")) in library.ref_to_source_id
         ]
         citations_all.extend(cites)
-        db.add(Block(
-            kind="segment",
-            title=labels[name],
-            body=body,
-            est_minutes=_section_minutes(name, teaching_minutes, bp),
-            order=order,
-            parent_id=lesson_block.id,
-            language=lesson_block.language,
-            meta={
-                "section": name,
-                "audience": sections_by_key[name].get("audience"),
-                "citations": cites,
-            },
-        ))
+        # WHOLE-DICT REASSIGNMENT, and it is load-bearing twice over: `Block.meta`
+        # is plain sa.JSON with no MutableDict, and a fresh dict is what DROPS
+        # `tutor_edited`/`prev_body` — the AI has just rewritten this section, so
+        # the marker that says "the tutor wrote this" must not survive it.
+        new_meta = {
+            "section": name,
+            "audience": sections_by_key[name].get("audience"),
+            "citations": cites,
+        }
+        existing = by_key.get(name)
+        if existing is not None:
+            existing.title = labels[name]
+            existing.body = body
+            existing.est_minutes = _section_minutes(name, teaching_minutes, bp)
+            existing.order = order
+            existing.meta = new_meta
+        else:
+            db.add(Block(
+                kind="segment",
+                title=labels[name],
+                body=body,
+                est_minutes=_section_minutes(name, teaching_minutes, bp),
+                order=order,
+                parent_id=lesson_block.id,
+                language=lesson_block.language,
+                meta=new_meta,
+            ))
+        seen.add(name)
         order += 1
 
-    # The preserved customs (see docstring): re-appended AFTER the freshly-built
-    # blueprint sections, in their prior relative order (`children` above was
-    # already ordered), `order` continuing on from where the loop left off. These
-    # rows are the SAME blocks — not deleted/recreated — so their id/body/meta are
-    # untouched by this redraft.
+    # Rows for keys the blueprint no longer has (or that came back empty) go —
+    # unless kept. Customs are not in `by_key` at all, so they never go.
+    for key, row in by_key.items():
+        if key not in seen and key not in keep:
+            db.delete(row)
+    for stray in strays:
+        db.delete(stray)
+
+    # The preserved customs (see docstring): re-ordered AFTER the blueprint
+    # sections, in their prior relative order (`children` above was already
+    # ordered), `order` continuing on from where the loop left off. These rows are
+    # the SAME blocks — never deleted/recreated — so id/body/meta are untouched.
     for custom in customs:
         custom.order = order
         order += 1
+    db.flush()
 
     if lesson.get("summary"):
         lesson_block.body = strip_inline_citations(lesson["summary"])
 
     # See the docstring: the caller's cached `children` collection is stale the
-    # moment we delete and re-add. Expiring it makes the next read a fresh SELECT.
+    # moment we add or delete a row. Expiring it makes the next read a fresh SELECT.
     db.expire(lesson_block, ["children"])
 
     # WHOLE-DICT REASSIGNMENT. `Block.meta` is plain sa.JSON with no MutableDict:

@@ -164,10 +164,16 @@ def section_labels(bp: dict, lang: str) -> dict[str, str]:
     }
 
 
-def build_lesson_schema(bp: dict) -> dict:
+def build_lesson_schema(bp: dict, exclude: set[str] | frozenset[str] = frozenset()) -> dict:
     """The guided-json schema for `bp` — the replacement for the module-level
-    `depth.LESSON_DRAFT_SCHEMA`. For the default blueprint it reproduces that schema
-    byte-for-byte (the golden test)."""
+    `depth.LESSON_DRAFT_SCHEMA`. For the default blueprint (and an empty
+    `exclude`) it reproduces that schema byte-for-byte (the golden test).
+
+    `exclude`: section keys the model must NOT write this time — the tutor's own
+    sections (`tutor_edited`) on a redraft, or the sections he left unticked on
+    the lesson panel's plan card. They are removed from `properties` AND
+    `required`, so the model physically cannot overwrite them; their text
+    reaches it as `LESSON_FIXED_BLOCK` instead."""
     props: dict = {
         "title": copy.deepcopy(depth._TITLE_PROP),
         "summary": copy.deepcopy(depth._SUMMARY_PROP),
@@ -175,6 +181,8 @@ def build_lesson_schema(bp: dict) -> dict:
     keys: list[str] = []
     for s in enabled_sections(bp):
         key = s["key"]
+        if key in exclude:
+            continue
         keys.append(key)
         if s["kind"] == _KIND_PROSE:
             props[key] = depth._prose_section(s["description"])
