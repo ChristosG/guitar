@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
 import { Loader2, Plus, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -32,8 +32,16 @@ const MAX_BRIEF = 20000;
 // Same cadence as the board's add-module poll. The deadline is longer because
 // this job does MORE: a planning call over the whole library, and then the
 // chained draft of the lesson it just planted, in the same thread.
+//
+// 40 MINUTES, NOT 10 (Task 4.3). Live, 2026-09-12: the planner answered in 26s
+// and the chained draft then ran past the bridge's own 1200s cap — and on the
+// afternoon's other runs that same draft took 617s. A 10-minute deadline gave
+// up on work that was still perfectly alive and told the tutor it had timed
+// out; the deadline has to sit ABOVE the bridge's ceiling, not under it. The
+// job is the server's either way (see `handleGenerate`) — and while it runs,
+// the status line says how many minutes it has been.
 const POLL_INTERVAL_MS = 2000;
-const POLL_DEADLINE_MS = 10 * 60_000;
+const POLL_DEADLINE_MS = 40 * 60_000;
 /** Consecutive unanswered polls before the loop gives up — see `handleGenerate`:
  * one blink is not a failed job. */
 const MAX_POLL_MISSES = 3;
@@ -113,6 +121,22 @@ export function AddLessonDialog({
    * the draft progress bar counts it. */
   const [phase, setPhase] = useState<"planning" | "empty" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // HOW LONG IT HAS BEEN — the same clock the lesson AI panel shows, for the
+  // same reason: this wait is now up to 40 minutes, and a spinner that has
+  // said «Σχεδιάζω…» for twenty of them reads as a hung app rather than a
+  // working one. Whole minutes; ticked every second, so the state only ever
+  // changes (and re-renders) when the minute does.
+  const [startedAt, setStartedAt] = useState<number | null>(null);
+  const [elapsedMinutes, setElapsedMinutes] = useState(0);
+
+  useEffect(() => {
+    if (phase !== "planning" || startedAt === null) return;
+    const id = setInterval(
+      () => setElapsedMinutes(Math.floor((performance.now() - startedAt) / 60_000)),
+      1000,
+    );
+    return () => clearInterval(id);
+  }, [phase, startedAt]);
 
   const busy = phase !== null;
   const trimmedBrief = brief.trim();
@@ -158,6 +182,8 @@ export function AddLessonDialog({
 
   async function handleGenerate() {
     setPhase("planning");
+    setStartedAt(performance.now());
+    setElapsedMinutes(0);
     setError(null);
     try {
       const accepted = await generateLesson(moduleId, {
@@ -323,6 +349,9 @@ export function AddLessonDialog({
               >
                 <Loader2 className="size-4 shrink-0 animate-spin" aria-hidden />
                 {t(phase)}
+                <span data-testid="add-lesson-elapsed" className="shrink-0 tabular-nums">
+                  {t("elapsed", { n: elapsedMinutes })}
+                </span>
               </p>
               {/* SAID OUT LOUD, because a spinner in a dialog reads as "wait
                   here" and this one means nothing of the sort — the work is

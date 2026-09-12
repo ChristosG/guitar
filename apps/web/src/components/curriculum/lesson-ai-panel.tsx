@@ -25,11 +25,20 @@ import { cn } from "@/lib/utils";
  * `chat/chat-panel.tsx`'s own loop, and duplicated for the same stated reason
  * that one duplicates `generate-dialog.tsx`'s: a 10-line loop used in a handful
  * of places is small deliberate duplication, not a missing abstraction. ~2s
- * between polls, capping at ~10 minutes — a `claude -p` planner turn was
- * measured at 6-8 minutes, and the job keeps running server-side past the cap
- * regardless (the cap ends THIS component's wait, not the work). */
+ * between polls, capping at ~40 MINUTES.
+ *
+ * WHY 40 AND NOT 10 (Task 4.3): the tutor's first live afternoon produced an
+ * apply that ran 19 minutes — a 390s draft call, then (before this task) a
+ * 726s citation-repair re-draft. The cap was 10 minutes, so the panel gave up
+ * and said «Το AI δουλεύει ακόμα» while the job went on to SUCCEED at 13:46.
+ * The work was fine; the only broken thing was this component's patience. A
+ * `claude -p` turn under bridge contention is 8+ minutes on its own, so the
+ * cap has to sit above the bridge's own 1200s ceiling rather than under it.
+ * The job still keeps running server-side past the cap regardless (the cap
+ * ends THIS component's wait, not the work) — and while it runs, the status
+ * line says how long it has been (`elapsedMinutes` below). */
 const POLL_INTERVAL_MS = 2000;
-const MAX_POLLS = 300;
+const MAX_POLLS = 1200;
 /** Consecutive unanswered polls before `waitForJob` gives up — see its own
  * comment: one blink is not a failed job. */
 const MAX_POLL_MISSES = 3;
@@ -96,6 +105,15 @@ export function LessonAiPanel({ tree, onApplied }: LessonAiPanelProps) {
   // card's `key` remounts it — React's documented way to reset all state when
   // a prop changes, and the reason the card needs no reset effect of its own.
   const [planKey, setPlanKey] = useState(0);
+  // HOW LONG IT HAS BEEN. A job here can legitimately run 20 minutes (see
+  // MAX_POLLS), and a spinner that has said the same three words for a quarter
+  // of an hour is indistinguishable from a hung one: the tutor's reasonable
+  // conclusion is that the app broke, and his reasonable next move — reload,
+  // press it again — meets a 409 `lesson_busy` from the job that is still
+  // holding the lesson. So the wait accounts for itself, in WHOLE MINUTES: a
+  // live seconds counter turns a wait into a stopwatch he feels watched by.
+  const [startedAt, setStartedAt] = useState<number | null>(null);
+  const [elapsedMinutes, setElapsedMinutes] = useState(0);
 
   const lessonId = scope?.lesson?.id ?? null;
   const lessonNode = useMemo(
@@ -230,8 +248,8 @@ export function LessonAiPanel({ tree, onApplied }: LessonAiPanelProps) {
    * `failed` is a real failure: `error_kind` is the taxonomy the API maintains
    * so the frontend can localize it, which is what `jobErrorText` does.
    *
-   * ANYTHING ELSE means `waitForJob` hit its 300-poll cap while the job was
-   * still `running`. That is NOT a failure — the work continues server-side,
+   * ANYTHING ELSE means `waitForJob` hit its MAX_POLLS cap (~40 min) while the
+   * job was still `running`. That is NOT a failure — the work continues server-side,
    * only this component stopped waiting. Saying «δοκίμασε ξανά» there would be
    * a lie AND a trap: a retry hits a 409 `lesson_busy`, because the job he was
    * told to retry is still holding the lesson. So the panel says its own
@@ -246,6 +264,8 @@ export function LessonAiPanel({ tree, onApplied }: LessonAiPanelProps) {
     const target = lessonId;
     if (!target) return;
     setPhase("planning");
+    setStartedAt(performance.now());
+    setElapsedMinutes(0);
     setError(null);
     try {
       const accepted = await planLessonAi(target, { instruction, note: extraNote });
@@ -281,6 +301,8 @@ export function LessonAiPanel({ tree, onApplied }: LessonAiPanelProps) {
     const target = lessonId;
     if (!target) return;
     setPhase("applying");
+    setStartedAt(performance.now());
+    setElapsedMinutes(0);
     setError(null);
     try {
       const accepted = await applyLessonAi(target, { instruction, note: extraNote, sections: picks });
@@ -303,6 +325,20 @@ export function LessonAiPanel({ tree, onApplied }: LessonAiPanelProps) {
   }
 
   const busy = phase === "planning" || phase === "applying";
+
+  // Ticked every second but STORED IN MINUTES, so React re-renders the panel
+  // once a minute rather than sixty times: setting a state to the value it
+  // already holds is a no-op. Stops with the job — the cleanup runs when
+  // `busy` goes false, so a finished plan leaves no interval behind.
+  useEffect(() => {
+    if (!busy || startedAt === null) return;
+    const id = setInterval(
+      () => setElapsedMinutes(Math.floor((performance.now() - startedAt) / 60_000)),
+      1000,
+    );
+    return () => clearInterval(id);
+  }, [busy, startedAt]);
+
   const lesson = scope?.lesson ?? null;
 
   if (!open || !lesson) return null;
@@ -444,6 +480,9 @@ export function LessonAiPanel({ tree, onApplied }: LessonAiPanelProps) {
           >
             <Loader2 className="size-4 shrink-0 animate-spin" />
             {phase === "planning" ? t("planning") : t("applying")}
+            <span data-testid="lesson-ai-elapsed" className="shrink-0 tabular-nums">
+              {t("elapsed", { n: elapsedMinutes })}
+            </span>
           </p>
         )}
 

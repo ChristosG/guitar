@@ -42,11 +42,15 @@ import { jobErrorText } from "@/lib/job-errors";
  * rather than introducing a new shared module for one 10-line loop used in
  * exactly two places. */
 const POLL_INTERVAL_MS = 2000;
-/** ~10 minutes. Was 150 (~5) when the only thing polled here was a
- * `generate_curriculum` job; the drawer's own turn is a job now too, and a
- * `claude -p` planner turn was measured at 6-8 minutes — a cap of 5 would
- * have given up on answers that were about to land. */
-const MAX_POLLS = 300;
+/** ~40 minutes. Was 150 (~5) when the only thing polled here was a
+ * `generate_curriculum` job, then 300 (~10) once the drawer's own turn became
+ * a job too. 1200 because 10 was still short of the real thing: on the tutor's
+ * first live afternoon (2026-09-12) a single `claude -p` turn under bridge
+ * contention ran past 8 minutes, and a curriculum job behind it ran 19 — the
+ * cap has to sit above the bridge's own 1200s ceiling, not under it. The job
+ * keeps running server-side past the cap regardless; the cap only ends THIS
+ * component's wait. */
+const MAX_POLLS = 1200;
 /** Consecutive unanswered polls before `waitForJob` gives up. Three, not one:
  * see its own comment — a single blink is not a failed job, and three in a row
  * (~6s of nothing) is a connection that is actually gone. */

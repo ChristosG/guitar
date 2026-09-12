@@ -332,6 +332,11 @@ test.describe("«AI στο μάθημα» panel — scope, the tutor-edited stri
 
     await panel.getByTestId("lesson-ai-plan").click();
     await expect(panel.getByTestId("lesson-ai-status")).toBeVisible();
+    // AND IT SAYS HOW LONG IT HAS BEEN (Task 4.3). The tutor's first live
+    // afternoon had an apply run 19 minutes; a spinner with no clock on it is
+    // indistinguishable from a hung one, and the panel now waits 40 minutes
+    // rather than 10, so the wait has to account for itself out loud.
+    await expect(panel.getByTestId("lesson-ai-elapsed")).toContainText("λεπτά");
 
     await expect(panel.getByTestId("lesson-plan-card")).toContainText("Θα ξαναγράψω 3 ενότητες.");
     // The status goes away once the card is there — a panel that kept saying

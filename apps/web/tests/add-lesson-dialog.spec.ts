@@ -257,6 +257,9 @@ test.describe("«Προσθήκη μαθήματος» — the brief, the positi
     // THE WAIT IS NAMED, not a bare spinner.
     const status = dialog.getByTestId("add-lesson-status");
     await expect(status).toContainText("Σχεδιάζω", { timeout: 10_000 });
+    // And it says HOW LONG (Task 4.3): this dialog now waits 40 minutes, which
+    // only reads as "working" if the wait accounts for itself.
+    await expect(dialog.getByTestId("add-lesson-elapsed")).toContainText("λεπτά");
     // And it says he is free to go — the job is the server's, not this
     // dialog's, and a tutor held hostage by a 10-minute spinner is the bug.
     await expect(dialog.getByTestId("add-lesson-close-hint")).toBeVisible();
