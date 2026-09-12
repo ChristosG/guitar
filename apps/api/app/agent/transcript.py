@@ -47,7 +47,11 @@ def window_wire(
     system message is always kept and never counted. The newest user turn is
     always kept, even alone over budget (better an oversized prompt the
     provider can reject loudly than an empty one). Old turns fall out of the
-    model's context; they remain in the DB and the UI untouched."""
+    model's context; they remain in the DB and the UI untouched.
+
+    When neither cap actually trims anything, `wire` is returned UNCHANGED
+    (the same object, not a reconstructed equal one) — callers that rely on
+    identity for the common "transcript fits" case keep working."""
     system: list[dict] = []
     body = wire
     if body and body[0].get("role") == "system":
@@ -73,6 +77,10 @@ def window_wire(
         last_user = next((i for i in range(len(body) - 1, -1, -1)
                           if body[i].get("role") == "user"), None)
         start = last_user if last_user is not None else 0
+    if start == 0:
+        # Nothing was cut by either cap and the edge never had to snap
+        # forward — hand back the exact object the caller gave us.
+        return wire
     return system + body[start:]
 
 

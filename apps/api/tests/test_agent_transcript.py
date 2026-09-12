@@ -415,3 +415,11 @@ def test_window_keeps_the_last_user_turn_even_if_alone_over_budget():
 
 def test_default_budget_is_240k():
     assert MAX_WIRE_CHARS == 240_000
+
+
+def test_window_wire_returns_the_same_object_when_nothing_is_trimmed():
+    """Under both caps, `window_wire` must hand back the exact `wire` object
+    (not an equal reconstruction) — pinned next to the new char-budget
+    behaviour since it now shares the same return path."""
+    wire = [{"role": "system", "content": "sys"}] + _char_turn(0)
+    assert window_wire(wire) is wire
