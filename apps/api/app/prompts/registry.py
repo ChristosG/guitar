@@ -2083,7 +2083,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="lesson",
         kind="prompt",
-        source_ref="app/curriculum/draft.py:267",
+        source_ref="app/curriculum/draft.py:268",
         title_el="Η συγγραφή ενός μαθήματος",
         what_it_does_el=(
             "Ζητάει το ίδιο το μάθημα — τις σελίδες που θα διδάξεις, όχι ένα "
@@ -2099,7 +2099,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: build_lesson_messages,
         build=_build_lesson_draft,
-        call_sites=("curriculum/draft.py:622",),
+        call_sites=("curriculum/draft.py:644",),
         slices=(
             Slice(
                 id=LESSON_SLICE_ID,
@@ -2115,7 +2115,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="lesson",
         kind="prompt",
-        source_ref="app/curriculum/draft.py:267",
+        source_ref="app/curriculum/draft.py:268",
         title_el="Το ξαναγράψιμο ενός κοντού μαθήματος",
         what_it_does_el=(
             "Αν το μάθημα βγήκε πιο κοντό από το όριο, γυρίζει πίσω με την "
@@ -2129,7 +2129,7 @@ _ENTRIES = [
         ),
         source_of_truth=lambda: build_lesson_messages,
         build=_build_lesson_deepen,
-        call_sites=("curriculum/draft.py:684",),
+        call_sites=("curriculum/draft.py:706",),
         slices=(
             Slice(
                 id=LESSON_DEEPEN_SLICE_ID,
@@ -2144,7 +2144,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="lesson",
         kind="fragment",
-        source_ref="app/curriculum/draft.py:267",
+        source_ref="app/curriculum/draft.py:268",
         title_el="Όταν αναθεωρείς ένα μάθημα: το τρέχον περιεχόμενό του",
         what_it_does_el=(
             "Μπαίνει στη συγγραφή του μαθήματος όταν ζητάς μια αναθεώρηση σε ένα "
@@ -2175,7 +2175,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="lesson",
         kind="fragment",
-        source_ref="app/curriculum/draft.py:267",
+        source_ref="app/curriculum/draft.py:268",
         title_el="Όταν κάποιες ενότητες είναι δικές σου: τι μένει σταθερό",
         what_it_does_el=(
             "Κρατάει έξω από τα χέρια του βοηθού τις ενότητες που έγραψες ή "
@@ -2205,7 +2205,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="lesson",
         kind="fragment",
-        source_ref="app/curriculum/draft.py:267",
+        source_ref="app/curriculum/draft.py:268",
         title_el="Όταν εγκρίνεις πλάνο AI: τι πρέπει να αλλάξει σε κάθε ενότητα",
         what_it_does_el=(
             "Στο πλαίσιο AI ενός μαθήματος, το πλάνο σού λέει για κάθε ενότητα "
@@ -2235,7 +2235,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="lesson",
         kind="fragment",
-        source_ref="app/curriculum/draft.py:389",
+        source_ref="app/curriculum/draft.py:390",
         title_el="Τα μαθήματα γύρω από αυτό που γράφεται",
         what_it_does_el=(
             "Δείχνει στον βοηθό, σε κάθε μάθημα που γράφει, ποιο μάθημα "
@@ -2266,7 +2266,7 @@ _ENTRIES = [
         language_from_course=True,
         flow="lesson",
         kind="fragment",
-        source_ref="app/curriculum/draft.py:398",
+        source_ref="app/curriculum/draft.py:399",
         title_el="Όταν έχεις γράψει σημείωση σε ένα μάθημα",
         what_it_does_el=(
             "Μεταφέρει αυτούσια τη σημείωση που έγραψες πάνω σε ΑΥΤΟ το μάθημα "
@@ -2294,7 +2294,7 @@ _ENTRIES = [
         id="lesson.retrieved",
         flow="lesson",
         kind="fragment",
-        source_ref="app/curriculum/draft.py:189",
+        source_ref="app/curriculum/draft.py:190",
         title_el="Όταν η βιβλιοθήκη σου δεν χώρεσε: τα αποσπάσματα του μαθήματος",
         what_it_does_el=(
             "Αν τα βιβλία που διάλεξες είναι πάρα πολλά για να διαβαστούν "
@@ -2325,7 +2325,7 @@ _ENTRIES = [
         curriculum_group=True,
         flow="lesson",
         kind="prompt",
-        source_ref="app/curriculum/draft.py:499",
+        source_ref="app/curriculum/draft.py:500",
         title_el="Όταν παραπέμπει σε σελίδα που δεν υπάρχει",
         what_it_does_el=(
             "Η εφαρμογή ελέγχει κάθε παραπομπή σε σελίδα που γράφει ο βοηθός. "
@@ -2338,7 +2338,7 @@ _ENTRIES = [
         when_it_runs_el="Μόνο όταν πιαστεί λάθος παραπομπή. Το πολύ μία φορά ανά μάθημα.",
         source_of_truth=lambda: _repair_message,
         build=_build_lesson_repair,
-        call_sites=("curriculum/draft.py:635",),
+        call_sites=("curriculum/draft.py:657",),
         slices=(
             Slice(
                 id=REPAIR_SLICE_ID,
@@ -2353,7 +2353,7 @@ _ENTRIES = [
         curriculum_group=True,
         flow="lesson",
         kind="fragment",
-        source_ref="app/curriculum/draft.py:112",
+        source_ref="app/curriculum/draft.py:113",
         title_el="Οδηγία: η ενότητα είναι μέσα στα βιβλία σου",
         what_it_does_el=(
             "Μπαίνει στη συγγραφή του μαθήματος όταν η ενότητα έχει "
@@ -2379,7 +2379,7 @@ _ENTRIES = [
         curriculum_group=True,
         flow="lesson",
         kind="fragment",
-        source_ref="app/curriculum/draft.py:112",
+        source_ref="app/curriculum/draft.py:113",
         title_el="Οδηγία: η ενότητα ΔΕΝ είναι στα βιβλία σου",
         what_it_does_el=(
             "Μπαίνει όταν η ενότητα δεν καλύπτεται από τη βιβλιοθήκη σου και "
@@ -2405,7 +2405,7 @@ _ENTRIES = [
         curriculum_group=True,
         flow="lesson",
         kind="fragment",
-        source_ref="app/curriculum/draft.py:112",
+        source_ref="app/curriculum/draft.py:113",
         title_el="Οδηγία: η ενότητα θέλει πρόσφατες πληροφορίες",
         what_it_does_el=(
             "Μπαίνει όταν η ενότητα δεν είναι στα βιβλία σου και χρειάζεται "

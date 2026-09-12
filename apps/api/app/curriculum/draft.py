@@ -36,6 +36,7 @@ import logging
 import uuid
 from dataclasses import dataclass, replace
 
+from app.config import settings
 from app.curriculum.corpus import LibraryContext, prefix_messages
 from app.curriculum.depth import (
     DEEPEN_MAX_PASSES,
@@ -533,7 +534,7 @@ def draft_lesson(
     fixed_sections: dict[str, str] | None = None,
     exclude_sections: set[str] | frozenset[str] = frozenset(),
     section_briefs: dict[str, str] | None = None,
-    repair_citations: bool = True,
+    repair_citations: bool | None = None,
 ) -> tuple[dict, Measurement]:
     """One lesson: draft -> validate citations (one repair) -> measure -> at most
     one deepen pass. Returns `(lesson, measurement)`.
@@ -583,16 +584,37 @@ def draft_lesson(
     `repair_citations=False` BUYS NO SECOND FULL CALL FOR A PAGE NUMBER. A bad
     cite then goes straight to `strip_invalid_citations` — where the repair
     already falls back to on its second miss — so the prose is kept and the false
-    chip is dropped, in one call instead of two. Passed by
-    `curriculum/lesson_ai.py:apply_lesson_change` and nowhere else: 2026-09-12,
-    live, an apply drafted for 390s, cited one page it had never been shown, and
-    re-drafted the whole lesson to fix it (726s — 19 minutes in total, past the
-    panel's poll cap, so the tutor was told «Το AI δουλεύει ακόμα» and saw
-    nothing change). On that path the tutor's own text is the authority and the
-    grounding is per-lesson retrieval; on the fan-out, which drafts from the
-    whole library and where a clickable page is the point, the repair stays.
+    chip is dropped, in one call instead of two. `apply_lesson_change` passes
+    `False` explicitly: 2026-09-12, live, an apply drafted for 390s, cited one
+    page it had never been shown, and re-drafted the whole lesson to fix it (726s
+    — 19 minutes in total, past the panel's poll cap, so the tutor was told «Το
+    AI δουλεύει ακόμα» and saw nothing change). On that path the tutor's own text
+    is the authority and the grounding is per-lesson retrieval.
+
+    `None` — THE DEFAULT — MEANS "WHOEVER IS PAYING DECIDES", because the repair
+    call costs a completely different thing on each provider:
+
+      * On `claude_cli` (the subscription CLI) there is NO PROMPT CACHE. The
+        repair re-reads the entire prefix at full price and takes another 6-12
+        minutes for a lesson-sized output — and it is not even reliably better:
+        2026-09-12, live, a 636s draft was followed by a 369s repair re-draft
+        that came back SHORTER than the draft it replaced (17 minutes for one
+        lesson). So there, a page number is fixed by STRIPPING, never by a second
+        draft.
+      * On `claude` (the real API) the prefix IS cached: the repair is a cheap
+        second call of seconds, and on the fan-out — which drafts from the whole
+        library, where a clickable page is the point — it stays.
+
+    An explicit `True`/`False` still wins; the provider only answers when the
+    caller said nothing.
     """
     provider = get_provider()
+
+    # See `repair_citations` in the docstring: the flag's default is not a
+    # constant, it is a property of the provider that would have to pay for the
+    # second call.
+    if repair_citations is None:
+        repair_citations = settings.llm_provider != "claude_cli"
 
     # The blueprint decides the section shape the model is asked for, the sections
     # `measure` counts, and the sections whose citations are validated. `None` is the

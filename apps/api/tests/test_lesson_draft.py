@@ -280,9 +280,10 @@ def test_a_bad_citation_is_stripped_without_a_second_call_when_repair_is_off(mon
     assert lesson["theory"]["body"], "the prose survives — only the false chip goes"
 
 
-def test_the_default_still_buys_exactly_one_repair(monkeypatch):
-    """Every other caller keeps the old behaviour: the fan-out drafts from the
-    whole library, where a page number the tutor can click is the point."""
+def test_the_default_still_buys_exactly_one_repair_on_the_api(monkeypatch):
+    """On `claude` the fan-out keeps the old behaviour: the prefix is CACHED, so
+    the repair is a cheap second call and a page number the tutor can click is
+    the point."""
     import app.curriculum.draft as draft_mod
 
     provider = _ScriptedProvider([
@@ -290,6 +291,7 @@ def test_the_default_still_buys_exactly_one_repair(monkeypatch):
         _long_lesson(citations=[{"source_id": "S1", "page": 19}]),    # repaired
     ])
     monkeypatch.setattr(draft_mod, "get_provider", lambda: provider)
+    monkeypatch.setattr("app.config.settings.llm_provider", "claude")
 
     lesson, _m = draft_mod.draft_lesson(
         None, ctx=_curriculum_ctx(), library=_shown_library(), language="el",
@@ -297,4 +299,55 @@ def test_the_default_still_buys_exactly_one_repair(monkeypatch):
 
     assert len(provider.calls) == 2, "one draft + one repair, unchanged"
     assert "412" in provider.calls[1]["messages"][-1]["content"]
+    assert lesson["theory"]["citations"] == [{"source_id": "S1", "page": 19}]
+
+
+# ---------------------------------------------------------------------------
+# Task 4.4 — AND THE DEFAULT ITSELF DEPENDS ON WHO IS PAYING
+#
+# `repair_citations=None` (the new default) resolves against the live provider.
+# Under `claude -p` there is no prompt cache: the repair call re-reads the whole
+# prefix at full price and takes another 6-12 minutes for a lesson-sized output.
+# Live, 2026-09-12: a 636s draft plus a 369s repair re-draft — 17 minutes — and
+# the re-draft came back SHORTER than the draft it replaced. On the API the
+# prefix is cached and the repair is cheap, so it stays.
+# ---------------------------------------------------------------------------
+
+def test_the_cli_strips_instead_of_re_drafting_by_default(monkeypatch):
+    """No explicit flag, provider `claude_cli`: ONE call, and the page the model
+    was never shown is dropped by the fallback the repair would have landed on."""
+    import app.curriculum.draft as draft_mod
+
+    provider = _ScriptedProvider([_long_lesson(citations=[{"source_id": "S1", "page": 412}])])
+    monkeypatch.setattr(draft_mod, "get_provider", lambda: provider)
+    monkeypatch.setattr("app.config.settings.llm_provider", "claude_cli")
+
+    lesson, _m = draft_mod.draft_lesson(
+        None, ctx=_curriculum_ctx(), library=_shown_library(), language="el",
+    )
+
+    assert len(provider.calls) == 1, "no repair re-draft on the subscription CLI"
+    assert draft_mod.invalid_citations(lesson, _shown_library()) == []
+    assert lesson["theory"]["citations"] == []
+    assert lesson["theory"]["body"], "the prose survives — only the false chip goes"
+
+
+def test_an_explicit_true_still_repairs_on_the_cli(monkeypatch):
+    """The provider only decides when the caller said nothing. `True` is still
+    `True` — the resolution is a default, not an override."""
+    import app.curriculum.draft as draft_mod
+
+    provider = _ScriptedProvider([
+        _long_lesson(citations=[{"source_id": "S1", "page": 412}]),   # fabricated
+        _long_lesson(citations=[{"source_id": "S1", "page": 19}]),    # repaired
+    ])
+    monkeypatch.setattr(draft_mod, "get_provider", lambda: provider)
+    monkeypatch.setattr("app.config.settings.llm_provider", "claude_cli")
+
+    lesson, _m = draft_mod.draft_lesson(
+        None, ctx=_curriculum_ctx(), library=_shown_library(), language="el",
+        repair_citations=True,
+    )
+
+    assert len(provider.calls) == 2, "the caller asked for the repair, and got it"
     assert lesson["theory"]["citations"] == [{"source_id": "S1", "page": 19}]
