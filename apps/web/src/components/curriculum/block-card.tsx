@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "react";
 import { useTranslations } from "next-intl";
 import {
   Bold,
@@ -204,17 +204,24 @@ export function BlockCard({
    * tutor is typing in is worse than no autosave at all. */
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  /** The text the API is known to hold. Every save compares against it, which is
-   * what makes a blur-then-Save (one click produces both) ONE PATCH. */
+  /** The text the API is known to hold — written only when a response lands. */
   const lastSavedRef = useRef(node.body ?? "");
+  /** The text of the write that is queued or in flight. `lastSavedRef` alone
+   * cannot dedupe, because it is written AFTER the response: between the
+   * debounce firing and the PATCH returning there is a window in which the Save
+   * click's blur would send the very same body a second time. */
+  const savingTextRef = useRef<string | null>(null);
   /** The text the editor opened with — what Cancel has to put back, since by
    * then an autosave may already have replaced it server-side. */
   const originalRef = useRef(node.body ?? "");
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  /** The PATCH in flight, if any. Cancel and Save both await it: the debounce
-   * can fire microseconds before a click, and the restore must land AFTER the
-   * autosave it is undoing. */
+  /** The TAIL of the write chain. Every body write — autosave, Save, and the
+   * Cancel restore — is appended to it, so this card's PATCHes are strictly
+   * serialized: two writes can never be in flight together, responses can never
+   * land out of order, and the restore is provably the last one. */
   const inflightRef = useRef<Promise<void> | null>(null);
+  /** The selection to hand back after the next render — see `applyMark`. */
+  const pendingSelRef = useRef<{ start: number; end: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [added, setAdded] = useState<ArtifactOut[]>([]);
   /** The segment's own «Τι άλλαξε;» — local, because the chip and the dialog
@@ -298,11 +305,26 @@ export function BlockCard({
   // component.
   useEffect(() => clearAutosaveTimer, []);
 
+  /** Append a body write to this card's chain and return the tail. Nothing here
+   * runs until everything queued before it has settled — an earlier PATCH that
+   * fails must still not let a later one overtake it, hence the swallowed
+   * `catch` on the predecessor. */
+  function chainWrite(work: () => Promise<void>): Promise<void> {
+    const prev = inflightRef.current;
+    const pending = (async () => {
+      if (prev) await prev.catch(() => {});
+      await work();
+    })();
+    inflightRef.current = pending;
+    return pending;
+  }
+
   /** Save without touching `busy` — the autosave's whole job is to be invisible. */
   async function saveQuiet(text: string) {
-    if (text === lastSavedRef.current) return;
+    if (text === lastSavedRef.current || text === savingTextRef.current) return;
+    savingTextRef.current = text;
     setSaveState("saving");
-    const pending = (async () => {
+    await chainWrite(async () => {
       try {
         const updated = await updateBlock(node.id, { body: text });
         lastSavedRef.current = text;
@@ -311,14 +333,11 @@ export function BlockCard({
       } catch (err) {
         setSaveState("error");
         setError(err instanceof ApiError ? err.detail : t("editBodyError"));
+      } finally {
+        // Only if nothing newer has been queued behind us in the meantime.
+        if (savingTextRef.current === text) savingTextRef.current = null;
       }
-    })();
-    inflightRef.current = pending;
-    try {
-      await pending;
-    } finally {
-      if (inflightRef.current === pending) inflightRef.current = null;
-    }
+    });
   }
 
   function scheduleAutosave(text: string) {
@@ -329,20 +348,30 @@ export function BlockCard({
     }, AUTOSAVE_MS);
   }
 
+  // The selection is restored in a LAYOUT effect, not in a `requestAnimationFrame`:
+  // a frame is roughly forever next to two keystrokes, and Ctrl+B followed
+  // straight by Ctrl+I would have read the offsets of the pre-bold text.
+  useLayoutEffect(() => {
+    const sel = pendingSelRef.current;
+    if (!sel) return;
+    pendingSelRef.current = null;
+    const box = textareaRef.current;
+    if (!box) return;
+    box.focus();
+    box.setSelectionRange(sel.start, sel.end);
+  });
+
   function applyMark(mark: MarkName) {
     const el = textareaRef.current;
     if (!el) return;
-    const next = toggleMark(draftBody, el.selectionStart, el.selectionEnd, mark);
+    // `el.value`, not `draftBody`: the textarea is controlled, so the DOM holds
+    // exactly the last rendered draft — and it cannot be a stale closure.
+    const next = toggleMark(el.value, el.selectionStart, el.selectionEnd, mark);
     setDraftBody(next.text);
     scheduleAutosave(next.text);
-    // After React has written the new value: put the caret back where the tutor
-    // left it (just inside the markers) and hand the box back.
-    requestAnimationFrame(() => {
-      const box = textareaRef.current;
-      if (!box) return;
-      box.focus();
-      box.setSelectionRange(next.start, next.end);
-    });
+    // Put the caret back where the tutor left it (just inside the markers) and
+    // hand the box back, as soon as React has written the new value.
+    pendingSelRef.current = { start: next.start, end: next.end };
   }
 
   async function commitBody(e: FormEvent) {
@@ -351,7 +380,7 @@ export function BlockCard({
     clearAutosaveTimer();
     setEditingBody(false);
     await run(async () => {
-      // The same click already blurred the textarea, which may have started the
+      // The same click already blurred the textarea, which may have queued the
       // very PATCH this one would repeat; `saveQuiet` then sees nothing to do.
       if (inflightRef.current) await inflightRef.current;
       await saveQuiet(next);
@@ -365,12 +394,19 @@ export function BlockCard({
     const original = originalRef.current;
     setEditingBody(false);
     setSaveState("idle");
-    await run(async () => {
-      if (inflightRef.current) await inflightRef.current;
-      if (lastSavedRef.current === original) return;
-      lastSavedRef.current = original;
-      onChanged(await updateBlock(node.id, { body: original }));
-    }, t("editBodyError"));
+    await run(
+      () =>
+        // Through the chain, so the restore runs AFTER every save it is undoing
+        // and the decision to restore is made once they have all landed.
+        chainWrite(async () => {
+          if (lastSavedRef.current === original) return;
+          const updated = await updateBlock(node.id, { body: original });
+          lastSavedRef.current = original;
+          savingTextRef.current = null;
+          onChanged(updated);
+        }),
+      t("editBodyError"),
+    );
   }
 
   async function handleDelete() {
@@ -482,6 +518,10 @@ export function BlockCard({
               e.preventDefault();
               commitTitle();
             } else if (e.key === "Escape") {
+              // Claimed, so the window-level Escape listeners («AI στο μάθημα»,
+              // the revise drawer) see `defaultPrevented` and do not ALSO close
+              // the panel this card is sitting inside.
+              e.preventDefault();
               setDraftTitle(node.title);
               setEditing(false);
             }
@@ -776,6 +816,8 @@ export function BlockCard({
               <span
                 data-testid="body-edit-status"
                 data-state={saveState}
+                role="status"
+                aria-live="polite"
                 className="ml-1 text-xs text-muted-foreground"
               >
                 {saveState === "saving" ? t("saving") : t("saved")}
@@ -798,10 +840,15 @@ export function BlockCard({
             }}
             onKeyDown={(e) => {
               if (e.key === "Escape") {
+                // Same reason as the title input's Escape: this one closes the
+                // EDITOR, not whatever panel the card is rendered in.
+                e.preventDefault();
                 void cancelBodyEdit();
                 return;
               }
-              if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+              // `!e.shiftKey` keeps Ctrl+Shift+B (the browser's bookmarks bar)
+              // out of the tutor's way — only the bare modifier is ours.
+              if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
               const hit = MARK_BUTTONS.find((b) => b.key === e.key.toLowerCase());
               if (!hit) return;
               e.preventDefault();
@@ -817,6 +864,12 @@ export function BlockCard({
               type="button" size="sm" variant="outline"
               data-testid="body-edit-cancel"
               disabled={busy}
+              // Same `onMouseDown` as the toolbar, for a bigger reason: without
+              // it the click blurs the textarea first, the blur flushes the
+              // draft the tutor is ABANDONING, and Cancel becomes a write
+              // followed by an undo — two PATCHes and a bogus «επεξεργασμένο
+              // από σένα» stamp for an edit he threw away.
+              onMouseDown={(e) => e.preventDefault()}
               onClick={() => void cancelBodyEdit()}
             >
               {t("cancel")}

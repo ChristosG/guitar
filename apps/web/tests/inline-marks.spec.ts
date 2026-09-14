@@ -411,8 +411,14 @@ const SEGMENT_TEXT = "Το σόλο ξεκινά αργά";
 
 type Patch = { body: string };
 
-/** The board, editable: GETs come from memory and every PATCH lands in `patches`. */
-async function mockEditor(page: Page, patches: Patch[]) {
+/** The board, editable: GETs come from memory and every PATCH lands in `patches`.
+ *
+ * `patchDelayMs` is the whole point of the second half of these tests. A PATCH
+ * that answers instantly hides the window that matters — the one between the
+ * request leaving and the response landing, where the tutor's next click
+ * arrives. Held open for 600 ms, a Save or a Cancel during a save is something
+ * a test can actually aim at. */
+async function mockEditor(page: Page, patches: Patch[], patchDelayMs = 0) {
   let segmentBody = SEGMENT_TEXT;
 
   async function handler(route: Route) {
@@ -430,8 +436,11 @@ async function mockEditor(page: Page, patches: Patch[]) {
 
     if (req.method() === "PATCH" && pathname === `/blocks/${SEGMENT_ID}`) {
       const payload = (req.postDataJSON() ?? {}) as { body?: string };
+      // Recorded on ARRIVAL, before the delay — so the test can see a write is
+      // in flight, which is exactly the state it is trying to interrupt.
       patches.push({ body: payload.body ?? "" });
       segmentBody = payload.body ?? "";
+      if (patchDelayMs) await new Promise((r) => setTimeout(r, patchDelayMs));
       await json(200, node({ id: SEGMENT_ID, kind: "segment", title: "Θεωρία", body: segmentBody }));
       return;
     }
@@ -581,5 +590,97 @@ test.describe("editor", () => {
     await page.waitForTimeout(2200);
     expect(patches).toHaveLength(1);
     await expect(segment.getByTestId("block-card-body")).toHaveText(`${SEGMENT_TEXT} δυνατά`);
+  });
+
+  test("two shortcuts back to back nest, instead of the second reading stale offsets", async ({ page }) => {
+    const patches: Patch[] = [];
+    await mockEditor(page, patches);
+    const segment = await openEditor(page);
+    const textarea = segment.getByTestId("body-edit-textarea");
+
+    await select(textarea, 3, 7); // «σόλο»
+    await page.keyboard.press("Control+b");
+    await page.keyboard.press("Control+i");
+
+    await expect(textarea).toHaveValue("Το ***σόλο*** ξεκινά αργά");
+    const picked = await textarea.evaluate((el) => {
+      const ta = el as HTMLTextAreaElement;
+      return ta.value.slice(ta.selectionStart, ta.selectionEnd);
+    });
+    expect(picked).toBe("σόλο");
+  });
+
+  test("Ctrl+Shift+B is the browser's, not ours", async ({ page }) => {
+    const patches: Patch[] = [];
+    await mockEditor(page, patches);
+    const segment = await openEditor(page);
+    const textarea = segment.getByTestId("body-edit-textarea");
+
+    await select(textarea, 3, 7);
+    await page.keyboard.press("Control+Shift+b");
+
+    await expect(textarea).toHaveValue(SEGMENT_TEXT);
+  });
+
+  test("Save during an autosave does not send the same body twice", async ({ page }) => {
+    // The window the whole chain exists for: the debounce has fired, the PATCH
+    // is still out, and `lastSavedRef` — written only when the response lands —
+    // still says the text is unsaved. Without `savingTextRef` the Save click's
+    // blur sends an identical second PATCH, and whichever response arrives last
+    // wins.
+    const patches: Patch[] = [];
+    await mockEditor(page, patches, 600);
+    const segment = await openEditor(page);
+    const textarea = segment.getByTestId("body-edit-textarea");
+    const typed = `${SEGMENT_TEXT} α`;
+
+    await textarea.fill(typed);
+    await page.waitForTimeout(1600);
+    expect(patches).toHaveLength(1); // in flight, held by the route
+
+    await segment.getByTestId("body-edit-save").click();
+    await expect(segment.getByTestId("body-edit-textarea")).toHaveCount(0);
+    await page.waitForTimeout(1500);
+
+    const bodies = patches.map((p) => p.body);
+    expect(new Set(bodies).size).toBe(bodies.length); // no body written twice
+    expect(bodies).toEqual([typed]);
+    await expect(segment.getByTestId("block-card-body")).toHaveText(typed);
+  });
+
+  test("Cancel during an autosave lands LAST, with the original text", async ({ page }) => {
+    const patches: Patch[] = [];
+    await mockEditor(page, patches, 600);
+    const segment = await openEditor(page);
+    const textarea = segment.getByTestId("body-edit-textarea");
+
+    await textarea.fill(`${SEGMENT_TEXT} — λάθος`);
+    await page.waitForTimeout(1600);
+    expect(patches).toHaveLength(1); // in flight
+
+    await segment.getByTestId("body-edit-cancel").click();
+    await expect(segment.getByTestId("body-edit-textarea")).toHaveCount(0);
+
+    await expect.poll(() => patches.length, { timeout: 5000 }).toBe(2);
+    // The restore is queued BEHIND the save it undoes — never before it.
+    expect(patches[patches.length - 1].body).toBe(SEGMENT_TEXT);
+    await expect(segment.getByTestId("block-card-body")).toHaveText(SEGMENT_TEXT);
+  });
+
+  test("Cancel before the debounce fires writes nothing at all", async ({ page }) => {
+    // Nothing had been saved yet, so Cancel must not save-then-undo: two PATCHes
+    // for an abandoned edit also stamp a «επεξεργασμένο από σένα» that is a lie.
+    const patches: Patch[] = [];
+    await mockEditor(page, patches);
+    const segment = await openEditor(page);
+    const textarea = segment.getByTestId("body-edit-textarea");
+
+    await textarea.fill(`${SEGMENT_TEXT} — λάθος`);
+    await segment.getByTestId("body-edit-cancel").click();
+
+    await expect(segment.getByTestId("body-edit-textarea")).toHaveCount(0);
+    await page.waitForTimeout(2200); // long past the debounce that was cancelled
+    expect(patches).toEqual([]);
+    await expect(segment.getByTestId("block-card-body")).toHaveText(SEGMENT_TEXT);
   });
 });
