@@ -28,7 +28,10 @@ import { cn } from "@/lib/utils";
  * `blueprint-default-card.tsx`'s Restore). On success the whole app reloads:
  * every screen is stale by definition after a restore. Failures arrive as a
  * machine `code` and render as exactly one sentence from `backup.errors.*` in
- * the tutor's language — never a status number, never server prose. */
+ * the tutor's language — never a status number. The server's own message
+ * (e.g. a `pg_restore` error) renders underneath that sentence, verbatim and
+ * in monospace, so a stuck tutor has something to paste into a support
+ * message — see `errorDetail` below. */
 export function BackupCard() {
   const t = useTranslations("backup");
   const confirm = useConfirm();
@@ -36,6 +39,7 @@ export function BackupCard() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [restoring, setRestoring] = useState(false);
   const [errorCode, setErrorCode] = useState<string | null>(null);
+  const [errorDetail, setErrorDetail] = useState<string | null>(null);
 
   /** WHERE EXPORT ACTUALLY POINTS — a client fact, read after hydration.
    *
@@ -122,6 +126,7 @@ export function BackupCard() {
 
     setRestoring(true);
     setErrorCode(null);
+    setErrorDetail(null);
     try {
       await restoreBackup(file);
       // Deliberately NOT setRestoring(false) first: the busy state must hold
@@ -129,6 +134,11 @@ export function BackupCard() {
       window.location.reload();
     } catch (e) {
       setErrorCode(codeOf(e, "restore_failed"));
+      // `ApiError.detail` is already the server's `detail.message` prose (see
+      // `parseError` in `lib/api.ts`) — unlike the Greek sentence above, this
+      // is shown VERBATIM, because a tutor stuck on a failed restore needs
+      // something to paste into a support message.
+      setErrorDetail(e instanceof ApiError ? e.detail : null);
       setRestoring(false);
     }
   }
@@ -166,7 +176,7 @@ export function BackupCard() {
           <input
             ref={fileInputRef}
             type="file"
-            accept=".gz,.tgz,application/gzip"
+            accept=".gz,.tgz,.tar,application/gzip,application/x-tar"
             onChange={onFilePicked}
             className="hidden"
             data-testid="backup-file-input"
@@ -180,11 +190,21 @@ export function BackupCard() {
             className="flex items-start gap-2 rounded-lg bg-destructive/10 p-3 text-sm text-destructive"
           >
             <TriangleAlert className="mt-0.5 size-4 shrink-0" />
-            <span>
-              {t.has(`errors.${errorCode}`)
-                ? t(`errors.${errorCode}`)
-                : t("errors.restore_failed")}
-            </span>
+            <div>
+              <span>
+                {t.has(`errors.${errorCode}`)
+                  ? t(`errors.${errorCode}`)
+                  : t("errors.restore_failed")}
+              </span>
+              {errorDetail && (
+                <span
+                  data-testid="backup-error-detail"
+                  className="block font-mono text-xs text-destructive/80 break-all"
+                >
+                  {errorDetail}
+                </span>
+              )}
+            </div>
           </div>
         )}
       </CardContent>
@@ -200,9 +220,10 @@ function subscribeToNothing(): () => void {
   return () => {};
 }
 
-/** The server's machine-readable `code`, or a fallback — never `detail`, which
- * is server prose the tutor must never actually read (mirrors
- * `blueprint-default-card.tsx`'s own `codeOf`). */
+/** The server's machine-readable `code`, or a fallback — which Greek sentence
+ * renders is decided by THIS, never by `detail` (server prose; mirrors
+ * `blueprint-default-card.tsx`'s own `codeOf`). `detail` is still shown, but
+ * only as an unbranched-on extra underneath — see `errorDetail`. */
 function codeOf(e: unknown, fallback: string): string {
   return e instanceof ApiError && e.code ? e.code : fallback;
 }

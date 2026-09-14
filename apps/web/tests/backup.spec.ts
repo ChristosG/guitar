@@ -185,6 +185,35 @@ test("a failed restore renders its code's Greek sentence — never the raw code 
   await expect(page.getByTestId("backup-restore")).toBeEnabled();
 });
 
+test("a failed restore also shows the server's own reason, and the picker accepts a plain .tar", async ({ page }) => {
+  await mockApi(page, {
+    restore: {
+      status: 409,
+      json: { detail: { code: "restore_failed", message: "pg_restore failed: could not execute query" } },
+    },
+  });
+  await page.goto("/el/settings");
+  await expect(page.getByTestId("backup-card")).toBeVisible();
+
+  await expect(page.getByTestId("backup-file-input")).toHaveAttribute(
+    "accept",
+    ".gz,.tgz,.tar,application/gzip,application/x-tar",
+  );
+
+  await pickBackupFile(page);
+  await page.getByTestId("confirm-accept").click();
+
+  const error = page.getByTestId("backup-error");
+  await expect(error).toBeVisible();
+  // the machine code's Greek sentence still renders
+  await expect(error).toContainText("Η επαναφορά δεν ολοκληρώθηκε");
+
+  // AND the server's own reason, underneath it
+  const detail = page.getByTestId("backup-error-detail");
+  await expect(detail).toBeVisible();
+  await expect(detail).toContainText("could not execute query");
+});
+
 test("an unknown future code falls back to the restore_failed sentence", async ({ page }) => {
   await mockApi(page, {
     restore: { status: 500, json: { detail: { code: "some_new_code", message: "?" } } },
