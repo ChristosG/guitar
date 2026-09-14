@@ -17,6 +17,7 @@ from drifting.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -39,12 +40,36 @@ def test_the_web_copy_of_the_case_table_is_identical():
     )
 
 
+# Named, not counted: a `len(...) >= 12` guard is satisfied by twelve cases about
+# nothing. These are the rules the grammar exists for, and deleting one of them
+# has to fail here rather than quietly narrow the contract.
+_REQUIRED = {
+    "plain text has no marks",
+    "strong",
+    "em",
+    "underline",
+    "em nested inside strong",
+    "strong nested inside em",
+    "nesting works both ways round",
+    "strong nested inside underline",
+    "triple markers are strong around em",
+    "an opener with no closer is literal",
+    "an unmatched closer is literal",
+    "the empty strong pair the toolbar inserts",
+    "the empty underline pair the toolbar inserts",
+    "a bare pair of asterisks has no closer, so it is text",
+    "a lone asterisk is literal",
+    "arithmetic is not italics",
+    "whitespace just inside the marker keeps it literal",
+    "a span may cross a newline",
+    "the empty string",
+}
+
+
 def test_the_case_table_still_covers_what_the_grammar_was_written_for():
-    inputs = [c["in"] for c in _CASES]
-    assert len(_CASES) >= 12
-    assert "***και τα δύο***" in inputs  # strong around em
-    assert "2 * 3 * 4" in inputs  # arithmetic is not italics
-    assert "" in inputs
+    missing = _REQUIRED - set(_IDS)
+    assert not missing, f"the case table lost: {sorted(missing)}"
+    assert len(_IDS) == len(set(_IDS)), "two cases share a name"
 
 
 @pytest.mark.parametrize("case", _CASES, ids=_IDS)
@@ -84,6 +109,37 @@ def test_text_nodes_are_merged_not_split_per_character():
     # would make the DOCX export write one run per letter.
     tree = parse_inline_marks("2 * 3 * 4")
     assert tree == [{"type": "text", "value": "2 * 3 * 4"}]
+
+
+def _depth(nodes: list[dict], at: int = 0) -> int:
+    return max(
+        [_depth(n["children"], at + 1) for n in nodes if n["type"] != "text"] + [at]
+    )
+
+
+def test_a_long_lesson_full_of_lone_asterisks_parses_in_linear_time():
+    # 15k characters, 5000 asterisks, not one of them a mark. The naive scanner
+    # re-searched the whole tail for every one of them and took 5.6 SECONDS —
+    # on a word count that runs on every keystroke-ish save.
+    text = "*a " * 5000
+    started = time.monotonic()
+    tree = parse_inline_marks(text)
+    assert time.monotonic() - started < 1.0
+    assert tree == [{"type": "text", "value": text}]
+
+
+def test_twenty_thousand_asterisks_parse_without_blowing_the_stack():
+    # This one used to raise RecursionError at ~4k while the TypeScript twin
+    # parsed on — the worst kind of divergence, because the board would render
+    # what the Word export had just crashed on. The same assertions run in
+    # `apps/web/tests/inline-marks.spec.ts`.
+    text = "*" * 20000
+    started = time.monotonic()
+    tree = parse_inline_marks(text)
+    assert time.monotonic() - started < 1.0
+    assert _depth(tree) == 32  # MAX_DEPTH — past it every marker is literal
+    assert _render(tree) == text
+    assert len(strip_inline_marks(text)) == 20000 - 32 * 4
 
 
 def test_an_unclosed_marker_never_swallows_the_rest_of_the_lesson():

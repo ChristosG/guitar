@@ -34,11 +34,32 @@ test.describe("the shared case table", () => {
   });
 
   test("still covers the cases the grammar was written for", () => {
-    expect(cases.length).toBeGreaterThanOrEqual(12);
-    const inputs = cases.map((c) => c.in);
-    expect(inputs).toContain("***και τα δύο***");
-    expect(inputs).toContain("2 * 3 * 4");
-    expect(inputs).toContain("");
+    // Named, not counted: a `length >= 12` guard is satisfied by twelve cases
+    // about nothing. The same list is asserted in `tests/test_inline_marks.py`.
+    const required = [
+      "plain text has no marks",
+      "strong",
+      "em",
+      "underline",
+      "em nested inside strong",
+      "strong nested inside em",
+      "nesting works both ways round",
+      "strong nested inside underline",
+      "triple markers are strong around em",
+      "an opener with no closer is literal",
+      "an unmatched closer is literal",
+      "the empty strong pair the toolbar inserts",
+      "the empty underline pair the toolbar inserts",
+      "a bare pair of asterisks has no closer, so it is text",
+      "a lone asterisk is literal",
+      "arithmetic is not italics",
+      "whitespace just inside the marker keeps it literal",
+      "a span may cross a newline",
+      "the empty string",
+    ];
+    const names = cases.map((c) => c.name);
+    expect(required.filter((name) => !names.includes(name))).toEqual([]);
+    expect(new Set(names).size).toBe(names.length);
   });
 });
 
@@ -67,6 +88,35 @@ test.describe("parse invariants", () => {
         })
         .join("");
     for (const c of cases) expect(render(parseInlineMarks(c.in))).toBe(c.in);
+  });
+
+  test("a long lesson full of lone asterisks parses in linear time", () => {
+    // 15k characters, 5000 asterisks, not one of them a mark. The naive scanner
+    // re-searched the whole tail for every one of them; in Python that was 5.6
+    // seconds, and the word count runs on save.
+    const text = "*a ".repeat(5000);
+    const started = Date.now();
+    const tree = parseInlineMarks(text);
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(tree).toEqual([{ type: "text", value: text }]);
+  });
+
+  test("twenty thousand asterisks parse, capped at MAX_DEPTH", () => {
+    // The Python twin used to raise RecursionError at ~4k asterisks while this
+    // side parsed on — the worst kind of divergence. These are the SAME
+    // assertions as `tests/test_inline_marks.py`'s.
+    const text = "*".repeat(20000);
+    const depth = (nodes: InlineNode[], at = 0): number =>
+      nodes.reduce(
+        (deepest, n) =>
+          n.type === "text" ? deepest : Math.max(deepest, depth(n.children, at + 1)),
+        at,
+      );
+    const started = Date.now();
+    const tree = parseInlineMarks(text);
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(depth(tree)).toBe(32);
+    expect(stripInlineMarks(text).length).toBe(20000 - 32 * 4);
   });
 });
 
@@ -129,6 +179,27 @@ test.describe("toggleMark", () => {
       end: 10,
     });
     expect(toggleMark("", 0, 0, "u")).toEqual({ text: "<u></u>", start: 3, end: 3 });
+  });
+
+  test("a selection that STARTS inside a marker still unwraps", () => {
+    // Dragged from between the two asterisks to the middle of the word. Without
+    // snapping the selection out of the run first, this bolded the bold:
+    // `****ab**c**`.
+    expect(toggleMark("**abc**", 1, 4, "strong")).toEqual({
+      text: "abc",
+      start: 0,
+      end: 3,
+    });
+    expect(toggleMark("Το **σόλο**", 4, 9, "strong")).toEqual({
+      text: "Το σόλο",
+      start: 3,
+      end: 7,
+    });
+    expect(toggleMark("<u>σόλο</u>", 1, 6, "u")).toEqual({
+      text: "σόλο",
+      start: 0,
+      end: 4,
+    });
   });
 
   test("only one layer comes off when a selection is wrapped twice", () => {

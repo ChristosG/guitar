@@ -49,6 +49,36 @@
       "stripped": "Το σόλο εδώ"
     },
     {
+      "name": "strong nested inside em",
+      "in": "*a **b** c*",
+      "tree": [
+        {
+          "type": "em",
+          "children": [
+            { "type": "text", "value": "a " },
+            { "type": "strong", "children": [{ "type": "text", "value": "b" }] },
+            { "type": "text", "value": " c" }
+          ]
+        }
+      ],
+      "stripped": "a b c"
+    },
+    {
+      "name": "nesting works both ways round",
+      "in": "*ιταλικά με **έμφαση** μέσα*",
+      "tree": [
+        {
+          "type": "em",
+          "children": [
+            { "type": "text", "value": "ιταλικά με " },
+            { "type": "strong", "children": [{ "type": "text", "value": "έμφαση" }] },
+            { "type": "text", "value": " μέσα" }
+          ]
+        }
+      ],
+      "stripped": "ιταλικά με έμφαση μέσα"
+    },
+    {
       "name": "strong nested inside underline",
       "in": "<u>**έμφαση**</u>",
       "tree": [
@@ -85,6 +115,36 @@
       "in": "τέλος** εδώ",
       "tree": [{ "type": "text", "value": "τέλος** εδώ" }],
       "stripped": "τέλος** εδώ"
+    },
+    {
+      "name": "the empty strong pair the toolbar inserts",
+      "in": "****",
+      "tree": [{ "type": "strong", "children": [] }],
+      "stripped": ""
+    },
+    {
+      "name": "the empty underline pair the toolbar inserts",
+      "in": "<u></u>",
+      "tree": [{ "type": "u", "children": [] }],
+      "stripped": ""
+    },
+    {
+      "name": "a bare pair of asterisks has no closer, so it is text",
+      "in": "**",
+      "tree": [{ "type": "text", "value": "**" }],
+      "stripped": "**"
+    },
+    {
+      "name": "three asterisks alone",
+      "in": "***",
+      "tree": [{ "type": "em", "children": [{ "type": "text", "value": "*" }] }],
+      "stripped": "*"
+    },
+    {
+      "name": "a word closed by a run of two",
+      "in": "*a**",
+      "tree": [{ "type": "em", "children": [{ "type": "text", "value": "a*" }] }],
+      "stripped": "a*"
     },
     {
       "name": "a lone asterisk is literal",

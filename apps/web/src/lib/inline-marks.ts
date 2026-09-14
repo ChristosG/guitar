@@ -18,14 +18,22 @@
 //   2. A marker OPENS a span only if a matching closer exists later (inside the
 //      current span, when nested). Otherwise it is literal text — an unclosed
 //      `**` must not swallow the rest of the lesson.
-//   3. A span is never empty, and an unmatched closer is literal.
+//   3. An unmatched closer is literal. `**…**` and `<u>…</u>` may be EMPTY (the
+//      toolbar inserts `****` and `<u></u>` when you press Ctrl+B on a blank
+//      line — those must read as an empty span, not as stray asterisks); a `*`
+//      span must have content, which is what keeps `**x` literal.
 //   4. For `*`/`**`: whitespace immediately INSIDE the marker makes it literal.
 //      This is what keeps «2 * 3 * 4» text instead of italics, and it is why
 //      `* x*` stays as typed.
 //   5. A closer that sits in a run of asterisks is taken at the END of the run,
 //      which is what turns `***και τα δύο***` into strong(em(...)) rather than
-//      strong("*και τα δύο") plus a stray asterisk.
+//      strong("*και τα δύο") plus a stray asterisk — EXCEPT when that run opens
+//      a `**` span of its own, which the em then skips whole, so that
+//      `*a **b** c*` nests the same way `**a *b* c**` does.
 //   6. Newlines are ordinary characters: a span may cross one.
+//   7. Nesting stops at MAX_DEPTH. Past it every marker is literal text, so a
+//      pathological string of asterisks can neither blow the Python twin's
+//      recursion limit (it did, at ~4k) nor build a tree nobody can render.
 
 export type InlineNode =
   | { type: "text"; value: string }
@@ -42,6 +50,11 @@ const MARKERS: readonly Marker[] = [
   { mark: "em", open: "*", close: "*" },
 ];
 
+const STRONG: Marker = MARKERS[1];
+
+/** The same cap on both sides — see rule 7. */
+const MAX_DEPTH = 32;
+
 // Spelled out rather than taken from a regex/`isspace()`, because the Python
 // twin must agree character for character.
 const SPACE = " \t\n\r\f\v\u00a0";
@@ -56,29 +69,87 @@ function markerFor(mark: MarkName): Marker {
   return found;
 }
 
+/**
+ * Per parse range: the offset from which a closer has already been PROVEN
+ * absent. Without it the scanner is quadratic — 20k characters of `*a ` took
+ * 5.6s in Python, because every one of the 5000 asterisks re-scanned the whole
+ * tail looking for the closer the one before it had just failed to find. The
+ * search only ever gets stricter as `from` grows, so one failure settles every
+ * later opener in the same range.
+ */
+type Absent = Map<string, number>;
+
+function rememberAbsent(absent: Absent, close: string, from: number): void {
+  const known = absent.get(close);
+  if (known === undefined || from < known) absent.set(close, from);
+}
+
+/** The closer of the `**` span opening at `runStart`, or null if none opens. */
+function strongSpanCloser(
+  text: string,
+  runStart: number,
+  end: number,
+  absent: Absent,
+): number | null {
+  const contentStart = runStart + 2;
+  if (contentStart >= end || isSpace(text[contentStart])) return null;
+  return findCloser(text, contentStart, end, STRONG, absent);
+}
+
 /** Position of the closer for `marker` inside [from, end), or null. */
-function findCloser(text: string, from: number, end: number, marker: Marker): number | null {
+function findCloser(
+  text: string,
+  from: number,
+  end: number,
+  marker: Marker,
+  absent: Absent,
+): number | null {
   const { close } = marker;
-  const asterisks = close === "*" || close === "**";
-  for (let j = from; j + close.length <= end; j++) {
-    if (!text.startsWith(close, j)) continue;
-    let at = j;
-    if (asterisks) {
-      // Right-align inside the run: `***x***` closes with the LAST two stars,
-      // leaving the first one to close the nested em.
+  const provenAbsentFrom = absent.get(close);
+  if (provenAbsentFrom !== undefined && from >= provenAbsentFrom) return null;
+
+  let j = from;
+  while (j + close.length <= end) {
+    if (!text.startsWith(close, j)) {
+      j++;
+      continue;
+    }
+    if (close === "*") {
       let runEnd = j;
       while (runEnd < end && text[runEnd] === "*") runEnd++;
-      at = runEnd - close.length;
-      if (isSpace(text[at - 1])) continue;
+      if (runEnd - j >= 2) {
+        // A `**` span INSIDE this em — `*a **b** c*`. Step over it whole;
+        // right-aligning into its opener would end the em mid-marker.
+        const inner = strongSpanCloser(text, j, end, absent);
+        if (inner !== null) {
+          j = inner + 2;
+          continue;
+        }
+      }
+      const at = runEnd - 1; // rule 5
+      if (at > from && !isSpace(text[at - 1])) return at; // an em is never empty
+      j = runEnd;
+      continue;
     }
-    if (at <= from) continue; // a span is never empty
-    return at;
+    let at = j;
+    if (close === "**") {
+      let runEnd = j;
+      while (runEnd < end && text[runEnd] === "*") runEnd++;
+      at = runEnd - 2; // rule 5
+      if (isSpace(text[at - 1])) {
+        j = runEnd;
+        continue;
+      }
+    }
+    return at; // `**…**` and `<u>…</u>` may be empty — rule 3
   }
+  rememberAbsent(absent, close, from);
   return null;
 }
 
-function parseRange(text: string, start: number, end: number): InlineNode[] {
+function parseRange(text: string, start: number, end: number, depth: number): InlineNode[] {
   const nodes: InlineNode[] = [];
+  const absent: Absent = new Map();
   let buf = "";
   const flush = () => {
     if (buf) {
@@ -89,22 +160,27 @@ function parseRange(text: string, start: number, end: number): InlineNode[] {
 
   let i = start;
   outer: while (i < end) {
-    for (const m of MARKERS) {
-      if (i + m.open.length > end || !text.startsWith(m.open, i)) continue;
-      const contentStart = i + m.open.length;
-      if (m.mark !== "u" && (contentStart >= end || isSpace(text[contentStart]))) {
-        // Rule 4. The marker is literal, and the shorter marker inside it does
-        // NOT get a second chance — otherwise «** x**» would open an em.
-        buf += m.open;
-        i = contentStart;
+    if (depth < MAX_DEPTH) {
+      for (const m of MARKERS) {
+        if (i + m.open.length > end || !text.startsWith(m.open, i)) continue;
+        const contentStart = i + m.open.length;
+        if (m.mark !== "u" && (contentStart >= end || isSpace(text[contentStart]))) {
+          // Rule 4. The marker is literal, and the shorter marker inside it does
+          // NOT get a second chance — otherwise «** x**» would open an em.
+          buf += m.open;
+          i = contentStart;
+          continue outer;
+        }
+        const closerAt = findCloser(text, contentStart, end, m, absent);
+        if (closerAt === null) continue; // rule 2 — try the next, shorter marker
+        flush();
+        nodes.push({
+          type: m.mark,
+          children: parseRange(text, contentStart, closerAt, depth + 1),
+        });
+        i = closerAt + m.close.length;
         continue outer;
       }
-      const closerAt = findCloser(text, contentStart, end, m);
-      if (closerAt === null) continue; // rule 2 — try the next, shorter marker
-      flush();
-      nodes.push({ type: m.mark, children: parseRange(text, contentStart, closerAt) });
-      i = closerAt + m.close.length;
-      continue outer;
     }
     buf += text[i];
     i++;
@@ -115,7 +191,7 @@ function parseRange(text: string, start: number, end: number): InlineNode[] {
 
 /** Parse lesson text into inline nodes. Never throws; never loses a character. */
 export function parseInlineMarks(text: string): InlineNode[] {
-  return parseRange(text, 0, text.length);
+  return parseRange(text, 0, text.length, 0);
 }
 
 /** The text a reader sees — every marker that actually opened a span removed. */
@@ -140,6 +216,32 @@ function wordAround(text: string, pos: number): [number, number] | null {
   while (s > 0 && isWord(text[s - 1])) s--;
   while (e < text.length && isWord(text[e])) e++;
   return [s, e];
+}
+
+const TAGS = ["</u>", "<u>"] as const;
+
+/** Where inside `text` an offset sits strictly inside a `<u>`/`</u>` tag. */
+function tagAround(text: string, i: number): { at: number; length: number } | null {
+  for (const tag of TAGS) {
+    for (let k = 1; k < tag.length; k++) {
+      if (i - k >= 0 && text.startsWith(tag, i - k)) return { at: i - k, length: tag.length };
+    }
+  }
+  return null;
+}
+
+/** Move an offset OUT of a marker, leftwards. */
+function snapStart(text: string, i: number): number {
+  while (i > 0 && i < text.length && text[i - 1] === "*" && text[i] === "*") i--;
+  const tag = tagAround(text, i);
+  return tag ? tag.at : i;
+}
+
+/** Move an offset OUT of a marker, rightwards. */
+function snapEnd(text: string, i: number): number {
+  while (i > 0 && i < text.length && text[i - 1] === "*" && text[i] === "*") i++;
+  const tag = tagAround(text, i);
+  return tag ? tag.at + tag.length : i;
 }
 
 export type ToggleResult = { text: string; start: number; end: number };
@@ -167,24 +269,28 @@ export function toggleMark(text: string, start: number, end: number, mark: MarkN
     [s, e] = word;
   }
 
+  // A selection that starts or ends INSIDE a marker is a selection the tutor
+  // made with the mouse, not a statement about the markers. Drag it out of them
+  // first, or `**abc**` selected from offset 1 gets bolded into `****ab**c**`.
+  s = snapStart(text, s);
+  e = Math.max(s, snapEnd(text, e));
+
   const sel = text.slice(s, e);
   // A single `*` next to another `*` belongs to a `**` run, not to an em.
-  const emConfusedByStrong =
-    mark === "em" && (sel.startsWith("**") || sel.endsWith("**"));
+  const emOnStrongRun = mark === "em" && text.startsWith("**", s);
 
-  // 1. The selection includes the markers.
-  if (
-    !emConfusedByStrong &&
-    sel.length > m.open.length + m.close.length &&
-    sel.startsWith(m.open) &&
-    sel.endsWith(m.close)
-  ) {
-    const inner = sel.slice(m.open.length, sel.length - m.close.length);
-    return {
-      text: text.slice(0, s) + inner + text.slice(e),
-      start: s,
-      end: e - m.open.length - m.close.length,
-    };
+  // 1. The selection starts at a span of this mark — take the whole span off,
+  //    whether or not the selection reaches its closer.
+  if (!emOnStrongRun && text.startsWith(m.open, s)) {
+    const closerAt = findCloser(text, s + m.open.length, text.length, m, new Map());
+    if (closerAt !== null && closerAt + m.close.length >= e) {
+      const inner = text.slice(s + m.open.length, closerAt);
+      return {
+        text: text.slice(0, s) + inner + text.slice(closerAt + m.close.length),
+        start: s,
+        end: closerAt - m.open.length,
+      };
+    }
   }
 
   // 2. The markers sit just outside the selection.
