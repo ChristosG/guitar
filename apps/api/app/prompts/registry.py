@@ -2853,7 +2853,7 @@ _ENTRIES = [
         id="shared.language_directive",
         flow="shared",
         kind="fragment",
-        source_ref="app/i18n.py:168",
+        source_ref="app/i18n.py:172",
         title_el="Ο κανόνας της γλώσσας",
         what_it_does_el=(
             "Ο πιο σημαντικός κανόνας της εφαρμογής, γραμμένος μία φορά και "
@@ -2885,7 +2885,7 @@ _ENTRIES = [
         id="shared.curriculum_style",
         flow="shared",
         kind="fragment",
-        source_ref="app/i18n.py:188",
+        source_ref="app/i18n.py:192",
         title_el="Το ύφος των μαθημάτων",
         what_it_does_el=(
             "Ο κανόνας του ύφους για ό,τι γράφεται ΜΕΣΑ σε πρόγραμμα "
@@ -2918,7 +2918,7 @@ _ENTRIES = [
         id="shared.answer_in",
         flow="shared",
         kind="fragment",
-        source_ref="app/i18n.py:204",
+        source_ref="app/i18n.py:208",
         title_el="Η τελευταία υπενθύμιση γλώσσας",
         what_it_does_el=(
             "Μία γραμμή, κολλημένη στο τέλος-τέλος, μετά τα αγγλικά "

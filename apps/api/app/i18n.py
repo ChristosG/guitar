@@ -160,7 +160,11 @@ CURRICULUM_STYLE = (
     "- NO CITATIONS IN THE TEXT: page references such as (S9, p.47) or "
     "[p.12] never appear inside titles or body text. Where the schema has "
     "a citations array, that array is the ONLY place a page reference "
-    "belongs; the app shows the tutor his sources separately."
+    "belongs; the app shows the tutor his sources separately.\n"
+    "- INLINE MARKERS: text you are given may carry **bold**, *italic* or "
+    "<u>underline</u> markers around words; keep them exactly where they "
+    "are in any text you keep or lightly edit, and do not add markers of "
+    "your own."
 )
 CURRICULUM_STYLE_SLICE_ID = "shared.curriculum_style"
 
