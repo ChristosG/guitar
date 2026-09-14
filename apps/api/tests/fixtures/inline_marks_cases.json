@@ -1,0 +1,164 @@
+{
+  "_about": [
+    "THE ground truth for the inline-mark grammar. Two parsers read this file —",
+    "apps/api/app/curriculum/inline_marks.py and apps/web/src/lib/inline-marks.ts —",
+    "and the two copies of the file (apps/api/tests/fixtures, apps/web/tests/fixtures)",
+    "are compared byte for byte by tests/test_inline_marks.py. Edit one, copy it to",
+    "the other, and both suites must stay green: a rule that lives in only one",
+    "language is a rule the tutor's Word export and his screen will disagree about.",
+    "Every case is Greek on purpose — el is the product's default locale."
+  ],
+  "cases": [
+    {
+      "name": "plain text has no marks",
+      "in": "Ο ήχος του ενισχυτή.",
+      "tree": [{ "type": "text", "value": "Ο ήχος του ενισχυτή." }],
+      "stripped": "Ο ήχος του ενισχυτή."
+    },
+    {
+      "name": "strong",
+      "in": "**έντονο**",
+      "tree": [{ "type": "strong", "children": [{ "type": "text", "value": "έντονο" }] }],
+      "stripped": "έντονο"
+    },
+    {
+      "name": "em",
+      "in": "*πλάγιο*",
+      "tree": [{ "type": "em", "children": [{ "type": "text", "value": "πλάγιο" }] }],
+      "stripped": "πλάγιο"
+    },
+    {
+      "name": "underline",
+      "in": "<u>υπογράμμιση</u>",
+      "tree": [{ "type": "u", "children": [{ "type": "text", "value": "υπογράμμιση" }] }],
+      "stripped": "υπογράμμιση"
+    },
+    {
+      "name": "em nested inside strong",
+      "in": "**Το *σόλο* εδώ**",
+      "tree": [
+        {
+          "type": "strong",
+          "children": [
+            { "type": "text", "value": "Το " },
+            { "type": "em", "children": [{ "type": "text", "value": "σόλο" }] },
+            { "type": "text", "value": " εδώ" }
+          ]
+        }
+      ],
+      "stripped": "Το σόλο εδώ"
+    },
+    {
+      "name": "strong nested inside underline",
+      "in": "<u>**έμφαση**</u>",
+      "tree": [
+        {
+          "type": "u",
+          "children": [
+            { "type": "strong", "children": [{ "type": "text", "value": "έμφαση" }] }
+          ]
+        }
+      ],
+      "stripped": "έμφαση"
+    },
+    {
+      "name": "triple markers are strong around em",
+      "in": "***και τα δύο***",
+      "tree": [
+        {
+          "type": "strong",
+          "children": [
+            { "type": "em", "children": [{ "type": "text", "value": "και τα δύο" }] }
+          ]
+        }
+      ],
+      "stripped": "και τα δύο"
+    },
+    {
+      "name": "an opener with no closer is literal",
+      "in": "**χωρίς κλείσιμο",
+      "tree": [{ "type": "text", "value": "**χωρίς κλείσιμο" }],
+      "stripped": "**χωρίς κλείσιμο"
+    },
+    {
+      "name": "an unmatched closer is literal",
+      "in": "τέλος** εδώ",
+      "tree": [{ "type": "text", "value": "τέλος** εδώ" }],
+      "stripped": "τέλος** εδώ"
+    },
+    {
+      "name": "a lone asterisk is literal",
+      "in": "*",
+      "tree": [{ "type": "text", "value": "*" }],
+      "stripped": "*"
+    },
+    {
+      "name": "a lone asterisk inside a sentence is literal",
+      "in": "ένα * αστέρι",
+      "tree": [{ "type": "text", "value": "ένα * αστέρι" }],
+      "stripped": "ένα * αστέρι"
+    },
+    {
+      "name": "arithmetic is not italics",
+      "in": "2 * 3 * 4",
+      "tree": [{ "type": "text", "value": "2 * 3 * 4" }],
+      "stripped": "2 * 3 * 4"
+    },
+    {
+      "name": "whitespace just inside the marker keeps it literal",
+      "in": "* κενό*",
+      "tree": [{ "type": "text", "value": "* κενό*" }],
+      "stripped": "* κενό*"
+    },
+    {
+      "name": "a span may cross a newline",
+      "in": "**πρώτη γραμμή\nδεύτερη γραμμή**",
+      "tree": [
+        {
+          "type": "strong",
+          "children": [{ "type": "text", "value": "πρώτη γραμμή\nδεύτερη γραμμή" }]
+        }
+      ],
+      "stripped": "πρώτη γραμμή\nδεύτερη γραμμή"
+    },
+    {
+      "name": "several spans in one line",
+      "in": "Ο **ενισχυτής** και ο *προενισχυτής*.",
+      "tree": [
+        { "type": "text", "value": "Ο " },
+        { "type": "strong", "children": [{ "type": "text", "value": "ενισχυτής" }] },
+        { "type": "text", "value": " και ο " },
+        { "type": "em", "children": [{ "type": "text", "value": "προενισχυτής" }] },
+        { "type": "text", "value": "." }
+      ],
+      "stripped": "Ο ενισχυτής και ο προενισχυτής."
+    },
+    {
+      "name": "underline around a sentence that itself carries marks",
+      "in": "<u>Άσκηση 3: *αργά* στα 60 bpm</u>",
+      "tree": [
+        {
+          "type": "u",
+          "children": [
+            { "type": "text", "value": "Άσκηση 3: " },
+            { "type": "em", "children": [{ "type": "text", "value": "αργά" }] },
+            { "type": "text", "value": " στα 60 bpm" }
+          ]
+        }
+      ],
+      "stripped": "Άσκηση 3: αργά στα 60 bpm"
+    },
+    {
+      "name": "an unclosed underline tag is literal",
+      "in": "<u>ξεχασμένο",
+      "tree": [{ "type": "text", "value": "<u>ξεχασμένο" }],
+      "stripped": "<u>ξεχασμένο"
+    },
+    {
+      "name": "the empty string",
+      "in": "",
+      "tree": [],
+      "stripped": ""
+    }
+  ]
+}

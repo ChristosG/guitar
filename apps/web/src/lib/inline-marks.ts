@@ -1,0 +1,212 @@
+// The inline-mark grammar — the TypeScript half.
+//
+// The tutor's lesson text is stored as PLAIN STRINGS. Bold, italic and underline
+// live in the string itself as three markers: `**έντονο**`, `*πλάγιο*` and
+// `<u>υπογράμμιση</u>`. Nothing else is markup: a lesson body is not Markdown
+// and must never be fed to a Markdown renderer, because the tutor writes `#`,
+// `-`, `1.` and `_` as ordinary characters and expects to read them back.
+//
+// This module is the ONLY place the grammar is written in TypeScript. Its twin
+// is `apps/api/app/curriculum/inline_marks.py`, and the two are pinned against
+// each other by ONE case table — `tests/fixtures/inline_marks_cases.json`, whose
+// bytes the API suite compares with its own copy. What renders on the board must
+// be exactly what lands in the Word export and what the word counter counts;
+// two hand-written parsers drift the moment they are allowed to.
+//
+// The rules, in the order the scanner applies them:
+//   1. Scan left to right. `<u>` is tried first, then `**`, then `*`.
+//   2. A marker OPENS a span only if a matching closer exists later (inside the
+//      current span, when nested). Otherwise it is literal text — an unclosed
+//      `**` must not swallow the rest of the lesson.
+//   3. A span is never empty, and an unmatched closer is literal.
+//   4. For `*`/`**`: whitespace immediately INSIDE the marker makes it literal.
+//      This is what keeps «2 * 3 * 4» text instead of italics, and it is why
+//      `* x*` stays as typed.
+//   5. A closer that sits in a run of asterisks is taken at the END of the run,
+//      which is what turns `***και τα δύο***` into strong(em(...)) rather than
+//      strong("*και τα δύο") plus a stray asterisk.
+//   6. Newlines are ordinary characters: a span may cross one.
+
+export type InlineNode =
+  | { type: "text"; value: string }
+  | { type: "strong" | "em" | "u"; children: InlineNode[] };
+
+export type MarkName = "strong" | "em" | "u";
+
+type Marker = { mark: MarkName; open: string; close: string };
+
+// Order matters: `**` MUST be tried before `*`.
+const MARKERS: readonly Marker[] = [
+  { mark: "u", open: "<u>", close: "</u>" },
+  { mark: "strong", open: "**", close: "**" },
+  { mark: "em", open: "*", close: "*" },
+];
+
+// Spelled out rather than taken from a regex/`isspace()`, because the Python
+// twin must agree character for character.
+const SPACE = " \t\n\r\f\v\u00a0";
+
+function isSpace(ch: string | undefined): boolean {
+  return ch !== undefined && SPACE.includes(ch);
+}
+
+function markerFor(mark: MarkName): Marker {
+  const found = MARKERS.find((m) => m.mark === mark);
+  if (!found) throw new Error(`unknown mark: ${mark}`);
+  return found;
+}
+
+/** Position of the closer for `marker` inside [from, end), or null. */
+function findCloser(text: string, from: number, end: number, marker: Marker): number | null {
+  const { close } = marker;
+  const asterisks = close === "*" || close === "**";
+  for (let j = from; j + close.length <= end; j++) {
+    if (!text.startsWith(close, j)) continue;
+    let at = j;
+    if (asterisks) {
+      // Right-align inside the run: `***x***` closes with the LAST two stars,
+      // leaving the first one to close the nested em.
+      let runEnd = j;
+      while (runEnd < end && text[runEnd] === "*") runEnd++;
+      at = runEnd - close.length;
+      if (isSpace(text[at - 1])) continue;
+    }
+    if (at <= from) continue; // a span is never empty
+    return at;
+  }
+  return null;
+}
+
+function parseRange(text: string, start: number, end: number): InlineNode[] {
+  const nodes: InlineNode[] = [];
+  let buf = "";
+  const flush = () => {
+    if (buf) {
+      nodes.push({ type: "text", value: buf });
+      buf = "";
+    }
+  };
+
+  let i = start;
+  outer: while (i < end) {
+    for (const m of MARKERS) {
+      if (i + m.open.length > end || !text.startsWith(m.open, i)) continue;
+      const contentStart = i + m.open.length;
+      if (m.mark !== "u" && (contentStart >= end || isSpace(text[contentStart]))) {
+        // Rule 4. The marker is literal, and the shorter marker inside it does
+        // NOT get a second chance — otherwise «** x**» would open an em.
+        buf += m.open;
+        i = contentStart;
+        continue outer;
+      }
+      const closerAt = findCloser(text, contentStart, end, m);
+      if (closerAt === null) continue; // rule 2 — try the next, shorter marker
+      flush();
+      nodes.push({ type: m.mark, children: parseRange(text, contentStart, closerAt) });
+      i = closerAt + m.close.length;
+      continue outer;
+    }
+    buf += text[i];
+    i++;
+  }
+  flush();
+  return nodes;
+}
+
+/** Parse lesson text into inline nodes. Never throws; never loses a character. */
+export function parseInlineMarks(text: string): InlineNode[] {
+  return parseRange(text, 0, text.length);
+}
+
+/** The text a reader sees — every marker that actually opened a span removed. */
+export function stripInlineMarks(text: string): string {
+  const out: string[] = [];
+  const walk = (nodes: InlineNode[]) => {
+    for (const n of nodes) {
+      if (n.type === "text") out.push(n.value);
+      else walk(n.children);
+    }
+  };
+  walk(parseInlineMarks(text));
+  return out.join("");
+}
+
+/** The run of non-whitespace around `pos`, or null when `pos` sits on whitespace. */
+function wordAround(text: string, pos: number): [number, number] | null {
+  const isWord = (ch: string | undefined) => ch !== undefined && !isSpace(ch);
+  if (!isWord(text[pos - 1]) && !isWord(text[pos])) return null;
+  let s = pos;
+  let e = pos;
+  while (s > 0 && isWord(text[s - 1])) s--;
+  while (e < text.length && isWord(text[e])) e++;
+  return [s, e];
+}
+
+export type ToggleResult = { text: string; start: number; end: number };
+
+/**
+ * Toggle `mark` over [start, end) — what the editor's Ctrl+B calls with the
+ * textarea's selectionStart/selectionEnd.
+ *
+ * The returned selection always covers the same INNER text: just inside the
+ * markers after wrapping, and the bare text after unwrapping, so the caller can
+ * assign it back to the textarea and the tutor's selection does not jump.
+ */
+export function toggleMark(text: string, start: number, end: number, mark: MarkName): ToggleResult {
+  const m = markerFor(mark);
+  let s = Math.max(0, Math.min(start, text.length));
+  let e = Math.max(s, Math.min(end, text.length));
+
+  if (s === e) {
+    const word = wordAround(text, s);
+    if (word === null) {
+      // On whitespace: drop an empty pair and put the caret between the markers.
+      const caret = s + m.open.length;
+      return { text: text.slice(0, s) + m.open + m.close + text.slice(s), start: caret, end: caret };
+    }
+    [s, e] = word;
+  }
+
+  const sel = text.slice(s, e);
+  // A single `*` next to another `*` belongs to a `**` run, not to an em.
+  const emConfusedByStrong =
+    mark === "em" && (sel.startsWith("**") || sel.endsWith("**"));
+
+  // 1. The selection includes the markers.
+  if (
+    !emConfusedByStrong &&
+    sel.length > m.open.length + m.close.length &&
+    sel.startsWith(m.open) &&
+    sel.endsWith(m.close)
+  ) {
+    const inner = sel.slice(m.open.length, sel.length - m.close.length);
+    return {
+      text: text.slice(0, s) + inner + text.slice(e),
+      start: s,
+      end: e - m.open.length - m.close.length,
+    };
+  }
+
+  // 2. The markers sit just outside the selection.
+  const outerConfusedByStrong =
+    mark === "em" && (text.slice(s - 2, s) === "**" || text.slice(e, e + 2) === "**");
+  if (
+    !outerConfusedByStrong &&
+    s >= m.open.length &&
+    text.slice(s - m.open.length, s) === m.open &&
+    text.slice(e, e + m.close.length) === m.close
+  ) {
+    return {
+      text: text.slice(0, s - m.open.length) + sel + text.slice(e + m.close.length),
+      start: s - m.open.length,
+      end: e - m.open.length,
+    };
+  }
+
+  // 3. Nothing to remove: wrap.
+  return {
+    text: text.slice(0, s) + m.open + sel + m.close + text.slice(e),
+    start: s + m.open.length,
+    end: e + m.open.length,
+  };
+}
