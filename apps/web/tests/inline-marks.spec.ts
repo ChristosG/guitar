@@ -554,6 +554,29 @@ test.describe("editor", () => {
     await expect(segment.getByTestId("body-edit-status")).toHaveText("Αποθηκεύτηκε");
   });
 
+  test("the status line stops claiming «Αποθηκεύτηκε» the moment he types again", async ({ page }) => {
+    // «Αποθηκεύτηκε» under text that has since changed is a lie the tutor acts
+    // on — he closes the laptop. The claim is about the text that WAS saved, so
+    // it has to be retracted as soon as newer text is queued.
+    const patches: Patch[] = [];
+    await mockEditor(page, patches);
+    const segment = await openEditor(page);
+    const textarea = segment.getByTestId("body-edit-textarea");
+    const status = segment.getByTestId("body-edit-status");
+
+    await textarea.fill(`${SEGMENT_TEXT} και δυναμώνει`);
+    await expect(status).toHaveText("Αποθηκεύτηκε", { timeout: 4000 });
+
+    await textarea.fill(`${SEGMENT_TEXT} και δυναμώνει πολύ`);
+    await expect(status).toHaveCount(0);
+    await page.waitForTimeout(800); // still inside the debounce — still silent
+    await expect(status).toHaveCount(0);
+
+    // …and it speaks again only once the second save has actually landed.
+    await expect(status).toHaveText("Αποθηκεύτηκε", { timeout: 4000 });
+    expect(patches.length).toBe(2);
+  });
+
   test("clicking away flushes the draft without waiting for the debounce", async ({ page }) => {
     const patches: Patch[] = [];
     await mockEditor(page, patches);

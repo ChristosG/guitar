@@ -370,6 +370,12 @@ export function BlockCard({
 
   function scheduleAutosave(text: string) {
     clearAutosaveTimer();
+    // The «Αποθηκεύτηκε» from the LAST save is about text that is no longer on
+    // screen. Retract it the moment newer text is queued — a status line that
+    // says "saved" over unsaved typing is worse than one that says nothing. A
+    // save actually on the wire keeps its spinner: it will land and speak for
+    // itself.
+    setSaveState((s) => (s === "saved" ? "idle" : s));
     timerRef.current = setTimeout(() => {
       timerRef.current = null;
       void saveQuiet(text);

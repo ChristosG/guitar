@@ -135,6 +135,38 @@ test.describe("what changed", () => {
     await expect(page.getByTestId("what-changed-diff")).toHaveCount(0);
   });
 
+  test("the marks in the text are rendered, not printed as asterisks", async ({ page }) => {
+    // The panel shows the tutor's OWN prose, and his prose carries `**...**`.
+    // Printing the markers raw makes the diff read as if the AI had inserted
+    // them — the one thing a "what changed" panel must never suggest.
+    const before = "Ο ενισχυτής χρωματίζει τον ήχο της κιθάρας.";
+    const after = `${before}\n\nΚράτα το **gain** χαμηλά.`;
+    await mockTree(page, { section: "warmup", prev_body: before, refined: true }, after);
+    await openSegment(page);
+
+    await page.getByTestId("what-changed-trigger").click();
+    const added = page.getByTestId("diff-add").first();
+    await expect(added.locator("strong")).toHaveText("gain");
+    await expect(added).not.toContainText("**");
+  });
+
+  test("the rewritten branch renders the marks in BOTH whole texts", async ({ page }) => {
+    // No shared phrasing -> the two texts are shown whole, by `Section`, which
+    // is the other place a `**` could have leaked onto the screen.
+    await mockTree(
+      page,
+      { section: "warmup", prev_body: "Ο **ενισχυτής** χρωματίζει τον ήχο με τον προενισχυτή του." },
+      "Οι **χορδές** καθορίζουν το ύφος: πάχος, υλικό και ηλικία.",
+    );
+    await openSegment(page);
+
+    await page.getByTestId("what-changed-trigger").click();
+    const panel = page.getByTestId("what-changed-rewritten");
+    await expect(panel).toBeVisible();
+    await expect(panel.locator("strong")).toHaveText(["ενισχυτής", "χορδές"]);
+    await expect(panel).not.toContainText("**");
+  });
+
   test("the chip and Undo appear together — two answers to one question", async ({ page }) => {
     await mockTree(page, { section: "warmup", prev_body: BEFORE, refined: true }, AFTER);
     await openSegment(page);

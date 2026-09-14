@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
 import { Loader2, Undo2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -12,6 +12,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { InlineMarks } from "@/components/ui/inline-marks";
 import { diffProse, type DiffBlock } from "@/lib/prose-diff";
 import { cn } from "@/lib/utils";
 
@@ -104,8 +105,8 @@ export function WhatChanged({
               <p className="rounded-md bg-muted p-2 text-sm text-muted-foreground">
                 {t("whatChangedRewritten")}
               </p>
-              <Section label={t("whatChangedBefore")}>{before}</Section>
-              <Section label={t("whatChangedAfter")}>{after}</Section>
+              <Section label={t("whatChangedBefore")} text={before} />
+              <Section label={t("whatChangedAfter")} text={after} />
             </div>
           ) : rendered.length === 0 ? (
             <p className="text-sm text-muted-foreground" data-testid="what-changed-nothing">
@@ -148,11 +149,13 @@ export function WhatChanged({
   );
 }
 
-function Section({ label, children }: { label: string; children: ReactNode }) {
+function Section({ label, text }: { label: string; text: string }) {
   return (
     <div className="flex flex-col gap-1">
       <span className="text-xs font-medium text-muted-foreground">{label}</span>
-      <p className="whitespace-pre-wrap rounded-md border border-border p-2 text-sm">{children}</p>
+      <p className="whitespace-pre-wrap rounded-md border border-border p-2 text-sm">
+        <InlineMarks text={text} />
+      </p>
     </div>
   );
 }
@@ -164,20 +167,29 @@ function Paragraph({ block }: { block: DiffBlock }) {
   if (block.kind === "add") {
     return (
       <p className={cn("whitespace-pre-wrap px-1", ADD)} data-testid="diff-add">
-        {block.text}
+        <InlineMarks text={block.text} />
       </p>
     );
   }
   if (block.kind === "del") {
     return (
       <p className={cn("whitespace-pre-wrap px-1", DEL)} data-testid="diff-del">
-        {block.text}
+        <InlineMarks text={block.text} />
       </p>
     );
   }
   if (block.kind === "same") {
-    return <p className="whitespace-pre-wrap px-1 text-muted-foreground">{block.text}</p>;
+    return (
+      <p className="whitespace-pre-wrap px-1 text-muted-foreground">
+        <InlineMarks text={block.text} />
+      </p>
+    );
   }
+  // The word-level pieces stay PLAIN TEXT on purpose. A piece is a fragment of a
+  // paragraph, so its `**` can be half of a pair whose other half landed in the
+  // neighbouring piece — `parseInlineMarks` would print the orphan verbatim and
+  // the two halves would render differently. The whole-paragraph cases above
+  // always carry a complete string, so they can be marked up.
   return (
     <p className="whitespace-pre-wrap px-1" data-testid="diff-edit">
       {block.pieces.map((piece, i) =>
