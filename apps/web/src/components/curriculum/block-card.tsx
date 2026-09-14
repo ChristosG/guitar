@@ -26,6 +26,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { InlineMarks } from "@/components/ui/inline-marks";
 import { Textarea } from "@/components/ui/textarea";
 import { useConfirm } from "@/components/ui/confirm";
 import { AddLessonDialog } from "@/components/curriculum/add-lesson-dialog";
@@ -673,7 +674,7 @@ export function BlockCard({
               isSegment ? "text-sm leading-relaxed" : "text-xs text-muted-foreground",
             )}
           >
-            {node.body}
+            <InlineMarks text={node.body} />
           </p>
         )
       )}

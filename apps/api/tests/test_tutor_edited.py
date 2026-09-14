@@ -132,3 +132,15 @@ def test_generate_segment_clears_the_tutor_marker(lesson_with_two_segments, monk
     db.commit()
     db.expire_all()
     assert "tutor_edited" not in db.get(Block, warm.id).meta
+
+
+def test_count_words_ignores_the_inline_marks():
+    """Formatting is not length. `<u>` in particular would otherwise score as
+    the word "u" (`\\w+` matches the tag's letter), so underlining a phrase
+    would make a thin lesson look longer than it is."""
+    from app.curriculum.depth import count_words
+
+    assert count_words("<u>ένα</u> **δύο**") == 2
+    assert count_words("Το **humbucker** έχει *δύο* πηνία") == 5
+    # An unclosed marker is literal text, not a span — and it is still not a word.
+    assert count_words("2 * 3 * 4") == count_words("2 3 4") == 3

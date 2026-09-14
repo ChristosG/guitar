@@ -131,3 +131,40 @@ def test_export_docx_404_for_non_roots():
         assert client.get(f"/curricula/{module_id}/export.docx").status_code == 404
     finally:
         db.close()
+
+
+def test_export_docx_renders_the_inline_marks_as_real_word_runs():
+    """`**bold**`, `*italic*` and `<u>underline</u>` are formatting, not text:
+    the Word file must carry them as run properties. A tutor who prints this
+    for a student must not be handed a page full of asterisks."""
+    db = SessionLocal()
+    try:
+        course = _mk_tree(db)
+        lesson = next(
+            b for m in course.children for b in m.children
+            if b.kind == "lesson" and "gain" in b.title
+        )
+        db.add(Block(kind="segment", title="Πηνία", parent_id=lesson.id, order=2,
+                     plane="content", meta={"section": "theory"},
+                     body="Το **humbucker** έχει *δύο* πηνία <u>σε σειρά</u>"))
+        db.commit()
+
+        r = client.get(f"/curricula/{course.id}/export.docx")
+        assert r.status_code == 200
+        doc = Document(io.BytesIO(r.content))
+
+        para = next(p for p in doc.paragraphs if "humbucker" in p.text)
+        # the markers themselves are gone from the visible text...
+        assert para.text == "Το humbucker έχει δύο πηνία σε σειρά"
+        runs = para.runs
+        assert [r.text for r in runs if r.bold] == ["humbucker"]
+        assert [r.text for r in runs if r.italic] == ["δύο"]
+        assert [r.text for r in runs if r.underline] == ["σε σειρά"]
+        # ...and no run anywhere in the document still shows a marker.
+        every_run = [run.text for p in doc.paragraphs for run in p.runs]
+        assert not any("*" in t or "<u>" in t or "</u>" in t for t in every_run)
+        # the unmarked words are plain, not accidentally inheriting the span
+        plain = [r.text for r in runs if not (r.bold or r.italic or r.underline)]
+        assert plain == ["Το ", " έχει ", " πηνία "]
+    finally:
+        db.close()

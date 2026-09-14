@@ -1,12 +1,13 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page, type Route } from "@playwright/test";
 import {
   parseInlineMarks,
   stripInlineMarks,
   toggleMark,
   type InlineNode,
 } from "../src/lib/inline-marks";
+import { fold } from "../src/lib/prose-diff";
 
 // Node-only: no browser, no server — `inline-marks.ts` is deliberately pure, the
 // same way `prose-diff.ts` is, so the grammar is tested in milliseconds.
@@ -165,5 +166,142 @@ test.describe("toggleMark", () => {
       start: 2,
       end: 6,
     });
+  });
+});
+
+test.describe("the diff ignores the markers", () => {
+  // `fold` is what `diffProse` compares lines and paragraphs with. If it kept
+  // the markers, bolding one word would report the whole paragraph as deleted
+  // and re-added in «Τι άλλαξε;» — a screen of red and green for a Ctrl+B.
+  test("bolding a word is not a change", () => {
+    expect(fold("**λέξη**")).toBe(fold("λέξη"));
+    expect(fold("*λέξη*")).toBe(fold("λέξη"));
+    expect(fold("<u>λέξη</u>")).toBe(fold("λέξη"));
+    expect(fold("Το **humbucker** έχει *δύο* πηνία <u>σε σειρά</u>")).toBe(
+      fold("Το humbucker έχει δύο πηνία σε σειρά"),
+    );
+  });
+
+  test("it still folds Greek the way it always did", () => {
+    expect(fold("**Τονικότητα**")).toBe("τονικοτητα");
+    expect(fold("ΦΩΣ")).toBe(fold("*φώς*"));
+  });
+});
+
+// --- the board ------------------------------------------------------------
+//
+// Same route-interception convention as `what-changed.spec.ts`: the grammar is
+// proved above in Node, so what is left to prove in a browser is that the board
+// actually RENDERS it — real `<strong>`/`<em>`/`<u>` elements, not asterisks on
+// the screen and not HTML injected into the page.
+const API_ORIGIN = "http://localhost:8791";
+
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "http://localhost:3100",
+  "Access-Control-Allow-Credentials": "true",
+  "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
+  "Access-Control-Allow-Headers": "content-type,x-app-locale",
+};
+
+const ROOT_ID = "33333333-3333-3333-3333-333333333333";
+const MODULE_ID = "44444444-4444-4444-4444-444444444444";
+const LESSON_ID = "55555555-5555-5555-5555-555555555555";
+const SEGMENT_ID = "66666666-6666-6666-6666-666666666666";
+
+const MARKED = "Το **humbucker** έχει *δύο* πηνία <u>σε σειρά</u>";
+
+function node(over: Record<string, unknown>) {
+  return {
+    id: "x", kind: "segment", title: "τ", body: null, est_minutes: null, order: 0,
+    language: "el", plane: "content", student_id: null, meta: null, children: [],
+    ...over,
+  };
+}
+
+async function mockTree(page: Page, segmentBody: string) {
+  async function handler(route: Route) {
+    const req = route.request();
+    const { pathname } = new URL(req.url());
+    if (req.method() === "OPTIONS") {
+      await route.fulfill({ status: 204, headers: CORS_HEADERS });
+      return;
+    }
+    const json = (status: number, body: unknown) =>
+      route.fulfill({
+        status, contentType: "application/json", headers: CORS_HEADERS,
+        body: JSON.stringify(body),
+      });
+
+    if (pathname === `/curricula/${ROOT_ID}`) {
+      await json(200, node({
+        id: ROOT_ID, kind: "course", title: "Ήχος Κιθάρας", meta: { brief: null },
+        children: [node({
+          id: MODULE_ID, kind: "module", title: "Ενότητα 1", body: "Στόχος.",
+          meta: { tier: "library" },
+          children: [node({
+            id: LESSON_ID, kind: "lesson", title: "Μάθημα 1",
+            meta: { draft_status: "ready", word_count: 300 },
+            children: [node({
+              id: SEGMENT_ID, kind: "segment", title: "Θεωρία", body: segmentBody,
+            })],
+          })],
+        })],
+      }));
+      return;
+    }
+    if (pathname.endsWith("/progress")) {
+      await json(200, { root_id: ROOT_ID, total: 1, queued: 0, drafting: 0, ready: 1, failed: 0, done: true });
+      return;
+    }
+    if (pathname === "/curricula/interview/open") {
+      await json(200, null);
+      return;
+    }
+    await json(500, { detail: "unexpected" });
+  }
+
+  await page.route(`${API_ORIGIN}/curricula/**`, handler);
+  await page.route(`${API_ORIGIN}/curricula`, handler);
+  await page.route(`${API_ORIGIN}/blocks/**`, handler);
+}
+
+/** Open the board and expand down to the segment card — non-root rows mount
+ * collapsed. */
+async function openSegment(page: Page) {
+  await page.goto(`/el/curricula/${ROOT_ID}`);
+  await expect(page.getByTestId("tree-board")).toBeVisible();
+  await page.locator('[data-testid="block-card"][data-kind="module"]').getByTestId("block-card-toggle").click();
+  await page.locator('[data-testid="block-card"][data-kind="lesson"]').getByTestId("block-card-toggle").click();
+  await expect(page.locator('[data-testid="block-card"][data-kind="segment"]')).toBeVisible();
+}
+
+test.describe("the board renders the marks", () => {
+  test("bold, italic and underline become real elements", async ({ page }) => {
+    await mockTree(page, MARKED);
+    await openSegment(page);
+
+    const body = page
+      .locator('[data-testid="block-card"][data-kind="segment"]')
+      .getByTestId("block-card-body");
+    await expect(body).toBeVisible();
+    await expect(body.locator("strong")).toHaveText("humbucker");
+    await expect(body.locator("em")).toHaveText("δύο");
+    await expect(body.locator("u")).toHaveText("σε σειρά");
+    // the markers themselves never reach the screen
+    await expect(body).toHaveText("Το humbucker έχει δύο πηνία σε σειρά");
+  });
+
+  test("angle brackets in the tutor's prose stay text, never markup", async ({ page }) => {
+    // The body is rendered from a parsed TREE, never with innerHTML — so a tag
+    // the tutor typed (or pasted) is shown, not executed.
+    await mockTree(page, "Γράψε <b>έντονα</b> με <script>alert(1)</script>");
+    await openSegment(page);
+
+    const body = page
+      .locator('[data-testid="block-card"][data-kind="segment"]')
+      .getByTestId("block-card-body");
+    await expect(body).toHaveText("Γράψε <b>έντονα</b> με <script>alert(1)</script>");
+    await expect(body.locator("b")).toHaveCount(0);
+    await expect(body.locator("script")).toHaveCount(0);
   });
 });

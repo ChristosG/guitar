@@ -35,6 +35,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from app.curriculum.inline_marks import strip_inline_marks
+
 # Words a tutor speaks-and-demonstrates per minute of lesson, as PLANNED PROSE
 # (not speech rate — a teaching script is read, paused over, and played through
 # on the guitar). Calibrated backwards from Chris's own "4-5 pages for 40
@@ -115,10 +117,15 @@ _SECTION_THIN_RATIO = 0.6
 
 def count_words(text: str | None) -> int:
     """Greek-safe word count. See this module's docstring for why `\\w+` and not
-    `.split()`."""
+    `.split()`.
+
+    The inline marks are stripped first: `<u>` would otherwise score as the word
+    "u" (`\\w+` matches the tag's letter), so an underlined lesson would measure
+    LONGER than the same lesson unformatted and could slip past the thin-lesson
+    floor on formatting alone."""
     if not text:
         return 0
-    return len(_WORD_RE.findall(text))
+    return len(_WORD_RE.findall(strip_inline_marks(text)))
 
 
 def target_words(teaching_minutes: int) -> int:

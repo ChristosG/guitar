@@ -64,6 +64,10 @@ export type ProseDiff = { rewritten: boolean; blocks: DiffBlock[]; similarity: n
 export function fold(text: string): string {
   if (!text) return "";
   return text
+    // The inline marks are FORMATTING, not words: «**λέξη**» and «λέξη» are the
+    // same prose, and without this every bolding the tutor (or the model) adds
+    // reads in «Τι άλλαξε;» as a deleted line plus an added line.
+    .replace(/\*\*|\*|<\/?u>/gu, "")
     .normalize("NFD")
     .replace(/\p{Mn}/gu, "")
     .toLowerCase()

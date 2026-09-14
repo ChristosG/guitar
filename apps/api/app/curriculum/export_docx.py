@@ -16,6 +16,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.curriculum.inline_marks import parse_inline_marks
 from app.models.block import Block
 
 # Rendered when a lesson has no drafted sections yet ("queued"/"drafting"/
@@ -28,6 +29,45 @@ def _children(db: Session, parent_id) -> list[Block]:
     return list(db.scalars(
         select(Block).where(Block.parent_id == parent_id).order_by(Block.order)
     ))
+
+
+def _add_marked_paragraph(doc, text: str, style: str | None = None):
+    """A paragraph whose `**bold**`, `*italic*` and `<u>underline</u>` markers
+    become real Word runs instead of literal asterisks.
+
+    The same grammar the board renders with (`inline_marks.py`, whose twin is
+    `apps/web/src/lib/inline-marks.ts`), so the exported document reads exactly
+    like the screen it was exported from. Nesting accumulates: a bold word
+    inside an underlined phrase comes out bold AND underlined, because each run
+    is written with the formatting of every span it sits inside.
+    """
+    p = doc.add_paragraph(style=style) if style else doc.add_paragraph()
+
+    def walk(nodes: list[dict], bold: bool, italic: bool, underline: bool) -> None:
+        for node in nodes:
+            if node["type"] == "text":
+                if node["value"] == "":
+                    continue
+                run = p.add_run(node["value"])
+                # Only ever set True: leaving it None keeps the style's own
+                # default, while setting False would explicitly UN-bold text a
+                # Word style (a heading, say) wanted bold.
+                if bold:
+                    run.bold = True
+                if italic:
+                    run.italic = True
+                if underline:
+                    run.underline = True
+                continue
+            walk(
+                node["children"],
+                bold or node["type"] == "strong",
+                italic or node["type"] == "em",
+                underline or node["type"] == "u",
+            )
+
+    walk(parse_inline_marks(text), False, False, False)
+    return p
 
 
 def filename_for(course: Block) -> str:
@@ -56,14 +96,14 @@ def build_curriculum_docx(db: Session, course: Block) -> io.BytesIO:
     ) if p]
     subtitle.add_run(" · ".join(parts))
     if course.body:
-        doc.add_paragraph(course.body)
+        _add_marked_paragraph(doc, course.body)
 
     # --- modules → lessons → sections ------------------------------------
     for module in modules:
         doc.add_page_break()
         doc.add_heading(module.title, level=1)
         if module.body:
-            doc.add_paragraph(module.body)
+            _add_marked_paragraph(doc, module.body)
         for lesson in _children(db, module.id):
             if lesson.kind != "lesson":
                 continue
@@ -72,7 +112,7 @@ def build_curriculum_docx(db: Session, course: Block) -> io.BytesIO:
                 heading = f"{heading} ({lesson.est_minutes}′)"
             doc.add_heading(heading, level=2)
             if lesson.body:
-                doc.add_paragraph(lesson.body)
+                _add_marked_paragraph(doc, lesson.body)
             segments = [b for b in _children(db, lesson.id) if b.kind == "segment"]
             if not segments:
                 doc.add_paragraph(_UNDRAFTED_NOTE)
@@ -81,7 +121,7 @@ def build_curriculum_docx(db: Session, course: Block) -> io.BytesIO:
                 doc.add_heading(segment.title, level=3)
                 for chunk in (segment.body or "").split("\n\n"):
                     if chunk.strip():
-                        doc.add_paragraph(chunk.strip())
+                        _add_marked_paragraph(doc, chunk.strip())
             # A REDRAFT-IN-PROGRESS OR FAILED REDRAFT still has its OLD segments —
             # `redraft_curriculum`/`deepen_lesson` requeue the lesson but never
             # delete its prior content, and a worker mid-write hasn't replaced it
