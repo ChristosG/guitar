@@ -416,9 +416,17 @@ type Patch = { body: string };
  * `patchDelayMs` is the whole point of the second half of these tests. A PATCH
  * that answers instantly hides the window that matters — the one between the
  * request leaving and the response landing, where the tutor's next click
- * arrives. Held open for 600 ms, a Save or a Cancel during a save is something
- * a test can actually aim at. */
-async function mockEditor(page: Page, patches: Patch[], patchDelayMs = 0) {
+ * arrives. Held open, a Save or a Cancel during a save is something a test can
+ * actually aim at.
+ *
+ * `control.failNext` breaks exactly one PATCH — the API refusing a write is the
+ * case where an editor that has already closed has thrown the draft away. */
+async function mockEditor(
+  page: Page,
+  patches: Patch[],
+  patchDelayMs = 0,
+  control: { failNext?: boolean } = {},
+) {
   let segmentBody = SEGMENT_TEXT;
 
   async function handler(route: Route) {
@@ -439,6 +447,12 @@ async function mockEditor(page: Page, patches: Patch[], patchDelayMs = 0) {
       // Recorded on ARRIVAL, before the delay — so the test can see a write is
       // in flight, which is exactly the state it is trying to interrupt.
       patches.push({ body: payload.body ?? "" });
+      if (control.failNext) {
+        control.failNext = false;
+        if (patchDelayMs) await new Promise((r) => setTimeout(r, patchDelayMs));
+        await json(500, { detail: "Δεν ήταν δυνατή η αποθήκευση." });
+        return;
+      }
       segmentBody = payload.body ?? "";
       if (patchDelayMs) await new Promise((r) => setTimeout(r, patchDelayMs));
       await json(200, node({ id: SEGMENT_ID, kind: "segment", title: "Θεωρία", body: segmentBody }));
@@ -629,7 +643,7 @@ test.describe("editor", () => {
     // blur sends an identical second PATCH, and whichever response arrives last
     // wins.
     const patches: Patch[] = [];
-    await mockEditor(page, patches, 600);
+    await mockEditor(page, patches, 1500);
     const segment = await openEditor(page);
     const textarea = segment.getByTestId("body-edit-textarea");
     const typed = `${SEGMENT_TEXT} α`;
@@ -650,7 +664,7 @@ test.describe("editor", () => {
 
   test("Cancel during an autosave lands LAST, with the original text", async ({ page }) => {
     const patches: Patch[] = [];
-    await mockEditor(page, patches, 600);
+    await mockEditor(page, patches, 1500);
     const segment = await openEditor(page);
     const textarea = segment.getByTestId("body-edit-textarea");
 
@@ -682,5 +696,81 @@ test.describe("editor", () => {
     await page.waitForTimeout(2200); // long past the debounce that was cancelled
     expect(patches).toEqual([]);
     await expect(segment.getByTestId("block-card-body")).toHaveText(SEGMENT_TEXT);
+  });
+
+  test("a Save the API refuses keeps the editor open with the draft in it", async ({ page }) => {
+    // The one that actually loses work: the editor used to close BEFORE the
+    // write, so a 500 left the tutor looking at the old prose with his rewrite
+    // gone and an error line to explain it.
+    const control = { failNext: true };
+    const patches: Patch[] = [];
+    await mockEditor(page, patches, 0, control);
+    const segment = await openEditor(page);
+    const textarea = segment.getByTestId("body-edit-textarea");
+    const typed = `${SEGMENT_TEXT} με ταχύτητα`;
+
+    await textarea.fill(typed);
+    await segment.getByTestId("body-edit-save").click();
+
+    await expect(segment.getByTestId("block-card-error")).toBeVisible();
+    await expect(textarea).toBeVisible();
+    await expect(textarea).toHaveValue(typed);
+    await expect(textarea).toBeEnabled();
+    expect(patches).toHaveLength(1);
+
+    // The route has recovered; the same click now works and the editor closes.
+    await segment.getByTestId("body-edit-save").click();
+    await expect(segment.getByTestId("body-edit-textarea")).toHaveCount(0);
+    await expect.poll(() => patches.length).toBe(2);
+    expect(patches[1].body).toBe(typed);
+    await expect(segment.getByTestId("block-card-body")).toHaveText(typed);
+  });
+
+  test("a failed restore does not poison the next Save", async ({ page }) => {
+    // The stale-rejection case. The Cancel restore is refused; its promise is
+    // the tail of the write chain, and a Save that re-throws it would drop the
+    // tutor's next paragraph without a word.
+    const control = { failNext: false };
+    const patches: Patch[] = [];
+    await mockEditor(page, patches, 0, control);
+    const segment = await openEditor(page);
+    const first = `${SEGMENT_TEXT} — πρόχειρο`;
+
+    await segment.getByTestId("body-edit-textarea").fill(first);
+    await page.waitForTimeout(2200); // the autosave lands
+    expect(patches).toHaveLength(1);
+
+    control.failNext = true; // the restore is the one that breaks
+    await segment.getByTestId("body-edit-cancel").click();
+    await expect(segment.getByTestId("body-edit-textarea")).toHaveCount(0);
+    await expect.poll(() => patches.length).toBe(2);
+    await expect(segment.getByTestId("block-card-error")).toBeVisible();
+
+    // Reopen and Save with nothing changed. There is nothing to write, so the
+    // ONLY thing this Save can report is the rejection still parked in the
+    // chain's tail — which it must not, because it is not this save's failure
+    // and nothing went wrong.
+    await segment.getByTestId("body-edit-trigger").click();
+    await expect(segment.getByTestId("body-edit-textarea")).toBeVisible();
+    await segment.getByTestId("body-edit-save").click();
+    await expect(segment.getByTestId("body-edit-textarea")).toHaveCount(0);
+    await expect(segment.getByTestId("block-card-error")).toHaveCount(0);
+    expect(patches).toHaveLength(2);
+
+    // Reopen and write something else — this must reach the API.
+    await segment.getByTestId("body-edit-trigger").click();
+    const reopened = segment.getByTestId("body-edit-textarea");
+    await expect(reopened).toBeVisible();
+    const second = `${SEGMENT_TEXT} — καθαρό`;
+    await reopened.fill(second);
+    await segment.getByTestId("body-edit-save").click();
+
+    await expect(segment.getByTestId("body-edit-textarea")).toHaveCount(0);
+    await expect.poll(() => patches.length).toBe(3);
+    expect(patches[2].body).toBe(second);
+    await expect(segment.getByTestId("block-card-body")).toHaveText(second);
+    // And the save is reported as what it was. Re-throwing the parked rejection
+    // put the OLD failure's error line under a paragraph that had just saved.
+    await expect(segment.getByTestId("block-card-error")).toHaveCount(0);
   });
 });

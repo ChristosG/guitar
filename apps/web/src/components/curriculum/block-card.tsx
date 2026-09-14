@@ -203,6 +203,10 @@ export function BlockCard({
    * `busy` disables the textarea, and an autosave that greys out the box the
    * tutor is typing in is worse than no autosave at all. */
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  /** The Cancel restore, in flight. Its own flag rather than `busy`, because
+   * `busy` is what the REST of the card is doing and Save now keeps the editor
+   * open while it saves — the textarea must not grey out under the tutor. */
+  const [cancelling, setCancelling] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   /** The text the API is known to hold — written only when a response lands. */
   const lastSavedRef = useRef(node.body ?? "");
@@ -222,6 +226,8 @@ export function BlockCard({
   const inflightRef = useRef<Promise<void> | null>(null);
   /** The selection to hand back after the next render — see `applyMark`. */
   const pendingSelRef = useRef<{ start: number; end: number } | null>(null);
+  /** Whether this card is still on the screen — a PATCH outlives its card. */
+  const mountedRef = useRef(true);
   const [error, setError] = useState<string | null>(null);
   const [added, setAdded] = useState<ArtifactOut[]>([]);
   /** The segment's own «Τι άλλαξε;» — local, because the chip and the dialog
@@ -302,8 +308,16 @@ export function BlockCard({
 
   // The pending debounce must not outlive the card — a tree refetch can unmount
   // a segment mid-edit, and a timer that fires afterwards PATCHes from a dead
-  // component.
-  useEffect(() => clearAutosaveTimer, []);
+  // component. The flag is the same problem one step later: a PATCH already on
+  // the wire when the card goes away still resolves, and its `onChanged` would
+  // push a node back into a tree that has moved on.
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      clearAutosaveTimer();
+    };
+  }, []);
 
   /** Append a body write to this card's chain and return the tail. Nothing here
    * runs until everything queued before it has settled — an earlier PATCH that
@@ -319,18 +333,31 @@ export function BlockCard({
     return pending;
   }
 
-  /** Save without touching `busy` — the autosave's whole job is to be invisible. */
-  async function saveQuiet(text: string) {
-    if (text === lastSavedRef.current || text === savingTextRef.current) return;
+  /** Save without touching `busy` — the autosave's whole job is to be invisible.
+   *
+   * Returns whether the API is now known to hold `text`. Save needs that answer:
+   * an editor that closes on a FAILED PATCH takes the tutor's draft with it. */
+  async function saveQuiet(text: string): Promise<boolean> {
+    if (text === lastSavedRef.current) return true;
+    // Already on the wire. The caller that cares (Save) awaits the chain before
+    // asking, so reaching here is a blur racing its own autosave.
+    if (text === savingTextRef.current) return false;
     savingTextRef.current = text;
     setSaveState("saving");
+    let saved = false;
+    // The work NEVER rejects: the chain's tail is awaited by the next Save, and
+    // a rejection parked there would take that Save down with it.
     await chainWrite(async () => {
       try {
         const updated = await updateBlock(node.id, { body: text });
         lastSavedRef.current = text;
+        saved = true;
+        if (!mountedRef.current) return;
         onChanged(updated);
         setSaveState("saved");
+        setError(null);
       } catch (err) {
+        if (!mountedRef.current) return;
         setSaveState("error");
         setError(err instanceof ApiError ? err.detail : t("editBodyError"));
       } finally {
@@ -338,6 +365,7 @@ export function BlockCard({
         if (savingTextRef.current === text) savingTextRef.current = null;
       }
     });
+    return saved;
   }
 
   function scheduleAutosave(text: string) {
@@ -378,12 +406,19 @@ export function BlockCard({
     e.preventDefault();
     const next = draftBody;
     clearAutosaveTimer();
-    setEditingBody(false);
+    // The same click already blurred the textarea, which may have queued this
+    // very text. Read that BEFORE awaiting the chain: afterwards the flag is
+    // cleared and Save would send a second, identical PATCH.
+    const alreadyQueued = savingTextRef.current === next;
     await run(async () => {
-      // The same click already blurred the textarea, which may have queued the
-      // very PATCH this one would repeat; `saveQuiet` then sees nothing to do.
-      if (inflightRef.current) await inflightRef.current;
-      await saveQuiet(next);
+      // `.catch`: an earlier write may have parked a rejection in the tail, and
+      // re-throwing it here would drop the text the tutor just asked to save.
+      if (inflightRef.current) await inflightRef.current.catch(() => {});
+      const saved = alreadyQueued ? lastSavedRef.current === next : await saveQuiet(next);
+      // THE EDITOR CLOSES ONLY ONCE THE TEXT IS ON THE SERVER. It used to close
+      // first, so a PATCH that failed left the tutor looking at the old prose
+      // with his rewrite gone and an error line to explain it.
+      if (saved) setEditingBody(false);
     }, t("editBodyError"));
   }
 
@@ -394,19 +429,31 @@ export function BlockCard({
     const original = originalRef.current;
     setEditingBody(false);
     setSaveState("idle");
-    await run(
-      () =>
-        // Through the chain, so the restore runs AFTER every save it is undoing
-        // and the decision to restore is made once they have all landed.
-        chainWrite(async () => {
-          if (lastSavedRef.current === original) return;
+    setCancelling(true);
+    setError(null);
+    try {
+      // Through the chain, so the restore runs AFTER every save it is undoing
+      // and the decision to restore is made once they have all landed.
+      await chainWrite(async () => {
+        if (lastSavedRef.current === original) return;
+        try {
           const updated = await updateBlock(node.id, { body: original });
+          // AFTER the response, not before: until it lands the API still holds
+          // the autosaved text, and `lastSavedRef` is what the next Save trusts.
           lastSavedRef.current = original;
           savingTextRef.current = null;
-          onChanged(updated);
-        }),
-      t("editBodyError"),
-    );
+          if (mountedRef.current) onChanged(updated);
+        } catch (err) {
+          // Caught HERE, so the chain's tail never holds a rejection for the
+          // next Save to trip over.
+          if (mountedRef.current) {
+            setError(err instanceof ApiError ? err.detail : t("editBodyError"));
+          }
+        }
+      });
+    } finally {
+      if (mountedRef.current) setCancelling(false);
+    }
   }
 
   async function handleDelete() {
@@ -805,7 +852,7 @@ export function BlockCard({
                 data-testid={testId}
                 aria-label={t(label)}
                 title={t(label)}
-                disabled={busy}
+                disabled={cancelling}
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => applyMark(mark)}
               >
@@ -856,14 +903,19 @@ export function BlockCard({
             }}
             rows={Math.min(18, Math.max(4, draftBody.split("\n").length + 1))}
             data-testid="body-edit-textarea"
-            disabled={busy}
+            // NOT `busy`. Neither an autosave nor a Save may grey out the box
+            // the tutor is typing in — Save now keeps the editor open until the
+            // PATCH lands, and a disabled textarea would swallow the sentence he
+            // is in the middle of. Only the Cancel restore locks it, and by then
+            // the editor is closed anyway.
+            disabled={cancelling}
             className={cn(isSegment && "text-sm leading-relaxed")}
           />
           <div className="flex items-center gap-2 self-end">
             <Button
               type="button" size="sm" variant="outline"
               data-testid="body-edit-cancel"
-              disabled={busy}
+              disabled={busy || cancelling}
               // Same `onMouseDown` as the toolbar, for a bigger reason: without
               // it the click blurs the textarea first, the blur flushes the
               // draft the tutor is ABANDONING, and Cancel becomes a write
@@ -874,7 +926,7 @@ export function BlockCard({
             >
               {t("cancel")}
             </Button>
-            <Button type="submit" size="sm" disabled={busy} data-testid="body-edit-save">
+            <Button type="submit" size="sm" disabled={busy || cancelling} data-testid="body-edit-save">
               {busy && <Loader2 className="animate-spin" />}
               {t("editSave")}
             </Button>
