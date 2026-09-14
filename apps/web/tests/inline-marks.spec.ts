@@ -223,6 +223,26 @@ test.describe("toggleMark", () => {
     ]);
   });
 
+  test("un-italicising a bold-italic word keeps the bold", () => {
+    // The trap is PARITY. `***σόλο***` is strong(em(…)); the run on each side is
+    // three asterisks, of which exactly one is the em's. Reading "there is a
+    // `**` next to the selection" as "the neighbours are not mine" wrapped the
+    // word again into `****σόλο****` — which parses as two EMPTY strongs around
+    // it: the bold silently gone, eight invisible asterisks left in the lesson.
+    const out = toggleMark("***σόλο***", 3, 7, "em");
+    expect(out).toEqual({ text: "**σόλο**", start: 2, end: 6 });
+    expect(parseInlineMarks(out.text)).toEqual([
+      { type: "strong", children: [{ type: "text", value: "σόλο" }] },
+    ]);
+
+    // …and the same when the tutor selected the markers too.
+    const outside = toggleMark("***σόλο***", 0, 10, "em");
+    expect(outside.text).toBe("**σόλο**");
+    expect(parseInlineMarks(outside.text)).toEqual([
+      { type: "strong", children: [{ type: "text", value: "σόλο" }] },
+    ]);
+  });
+
   test("toggling twice returns the original text and selection", () => {
     for (const mark of ["strong", "em", "u"] as const) {
       const once = toggleMark("Το σόλο εδώ", 3, 7, mark);

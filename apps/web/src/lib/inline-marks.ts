@@ -244,6 +244,13 @@ function snapEnd(text: string, i: number): number {
   return tag ? tag.at + tag.length : i;
 }
 
+/** How many asterisks run away from `i` — leftwards when `step` is -1. */
+function asteriskRun(text: string, i: number, step: -1 | 1): number {
+  let n = 0;
+  while (text[step < 0 ? i - 1 - n : i + n] === "*") n++;
+  return n;
+}
+
 export type ToggleResult = { text: string; start: number; end: number };
 
 /**
@@ -276,17 +283,40 @@ export function toggleMark(text: string, start: number, end: number, mark: MarkN
   e = Math.max(s, snapEnd(text, e));
 
   const sel = text.slice(s, e);
-  // A single `*` next to another `*` belongs to a `**` run, not to an em.
-  const emOnStrongRun = mark === "em" && text.startsWith("**", s);
+
+  // PARITY, not adjacency. In a run of asterisks the `**` pairs are taken from
+  // the outside in, so a run of ODD length has exactly one `*` left over and
+  // that one is an em marker — `***σόλο***` is strong(em(…)). A run of EVEN
+  // length is all `**` and none of it belongs to an em. Asking only "is there a
+  // `**` next to the selection?" got this wrong in the direction that hurts:
+  // Ctrl+I on a bold-italic word wrapped it again into `****σόλο****`, which
+  // parses as two EMPTY strongs around the word — the bold gone and eight
+  // invisible asterisks left behind.
+  const runLeftOf = (i: number) => asteriskRun(text, i, -1);
+  const runRightOf = (i: number) => asteriskRun(text, i, 1);
+
+  // Where a span of this mark opens at the selection's start, if one does.
+  const leadRun = runRightOf(s);
+  const opensAt =
+    mark === "em"
+      ? leadRun % 2 === 1
+        ? s + leadRun - 1 // the leftover `*` is the LAST of the run
+        : null
+      : text.startsWith(m.open, s)
+        ? s
+        : null;
 
   // 1. The selection starts at a span of this mark — take the whole span off,
   //    whether or not the selection reaches its closer.
-  if (!emOnStrongRun && text.startsWith(m.open, s)) {
-    const closerAt = findCloser(text, s + m.open.length, text.length, m, new Map());
+  if (opensAt !== null) {
+    const o = opensAt;
+    const closerAt = findCloser(text, o + m.open.length, text.length, m, new Map());
     if (closerAt !== null && closerAt + m.close.length >= e) {
-      const inner = text.slice(s + m.open.length, closerAt);
       return {
-        text: text.slice(0, s) + inner + text.slice(closerAt + m.close.length),
+        text:
+          text.slice(0, o) +
+          text.slice(o + m.open.length, closerAt) +
+          text.slice(closerAt + m.close.length),
         start: s,
         end: closerAt - m.open.length,
       };
@@ -295,7 +325,7 @@ export function toggleMark(text: string, start: number, end: number, mark: MarkN
 
   // 2. The markers sit just outside the selection.
   const outerConfusedByStrong =
-    mark === "em" && (text.slice(s - 2, s) === "**" || text.slice(e, e + 2) === "**");
+    mark === "em" && (runLeftOf(s) % 2 === 0 || runRightOf(e) % 2 === 0);
   if (
     !outerConfusedByStrong &&
     s >= m.open.length &&
