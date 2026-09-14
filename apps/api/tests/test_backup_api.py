@@ -26,6 +26,7 @@ import tarfile
 from pathlib import Path
 
 import pytest
+from sqlalchemy import text
 
 import app.routers.backup as backup
 from app.models.generation_job import GenerationJob
@@ -67,13 +68,17 @@ def make_archive(
     media: dict[str, bytes] | None = None,
     superseded: dict[str, dict[str, bytes]] | None = None,
     extra_member: str | None = None,
+    compress: bool = True,
 ) -> bytes:
-    """A small in-memory archive in exactly make-seed.sh's shape."""
+    """A small in-memory archive in exactly make-seed.sh's shape.
+
+    `compress=False` is the uncompressed `.tar` Safari's "open safe files"
+    leaves behind after it gunzips a download."""
     if manifest is None:
         manifest = {"created": "2026-07-30T00:00:00Z", "app_commit": "abc",
                     "pg_major": 16, "schema": None}
     buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+    with tarfile.open(fileobj=buf, mode="w:gz" if compress else "w") as tar:
         def add(name: str, data: bytes) -> None:
             info = tarfile.TarInfo(name)
             info.size = len(data)
@@ -246,6 +251,9 @@ def test_a_restore_puts_a_displaced_library_back_and_never_overwrites_one(
     """
     monkeypatch.setattr(backup, "_run", FakeRun())
     monkeypatch.setattr(backup, "_run_alembic_upgrade", lambda: None)
+    monkeypatch.setattr(backup, "_reset_schema", lambda db: None)
+    monkeypatch.setattr(backup, "_safety_dump",
+                        lambda conn_args, env: media_dir.parent / "pre-restore-unit.dump")
     name = f"{SUPERSEDED_MEDIA_PREFIX}20260730T142530Z"
     mine = _displace(media_dir, "20260101T000000Z", {"keep.pdf": b"ALREADY HERE"})
 
@@ -275,6 +283,9 @@ def test_restore_ignores_a_superseded_entry_it_did_not_write(
     archive-wide one."""
     monkeypatch.setattr(backup, "_run", FakeRun())
     monkeypatch.setattr(backup, "_run_alembic_upgrade", lambda: None)
+    monkeypatch.setattr(backup, "_reset_schema", lambda db: None)
+    monkeypatch.setattr(backup, "_safety_dump",
+                        lambda conn_args, env: media_dir.parent / "pre-restore-unit.dump")
 
     archive = make_archive(superseded={"not-ours": {"x.txt": b"nope"}})
     assert post_restore(client, archive).status_code == 200
@@ -292,6 +303,19 @@ def test_restore_rejects_a_non_tar_upload(client, media_dir, monkeypatch):
     assert res.status_code == 400
     assert res.json()["detail"]["code"] == "not_a_backup"
     assert fake.calls == []  # pg_restore never ran
+
+
+def test_restore_accepts_a_plain_uncompressed_tar(client, media_dir, monkeypatch):
+    """Safari's "open safe files" gunzips a download and leaves `x.tar`."""
+    fake = FakeRun()
+    monkeypatch.setattr(backup, "_run", fake)
+    monkeypatch.setattr(backup, "_reset_schema", lambda db: None)
+    monkeypatch.setattr(backup, "_safety_dump",
+                        lambda conn_args, env: media_dir.parent / "pre-restore-unit.dump")
+    monkeypatch.setattr(backup, "_run_alembic_upgrade", lambda: None)
+    archive = make_archive(media={"0002.jpg": b"restored-scan"}, compress=False)
+    res = post_restore(client, archive)
+    assert res.status_code == 200, res.text
 
 
 def test_restore_rejects_a_tar_missing_db_dump(client, media_dir, monkeypatch):
@@ -331,6 +355,10 @@ def test_restore_rejects_path_traversal(client, media_dir, monkeypatch, tmp_path
 def test_restore_runs_pg_restore_and_swaps_media(client, media_dir, monkeypatch):
     fake = FakeRun()
     monkeypatch.setattr(backup, "_run", fake)
+    resets: list[str] = []
+    monkeypatch.setattr(backup, "_reset_schema", lambda db: resets.append("reset"))
+    monkeypatch.setattr(backup, "_safety_dump",
+                        lambda conn_args, env: media_dir.parent / "pre-restore-unit.dump")
     alembic_calls: list[str] = []
     monkeypatch.setattr(backup, "_run_alembic_upgrade", lambda: alembic_calls.append("ran"))
 
@@ -341,15 +369,17 @@ def test_restore_runs_pg_restore_and_swaps_media(client, media_dir, monkeypatch)
     assert body["ok"] is True
     assert body["restored_manifest"]["pg_major"] == 16
 
-    # exact pg_restore argv + env
+    # exact pg_restore argv + env — no `--clean`/`--if-exists`: the schema was
+    # emptied wholesale first, so there is nothing for pg_restore to drop.
     assert len(fake.calls) == 1
     argv, env = fake.calls[0]
     assert argv[0] == "pg_restore"
-    assert argv[1:6] == ["--clean", "--if-exists", "--no-owner",
-                         "--no-privileges", "--exit-on-error"]
-    assert argv[6:14] == CONN_ARGS
+    assert argv[1:4] == ["--no-owner", "--no-privileges", "--exit-on-error"]
+    assert argv[4:12] == CONN_ARGS
     assert argv[-1].endswith("/db.dump")
     assert env["PGPASSWORD"] == DB["password"]
+
+    assert resets == ["reset"]
 
     # media atomically replaced: new content in, old content gone
     assert (media_dir / "0002.jpg").read_bytes() == b"restored-scan"
@@ -376,6 +406,9 @@ def test_restore_refuses_while_a_generation_job_is_running(client, media_dir, mo
 
 def test_restore_pg_restore_failure_reports_stderr(client, media_dir, monkeypatch):
     monkeypatch.setattr(backup, "_run", FakeRun(returncode=1, stderr="pg_restore: error: kaput"))
+    monkeypatch.setattr(backup, "_reset_schema", lambda db: None)
+    monkeypatch.setattr(backup, "_safety_dump",
+                        lambda conn_args, env: media_dir.parent / "pre-restore-unit.dump")
     res = post_restore(client, make_archive())
     assert res.status_code == 409
     detail = res.json()["detail"]
@@ -385,8 +418,62 @@ def test_restore_pg_restore_failure_reports_stderr(client, media_dir, monkeypatc
     assert (media_dir / "0001.jpg").read_bytes() == b"old-scan"
 
 
+def test_a_failed_restore_puts_the_previous_data_back(client, media_dir, monkeypatch):
+    """"The app displaces, it never deletes" — and the schema reset DELETES.
+    A `pg_restore` that dies after it would leave the tutor with an empty
+    database, which is the one outcome a restore may not produce. So the
+    database is dumped beside media_dir first and put straight back when the
+    upload is rejected."""
+
+    class ScriptedRun(FakeRun):
+        """Safety pg_dump ok; the upload's pg_restore fails; the put-back
+        pg_restore of the safety dump succeeds."""
+
+        def __call__(self, argv, env):
+            n = len(self.calls)
+            self.calls.append((list(argv), dict(env)))
+            if "-f" in argv:
+                Path(argv[argv.index("-f") + 1]).write_bytes(b"PGDMP safety copy")
+            rc, err = (1, "boom") if n == 1 else (0, "")
+            return subprocess.CompletedProcess(argv, rc, stdout="", stderr=err)
+
+    fake = ScriptedRun()
+    monkeypatch.setattr(backup, "_run", fake)
+    monkeypatch.setattr(backup, "_run_alembic_upgrade", lambda: None)
+    # The DDL itself is proven by the real round-trip tests below; guitar_test
+    # is shared, and what this test is about is the argv sequence around it.
+    monkeypatch.setattr(backup, "_reset_schema", lambda db: None)
+
+    res = post_restore(client, make_archive(media={"0002.jpg": b"restored-scan"}))
+    assert res.status_code == 409
+    detail = res.json()["detail"]
+    assert detail["code"] == "restore_failed"
+    assert "boom" in detail["message"]
+    assert "put back" in detail["message"]
+
+    # exactly three subprocesses, in this order: the safety dump, the upload
+    # that failed, the safety dump going back in.
+    assert [argv[0] for argv, _ in fake.calls] == ["pg_dump", "pg_restore", "pg_restore"]
+    safety_argv = fake.calls[0][0]
+    assert safety_argv[1] == "-Fc"
+    safety_path = Path(safety_argv[safety_argv.index("-f") + 1])
+    assert safety_path.parent == media_dir.parent, "a SIBLING of media_dir, not a tempdir"
+    assert safety_path.name.startswith("pre-restore-") and safety_path.suffix == ".dump"
+    assert fake.calls[1][0][-1].endswith("/db.dump")   # the upload's dump
+    assert fake.calls[2][0][-1] == str(safety_path)    # …and his data going back
+    assert str(safety_path) in detail["message"], "he is told where the file is"
+
+    # the safety copy is KEPT, and the media dir was never touched at all
+    assert safety_path.read_bytes() == b"PGDMP safety copy"
+    assert (media_dir / "0001.jpg").read_bytes() == b"old-scan"
+    assert not (media_dir / "0002.jpg").exists()
+
+
 def test_restore_pg_tools_missing(client, media_dir, monkeypatch):
     monkeypatch.setattr(backup, "_run", FakeRun(raises=FileNotFoundError("pg_restore")))
+    monkeypatch.setattr(backup, "_reset_schema", lambda db: None)
+    monkeypatch.setattr(backup, "_safety_dump",
+                        lambda conn_args, env: media_dir.parent / "pre-restore-unit.dump")
     res = post_restore(client, make_archive())
     assert res.status_code == 409
     assert res.json()["detail"]["code"] == "pg_tools_missing"
@@ -416,6 +503,9 @@ def test_both_endpoints_409_while_the_lock_is_held(client, media_dir, monkeypatc
 def test_the_lock_is_released_after_export_and_after_restore(client, media_dir, monkeypatch):
     monkeypatch.setattr(backup, "_run", FakeRun())
     monkeypatch.setattr(backup, "_run_alembic_upgrade", lambda: None)
+    monkeypatch.setattr(backup, "_reset_schema", lambda db: None)
+    monkeypatch.setattr(backup, "_safety_dump",
+                        lambda conn_args, env: media_dir.parent / "pre-restore-unit.dump")
 
     assert client.get("/backup/export").status_code == 200
     assert not backup._LOCK.locked()  # released by the streamed response's cleanup
@@ -512,4 +602,72 @@ def test_real_round_trip_export_wipe_restore(client, media_dir, monkeypatch, db)
     assert [j.id for j in restored] == [job_id]
     assert restored[0].params == {"marker": "round-trip"}
     assert restored[0].status == "succeeded"
+    assert (media_dir / "0001.jpg").read_bytes() == b"old-scan"
+
+    safety = sorted(media_dir.parent.glob("pre-restore-*.dump"))
+    assert len(safety) == 1 and safety[0].stat().st_size > 0, \
+        "the pre-restore safety copy of his data is kept beside media_dir"
+
+
+@pytest.mark.skipif(PG16_BIN is None, reason="no PostgreSQL 16 pg_dump/pg_restore found")
+def test_restore_does_not_depend_on_the_live_databases_constraint_names(client, media_dir, monkeypatch, db):
+    """2026-09-14, CI on the v0.5.2 bundle: restoring a dump whose chunk->page
+    foreign key is named `chunk_page_id_fkey` into a database whose migrations
+    named it `fk_chunk_page_id` died in `pg_restore --clean` ("cannot drop
+    constraint page_pkey ... fk_chunk_page_id depends on it"). A restore must
+    not care what the target database used to call its constraints."""
+    monkeypatch.setenv("PG_BIN_DIR", PG16_BIN)
+    res = client.get("/backup/export")
+    assert res.status_code == 200, res.text
+    archive = res.content
+    # Now give the live DB a dependent object under a name the dump cannot know.
+    db.execute(text("ALTER TABLE chunk DROP CONSTRAINT IF EXISTS chunk_page_id_fkey"))
+    db.execute(text("ALTER TABLE chunk DROP CONSTRAINT IF EXISTS fk_chunk_page_id"))
+    db.execute(text(
+        "ALTER TABLE chunk ADD CONSTRAINT renamed_by_a_later_migration "
+        "FOREIGN KEY (page_id) REFERENCES page(id) ON DELETE CASCADE"
+    ))
+    db.commit()
+    res = post_restore(client, archive)
+    assert res.status_code == 200, res.text
+    assert res.json()["ok"] is True
+    names = {r[0] for r in db.execute(text(
+        "SELECT conname FROM pg_constraint WHERE conrelid = 'chunk'::regclass"
+    ))}
+    assert "renamed_by_a_later_migration" not in names
+
+    safety = sorted(media_dir.parent.glob("pre-restore-*.dump"))
+    assert len(safety) == 1 and safety[0].stat().st_size > 0, \
+        "the pre-restore safety copy of his data is kept beside media_dir"
+
+
+@pytest.mark.skipif(PG16_BIN is None, reason="no PostgreSQL 16 pg_dump/pg_restore found")
+def test_a_failed_restore_really_puts_the_database_back(client, media_dir, monkeypatch, db):
+    """The safety net, against a real PostgreSQL rather than a scripted fake:
+    a real `DROP SCHEMA public CASCADE` really happens, the upload really is
+    rejected by a real `pg_restore`, and his row is really still there
+    afterwards. "The app displaces, it never deletes" has to survive the
+    failure path or it is not an invariant."""
+    monkeypatch.setenv("PG_BIN_DIR", PG16_BIN)
+
+    job = GenerationJob(kind="curriculum", status="succeeded",
+                        params={"marker": "must survive a failed restore"})
+    db.add(job)
+    db.commit()
+    job_id = job.id
+    db.rollback()  # no idle-in-transaction locks against the DROP SCHEMA
+
+    # A structurally valid archive whose db.dump is garbage: validation passes,
+    # the safety dump is taken, the schema is really emptied, and then the real
+    # pg_restore rejects it.
+    res = post_restore(client, make_archive(db_dump=b"this is not a pg_dump archive"))
+    assert res.status_code == 409, res.text
+    detail = res.json()["detail"]
+    assert detail["code"] == "restore_failed"
+    assert "put back" in detail["message"], detail["message"]
+
+    restored = db.query(GenerationJob).all()
+    assert [j.id for j in restored] == [job_id], "his data survived a failed restore"
+    assert restored[0].params == {"marker": "must survive a failed restore"}
+    # …and the media dir never entered it at all.
     assert (media_dir / "0001.jpg").read_bytes() == b"old-scan"

@@ -47,6 +47,33 @@ shell's displacement path closes permanently once one first run completes, so
 backup that is large is a solvable problem. A backup that quietly contains the
 wrong library is not a problem anyone will notice until it is too late.
 
+A RESTORE EMPTIES THE SCHEMA FIRST, and does not ask `pg_restore --clean` to
+do it. `--clean` emits a DROP for every object THE DUMP knows about and nothing
+else, so its success depends on the *history* of the target database. The
+webapp's database calls the chunk->page foreign key `chunk_page_id_fkey` (every
+dump cut from it carries that name); a database the migrations built calls it
+`fk_chunk_page_id`. Restoring the one into the other (CI on the v0.5.2 bundle,
+2026-09-14) died on "cannot drop constraint page_pkey ... fk_chunk_page_id
+depends on it" — with the tables already half-dropped. `_reset_schema` drops
+the whole `public` schema instead: nothing survives to be named, so nothing can
+be named wrongly. `pg_restore` then runs into an empty database with no
+`--clean`/`--if-exists` at all.
+
+AND BECAUSE THAT RESET DELETES, IT IS PRECEDED BY A SAFETY DUMP. This app
+displaces, it never deletes: a restore that emptied the schema and then failed
+inside `pg_restore` would leave the tutor with nothing, which is the one
+outcome a restore may not produce. So before a single object is dropped,
+`_safety_dump` writes a `pg_dump -Fc` of the database exactly as it is to
+`<media_dir>/../pre-restore-<stamp>.dump` — a SIBLING of the media dir like the
+`media_superseded_*` folders, never a temp dir, and never deleted afterwards
+(it is a few MB, and it is his data). If that dump cannot be made, the restore
+refuses and nothing has changed. If the upload's `pg_restore` fails after the
+reset, `_put_back` empties the schema again, restores the safety dump, re-runs
+`alembic upgrade head` if it carried one, and the 409 tells the tutor in his own
+error message that his previous data was put back and from which file. The
+media directory is never in question either way: the swap only happens after a
+`pg_restore` that succeeded.
+
 `manifest.schema` is the alembic revision the database was at when the backup
 was taken (read from its `alembic_version` table; null when that table does not
 exist — e.g. a dev/test DB built by `create_all`). Restore runs
@@ -67,8 +94,8 @@ is mid-`pg_restore`) would interleave two writers over the same database and
 media directory. Busy -> 409 `backup_busy`, never a queue: the tutor pressing
 the button twice wants one backup, not two. Restore additionally refuses while
 any `GenerationJob` is `running` (409 `jobs_running`): a draft fan-out holds DB
-sessions and writes blocks, and `pg_restore --clean` would drop the tables out
-from under it.
+sessions and writes blocks, and the schema reset would drop the tables out from
+under it.
 
 FAILURE TAXONOMY, mirrored from `routers/settings.py`'s style: HTTP 4xx with
 `{"detail": {"code": ..., "message": ...}}`. The UI maps `code` to one Greek
@@ -102,7 +129,7 @@ from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
 
 from app.config import settings
-from app.db import get_db
+from app.db import engine, get_db
 from app.models.generation_job import GenerationJob
 
 log = logging.getLogger(__name__)
@@ -347,6 +374,110 @@ def _validate_member_name(name: str) -> None:
         raise _err(400, "not_a_backup", f"archive member escapes the archive: {name!r}")
 
 
+def _reset_schema(db: Session) -> None:
+    """Empty the database before `pg_restore` — the whole `public` schema, in
+    one statement, extension included (CASCADE takes `vector` with it; the
+    dump's own CREATE EXTENSION puts it back).
+
+    Why not `pg_restore --clean`: `--clean` drops only what the DUMP knows.
+    The webapp's database calls the chunk->page key `chunk_page_id_fkey`; a
+    database the migrations built calls it `fk_chunk_page_id`. Restoring the
+    one into the other (CI, 2026-09-14, the v0.5.2 bundle) died on
+    "cannot drop constraint page_pkey ... fk_chunk_page_id depends on it" with
+    the tables half-dropped. A restore whose outcome depends on what the
+    target used to call its constraints is not a restore."""
+    db.execute(text(
+        "DROP SCHEMA public CASCADE; CREATE SCHEMA public; "
+        "GRANT ALL ON SCHEMA public TO public;"
+    ))
+    db.commit()
+
+
+def _safety_dump(conn_args: list[str], env: dict[str, str]) -> Path:
+    """`pg_dump -Fc` of the database as it is RIGHT NOW, before the restore
+    drops anything, written beside `settings.media_dir`.
+
+    A sibling of the media dir — the same place the desktop shell puts a
+    `media_superseded_*` library — and deliberately NOT a temp dir: the whole
+    point is that it outlives this request. It is never deleted, not even on a
+    restore that succeeded: it is a few MB, it is the tutor's data, and "the
+    app tidied away the only copy of what you had before" is exactly the class
+    of helpfulness this file exists to refuse.
+
+    Failing here is safe: nothing has been reset yet, so the 409 leaves the
+    database untouched.
+    """
+    dest = (
+        Path(settings.media_dir).parent
+        / f"pre-restore-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.dump"
+    )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    argv = [_pg_bin("pg_dump"), "-Fc", *conn_args, "-f", str(dest)]
+    try:
+        proc = _run(argv, env)
+    except FileNotFoundError as e:
+        raise _err(
+            409, "pg_tools_missing",
+            f"pg_dump not found ({argv[0]}) — set PG_BIN_DIR or install postgresql-client",
+        ) from e
+    if proc.returncode != 0:
+        raise _err(
+            409, "restore_failed",
+            "a safety copy of your current data could not be made, so nothing "
+            f"was changed (pg_dump failed: {proc.stderr[-2000:]})",
+        )
+    log.info("restore: safety copy of the current database written to %s", dest)
+    return dest
+
+
+def _put_back(db: Session, safety: Path, conn_args: list[str], env: dict[str, str]) -> str:
+    """Undo a half-done restore: empty the schema again and restore the safety
+    dump `_safety_dump` took before any of this started.
+
+    Returns the sentence appended to the `restore_failed` message — the tutor
+    reads a Greek sentence keyed off the `code`, but whoever is helping him
+    reads this, and what they most need to know is whether his data is back and
+    where the file is if it is not.
+
+    Everything is caught: this runs on a path that is ALREADY failing, and an
+    exception escaping here would replace a precise "your restore failed and
+    your data is back" with an opaque 500.
+    """
+    try:
+        _reset_schema(db)
+        argv = [
+            _pg_bin("pg_restore"),
+            "--no-owner", "--no-privileges", "--exit-on-error",
+            *conn_args,
+            str(safety),
+        ]
+        proc = _run(argv, env)
+        if proc.returncode != 0:
+            raise RuntimeError(proc.stderr[-2000:] or f"pg_restore exited {proc.returncode}")
+        # The safety dump came out of the live database, so on the desktop it
+        # always carries alembic_version; bring it back to head exactly as a
+        # successful restore would.
+        has_alembic = _has_alembic_table(db)
+        db.rollback()
+        if has_alembic:
+            _run_alembic_upgrade()
+    except Exception as e:  # noqa: BLE001 — see the docstring
+        log.exception("restore: putting the previous data back FAILED (%s)", safety)
+        return (
+            f" — AND putting your previous data back failed: {e}; "
+            f"the file {safety} holds it"
+        )
+    log.info("restore: upload rejected by pg_restore; previous data put back from %s", safety)
+    try:
+        # Same reason as the success path: the schema (and with it the `vector`
+        # extension) has been dropped and recreated twice now, so every pooled
+        # connection is holding a type OID that no longer exists.
+        engine.dispose()
+    except Exception:  # noqa: BLE001 — the data is already back
+        log.exception("restore: engine.dispose() after a put-back failed")
+    return f" — your previous data was put back from {safety}"
+
+
 def _run_alembic_upgrade() -> None:
     """`alembic upgrade head`, programmatically and cwd-independent: both the
     ini path and `script_location` are absolute, so this works no matter what
@@ -368,11 +499,14 @@ def restore_backup(file: UploadFile = File(...), db: Session = Depends(get_db)) 
     for format, locking and the failure codes.
 
     Order: validate the whole archive first (a corrupt upload must fail before
-    a single byte of the tutor's data is touched), then (a) `pg_restore --clean
-    --if-exists --no-owner --no-privileges --exit-on-error`, (b) `alembic
-    upgrade head` (skipped when the restored dump has no `alembic_version` —
-    see module docstring), (c) atomically swap `media/` into
-    `settings.media_dir`.
+    a single byte of the tutor's data is touched), then (a) `_safety_dump` of
+    the database as it stands, `_reset_schema` — `DROP SCHEMA public CASCADE` —
+    and `pg_restore --no-owner --no-privileges --exit-on-error` into the empty
+    database (NOT `--clean`: see `_reset_schema` and the module docstring for
+    the CI failure that bought this); a `pg_restore` that fails here is undone
+    by `_put_back` from the safety dump, (b) `alembic upgrade head` (skipped
+    when the restored dump has no `alembic_version` — see module docstring),
+    (c) atomically swap `media/` into `settings.media_dir`.
     """
     if not _LOCK.acquire(blocking=False):
         raise _err(409, "backup_busy", "an export or restore is already running")
@@ -394,10 +528,14 @@ def restore_backup(file: UploadFile = File(...), db: Session = Depends(get_db)) 
                 shutil.copyfileobj(file.file, out)
 
             # ---- validate ------------------------------------------------
+            # "r:*", not "r:gz": Safari's "open safe files" gunzips a download
+            # on arrival and hands the tutor a plain `guitar-backup-....tar`.
+            # Refusing his own backup because his browser helped is not a
+            # format check, it is a papercut.
             try:
-                tar = tarfile.open(upload_path, "r:gz")
+                tar = tarfile.open(upload_path, "r:*")
             except (tarfile.TarError, OSError) as e:
-                raise _err(400, "not_a_backup", f"not a gzipped tar: {e}") from e
+                raise _err(400, "not_a_backup", f"not a tar archive: {e}") from e
             with tar:
                 names = tar.getnames()
                 if "db.dump" not in names or "manifest.json" not in names:
@@ -436,17 +574,22 @@ def restore_backup(file: UploadFile = File(...), db: Session = Depends(get_db)) 
                 extract_dir.mkdir()
                 tar.extractall(extract_dir, filter="data")
 
-            # ---- (a) pg_restore ------------------------------------------
+            # ---- (a) safety dump, empty the schema, then pg_restore -------
             # This request's own session ran queries above, which opened a
             # transaction; an idle-in-transaction connection holds ACCESS SHARE
-            # locks that would deadlock `pg_restore --clean`'s DROPs. Release it.
+            # locks that would block the DROP SCHEMA below. Release it.
             db.rollback()
 
             conn_args, env = _conn()
+            # BEFORE anything is dropped. A failure here is a 409 over a
+            # database nobody has touched yet.
+            safety = _safety_dump(conn_args, env)
+
+            _reset_schema(db)
+
             argv = [
                 _pg_bin("pg_restore"),
-                "--clean", "--if-exists", "--no-owner", "--no-privileges",
-                "--exit-on-error",
+                "--no-owner", "--no-privileges", "--exit-on-error",
                 *conn_args,
                 str(extract_dir / "db.dump"),
             ]
@@ -456,10 +599,14 @@ def restore_backup(file: UploadFile = File(...), db: Session = Depends(get_db)) 
                 raise _err(
                     409, "pg_tools_missing",
                     f"pg_restore not found ({argv[0]}) — set PG_BIN_DIR or "
-                    "install postgresql-client",
+                    f"install postgresql-client{_put_back(db, safety, conn_args, env)}",
                 ) from e
             if proc.returncode != 0:
-                raise _err(409, "restore_failed", f"pg_restore failed: {proc.stderr[-2000:]}")
+                raise _err(
+                    409, "restore_failed",
+                    f"pg_restore failed: {proc.stderr[-2000:]}"
+                    f"{_put_back(db, safety, conn_args, env)}",
+                )
 
             # ---- (b) alembic upgrade head --------------------------------
             has_alembic = _has_alembic_table(db)
@@ -482,6 +629,11 @@ def restore_backup(file: UploadFile = File(...), db: Session = Depends(get_db)) 
             # thrown away with it — which is the same failure as the export bug
             # this section exists to fix, one step further along.
             _restore_superseded(extract_dir / SUPERSEDED_ARCNAME)
+
+            try:
+                engine.dispose()  # pooled connections cached the OLD vector type OID
+            except Exception:  # noqa: BLE001 — the restore already happened
+                log.exception("restore: engine.dispose() failed")
 
         # The BM25 index self-heals: its staleness fingerprint no longer matches
         # the restored corpus, so the next search rebuilds it. Nothing to do.
