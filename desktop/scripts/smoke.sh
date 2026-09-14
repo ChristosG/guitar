@@ -89,7 +89,8 @@ fi
   || { cat "$TMP/pg.log" >&2; die "postgres did not start"; }
 PG_STARTED=1
 
-"$RES/pg/bin/createdb" -h "$TMP" -p "$PG_PORT" -U guitar guitar
+"$RES/pg/bin/createdb" -h "$TMP" -p "$PG_PORT" -U guitar guitar \
+  || die "createdb failed"
 
 mkdir -p "$TMP/media"
 export DATABASE_URL="postgresql+psycopg://guitar:guitar@127.0.0.1:$PG_PORT/guitar"
@@ -142,22 +143,63 @@ done
 # and all four run OUT of the bundle on the desktop (PG_BIN_DIR). So: export,
 # restore that export, then restore the bundled seed (a real archive with page
 # scans) and prove rows AND files came back. Any miss fails the smoke.
-api_json() { "$PY" -c 'import sys,json; d=json.load(sys.stdin); print(len(d if isinstance(d,list) else d.get("items",[])))'; }
+# Counts the rows in a list body or a {"items": [...]} body. Anything else —
+# an error object, a string, a non-JSON page — prints 0 rather than dying with
+# a traceback inside a `$(...)` whose failure `set -e` would report as a bare
+# exit code.
+api_json() {
+  "$PY" -c 'import sys,json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print(0); raise SystemExit(0)
+if isinstance(d, list):
+    print(len(d))
+elif isinstance(d, dict) and isinstance(d.get("items"), list):
+    print(len(d["items"]))
+else:
+    print(0)'
+}
+
+# Any of the checks below failing under `set -e` would otherwise kill the
+# script with no explanation at all; say what broke and show the server log.
+smoke_die() {
+  echo "--- uvicorn.log (tail) ---" >&2; tail -40 "$TMP/uvicorn.log" >&2 || true
+  die "$1"
+}
 
 log "backup: export"
 curl -fsS --max-time 300 -o "$TMP/export.tar.gz" "http://127.0.0.1:$API_PORT/backup/export" \
   || { tail -30 "$TMP/uvicorn.log" >&2; die "/backup/export failed (pg_dump missing from the bundle?)"; }
-tar tzf "$TMP/export.tar.gz" | grep -qx 'db.dump' || die "export archive has no db.dump"
-tar tzf "$TMP/export.tar.gz" | grep -qx 'manifest.json' || die "export archive has no manifest.json"
+# List ONCE into a file, then grep the file. `tar tzf ... | grep -q` closes the
+# pipe on the first match, tar takes SIGPIPE, and `pipefail` then fails the
+# pipeline — on a VALID archive, as soon as it carries more members than the
+# one being matched (a real backup carries media). The bug only appears once
+# there is data to back up, which is exactly when it matters.
+tar tzf "$TMP/export.tar.gz" > "$TMP/members" \
+  || { tail -30 "$TMP/uvicorn.log" >&2; die "export archive is not readable as a tar.gz"; }
+grep -qx 'db.dump' "$TMP/members" || die "export archive has no db.dump"
+grep -qx 'manifest.json' "$TMP/members" || die "export archive has no manifest.json"
+
+# Real JSON, not a substring match: `*'"ok":true'*` also matches an error body
+# that happens to quote one (`{"detail":{"message":"expected \"ok\":true"}}`),
+# and misses the same true value pretty-printed with a space after the colon.
+# A body that is not JSON at all (an HTML 502, an empty response) is a failure.
+restore_ok() {
+  printf '%s' "$1" | "$PY" -c \
+    'import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get("ok") is True else 1)' \
+    2>/dev/null
+}
 
 restore_archive() {
   local archive="$1" what="$2" body
   body="$(curl -sS --max-time 600 -X POST -F "file=@$archive" "http://127.0.0.1:$API_PORT/backup/restore" || true)"
-  case "$body" in
-    *'"ok":true'*) log "backup: restore of $what ok" ;;
-    *) echo "--- uvicorn.log (tail) ---" >&2; tail -40 "$TMP/uvicorn.log" >&2 || true
-       die "restore of $what failed: ${body:-<no body>}" ;;
-  esac
+  if restore_ok "$body"; then
+    log "backup: restore of $what ok"
+  else
+    echo "--- uvicorn.log (tail) ---" >&2; tail -40 "$TMP/uvicorn.log" >&2 || true
+    die "restore of $what failed: ${body:-<no body>}"
+  fi
 }
 
 restore_archive "$TMP/export.tar.gz" "our own export"
@@ -166,12 +208,17 @@ if [ -f "$RES/seed/db.dump" ] && [ -f "$RES/seed/manifest.json" ]; then
   # Re-pack the bundled seed exactly as an exported archive is laid out.
   tar czf "$TMP/seed.tar.gz" -C "$RES/seed" db.dump manifest.json $( [ -d "$RES/seed/media" ] && echo media )
   restore_archive "$TMP/seed.tar.gz" "the bundled seed"
-  N="$(curl -fsS --max-time 30 "http://127.0.0.1:$API_PORT/curricula" | api_json)"
-  [ "${N:-0}" -ge 1 ] || die "after restoring the seed, /curricula lists $N curricula"
+  CURRICULA="$(curl -fsS --max-time 30 "http://127.0.0.1:$API_PORT/curricula" || true)"
+  [ -n "$CURRICULA" ] || smoke_die "GET /curricula returned nothing after the seed restore"
+  N="$(printf '%s' "$CURRICULA" | api_json)" \
+    || smoke_die "could not parse GET /curricula: $CURRICULA"
+  [ "${N:-0}" -ge 1 ] || smoke_die "after restoring the seed, /curricula lists $N curricula"
   if [ -d "$RES/seed/media" ]; then
-    WANT="$(find "$RES/seed/media" -type f | wc -l | tr -d ' ')"
-    GOT="$(find "$MEDIA_DIR" -type f | wc -l | tr -d ' ')"
-    [ "$GOT" = "$WANT" ] || die "media swap: seed has $WANT files, MEDIA_DIR has $GOT"
+    WANT="$(find "$RES/seed/media" -type f | wc -l | tr -d ' ')" \
+      || smoke_die "could not count the seed's media files"
+    GOT="$(find "$MEDIA_DIR" -type f | wc -l | tr -d ' ')" \
+      || smoke_die "could not count the media files in $MEDIA_DIR"
+    [ "$GOT" = "$WANT" ] || smoke_die "media swap: seed has $WANT files, MEDIA_DIR has $GOT"
   fi
   log "backup: seed restored — $N curricula, media files match"
 else
@@ -179,7 +226,10 @@ else
 fi
 
 log "clean shutdown"
-kill -TERM "$UVICORN_PID"
+# `|| true`: under `set -e` a server that has ALREADY exited cleanly (it is
+# about to be waited on anyway) would otherwise fail the whole smoke at the
+# very last step, after everything it tests has passed.
+kill -TERM "$UVICORN_PID" || true
 wait "$UVICORN_PID" 2>/dev/null || true
 UVICORN_PID=""
 "$RES/pg/bin/pg_ctl" -w -t 20 -D "$TMP/data" -m fast stop
