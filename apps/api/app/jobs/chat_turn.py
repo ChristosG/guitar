@@ -46,6 +46,10 @@ def run_chat_turn_job(job_id: uuid.UUID) -> None:
             return
         turn = run_turn_core(db, session, str(job.params.get("content") or ""))
         job = db.get(GenerationJob, job_id)
+        # A restore can empty the table while the turn is running — no row left to write.
+        if job is None:
+            log.warning("run_chat_turn_job: job %s vanished mid-turn", job_id)
+            return
         job.status = "succeeded"
         job.progress = {"phase": "done", "turn": turn.model_dump(mode="json")}
         db.commit()

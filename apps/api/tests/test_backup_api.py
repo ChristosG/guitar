@@ -406,7 +406,7 @@ def test_restore_runs_pg_restore_and_swaps_media(client, media_dir, monkeypatch)
     assert env["PGPASSWORD"] == DB["password"]
 
     assert resets == ["reset"]
-    assert spy.disposed == 1, "the pool's cached vector type OID is stale after a restore"
+    assert spy.disposed == 1, "pooled conns hold prepared statements for dropped tables"
 
     # media atomically replaced: new content in, old content gone
     assert (media_dir / "0002.jpg").read_bytes() == b"restored-scan"
@@ -422,6 +422,23 @@ def test_restore_refuses_while_a_generation_job_is_running(client, media_dir, mo
     fake = FakeRun()
     monkeypatch.setattr(backup, "_run", fake)
     db.add(GenerationJob(kind="curriculum", status="running", params={}))
+    db.commit()
+
+    res = post_restore(client, make_archive())
+    assert res.status_code == 409
+    assert res.json()["detail"]["code"] == "jobs_running"
+    assert fake.calls == []
+    assert (media_dir / "0001.jpg").exists()  # nothing touched
+
+
+def test_restore_refuses_while_a_generation_job_is_pending(client, media_dir, monkeypatch, db):
+    """`pending` is the dangerous one. The row is committed by the request and the
+    background task starts AFTER the response — a restore that only looked at
+    `running` would drop the schema in the gap and the job would wake up to an
+    empty table."""
+    fake = FakeRun()
+    monkeypatch.setattr(backup, "_run", fake)
+    db.add(GenerationJob(kind="curriculum", status="pending", params={}))
     db.commit()
 
     res = post_restore(client, make_archive())

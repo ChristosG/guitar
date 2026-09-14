@@ -93,9 +93,11 @@ starts while an export is still streaming (or a second restore while the first
 is mid-`pg_restore`) would interleave two writers over the same database and
 media directory. Busy -> 409 `backup_busy`, never a queue: the tutor pressing
 the button twice wants one backup, not two. Restore additionally refuses while
-any `GenerationJob` is `running` (409 `jobs_running`): a draft fan-out holds DB
-sessions and writes blocks, and the schema reset would drop the tables out from
-under it.
+any `GenerationJob` is `running` OR `pending` (409 `jobs_running`): a draft
+fan-out holds DB sessions and writes blocks, and the schema reset would drop the
+tables out from under it. `pending` is in the gate because a job row is
+committed before its background task starts — letting one through would wipe
+the schema out from under a job that has not even woken up yet.
 
 FAILURE TAXONOMY, mirrored from `routers/settings.py`'s style: HTTP 4xx with
 `{"detail": {"code": ..., "message": ...}}`. The UI maps `code` to one Greek
@@ -555,14 +557,21 @@ def restore_backup(file: UploadFile = File(...), db: Session = Depends(get_db)) 
     if not _LOCK.acquire(blocking=False):
         raise _err(409, "backup_busy", "an export or restore is already running")
     try:
+        # `pending` counts too, and that is the whole point: a job row is
+        # committed `pending` and only started by a background task AFTER the
+        # response is sent (`routers/chat.py`, `routers/curriculum.py`). A
+        # restore that let those through would drop the schema and the job
+        # would then wake up and silently find no row at all.
         running = (
-            db.query(GenerationJob).filter(GenerationJob.status == "running").count()
+            db.query(GenerationJob)
+            .filter(GenerationJob.status.in_(("pending", "running")))
+            .count()
         )
         if running:
             raise _err(
                 409, "jobs_running",
-                f"{running} generation job(s) are running — a restore would drop "
-                "the tables out from under them",
+                f"{running} generation job(s) are running or pending — a restore "
+                "would drop the tables out from under them",
             )
         server_major = _server_pg_major(db)
 
@@ -705,7 +714,12 @@ def restore_backup(file: UploadFile = File(...), db: Session = Depends(get_db)) 
                 _restore_superseded(extract_dir / SUPERSEDED_ARCNAME)
             finally:
                 try:
-                    engine.dispose()  # pooled conns cached the OLD vector type OID
+                    # Pooled connections outlived the schema they were opened
+                    # against: psycopg3 keeps server-side PREPARED STATEMENTS
+                    # per connection, and every one of them names a table that
+                    # the reset dropped. (Not the `vector` type OID — pgvector
+                    # rides the wire as text.)
+                    engine.dispose()
                 except Exception:  # noqa: BLE001 — never mask the real outcome
                     log.exception("restore: engine.dispose() failed")
 

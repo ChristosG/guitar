@@ -63,6 +63,10 @@ def run_lesson_ai_job(job_id: uuid.UUID) -> None:
             # re-fetching the row this wrapper writes to.
             db.rollback()
             job = db.get(GenerationJob, job_id)
+            # A restore can empty the table while the plan runs — no row left to write.
+            if job is None:
+                log.warning("run_lesson_ai_job: job %s vanished mid-plan", job_id)
+                return
             job.status = "succeeded"
             job.progress = {"phase": "done", "plan": plan}
             db.commit()
@@ -77,6 +81,10 @@ def run_lesson_ai_job(job_id: uuid.UUID) -> None:
         # `apply_lesson_change` already committed and closed its own connection
         # before/after the model call — just re-fetch the row on this session.
         job = db.get(GenerationJob, job_id)
+        # A restore can empty the table while the apply runs — no row left to write.
+        if job is None:
+            log.warning("run_lesson_ai_job: job %s vanished mid-apply", job_id)
+            return
         job.status = "succeeded"
         job.progress = {"phase": "done", **out}
         db.commit()

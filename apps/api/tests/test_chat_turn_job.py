@@ -121,3 +121,44 @@ def test_llm_error_in_the_job_is_recorded_with_its_kind(monkeypatch):
     r = client.post(f"/chat/{session}/messages?async=1", json={"content": "γεια"})
     job = client.get(f"/jobs/{r.json()['job_id']}").json()
     assert job["status"] == "failed" and job["error_kind"] == "too_long"
+
+
+def test_a_job_row_that_vanished_is_not_an_exception(monkeypatch):
+    """A restore drops the whole schema; a job scheduled just before it wakes up
+    to find no row. The runner must return quietly — the alternative is an
+    AttributeError on `None` in a background task nobody is watching."""
+    chat_turn_job.run_chat_turn_job(uuid.uuid4())  # never scheduled, no row
+
+
+def test_a_job_row_that_vanishes_mid_turn_is_not_an_exception(monkeypatch):
+    """Same restore, one step later: the row was there when the turn started and
+    gone by the time the runner writes `succeeded` back to it."""
+    monkeypatch.setattr(chat_router, "run_agent_turn", _answer("ok"))
+    monkeypatch.setattr(chat_router, "run_chat_turn_job", lambda job_id: None)  # stays pending
+    session = client.post("/chat", json={"locale": "el"}).json()["session_id"]
+    job_id = uuid.UUID(client.post(f"/chat/{session}/messages?async=1",
+                                   json={"content": "γεια"}).json()["job_id"])
+
+    real_get = chat_turn_job.GenerationJob
+    seen = {"n": 0}
+    orig = chat_turn_job.SessionLocal
+
+    class _VanishingSession:
+        """Hands back the row the first time, `None` on the re-fetch."""
+        def __init__(self, inner): self._inner = inner
+        def get(self, model, pk):
+            if model is real_get:
+                seen["n"] += 1
+                if seen["n"] > 1:
+                    return None
+            return self._inner.get(model, pk)
+        def __getattr__(self, name): return getattr(self._inner, name)
+
+    monkeypatch.setattr(chat_turn_job, "SessionLocal", lambda: _VanishingSession(orig()))
+    chat_turn_job.run_chat_turn_job(job_id)  # must not raise
+
+    db = SessionLocal()
+    try:
+        assert db.get(GenerationJob, job_id).status == "running"  # never written back
+    finally:
+        db.close()
