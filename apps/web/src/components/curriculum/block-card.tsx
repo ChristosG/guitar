@@ -401,7 +401,9 @@ export function BlockCard({
         </span>
       )}
 
-      {isModule && <TierBadge tier={meta.tier} coverageNote={meta.coverage_note} />}
+      {isModule && (meta.tier !== "library" || meta.coverage_note) && (
+        <TierBadge tier={meta.tier} coverageNote={meta.coverage_note} />
+      )}
 
       {isModule && !expanded && lessonCount > 0 && (
         <Badge variant="outline" data-testid="module-lesson-count">
@@ -481,6 +483,29 @@ export function BlockCard({
           >
             {busy ? <Loader2 className="animate-spin" /> : <Sparkles />}
             {t("deepen")}
+          </Button>
+        )}
+
+        {/* THE MODULE'S OWN DOOR. It used to live only inside the ⋯ menu as
+            «Αναδιάρθρωση με AI» — a real capability hidden behind a click that
+            gives no hint it is there. This is the same call
+            (`reviseScope.openForModule`), just visible, like the lesson row's
+            `lesson-ai` button. The menu item stays — muscle memory, and the
+            drawer opens identically either way. */}
+        {isModule && reviseScope && (
+          <Button
+            type="button" variant="ghost" size="sm"
+            data-testid="module-ai"
+            onClick={() =>
+              reviseScope.openForModule(
+                node.id,
+                node.title,
+                t("restructureSeed", { title: node.title, id: node.id }),
+              )
+            }
+          >
+            <Sparkles />
+            {t("moduleAi")}
           </Button>
         )}
 

@@ -316,4 +316,80 @@ test.describe("restructure one module with AI", () => {
     await page.getByTestId("revise-open").click();
     await expect(page.getByTestId("revise-scope-chip")).toHaveCount(0);
   });
+
+  // THE VISIBLE DOOR. Same scope, reached without the ⋯ menu at all — the
+  // module row now carries its own button, like the lesson row's `lesson-ai`.
+  test("the module row's own button opens the drawer scoped, no menu required", async ({ page }) => {
+    await mockBoard(page);
+    await page.goto(`/el/curricula/${ROOT_ID}`);
+    await expect(page.getByTestId("tree-board")).toBeVisible();
+
+    await page.locator('[data-testid="block-card"][data-kind="module"]').getByTestId("module-ai").click();
+
+    await expect(page.getByTestId("revise-scope-chip")).toContainText("Από το πετάλι στον ενισχυτή");
+    const composer = page.getByTestId("chat-input");
+    await expect(composer).toHaveValue(new RegExp(MODULE_ID));
+    await expect(composer).toHaveValue(/Από το πετάλι/);
+  });
+});
+
+test.describe("the module tier badge", () => {
+  /** course -> one module, nothing underneath — enough to see the badge gate. */
+  async function mockModule(page: Page, moduleMeta: Record<string, unknown>) {
+    async function handler(route: Route) {
+      const req = route.request();
+      const { pathname } = new URL(req.url());
+      if (req.method() === "OPTIONS") {
+        await route.fulfill({ status: 204, headers: CORS_HEADERS });
+        return;
+      }
+      const json = (status: number, body: unknown) =>
+        route.fulfill({ status, contentType: "application/json", headers: CORS_HEADERS, body: JSON.stringify(body) });
+
+      if (pathname === `/curricula/${ROOT_ID}`) {
+        await json(200, node({
+          id: ROOT_ID, kind: "course", title: "Ήχος Κιθάρας", meta: { brief: null },
+          children: [node({ id: MODULE_ID, kind: "module", title: "Ενότητα 1", body: "Στόχος.", meta: moduleMeta })],
+        }));
+        return;
+      }
+      if (pathname.endsWith("/progress")) {
+        await json(200, { root_id: ROOT_ID, total: 0, queued: 0, drafting: 0, ready: 0, failed: 0, done: true });
+        return;
+      }
+      if (pathname === "/curricula/interview/open") {
+        await json(200, null);
+        return;
+      }
+      await json(200, null);
+    }
+    await page.route(`${API_ORIGIN}/**`, handler);
+  }
+
+  test("library tier with no coverage note says nothing — that is the resting state", async ({ page }) => {
+    await mockModule(page, { tier: "library" });
+    await page.goto(`/el/curricula/${ROOT_ID}`);
+    await expect(page.getByTestId("tree-board")).toBeVisible();
+    await expect(
+      page.locator('[data-testid="block-card"][data-kind="module"]').getByTestId("tier-badge"),
+    ).toHaveCount(0);
+  });
+
+  test("library tier WITH a coverage note keeps the badge — there is something to hover", async ({ page }) => {
+    await mockModule(page, { tier: "library", coverage_note: "Your book, p. 12." });
+    await page.goto(`/el/curricula/${ROOT_ID}`);
+    await expect(page.getByTestId("tree-board")).toBeVisible();
+    await expect(
+      page.locator('[data-testid="block-card"][data-kind="module"]').getByTestId("tier-badge"),
+    ).toBeVisible();
+  });
+
+  test("a gap is always shown — it is the most honest badge of the four", async ({ page }) => {
+    await mockModule(page, { tier: "gap" });
+    await page.goto(`/el/curricula/${ROOT_ID}`);
+    await expect(page.getByTestId("tree-board")).toBeVisible();
+    await expect(
+      page.locator('[data-testid="block-card"][data-kind="module"]').getByTestId("tier-badge"),
+    ).toBeVisible();
+  });
 });

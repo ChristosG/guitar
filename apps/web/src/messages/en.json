@@ -113,6 +113,7 @@
       "redraftConfirm": "Re-draft",
       "redraftError": "Could not start the re-draft.",
       "lessonAi": "AI on this lesson",
+      "moduleAi": "AI on this module",
       "wordsLine": "{count, number} words · target ~{target, number}",
       "wordsLineNoTarget": "{count, number} words",
       "tutorEdited": "Edited by you — what changed?",
