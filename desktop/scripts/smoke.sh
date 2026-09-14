@@ -104,6 +104,9 @@ export APP_SECRET="smoke-app-secret"
 export ENCRYPTION_SECRET="smoke-encryption-secret"
 export PYTHONNOUSERSITE=1
 export PYTHONDONTWRITEBYTECODE=1
+# The backup endpoints shell out to pg_dump/pg_restore from THIS tree, exactly
+# as the desktop shell points them (supervisor.rs sets the same variable).
+export PG_BIN_DIR="$RES/pg/bin"
 
 PY="$RES/python/bin/python3.12"
 
@@ -131,6 +134,49 @@ while :; do
   kill -0 "$UVICORN_PID" 2>/dev/null || { tail -50 "$TMP/uvicorn.log" >&2 || true; die "uvicorn exited early"; }
   sleep 2
 done
+
+# ---- backup round trip ------------------------------------------------------
+# The tutor's Mac (2026-09-13) could not restore an archive that his Linux box
+# restored fine, and nothing in CI had ever exercised /backup on the bundled
+# tree: export needs pg_dump, restore needs pg_restore + alembic + a media swap,
+# and all four run OUT of the bundle on the desktop (PG_BIN_DIR). So: export,
+# restore that export, then restore the bundled seed (a real archive with page
+# scans) and prove rows AND files came back. Any miss fails the smoke.
+api_json() { "$PY" -c 'import sys,json; d=json.load(sys.stdin); print(len(d if isinstance(d,list) else d.get("items",[])))'; }
+
+log "backup: export"
+curl -fsS --max-time 300 -o "$TMP/export.tar.gz" "http://127.0.0.1:$API_PORT/backup/export" \
+  || { tail -30 "$TMP/uvicorn.log" >&2; die "/backup/export failed (pg_dump missing from the bundle?)"; }
+tar tzf "$TMP/export.tar.gz" | grep -qx 'db.dump' || die "export archive has no db.dump"
+tar tzf "$TMP/export.tar.gz" | grep -qx 'manifest.json' || die "export archive has no manifest.json"
+
+restore_archive() {
+  local archive="$1" what="$2" body
+  body="$(curl -sS --max-time 600 -X POST -F "file=@$archive" "http://127.0.0.1:$API_PORT/backup/restore" || true)"
+  case "$body" in
+    *'"ok":true'*) log "backup: restore of $what ok" ;;
+    *) echo "--- uvicorn.log (tail) ---" >&2; tail -40 "$TMP/uvicorn.log" >&2 || true
+       die "restore of $what failed: ${body:-<no body>}" ;;
+  esac
+}
+
+restore_archive "$TMP/export.tar.gz" "our own export"
+
+if [ -f "$RES/seed/db.dump" ] && [ -f "$RES/seed/manifest.json" ]; then
+  # Re-pack the bundled seed exactly as an exported archive is laid out.
+  tar czf "$TMP/seed.tar.gz" -C "$RES/seed" db.dump manifest.json $( [ -d "$RES/seed/media" ] && echo media )
+  restore_archive "$TMP/seed.tar.gz" "the bundled seed"
+  N="$(curl -fsS --max-time 30 "http://127.0.0.1:$API_PORT/curricula" | api_json)"
+  [ "${N:-0}" -ge 1 ] || die "after restoring the seed, /curricula lists $N curricula"
+  if [ -d "$RES/seed/media" ]; then
+    WANT="$(find "$RES/seed/media" -type f | wc -l | tr -d ' ')"
+    GOT="$(find "$MEDIA_DIR" -type f | wc -l | tr -d ' ')"
+    [ "$GOT" = "$WANT" ] || die "media swap: seed has $WANT files, MEDIA_DIR has $GOT"
+  fi
+  log "backup: seed restored — $N curricula, media files match"
+else
+  log "backup: no bundled seed — round trip proven on the export only"
+fi
 
 log "clean shutdown"
 kill -TERM "$UVICORN_PID"
