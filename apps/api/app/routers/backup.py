@@ -125,6 +125,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
 
@@ -376,8 +377,8 @@ def _validate_member_name(name: str) -> None:
 
 def _reset_schema(db: Session) -> None:
     """Empty the database before `pg_restore` — the whole `public` schema, in
-    one statement, extension included (CASCADE takes `vector` with it; the
-    dump's own CREATE EXTENSION puts it back).
+    one round trip, three statements, extension included (CASCADE takes
+    `vector` with it; the dump's own CREATE EXTENSION puts it back).
 
     Why not `pg_restore --clean`: `--clean` drops only what the DUMP knows.
     The webapp's database calls the chunk->page key `chunk_page_id_fkey`; a
@@ -385,7 +386,18 @@ def _reset_schema(db: Session) -> None:
     one into the other (CI, 2026-09-14, the v0.5.2 bundle) died on
     "cannot drop constraint page_pkey ... fk_chunk_page_id depends on it" with
     the tables half-dropped. A restore whose outcome depends on what the
-    target used to call its constraints is not a restore."""
+    target used to call its constraints is not a restore.
+
+    `lock_timeout` first, and it is not decoration. `DROP SCHEMA public
+    CASCADE` takes an ACCESS EXCLUSIVE lock on every table and waits behind any
+    other connection's open transaction for as long as that transaction lives
+    — which, for an idle-in-transaction session, is forever. This request holds
+    `_LOCK` while it waits, so every retry from the Settings page answers
+    `backup_busy` and nothing anywhere says why. Fifteen seconds, then a 409
+    that names the actual problem. PostgreSQL DDL is transactional, so the
+    timeout leaves the schema exactly as it was — nothing half-dropped.
+    """
+    db.execute(text("SET lock_timeout = '15s'"))
     db.execute(text(
         "DROP SCHEMA public CASCADE; CREATE SCHEMA public; "
         "GRANT ALL ON SCHEMA public TO public;"
@@ -400,18 +412,29 @@ def _safety_dump(conn_args: list[str], env: dict[str, str]) -> Path:
     A sibling of the media dir — the same place the desktop shell puts a
     `media_superseded_*` library — and deliberately NOT a temp dir: the whole
     point is that it outlives this request. It is never deleted, not even on a
-    restore that succeeded: it is a few MB, it is the tutor's data, and "the
-    app tidied away the only copy of what you had before" is exactly the class
-    of helpfulness this file exists to refuse.
+    restore that succeeded, and these files ACCUMULATE BY DESIGN: one per
+    restore attempt, each as large as the whole database was at that moment.
+    That is the cost, and it is accepted on purpose — "the app tidied away the
+    only copy of what you had before" is exactly the class of helpfulness this
+    file exists to refuse. A human deleting one deliberately is how they go.
 
     Failing here is safe: nothing has been reset yet, so the 409 leaves the
     database untouched.
     """
     dest = (
         Path(settings.media_dir).parent
-        / f"pre-restore-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.dump"
+        # Microseconds, not seconds: two restore attempts inside one second
+        # must not have the second overwrite the first one's safety copy.
+        / f"pre-restore-{datetime.now(timezone.utc):%Y%m%dT%H%M%S%fZ}.dump"
     )
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise _err(
+            409, "restore_failed",
+            f"a safety copy of your current data could not be written to "
+            f"{dest.parent} ({e}), so nothing was changed",
+        ) from e
     argv = [_pg_bin("pg_dump"), "-Fc", *conn_args, "-f", str(dest)]
     try:
         proc = _run(argv, env)
@@ -442,18 +465,35 @@ def _put_back(db: Session, safety: Path, conn_args: list[str], env: dict[str, st
     Everything is caught: this runs on a path that is ALREADY failing, and an
     exception escaping here would replace a precise "your restore failed and
     your data is back" with an opaque 500.
+
+    TWO PHASES, and the split is the point. Phase one — reset + `pg_restore` of
+    the safety dump — decides whether his rows exist again. Phase two —
+    `alembic upgrade head` — decides only whether they are at head. Telling him
+    "putting your previous data back failed" because phase two stumbled would
+    be a lie about the thing he actually cares about, so once phase one has
+    succeeded the answer is always "put back", with the migration trouble named
+    in parentheses.
     """
-    try:
+    argv = [
+        _pg_bin("pg_restore"),
+        "--no-owner", "--no-privileges", "--exit-on-error",
+        *conn_args,
+        str(safety),
+    ]
+    try:  # ---- phase one: are his rows back? ----------------------------
         _reset_schema(db)
-        argv = [
-            _pg_bin("pg_restore"),
-            "--no-owner", "--no-privileges", "--exit-on-error",
-            *conn_args,
-            str(safety),
-        ]
         proc = _run(argv, env)
         if proc.returncode != 0:
             raise RuntimeError(proc.stderr[-2000:] or f"pg_restore exited {proc.returncode}")
+    except Exception as e:  # noqa: BLE001 — see the docstring
+        log.exception("restore: putting the previous data back FAILED (%s)", safety)
+        return (
+            f" — AND putting your previous data back failed: {e}; "
+            f"the file {safety} holds it"
+        )
+
+    note = f" — your previous data was put back from {safety}"
+    try:  # ---- phase two: and are they at head? --------------------------
         # The safety dump came out of the live database, so on the desktop it
         # always carries alembic_version; bring it back to head exactly as a
         # successful restore would.
@@ -461,21 +501,25 @@ def _put_back(db: Session, safety: Path, conn_args: list[str], env: dict[str, st
         db.rollback()
         if has_alembic:
             _run_alembic_upgrade()
-    except Exception as e:  # noqa: BLE001 — see the docstring
-        log.exception("restore: putting the previous data back FAILED (%s)", safety)
-        return (
-            f" — AND putting your previous data back failed: {e}; "
-            f"the file {safety} holds it"
+    except Exception as e:  # noqa: BLE001 — his data is already back
+        log.exception("restore: previous data put back, but alembic upgrade head failed")
+        note = (
+            f" — your previous data was put back from {safety} "
+            f"(but alembic upgrade head failed: {e})"
         )
-    log.info("restore: upload rejected by pg_restore; previous data put back from %s", safety)
+    else:
+        log.info(
+            "restore: upload rejected by pg_restore; previous data put back from %s", safety
+        )
     try:
         # Same reason as the success path: the schema (and with it the `vector`
         # extension) has been dropped and recreated twice now, so every pooled
-        # connection is holding a type OID that no longer exists.
+        # connection is holding a type OID that no longer exists. Runs on BOTH
+        # phase-two outcomes — the pool is equally stale either way.
         engine.dispose()
     except Exception:  # noqa: BLE001 — the data is already back
         log.exception("restore: engine.dispose() after a put-back failed")
-    return f" — your previous data was put back from {safety}"
+    return note
 
 
 def _run_alembic_upgrade() -> None:
@@ -585,55 +629,85 @@ def restore_backup(file: UploadFile = File(...), db: Session = Depends(get_db)) 
             # database nobody has touched yet.
             safety = _safety_dump(conn_args, env)
 
-            _reset_schema(db)
-
-            argv = [
-                _pg_bin("pg_restore"),
-                "--no-owner", "--no-privileges", "--exit-on-error",
-                *conn_args,
-                str(extract_dir / "db.dump"),
-            ]
+            # From here to the `finally` the schema is being dropped and
+            # recreated, so the connection pool's cached `vector` type OID is
+            # stale on EVERY exit from this block — the restore that worked,
+            # the pg_restore that failed and was put back, the alembic upgrade
+            # that failed, the media swap that raised. `engine.dispose()`
+            # belongs to the block, not to its happy path.
             try:
-                proc = _run(argv, env)
-            except FileNotFoundError as e:
-                raise _err(
-                    409, "pg_tools_missing",
-                    f"pg_restore not found ({argv[0]}) — set PG_BIN_DIR or "
-                    f"install postgresql-client{_put_back(db, safety, conn_args, env)}",
-                ) from e
-            if proc.returncode != 0:
-                raise _err(
-                    409, "restore_failed",
-                    f"pg_restore failed: {proc.stderr[-2000:]}"
-                    f"{_put_back(db, safety, conn_args, env)}",
-                )
-
-            # ---- (b) alembic upgrade head --------------------------------
-            has_alembic = _has_alembic_table(db)
-            db.rollback()  # same idle-in-transaction reasoning as above
-            if has_alembic:
                 try:
-                    _run_alembic_upgrade()
-                except Exception as e:
+                    _reset_schema(db)
+                except SQLAlchemyError as e:
+                    # Nothing was dropped — PostgreSQL DDL is transactional, so
+                    # a DROP SCHEMA that failed rolled itself back whole — and
+                    # the safety dump is already on disk.
+                    db.rollback()
+                    if "lock timeout" in str(e).lower():
+                        raise _err(
+                            409, "restore_failed",
+                            "the database is busy with another request — try "
+                            "again in a moment",
+                        ) from e
                     raise _err(
-                        409, "restore_failed", f"alembic upgrade after restore failed: {e}"
+                        409, "restore_failed",
+                        f"the database could not be emptied, so nothing was "
+                        f"restored: {e}",
                     ) from e
-            else:
-                log.info("restore: no alembic_version in the dump — skipping upgrade")
 
-            # ---- (c) media swap ------------------------------------------
-            _swap_media(extract_dir / "media")
-            # …and (d) put back anything the archive carried under
-            # `superseded/`. Without this the restore would silently DELETE a
-            # displaced library — it would be extracted into the temp dir and
-            # thrown away with it — which is the same failure as the export bug
-            # this section exists to fix, one step further along.
-            _restore_superseded(extract_dir / SUPERSEDED_ARCNAME)
+                argv = [
+                    _pg_bin("pg_restore"),
+                    "--no-owner", "--no-privileges", "--exit-on-error",
+                    *conn_args,
+                    str(extract_dir / "db.dump"),
+                ]
+                try:
+                    proc = _run(argv, env)
+                except FileNotFoundError as e:
+                    raise _err(
+                        409, "pg_tools_missing",
+                        f"pg_restore not found ({argv[0]}) — set PG_BIN_DIR or "
+                        f"install postgresql-client{_put_back(db, safety, conn_args, env)}",
+                    ) from e
+                if proc.returncode != 0:
+                    raise _err(
+                        409, "restore_failed",
+                        f"pg_restore failed: {proc.stderr[-2000:]}"
+                        f"{_put_back(db, safety, conn_args, env)}",
+                    )
 
-            try:
-                engine.dispose()  # pooled connections cached the OLD vector type OID
-            except Exception:  # noqa: BLE001 — the restore already happened
-                log.exception("restore: engine.dispose() failed")
+                # ---- (b) alembic upgrade head ----------------------------
+                has_alembic = _has_alembic_table(db)
+                db.rollback()  # same idle-in-transaction reasoning as above
+                if has_alembic:
+                    try:
+                        _run_alembic_upgrade()
+                    except Exception as e:
+                        # NOT put back: the upload restored cleanly, so this is
+                        # his NEW data sitting one migration short of head, and
+                        # throwing it away over that would be the wrong trade.
+                        # Name the safety file so the way back is on the screen.
+                        raise _err(
+                            409, "restore_failed",
+                            f"alembic upgrade after restore failed: {e}"
+                            f" — your previous data is also saved at {safety}",
+                        ) from e
+                else:
+                    log.info("restore: no alembic_version in the dump — skipping upgrade")
+
+                # ---- (c) media swap --------------------------------------
+                _swap_media(extract_dir / "media")
+                # …and (d) put back anything the archive carried under
+                # `superseded/`. Without this the restore would silently DELETE
+                # a displaced library — it would be extracted into the temp dir
+                # and thrown away with it — which is the same failure as the
+                # export bug this section exists to fix, one step further along.
+                _restore_superseded(extract_dir / SUPERSEDED_ARCNAME)
+            finally:
+                try:
+                    engine.dispose()  # pooled conns cached the OLD vector type OID
+                except Exception:  # noqa: BLE001 — never mask the real outcome
+                    log.exception("restore: engine.dispose() failed")
 
         # The BM25 index self-heals: its staleness fingerprint no longer matches
         # the restored corpus, so the next search rebuilds it. Nothing to do.

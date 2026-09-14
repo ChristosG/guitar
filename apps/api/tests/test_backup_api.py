@@ -8,12 +8,20 @@ and the lock really refuses a second caller. The database queries
 (`server_version_num`, `alembic_version`, the `GenerationJob` gate) run
 against the real guitar_test DB conftest manages.
 
-INTEGRATION (`@pytest.mark.integration`): one real round-trip —
-pg_dump the test DB, wipe a table, pg_restore, assert the rows came back —
-run ONLY when PostgreSQL 16 client tools are found (PATH, a staged desktop
-build, or /usr/lib/postgresql/16/bin). The conftest's
-`_integration_needs_a_real_key` autouse skip is OVERRIDDEN in this module: it
-gates live-LLM spend, and this test spends none — it needs pg tools, not a key.
+REAL POSTGRES: three tests at the bottom run the actual pg_dump/pg_restore
+against the actual `guitar_test` server — the round trip (dump, wipe, restore,
+assert the rows came back), the renamed-constraint case that `--clean` died on,
+and the safety net (a failed restore really puts his rows back). They run ONLY
+when PostgreSQL 16 client tools are found (PATH, a staged desktop build, or
+/usr/lib/postgresql/16/bin). The conftest's `_integration_needs_a_real_key`
+autouse skip is OVERRIDDEN in this module: it gates live-LLM spend, and these
+tests spend none — they need pg tools, not a key.
+
+All three really run `DROP SCHEMA public CASCADE` on the shared test database,
+and conftest's `_test_database` builds that schema once per SESSION. So each of
+them takes `restore_the_schema_afterwards`, which puts the tables back however
+the test ends — without it one failure at the wrong moment leaves every later
+test in the run staring at a database with no tables.
 """
 from __future__ import annotations
 
@@ -27,8 +35,11 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 
 import app.routers.backup as backup
+from app.db import Base
+from app.db import engine as real_engine
 from app.models.generation_job import GenerationJob
 from app.routers.backup import SUPERSEDED_ARCNAME, SUPERSEDED_MEDIA_PREFIX
 
@@ -59,6 +70,19 @@ class FakeRun:
         if "-f" in argv:  # pg_dump writes its output file
             Path(argv[argv.index("-f") + 1]).write_bytes(b"PGDMP fake dump bytes")
         return subprocess.CompletedProcess(argv, self.returncode, stdout="", stderr=self.stderr)
+
+
+class DisposeSpy:
+    """Stands in for `backup.engine` — the restore only ever calls `.dispose()`
+    on it, and every exit from the reset/restore block must call it exactly
+    once: the schema (and the `vector` type OID every pooled connection cached)
+    has been replaced underneath the pool."""
+
+    def __init__(self) -> None:
+        self.disposed = 0
+
+    def dispose(self) -> None:
+        self.disposed += 1
 
 
 def make_archive(
@@ -361,6 +385,8 @@ def test_restore_runs_pg_restore_and_swaps_media(client, media_dir, monkeypatch)
                         lambda conn_args, env: media_dir.parent / "pre-restore-unit.dump")
     alembic_calls: list[str] = []
     monkeypatch.setattr(backup, "_run_alembic_upgrade", lambda: alembic_calls.append("ran"))
+    spy = DisposeSpy()
+    monkeypatch.setattr(backup, "engine", spy)
 
     archive = make_archive(media={"0002.jpg": b"restored-scan"})
     res = post_restore(client, archive)
@@ -380,6 +406,7 @@ def test_restore_runs_pg_restore_and_swaps_media(client, media_dir, monkeypatch)
     assert env["PGPASSWORD"] == DB["password"]
 
     assert resets == ["reset"]
+    assert spy.disposed == 1, "the pool's cached vector type OID is stale after a restore"
 
     # media atomically replaced: new content in, old content gone
     assert (media_dir / "0002.jpg").read_bytes() == b"restored-scan"
@@ -469,6 +496,110 @@ def test_a_failed_restore_puts_the_previous_data_back(client, media_dir, monkeyp
     assert not (media_dir / "0002.jpg").exists()
 
 
+def test_a_failed_restore_whose_put_back_also_fails_says_so(client, media_dir, monkeypatch):
+    """The worst case, and the one where prose matters most: the upload was
+    rejected AND his data could not be put back. The message must not claim it
+    was — it must say so plainly and name the file that still holds it, because
+    that file is now the only route back."""
+
+    class BothFail(FakeRun):
+        """pg_dump (safety) ok; the upload's pg_restore fails; the put-back
+        pg_restore fails too."""
+
+        def __call__(self, argv, env):
+            n = len(self.calls)
+            self.calls.append((list(argv), dict(env)))
+            if "-f" in argv:
+                Path(argv[argv.index("-f") + 1]).write_bytes(b"PGDMP safety copy")
+            rc, err = (0, "") if n == 0 else (1, "boom" if n == 1 else "bang")
+            return subprocess.CompletedProcess(argv, rc, stdout="", stderr=err)
+
+    fake = BothFail()
+    monkeypatch.setattr(backup, "_run", fake)
+    monkeypatch.setattr(backup, "_run_alembic_upgrade", lambda: None)
+    monkeypatch.setattr(backup, "_reset_schema", lambda db: None)
+
+    res = post_restore(client, make_archive())
+    assert res.status_code == 409
+    message = res.json()["detail"]["message"]
+    assert res.json()["detail"]["code"] == "restore_failed"
+    assert "boom" in message                                   # why the upload failed
+    assert "AND putting your previous data back failed" in message
+    assert "bang" in message                                   # why the put-back failed
+    assert "put back from" not in message, "it must NOT claim his data came back"
+
+    safety_argv = fake.calls[0][0]
+    safety_path = Path(safety_argv[safety_argv.index("-f") + 1])
+    assert str(safety_path) in message, "the only route back is named"
+    assert safety_path.read_bytes() == b"PGDMP safety copy", "and it is still there"
+    assert (media_dir / "0001.jpg").read_bytes() == b"old-scan"
+
+
+def test_an_alembic_failure_after_the_restore_names_the_safety_copy(
+    client, media_dir, monkeypatch
+):
+    """`pg_restore` succeeded, so his NEW data is in and is NOT thrown away for
+    a migration that stumbled. But the message has to name the safety copy —
+    that file is the only thing standing between him and a database he cannot
+    open — and the pool still has to be disposed: the schema was replaced
+    whether or not alembic finished."""
+    fake = FakeRun()
+    monkeypatch.setattr(backup, "_run", fake)
+    monkeypatch.setattr(backup, "_reset_schema", lambda db: None)
+    safety = media_dir.parent / "pre-restore-unit.dump"
+    monkeypatch.setattr(backup, "_safety_dump", lambda conn_args, env: safety)
+    # The create_all test DB has no alembic_version, so the branch has to be
+    # opened deliberately.
+    monkeypatch.setattr(backup, "_has_alembic_table", lambda db: True)
+
+    def boom() -> None:
+        raise RuntimeError("Can't locate revision identified by 'c7d8e9f0a1b2'")
+
+    monkeypatch.setattr(backup, "_run_alembic_upgrade", boom)
+    spy = DisposeSpy()
+    monkeypatch.setattr(backup, "engine", spy)
+
+    res = post_restore(client, make_archive(media={"0002.jpg": b"restored-scan"}))
+    assert res.status_code == 409
+    detail = res.json()["detail"]
+    assert detail["code"] == "restore_failed"
+    assert "c7d8e9f0a1b2" in detail["message"]
+    assert f"also saved at {safety}" in detail["message"]
+    assert spy.disposed == 1, "the schema was replaced even though alembic failed"
+    # The media swap never ran, so the old tree is untouched.
+    assert (media_dir / "0001.jpg").read_bytes() == b"old-scan"
+
+
+def test_restore_is_busy_when_the_schema_cannot_be_locked(client, media_dir, monkeypatch):
+    """`DROP SCHEMA public CASCADE` waits behind any open transaction for as
+    long as that transaction lives. Without `lock_timeout` this request hangs
+    holding `_LOCK`, so every retry from Settings answers `backup_busy` and
+    nothing says why. The timeout turns that into one honest sentence — and
+    PostgreSQL DDL being transactional, nothing was dropped."""
+    fake = FakeRun()
+    monkeypatch.setattr(backup, "_run", fake)
+    monkeypatch.setattr(backup, "_safety_dump",
+                        lambda conn_args, env: media_dir.parent / "pre-restore-unit.dump")
+
+    def locked(db) -> None:
+        raise OperationalError(
+            "DROP SCHEMA public CASCADE", {},
+            Exception("canceling statement due to lock timeout"),
+        )
+
+    monkeypatch.setattr(backup, "_reset_schema", locked)
+
+    res = post_restore(client, make_archive())
+    assert res.status_code == 409
+    detail = res.json()["detail"]
+    assert detail["code"] == "restore_failed"
+    assert detail["message"] == (
+        "the database is busy with another request — try again in a moment"
+    )
+    assert fake.calls == [], "no pg_restore ran, so nothing was dropped"
+    assert (media_dir / "0001.jpg").read_bytes() == b"old-scan"
+
+
 def test_restore_pg_tools_missing(client, media_dir, monkeypatch):
     monkeypatch.setattr(backup, "_run", FakeRun(raises=FileNotFoundError("pg_restore")))
     monkeypatch.setattr(backup, "_reset_schema", lambda db: None)
@@ -530,6 +661,26 @@ def _integration_needs_a_real_key():
     return
 
 
+@pytest.fixture
+def restore_the_schema_afterwards():
+    """Put `guitar_test`'s tables back however the test ends.
+
+    The three tests below really run `DROP SCHEMA public CASCADE` against the
+    shared database, and conftest's `_test_database` builds that schema once
+    per SESSION — so an assertion that fails between the drop and the restore
+    (or a `pg_restore` that dies) would hand every later test in the run a
+    database with no tables and an error naming none of this. `create_all`
+    skips tables that already exist, so on the happy path this is a no-op.
+
+    The `vector` extension goes first: `Chunk.embedding` is a Vector column,
+    and CASCADE took the extension with the schema.
+    """
+    yield
+    with real_engine.begin() as conn:
+        conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+    Base.metadata.create_all(real_engine)
+
+
 def _find_pg16_bin() -> str | None:
     """A dir holding PostgreSQL 16 pg_dump+pg_restore, or None.
 
@@ -567,7 +718,9 @@ PG16_BIN = _find_pg16_bin()
 
 @pytest.mark.integration
 @pytest.mark.skipif(PG16_BIN is None, reason="no PostgreSQL 16 pg_dump/pg_restore found")
-def test_real_round_trip_export_wipe_restore(client, media_dir, monkeypatch, db):
+def test_real_round_trip_export_wipe_restore(
+    client, media_dir, monkeypatch, db, restore_the_schema_afterwards
+):
     """Export the real test DB, wipe a table and the media dir, restore the
     archive, and assert both came back. Uses the pg tools at PG16_BIN via
     PG_BIN_DIR — exactly how the desktop build points at its own binaries."""
@@ -610,7 +763,9 @@ def test_real_round_trip_export_wipe_restore(client, media_dir, monkeypatch, db)
 
 
 @pytest.mark.skipif(PG16_BIN is None, reason="no PostgreSQL 16 pg_dump/pg_restore found")
-def test_restore_does_not_depend_on_the_live_databases_constraint_names(client, media_dir, monkeypatch, db):
+def test_restore_does_not_depend_on_the_live_databases_constraint_names(
+    client, media_dir, monkeypatch, db, restore_the_schema_afterwards
+):
     """2026-09-14, CI on the v0.5.2 bundle: restoring a dump whose chunk->page
     foreign key is named `chunk_page_id_fkey` into a database whose migrations
     named it `fk_chunk_page_id` died in `pg_restore --clean` ("cannot drop
@@ -642,7 +797,9 @@ def test_restore_does_not_depend_on_the_live_databases_constraint_names(client, 
 
 
 @pytest.mark.skipif(PG16_BIN is None, reason="no PostgreSQL 16 pg_dump/pg_restore found")
-def test_a_failed_restore_really_puts_the_database_back(client, media_dir, monkeypatch, db):
+def test_a_failed_restore_really_puts_the_database_back(
+    client, media_dir, monkeypatch, db, restore_the_schema_afterwards
+):
     """The safety net, against a real PostgreSQL rather than a scripted fake:
     a real `DROP SCHEMA public CASCADE` really happens, the upload really is
     rejected by a real `pg_restore`, and his row is really still there
