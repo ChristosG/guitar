@@ -376,3 +376,190 @@ test.describe("the board renders the marks", () => {
     await expect(body.locator("script")).toHaveCount(0);
   });
 });
+
+// --- the editor -----------------------------------------------------------
+//
+// The grammar above says what `**…**` MEANS; the board section says it renders.
+// What is left is the only part the tutor actually touches: the three buttons
+// over the textarea, the three shortcuts, and the fact that his typing is saved
+// whether or not he finds the Save button. The API is mocked and every
+// `PATCH /blocks/{id}` is recorded, because the whole risk of an autosave is the
+// PATCH you did not mean to send — one per pause, none while idle, and never a
+// second one for the same text when the blur and the Save click arrive together.
+
+const SEGMENT_TEXT = "Το σόλο ξεκινά αργά";
+
+type Patch = { body: string };
+
+/** The board, editable: GETs come from memory and every PATCH lands in `patches`. */
+async function mockEditor(page: Page, patches: Patch[]) {
+  let segmentBody = SEGMENT_TEXT;
+
+  async function handler(route: Route) {
+    const req = route.request();
+    const { pathname } = new URL(req.url());
+    if (req.method() === "OPTIONS") {
+      await route.fulfill({ status: 204, headers: CORS_HEADERS });
+      return;
+    }
+    const json = (status: number, body: unknown) =>
+      route.fulfill({
+        status, contentType: "application/json", headers: CORS_HEADERS,
+        body: JSON.stringify(body),
+      });
+
+    if (req.method() === "PATCH" && pathname === `/blocks/${SEGMENT_ID}`) {
+      const payload = (req.postDataJSON() ?? {}) as { body?: string };
+      patches.push({ body: payload.body ?? "" });
+      segmentBody = payload.body ?? "";
+      await json(200, node({ id: SEGMENT_ID, kind: "segment", title: "Θεωρία", body: segmentBody }));
+      return;
+    }
+    if (pathname === `/curricula/${ROOT_ID}`) {
+      await json(200, node({
+        id: ROOT_ID, kind: "course", title: "Ήχος Κιθάρας", meta: { brief: null },
+        children: [node({
+          id: MODULE_ID, kind: "module", title: "Ενότητα 1", body: "Στόχος.",
+          meta: { tier: "library" },
+          children: [node({
+            id: LESSON_ID, kind: "lesson", title: "Μάθημα 1",
+            meta: { draft_status: "ready", word_count: 300 },
+            children: [node({
+              id: SEGMENT_ID, kind: "segment", title: "Θεωρία", body: segmentBody,
+            })],
+          })],
+        })],
+      }));
+      return;
+    }
+    if (pathname.endsWith("/progress")) {
+      await json(200, { root_id: ROOT_ID, total: 1, queued: 0, drafting: 0, ready: 1, failed: 0, done: true });
+      return;
+    }
+    if (pathname === "/curricula/interview/open") {
+      await json(200, null);
+      return;
+    }
+    await json(500, { detail: "unexpected" });
+  }
+
+  await page.route(`${API_ORIGIN}/curricula/**`, handler);
+  await page.route(`${API_ORIGIN}/curricula`, handler);
+  await page.route(`${API_ORIGIN}/blocks/**`, handler);
+}
+
+/** Open the board, expand down to the segment, and put its body into edit mode. */
+async function openEditor(page: Page) {
+  await openSegment(page);
+  const segment = page.locator('[data-testid="block-card"][data-kind="segment"]');
+  await segment.getByTestId("body-edit-trigger").click();
+  await expect(segment.getByTestId("body-edit-textarea")).toBeVisible();
+  return segment;
+}
+
+/** Put the caret/selection where a tutor's mouse would have put it. */
+async function select(textarea: ReturnType<Page["getByTestId"]>, start: number, end: number) {
+  await textarea.evaluate((el, [s, e]: [number, number]) => {
+    const ta = el as HTMLTextAreaElement;
+    ta.focus();
+    ta.setSelectionRange(s, e);
+  }, [start, end] as [number, number]);
+}
+
+test.describe("editor", () => {
+  test("the B button bolds the selection and gives the textarea back", async ({ page }) => {
+    const patches: Patch[] = [];
+    await mockEditor(page, patches);
+    const segment = await openEditor(page);
+    const textarea = segment.getByTestId("body-edit-textarea");
+
+    await select(textarea, 3, 7); // «σόλο»
+    await segment.getByTestId("mark-bold").click();
+
+    await expect(textarea).toHaveValue("Το **σόλο** ξεκινά αργά");
+    // The tutor keeps typing where he was — the button must never steal focus.
+    await expect(textarea).toBeFocused();
+  });
+
+  test("Ctrl+I italicises the selection", async ({ page }) => {
+    const patches: Patch[] = [];
+    await mockEditor(page, patches);
+    const segment = await openEditor(page);
+    const textarea = segment.getByTestId("body-edit-textarea");
+
+    await select(textarea, 3, 7);
+    await page.keyboard.press("Control+i");
+
+    await expect(textarea).toHaveValue("Το *σόλο* ξεκινά αργά");
+    await expect(textarea).toBeFocused();
+  });
+
+  test("a pause in the typing saves, once, with the editor still open", async ({ page }) => {
+    const patches: Patch[] = [];
+    await mockEditor(page, patches);
+    const segment = await openEditor(page);
+    const textarea = segment.getByTestId("body-edit-textarea");
+    const typed = `${SEGMENT_TEXT} και δυναμώνει`;
+
+    await textarea.fill(typed);
+    await page.waitForTimeout(2200);
+
+    expect(patches).toEqual([{ body: typed }]);
+    // Autosave is not the Save button: the box stays open and usable while it runs.
+    await expect(textarea).toBeVisible();
+    await expect(textarea).toBeEnabled();
+    await expect(segment.getByTestId("body-edit-status")).toHaveText("Αποθηκεύτηκε");
+  });
+
+  test("clicking away flushes the draft without waiting for the debounce", async ({ page }) => {
+    const patches: Patch[] = [];
+    await mockEditor(page, patches);
+    const segment = await openEditor(page);
+    const textarea = segment.getByTestId("body-edit-textarea");
+    const typed = `${SEGMENT_TEXT} με σιγουριά`;
+
+    await textarea.fill(typed);
+    await segment.getByTestId("block-card-title").click();
+
+    // Under the 1500 ms debounce, so only a blur-flush can explain the PATCH.
+    await expect.poll(() => patches.length, { timeout: 1000 }).toBe(1);
+    expect(patches[0].body).toBe(typed);
+  });
+
+  test("Cancel puts back the text the editor opened with", async ({ page }) => {
+    const patches: Patch[] = [];
+    await mockEditor(page, patches);
+    const segment = await openEditor(page);
+    const textarea = segment.getByTestId("body-edit-textarea");
+
+    await textarea.fill(`${SEGMENT_TEXT} — λάθος`);
+    await page.waitForTimeout(2200);
+    expect(patches).toHaveLength(1);
+
+    await segment.getByTestId("body-edit-cancel").click();
+
+    await expect(segment.getByTestId("body-edit-textarea")).toHaveCount(0);
+    await expect.poll(() => patches.length).toBe(2);
+    expect(patches[1].body).toBe(SEGMENT_TEXT);
+    await expect(segment.getByTestId("block-card-body")).toHaveText(SEGMENT_TEXT);
+  });
+
+  test("Save sends the draft exactly once and closes the editor", async ({ page }) => {
+    const patches: Patch[] = [];
+    await mockEditor(page, patches);
+    const segment = await openEditor(page);
+    const textarea = segment.getByTestId("body-edit-textarea");
+    const typed = `${SEGMENT_TEXT} **δυνατά**`;
+
+    await textarea.fill(typed);
+    await segment.getByTestId("body-edit-save").click();
+
+    await expect(segment.getByTestId("body-edit-textarea")).toHaveCount(0);
+    await expect.poll(() => patches.length).toBe(1);
+    expect(patches[0].body).toBe(typed);
+    // The blur the Save click causes and the Save itself are ONE PATCH, not two.
+    await page.waitForTimeout(2200);
+    expect(patches).toHaveLength(1);
+    await expect(segment.getByTestId("block-card-body")).toHaveText(`${SEGMENT_TEXT} δυνατά`);
+  });
+});

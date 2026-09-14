@@ -1,11 +1,13 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useTranslations } from "next-intl";
 import {
+  Bold,
   ChevronDown,
   ChevronRight,
   ChevronUp,
+  Italic,
   Layers,
   Loader2,
   MoreVertical,
@@ -13,6 +15,7 @@ import {
   Plus,
   Sparkles,
   Trash2,
+  Underline,
 } from "lucide-react";
 import { Artifact } from "@/components/artifacts/artifact";
 import { Badge } from "@/components/ui/badge";
@@ -27,6 +30,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { InlineMarks } from "@/components/ui/inline-marks";
+import { toggleMark, type MarkName } from "@/lib/inline-marks";
 import { Textarea } from "@/components/ui/textarea";
 import { useConfirm } from "@/components/ui/confirm";
 import { AddLessonDialog } from "@/components/curriculum/add-lesson-dialog";
@@ -111,6 +115,19 @@ const SEGMENT_STATUS_CLASS: Record<Exclude<SegmentStatus, "done">, string> = {
   failed: "border-destructive/40 bg-destructive/10 text-destructive",
 };
 
+/** How long the tutor has to stop typing before the draft goes to the API. Long
+ * enough that a sentence is one PATCH, short enough that a phone call mid-edit
+ * does not lose the paragraph. */
+const AUTOSAVE_MS = 1500;
+
+/** The three buttons over the textarea — the toolbar and the shortcuts are the
+ * same table, so Ctrl+B and the B button can never drift apart. */
+const MARK_BUTTONS = [
+  { mark: "strong", key: "b", testId: "mark-bold", label: "markBold", Icon: Bold },
+  { mark: "em", key: "i", testId: "mark-italic", label: "markItalic", Icon: Italic },
+  { mark: "u", key: "u", testId: "mark-underline", label: "markUnderline", Icon: Underline },
+] as const satisfies readonly { mark: MarkName; key: string; testId: string; label: string; Icon: typeof Bold }[];
+
 interface BlockCardProps {
   node: BlockNode;
   locale: string;
@@ -182,6 +199,22 @@ export function BlockCard({
   const [editingBody, setEditingBody] = useState(false);
   const [draftBody, setDraftBody] = useState("");
   const [busy, setBusy] = useState(false);
+  /** What the status line beside the toolbar says. Deliberately NOT `busy`:
+   * `busy` disables the textarea, and an autosave that greys out the box the
+   * tutor is typing in is worse than no autosave at all. */
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  /** The text the API is known to hold. Every save compares against it, which is
+   * what makes a blur-then-Save (one click produces both) ONE PATCH. */
+  const lastSavedRef = useRef(node.body ?? "");
+  /** The text the editor opened with — what Cancel has to put back, since by
+   * then an autosave may already have replaced it server-side. */
+  const originalRef = useRef(node.body ?? "");
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** The PATCH in flight, if any. Cancel and Save both await it: the debounce
+   * can fire microseconds before a click, and the restore must land AFTER the
+   * autosave it is undoing. */
+  const inflightRef = useRef<Promise<void> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [added, setAdded] = useState<ArtifactOut[]>([]);
   /** The segment's own «Τι άλλαξε;» — local, because the chip and the dialog
@@ -244,18 +277,99 @@ export function BlockCard({
   }
 
   function startBodyEdit() {
-    setDraftBody(node.body ?? "");
+    const current = node.body ?? "";
+    setDraftBody(current);
+    lastSavedRef.current = current;
+    originalRef.current = current;
+    setSaveState("idle");
     setEditingBody(true);
     setExpanded(true);
+  }
+
+  function clearAutosaveTimer() {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  }
+
+  // The pending debounce must not outlive the card — a tree refetch can unmount
+  // a segment mid-edit, and a timer that fires afterwards PATCHes from a dead
+  // component.
+  useEffect(() => clearAutosaveTimer, []);
+
+  /** Save without touching `busy` — the autosave's whole job is to be invisible. */
+  async function saveQuiet(text: string) {
+    if (text === lastSavedRef.current) return;
+    setSaveState("saving");
+    const pending = (async () => {
+      try {
+        const updated = await updateBlock(node.id, { body: text });
+        lastSavedRef.current = text;
+        onChanged(updated);
+        setSaveState("saved");
+      } catch (err) {
+        setSaveState("error");
+        setError(err instanceof ApiError ? err.detail : t("editBodyError"));
+      }
+    })();
+    inflightRef.current = pending;
+    try {
+      await pending;
+    } finally {
+      if (inflightRef.current === pending) inflightRef.current = null;
+    }
+  }
+
+  function scheduleAutosave(text: string) {
+    clearAutosaveTimer();
+    timerRef.current = setTimeout(() => {
+      timerRef.current = null;
+      void saveQuiet(text);
+    }, AUTOSAVE_MS);
+  }
+
+  function applyMark(mark: MarkName) {
+    const el = textareaRef.current;
+    if (!el) return;
+    const next = toggleMark(draftBody, el.selectionStart, el.selectionEnd, mark);
+    setDraftBody(next.text);
+    scheduleAutosave(next.text);
+    // After React has written the new value: put the caret back where the tutor
+    // left it (just inside the markers) and hand the box back.
+    requestAnimationFrame(() => {
+      const box = textareaRef.current;
+      if (!box) return;
+      box.focus();
+      box.setSelectionRange(next.start, next.end);
+    });
   }
 
   async function commitBody(e: FormEvent) {
     e.preventDefault();
     const next = draftBody;
+    clearAutosaveTimer();
     setEditingBody(false);
-    if (next === (node.body ?? "")) return;
     await run(async () => {
-      onChanged(await updateBlock(node.id, { body: next }));
+      // The same click already blurred the textarea, which may have started the
+      // very PATCH this one would repeat; `saveQuiet` then sees nothing to do.
+      if (inflightRef.current) await inflightRef.current;
+      await saveQuiet(next);
+    }, t("editBodyError"));
+  }
+
+  /** Cancel means "as it was when I opened this", which after an autosave is a
+   * PATCH of its own rather than simply not saving. */
+  async function cancelBodyEdit() {
+    clearAutosaveTimer();
+    const original = originalRef.current;
+    setEditingBody(false);
+    setSaveState("idle");
+    await run(async () => {
+      if (inflightRef.current) await inflightRef.current;
+      if (lastSavedRef.current === original) return;
+      lastSavedRef.current = original;
+      onChanged(await updateBlock(node.id, { body: original }));
     }, t("editBodyError"));
   }
 
@@ -639,12 +753,59 @@ export function BlockCard({
     <div className="flex flex-col gap-3">
       {editingBody ? (
         <form onSubmit={commitBody} className="flex flex-col gap-2" data-testid="body-edit-form">
+          {/* THE THREE BUTTONS. `onMouseDown` is prevented on every one of them:
+              without it the mousedown blurs the textarea, the selection the
+              tutor just made is gone by the time the click handler reads it,
+              and the blur-flush fires a PATCH for a Ctrl+B. */}
+          <div className="flex items-center gap-1" data-testid="body-edit-toolbar">
+            {MARK_BUTTONS.map(({ mark, testId, label, Icon }) => (
+              <Button
+                key={mark}
+                type="button" size="icon-sm" variant="ghost"
+                data-testid={testId}
+                aria-label={t(label)}
+                title={t(label)}
+                disabled={busy}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => applyMark(mark)}
+              >
+                <Icon />
+              </Button>
+            ))}
+            {saveState !== "idle" && saveState !== "error" && (
+              <span
+                data-testid="body-edit-status"
+                data-state={saveState}
+                className="ml-1 text-xs text-muted-foreground"
+              >
+                {saveState === "saving" ? t("saving") : t("saved")}
+              </span>
+            )}
+          </div>
           <Textarea
             autoFocus
+            ref={textareaRef}
             value={draftBody}
-            onChange={(e) => setDraftBody(e.target.value)}
+            onChange={(e) => {
+              setDraftBody(e.target.value);
+              scheduleAutosave(e.target.value);
+            }}
+            // Clicking away is a pause the tutor meant — flush now rather than
+            // leave 1.5s of typing hanging on a timer he cannot see.
+            onBlur={() => {
+              clearAutosaveTimer();
+              void saveQuiet(draftBody);
+            }}
             onKeyDown={(e) => {
-              if (e.key === "Escape") setEditingBody(false);
+              if (e.key === "Escape") {
+                void cancelBodyEdit();
+                return;
+              }
+              if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+              const hit = MARK_BUTTONS.find((b) => b.key === e.key.toLowerCase());
+              if (!hit) return;
+              e.preventDefault();
+              applyMark(hit.mark);
             }}
             rows={Math.min(18, Math.max(4, draftBody.split("\n").length + 1))}
             data-testid="body-edit-textarea"
@@ -654,8 +815,9 @@ export function BlockCard({
           <div className="flex items-center gap-2 self-end">
             <Button
               type="button" size="sm" variant="outline"
+              data-testid="body-edit-cancel"
               disabled={busy}
-              onClick={() => setEditingBody(false)}
+              onClick={() => void cancelBodyEdit()}
             >
               {t("cancel")}
             </Button>
