@@ -318,9 +318,13 @@ test.describe("«AI στο μάθημα» panel — scope, the tutor-edited stri
 
     const panel = page.getByTestId("lesson-ai-panel");
     await expect(panel).toBeVisible();
-    // WHICH lesson — the header names it, and the module it sits in.
-    await expect(panel).toContainText("Μπράτσο");
-    await expect(panel).toContainText("Ξύλα");
+    // WHICH lesson — and it is the CHIP that says so, not a line of text
+    // anywhere in the panel. Both halves live inside `lesson-ai-scope`: the
+    // lesson title carrying the weight, the module trailing it.
+    const scope = panel.getByTestId("lesson-ai-scope");
+    await expect(scope).toBeVisible();
+    await expect(scope).toContainText("Μπράτσο");
+    await expect(scope).toContainText("Ξύλα");
 
     // Exactly one section was hand-edited, so exactly one chip.
     await expect(panel.getByTestId("lesson-ai-edited-chip")).toHaveCount(1);

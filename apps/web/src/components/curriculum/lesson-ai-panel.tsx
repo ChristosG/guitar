@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslations } from "next-intl";
-import { Loader2, Maximize2, Minimize2, Pencil, Sparkles, X } from "lucide-react";
+import { BookOpen, Loader2, Maximize2, Minimize2, Pencil, Sparkles, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { LessonPlanCard } from "@/components/curriculum/lesson-plan-card";
@@ -364,14 +364,32 @@ export function LessonAiPanel({ tree, onApplied }: LessonAiPanelProps) {
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
             <h2 className="font-heading text-base font-medium">{t("heading")}</h2>
-            {/* WHICH LESSON. A panel that looked identical for every row would
-                be a trap: he would type an instruction meant for one lesson and
-                watch another one change. */}
-            <p className="truncate text-sm font-medium" data-testid="lesson-ai-scope">
-              {lesson.moduleTitle
-                ? t("scopedTo", { lesson: lesson.title, module: lesson.moduleTitle })
-                : lesson.title}
-            </p>
+            {/* WHICH LESSON, LOUDLY. A panel that looked identical for every
+                row would be a trap: he would type an instruction meant for one
+                lesson and watch another one change. It was a plain line of
+                text under the heading, which is exactly the shape of a
+                subtitle nobody reads — so it is a chip now, the same shape the
+                revise drawer uses to say which module it is scoped to (BookOpen
+                rather than Layers, because this one is a lesson, and no clear
+                button, because this panel has no unscoped mode to clear to).
+                The lesson carries the weight; the module trails it, muted. The
+                `title` attribute keeps the whole «lesson · module» string in
+                one piece for a hover and for assistive tech. */}
+            <span
+              data-testid="lesson-ai-scope"
+              className="mt-1.5 inline-flex max-w-full items-center gap-1.5 rounded-full border border-border bg-muted px-2.5 py-0.5 text-sm"
+              title={
+                lesson.moduleTitle
+                  ? t("scopedTo", { lesson: lesson.title, module: lesson.moduleTitle })
+                  : lesson.title
+              }
+            >
+              <BookOpen className="size-3.5 shrink-0" aria-hidden />
+              <span className="truncate font-medium">{lesson.title}</span>
+              {lesson.moduleTitle && (
+                <span className="truncate text-muted-foreground">{" · "}{lesson.moduleTitle}</span>
+              )}
+            </span>
             <p className="text-sm text-muted-foreground">{t("description")}</p>
           </div>
           <div className="flex shrink-0 items-center gap-1">
