@@ -609,7 +609,15 @@ export function BlockCard({
         </span>
       )}
 
-      {isModule && (meta.tier !== "library" || meta.coverage_note) && (
+      {/* ONLY A REAL GAP EARNS A CHIP. The rule used to be "anything that
+          isn't a plain library tier", which put a chip on almost every module
+          row — `library` with a coverage note got one too, and a coverage note
+          is the NORMAL case for a module written from his own books. A chip on
+          every row is wallpaper, and wallpaper is exactly what makes the one
+          row that says «κενό» invisible. A gap is the only tier that is asking
+          him for something; it keeps its chip (and its note in the tooltip),
+          everything else says nothing. */}
+      {isModule && meta.tier === "gap" && (
         <TierBadge tier={meta.tier} coverageNote={meta.coverage_note} />
       )}
 

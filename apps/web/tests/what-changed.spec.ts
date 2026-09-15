@@ -407,8 +407,22 @@ test.describe("the module tier badge", () => {
     ).toHaveCount(0);
   });
 
-  test("library tier WITH a coverage note keeps the badge — there is something to hover", async ({ page }) => {
+  // WAS "keeps the badge". A coverage note is the NORMAL state of a module
+  // written from his own library, so this branch put a chip on nearly every
+  // module row — and a chip on every row is wallpaper the eye learns to skip,
+  // which is what made the one row that says «κενό» invisible. Only a gap is
+  // asking him for anything, so only a gap gets a chip now.
+  test("library tier WITH a coverage note says nothing either — a note is not a gap", async ({ page }) => {
     await mockModule(page, { tier: "library", coverage_note: "Your book, p. 12." });
+    await page.goto(`/el/curricula/${ROOT_ID}`);
+    await expect(page.getByTestId("tree-board")).toBeVisible();
+    await expect(
+      page.locator('[data-testid="block-card"][data-kind="module"]').getByTestId("tier-badge"),
+    ).toHaveCount(0);
+  });
+
+  test("a gap is the one tier that is shown — it is the only one asking for something", async ({ page }) => {
+    await mockModule(page, { tier: "gap" });
     await page.goto(`/el/curricula/${ROOT_ID}`);
     await expect(page.getByTestId("tree-board")).toBeVisible();
     await expect(
@@ -416,12 +430,17 @@ test.describe("the module tier badge", () => {
     ).toBeVisible();
   });
 
-  test("a gap is always shown — it is the most honest badge of the four", async ({ page }) => {
-    await mockModule(page, { tier: "gap" });
+  // The tier the old rule justified itself with: `general_knowledge` was
+  // shown because it "isn't library". It is not a gap either — nothing is
+  // missing, Claude simply wrote it from what it knows — so the row is quiet
+  // now. Pinned so a future widening of the rule has to argue with a test
+  // rather than slip through.
+  test("general_knowledge is quiet too — the row is not a status board", async ({ page }) => {
+    await mockModule(page, { tier: "general_knowledge", coverage_note: "Not in your books." });
     await page.goto(`/el/curricula/${ROOT_ID}`);
     await expect(page.getByTestId("tree-board")).toBeVisible();
     await expect(
       page.locator('[data-testid="block-card"][data-kind="module"]').getByTestId("tier-badge"),
-    ).toBeVisible();
+    ).toHaveCount(0);
   });
 });
