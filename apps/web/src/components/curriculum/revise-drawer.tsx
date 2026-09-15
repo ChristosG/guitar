@@ -201,7 +201,9 @@ export function ReviseDrawer({ rootId, tree, onApplied }: ReviseDrawerProps) {
           <aside
             className={cn(
               "relative flex h-full w-full flex-col gap-4 overflow-hidden border-border bg-background p-4 shadow-xl",
-              fullScreen ? "max-w-full border-l-0" : "max-w-md border-l",
+              // `max-w-lg` — same widening as the lesson panel, for the same
+              // reason and so the two side panels stay the same size.
+              fullScreen ? "max-w-full border-l-0" : "max-w-lg border-l",
             )}
           >
             <div className="flex items-start justify-between gap-2">

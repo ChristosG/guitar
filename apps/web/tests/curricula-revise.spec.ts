@@ -1279,7 +1279,11 @@ test.describe("curriculum revise drawer — full-screen toggle (mocked API)", ()
     const drawer = page.getByTestId("revise-drawer");
     const panel = drawer.locator("aside");
     await expect(drawer).toHaveAttribute("data-fullscreen", "false");
-    await expect(panel).toHaveClass(/max-w-md/);
+    // `max-w-lg`, widened from `md` (2026-09-15): at 1366×768 the `md` panel
+    // squeezed the composer and the scope block into ~380px of Greek prose.
+    // The assertion is still "the side panel has its side-panel width", it is
+    // just a different number now.
+    await expect(panel).toHaveClass(/max-w-lg/);
 
     await page.getByTestId("revise-fullscreen-toggle").click();
     await expect(drawer).toHaveAttribute("data-fullscreen", "true");
@@ -1290,7 +1294,7 @@ test.describe("curriculum revise drawer — full-screen toggle (mocked API)", ()
     // Back to the side panel.
     await page.getByTestId("revise-fullscreen-toggle").click();
     await expect(drawer).toHaveAttribute("data-fullscreen", "false");
-    await expect(panel).toHaveClass(/max-w-md/);
+    await expect(panel).toHaveClass(/max-w-lg/);
 
     // Expand again, then close and re-open — plain component state, so the
     // choice survives the close/re-open (the component itself never

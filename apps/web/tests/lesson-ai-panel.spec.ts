@@ -318,9 +318,13 @@ test.describe("«AI στο μάθημα» panel — scope, the tutor-edited stri
 
     const panel = page.getByTestId("lesson-ai-panel");
     await expect(panel).toBeVisible();
-    // WHICH lesson — and it is the CHIP that says so, not a line of text
-    // anywhere in the panel. Both halves live inside `lesson-ai-scope`: the
-    // lesson title carrying the weight, the module trailing it.
+    // WHICH lesson — and it is the SCOPE BLOCK that says so, not a line of
+    // text somewhere in the panel. Both names live inside `lesson-ai-scope`,
+    // and both are asserted WHOLE and individually: the block is two wrapping
+    // lines now precisely because the one-line pill truncated them into
+    // «Τύποι σώματος κιθάρας: Solid, … · Η Κιθάρα ως …», which names neither.
+    // There is no «·» separator to assert against any more, and that is the
+    // point.
     const scope = panel.getByTestId("lesson-ai-scope");
     await expect(scope).toBeVisible();
     await expect(scope).toContainText("Μπράτσο");

@@ -755,8 +755,16 @@ export function ChatPanel({ sessionId, rootId, blockTitles, onJobDone, seedDraft
             breakpoint — the shared Textarea drops to `md:text-sm` on a laptop,
             which is the one place he reads this glasses-off. Enter still
             sends, because that is the muscle memory a chat box owes you;
-            Shift+Enter is how you get a second paragraph. */}
-        <form onSubmit={handleSend} className="flex items-end gap-2">
+            Shift+Enter is how you get a second paragraph.
+
+            THE BUTTONS GO UNDERNEATH, NOT BESIDE. One flex row was fine on the
+            /chat page's full width and a disaster in the revise drawer, which
+            is a `max-w-lg` side panel: the two buttons took their natural width
+            and left the textarea about 160px wide — a tall thin column, five
+            words to a line, the exact complaint this round set out to fix. The
+            box now owns the full width of wherever it is mounted and the
+            controls sit on their own row beneath it. */}
+        <form onSubmit={handleSend} className="flex flex-col gap-2">
           <Textarea
             data-testid="chat-input"
             rows={3}
@@ -788,38 +796,46 @@ export function ChatPanel({ sessionId, rootId, blockTitles, onJobDone, seedDraft
             placeholder={t("placeholder")}
             disabled={composerDisabled}
           />
-          {/* "Talk it through first" exit — curriculum-bound chats only: one
-              cheap call distills the conversation into the instruction the
-              tutor MEANT and drops it in the composer for him to edit and
-              send. Nothing is planned or applied until he presses Send. */}
-          {rootId && (
-            <Button
-              type="button"
-              variant="outline"
-              size="lg"
-              data-testid="chat-distill"
-              disabled={composerDisabled || distilling || messages.length === 0}
-              onClick={async () => {
-                setDistilling(true);
-                setComposerError(null);
-                try {
-                  const { instruction } = await distillChatInstruction(sessionId);
-                  setDraft(instruction);
-                } catch (e) {
-                  setComposerError(e instanceof ApiError && e.detail ? e.detail : t("distillFailed"));
-                } finally {
-                  setDistilling(false);
-                }
-              }}
-            >
-              {distilling ? <Loader2 className="animate-spin" /> : <Wand2 />}
-              {t("distill")}
+          {/* Send on the right, where a send button belongs; the optional
+              "help me word it" button pushed to the far left by `mr-auto`, so
+              the thing that COMMITS is never adjacent to the thing that
+              rewrites your draft. With no distill button (the /chat page) Send
+              simply sits alone at the right. */}
+          <div className="flex items-center justify-end gap-2">
+            {/* "Talk it through first" exit — curriculum-bound chats only: one
+                cheap call distills the conversation into the instruction the
+                tutor MEANT and drops it in the composer for him to edit and
+                send. Nothing is planned or applied until he presses Send. */}
+            {rootId && (
+              <Button
+                type="button"
+                variant="outline"
+                size="lg"
+                className="mr-auto"
+                data-testid="chat-distill"
+                disabled={composerDisabled || distilling || messages.length === 0}
+                onClick={async () => {
+                  setDistilling(true);
+                  setComposerError(null);
+                  try {
+                    const { instruction } = await distillChatInstruction(sessionId);
+                    setDraft(instruction);
+                  } catch (e) {
+                    setComposerError(e instanceof ApiError && e.detail ? e.detail : t("distillFailed"));
+                  } finally {
+                    setDistilling(false);
+                  }
+                }}
+              >
+                {distilling ? <Loader2 className="animate-spin" /> : <Wand2 />}
+                {t("distill")}
+              </Button>
+            )}
+            <Button type="submit" size="lg" disabled={composerDisabled || !draft.trim()} data-testid="chat-send">
+              {sending ? <Loader2 className="animate-spin" /> : <Send />}
+              {t("send")}
             </Button>
-          )}
-          <Button type="submit" size="lg" disabled={composerDisabled || !draft.trim()} data-testid="chat-send">
-            {sending ? <Loader2 className="animate-spin" /> : <Send />}
-            {t("send")}
-          </Button>
+          </div>
         </form>
       </div>
     </div>

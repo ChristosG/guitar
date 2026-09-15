@@ -358,7 +358,11 @@ export function LessonAiPanel({ tree, onApplied }: LessonAiPanelProps) {
       <aside
         className={cn(
           "relative flex h-full w-full flex-col gap-4 overflow-y-auto border-border bg-background p-4 shadow-xl",
-          fullScreen ? "max-w-full border-l-0" : "max-w-md border-l",
+          // `max-w-lg`, not `md`: at 1366×768 the `md` panel left the composer
+          // and the scope block fighting for about 380px, and everything in
+          // here is Greek prose — the language runs ~15% longer than the
+          // English these widths were picked against.
+          fullScreen ? "max-w-full border-l-0" : "max-w-lg border-l",
         )}
       >
         <div className="flex items-start justify-between gap-2">
@@ -375,25 +379,30 @@ export function LessonAiPanel({ tree, onApplied }: LessonAiPanelProps) {
                 The lesson carries the weight; the module trails it, muted. The
                 `title` attribute keeps the whole «lesson · module» string in
                 one piece for a hover and for assistive tech. */}
-            <span
+            <div
               data-testid="lesson-ai-scope"
-              className="mt-1.5 inline-flex max-w-full items-center gap-1.5 rounded-full border border-border bg-muted px-2.5 py-0.5 text-sm"
+              className="mt-1.5 flex flex-col gap-0.5 rounded-lg border border-border bg-muted px-2.5 py-1.5"
               title={
                 lesson.moduleTitle
                   ? t("scopedTo", { lesson: lesson.title, module: lesson.moduleTitle })
                   : lesson.title
               }
             >
-              <BookOpen className="size-3.5 shrink-0" aria-hidden />
-              {/* `min-w-0` or `truncate` is decoration: a flex child's default
-                  `min-width: auto` refuses to shrink below its content, so a
-                  long lesson title pushed the chip past the panel and produced
-                  a horizontal scrollbar instead of an ellipsis. */}
-              <span className="min-w-0 truncate font-medium">{lesson.title}</span>
+              {/* TWO LINES, NOT ONE PILL. A single-line chip had to truncate,
+                  and in a side panel truncation ate both names at once — the
+                  real board produced «Τύποι σώματος κιθάρας: Solid, … · Η
+                  Κιθάρα ως …», which names neither the lesson nor the module.
+                  A pill that cannot say which lesson this is fails at its only
+                  job. The titles wrap instead; they are short prose, and two
+                  wrapped lines cost less than being wrong. */}
+              <span className="text-base leading-snug font-medium">{lesson.title}</span>
               {lesson.moduleTitle && (
-                <span className="min-w-0 truncate text-muted-foreground">{" · "}{lesson.moduleTitle}</span>
+                <span className="flex items-start gap-1.5 text-sm leading-snug text-muted-foreground">
+                  <BookOpen className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+                  <span>{lesson.moduleTitle}</span>
+                </span>
               )}
-            </span>
+            </div>
             <p className="text-sm text-muted-foreground">{t("description")}</p>
           </div>
           <div className="flex shrink-0 items-center gap-1">
