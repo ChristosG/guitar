@@ -219,12 +219,22 @@ test.describe("draft progress bar — resume (mocked API)", () => {
     await expect(otherLesson.getByTestId("lesson-status")).toHaveAttribute("data-status", "drafting", {
       timeout: 5_000,
     });
+    // NO TOGGLE TOUCHED, AND THE LINE IS THERE ANYWAY. A lesson being written
+    // is news, and news does not hide behind «Λεπτομέρειες» — nor does the
+    // Resume button that sits beside it.
     await expect(page.getByTestId("draft-progress-states")).toContainText("1 writing");
 
     // ...and it finishes, without a reload.
     fixture.advanceToReady();
     await expect(page.getByTestId("draft-progress")).toHaveAttribute("data-done", "true", { timeout: 5_000 });
+    // SETTLED, SO THE NUMBERS GO QUIET. "2 of 2" is a status report while
+    // something is still being written and plain arithmetic once nothing is;
+    // on a settled board it lives behind «Λεπτομέρειες», which starts closed.
+    await expect(page.getByTestId("draft-progress-count")).toHaveCount(0);
+    await expect(page.getByTestId("draft-progress-states")).toHaveCount(0);
+    await page.getByTestId("board-details-toggle").click();
     await expect(page.getByTestId("draft-progress-count")).toContainText("2 of 2");
+    await expect(page.getByTestId("draft-progress-states")).toBeVisible();
     // The pill DISAPPEARS on `ready` (Task 1.5: ready is the resting state, and
     // a badge on every settled row is noise) — its absence is the assertion,
     // and the enabled AI button is the positive half of the same claim.

@@ -33,6 +33,14 @@ interface DraftProgressBarProps {
    * next tick instead of being silently skipped forever (which mattered most on
    * the FINAL tick — `done` used to park the loop with the board still stale). */
   onLessonReady: () => Promise<boolean> | boolean;
+  /** Whether the board's «Λεπτομέρειες» toggle is open. It gates ONLY the two
+   * number lines (`N από N μαθήματα γραμμένα` / `N γράφονται · N σε αναμονή ·
+   * N απέτυχαν`) and only while the draft is SETTLED. The moment anything is
+   * drafting, queued or failed those lines are news, and news is not something
+   * you hide behind a disclosure — they come back on their own, toggle or not,
+   * along with the Resume button that has to stay reachable beside them. The
+   * bar itself, the failure hint and the error rows are never gated. */
+  detailsOpen?: boolean;
 }
 
 /** THE FLAGSHIP PROOF, RENDERED: he can read module 1 while module 5 is still
@@ -63,6 +71,7 @@ export function DraftProgressBar({
   draftingInTree,
   failedInTree,
   onLessonReady,
+  detailsOpen = false,
 }: DraftProgressBarProps) {
   const t = useTranslations("curricula.progress");
 
@@ -150,6 +159,12 @@ export function DraftProgressBar({
   const draftError = progress.draft_error ?? null;
   const pct = Math.round((ready / total) * 100);
   const canResume = queued > 0 || failed > 0;
+  // NEWS OVERRIDES THE TOGGLE. "3 από 12" is arithmetic on a finished board and
+  // a status report on a live one; only the second is worth a permanent line.
+  // `drafting`/`queued`/`failed` is precisely the difference, so it — not
+  // `done`, which a failed-only board still reports — is what un-hides them.
+  const inFlight = drafting > 0 || queued > 0 || failed > 0;
+  const showCounts = inFlight || detailsOpen;
 
   async function handleResume() {
     setResuming(true);
@@ -179,14 +194,18 @@ export function DraftProgressBar({
       className="flex flex-col gap-2.5 rounded-2xl border border-border bg-card px-4 py-3.5 ring-1 ring-foreground/5"
     >
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-        <span className="flex items-center gap-2 text-sm font-medium">
-          {!done && <Loader2 className="size-4 shrink-0 animate-spin text-primary" aria-hidden />}
-          <span data-testid="draft-progress-count">{t("count", { ready, total })}</span>
-        </span>
+        {showCounts && (
+          <span className="flex items-center gap-2 text-sm font-medium">
+            {!done && <Loader2 className="size-4 shrink-0 animate-spin text-primary" aria-hidden />}
+            <span data-testid="draft-progress-count">{t("count", { ready, total })}</span>
+          </span>
+        )}
 
-        <span className="text-xs text-muted-foreground" data-testid="draft-progress-states">
-          {t("states", { drafting, queued, failed })}
-        </span>
+        {showCounts && (
+          <span className="text-xs text-muted-foreground" data-testid="draft-progress-states">
+            {t("states", { drafting, queued, failed })}
+          </span>
+        )}
 
         {canResume && (
           <Button

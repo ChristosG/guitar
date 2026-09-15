@@ -955,6 +955,10 @@ test.describe("the guided interview, v2 (mocked API)", () => {
     // ...and then the rest lands, without a reload.
     mock.finishDraft();
     await expect(page.getByTestId("draft-progress")).toHaveAttribute("data-done", "true", { timeout: 15_000 });
+    // The tally is behind «Λεπτομέρειες» once the board is settled — closed by
+    // default, so it has to be asked for. The bar itself never hides.
+    await expect(page.getByTestId("draft-progress-count")).toHaveCount(0);
+    await page.getByTestId("board-details-toggle").click();
     await expect(page.getByTestId("draft-progress-count")).toContainText("3 of 3");
   });
 

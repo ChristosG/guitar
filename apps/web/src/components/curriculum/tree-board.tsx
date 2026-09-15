@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { useTranslations } from "next-intl";
-import { AlertTriangle, BookOpen, Loader2, Plus, RefreshCw, Sparkles } from "lucide-react";
+import { AlertTriangle, BookOpen, ChevronDown, ChevronUp, Loader2, Plus, RefreshCw, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useConfirm } from "@/components/ui/confirm";
@@ -56,6 +56,11 @@ function sleep(ms: number) {
 const MODULE_POLL_INTERVAL_MS = 2000;
 const MODULE_POLL_DEADLINE_MS = 6 * 60_000;
 
+/** Where «Λεπτομέρειες» remembers itself. Per-browser, not per-curriculum: the
+ * question it answers ("do I want to see numbers on a board?") is about the
+ * tutor, not about one course. */
+const DETAILS_STORAGE_KEY = "curricula.board.detailsOpen";
+
 /** THE BOARD. A `max-w-3xl` reading column that OWNS the tree; every mutation
  * flows back up to it, and the draft-progress poll refetches into it.
  *
@@ -78,7 +83,33 @@ export function TreeBoard({ root, locale, onRootDeleted }: TreeBoardProps) {
   const [generating, setGenerating] = useState(false); // the AI job, enqueue → done
   const [redrafting, setRedrafting] = useState(false);
   const [redraftError, setRedraftError] = useState<string | null>(null);
+  // Closed on the server AND on the first client render — the stored answer is
+  // read in an effect below rather than during render, because reading
+  // localStorage while rendering makes the server's HTML and the client's
+  // first pass disagree, and React calls that a hydration error.
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    try {
+      setDetailsOpen(window.localStorage.getItem(DETAILS_STORAGE_KEY) === "true");
+    } catch {
+      // A browser with site data blocked. The board is not the place to
+      // complain about it — it just stays closed, which is the default anyway.
+    }
+  }, []);
+
+  function toggleDetails() {
+    setDetailsOpen((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem(DETAILS_STORAGE_KEY, next ? "true" : "false");
+      } catch {
+        // Same as above: the toggle still works for this session.
+      }
+      return next;
+    });
+  }
 
   /** Refetch the whole tree. Returns whether it landed — the progress bar's poll
    * uses that to decide if its baseline may advance (a failed refetch is retried
@@ -229,8 +260,8 @@ export function TreeBoard({ root, locale, onRootDeleted }: TreeBoardProps) {
             data-degraded={degraded ? "true" : "false"}
             className={
               degraded
-                ? "flex items-start gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300"
-                : "flex items-start gap-2 rounded-xl border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
+                ? "flex items-start gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-300"
+                : "flex items-start gap-2 rounded-xl border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground"
             }
           >
             {degraded ? (
@@ -245,12 +276,38 @@ export function TreeBoard({ root, locale, onRootDeleted }: TreeBoardProps) {
                     sources: library.sources?.length ?? 0,
                     tokens: library.token_count ?? 0,
                   })}
-              {shape?.target_words_per_lesson
-                ? ` · ${t("shapeWords", { words: shape.target_words_per_lesson })}`
-                : ""}
             </span>
           </div>
         )}
+
+        {/* WHERE THE TEXT CAME FROM, ALWAYS. THE NUMBERS, ON REQUEST.
+            The library line above is the one sentence on this header worth
+            reading every time — it is the answer to "is this mine or did the
+            machine make it up", so it stays, and at `text-sm` rather than the
+            squint-size it used to be. Everything else here is arithmetic: the
+            per-lesson word target, and the draft tallies once the draft is
+            over. They were appended to that sentence and bolted under it,
+            which turned the answer into a dashboard. They live behind this
+            toggle now, and the toggle remembers itself. */}
+        <div className="flex items-center">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            data-testid="board-details-toggle"
+            aria-expanded={detailsOpen}
+            onClick={toggleDetails}
+          >
+            {detailsOpen ? <ChevronUp /> : <ChevronDown />}
+            {t("details")}
+          </Button>
+        </div>
+
+        {detailsOpen && shape?.target_words_per_lesson ? (
+          <p data-testid="board-shape-words" className="text-sm text-muted-foreground">
+            {t("shapeWords", { words: shape.target_words_per_lesson })}
+          </p>
+        ) : null}
 
         <DraftProgressBar
           rootId={tree.id}
@@ -259,6 +316,7 @@ export function TreeBoard({ root, locale, onRootDeleted }: TreeBoardProps) {
           draftingInTree={draftingInTree}
           failedInTree={failedInTree}
           onLessonReady={refresh}
+          detailsOpen={detailsOpen}
         />
       </header>
 
