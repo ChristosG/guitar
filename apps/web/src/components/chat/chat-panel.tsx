@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import { useLocale, useTranslations } from "next-intl";
 import { Loader2, Send, Wand2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { ApprovalCard } from "@/components/chat/approval-card";
 import { RevisionPlanCard } from "@/components/chat/revision-plan-card";
 import { MessageList, type ChatDisplayMessage } from "@/components/chat/message-list";
@@ -746,12 +746,35 @@ export function ChatPanel({ sessionId, rootId, blockTitles, onJobDone, seedDraft
           </p>
         )}
 
-        <form onSubmit={handleSend} className="flex gap-2">
-          <Input
+        {/* A BOX HE CAN SEE HIS OWN WORDS IN. This composer was a single-line
+            `h-9` Input, and the tutor's instructions to the reviser are not
+            one line — they are a paragraph about one lesson, typed in Greek,
+            which scrolled out of sight character by character as he wrote it
+            ("cannot see what he is writing", 2026-09-15). Three rows that
+            auto-grow (field-sizing) up to 40vh, at a flat 16px on EVERY
+            breakpoint — the shared Textarea drops to `md:text-sm` on a laptop,
+            which is the one place he reads this glasses-off. Enter still
+            sends, because that is the muscle memory a chat box owes you;
+            Shift+Enter is how you get a second paragraph. */}
+        <form onSubmit={handleSend} className="flex items-end gap-2">
+          <Textarea
             data-testid="chat-input"
-            className="h-9"
+            rows={3}
+            className="max-h-[40vh] min-h-20 overflow-y-auto text-base leading-relaxed md:text-base"
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key !== "Enter" || e.shiftKey) return;
+              // A Greek/IME candidate window is open: Enter is COMMITTING the
+              // word he is typing, not sending the turn. Submitting here would
+              // eat the composition and send a half-word.
+              if (e.nativeEvent.isComposing) return;
+              e.preventDefault();
+              // `requestSubmit`, not a direct `sendContent` call: it runs the
+              // form's own `onSubmit` (and its validation), so Enter and the
+              // Send button stay literally the same path forever.
+              e.currentTarget.form?.requestSubmit();
+            }}
             placeholder={t("placeholder")}
             disabled={composerDisabled}
           />

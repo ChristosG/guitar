@@ -766,6 +766,36 @@ test.describe("suggestion chips (mocked API)", () => {
     expect(mock.calls.suggestions).toBe(0);
     expect(mock.unexpected).toEqual([]);
   });
+
+  // THE COMPOSER IS A TEXTAREA NOW (2026-09-15). The tutor writes paragraphs
+  // into it, so a second line has to be reachable — and Enter still has to
+  // send, because that is what every chat box he has ever used does. Both
+  // halves are asserted here, in that order, from the same draft.
+  test("Shift+Enter adds a line without sending; Enter sends", async ({ page }) => {
+    const mock = await mockChatApi(page);
+    await page.goto("/en/chat");
+    const composer = page.getByTestId("chat-input");
+    await expect(composer).toBeEnabled();
+
+    mock.setNextMessage({ status: "answer", content: "Two lines received." });
+
+    await composer.fill("first line");
+    await composer.press("Shift+Enter");
+    await composer.pressSequentially("second line");
+
+    // The newline landed IN the box and nothing was sent.
+    await expect(composer).toHaveValue("first line\nsecond line");
+    expect(mock.calls.message).toBe(0);
+    await expect(page.getByTestId("chat-message")).toHaveCount(0);
+
+    await composer.press("Enter");
+
+    await expect(page.getByTestId("chat-message").first()).toContainText("first line");
+    await expect(page.getByTestId("chat-message").last()).toContainText("Two lines received.");
+    expect(mock.calls.message).toBe(1);
+    expect(mock.lastBody.message).toEqual({ content: "first line\nsecond line" });
+    expect(mock.unexpected).toEqual([]);
+  });
 });
 
 // Plan 13 Stage 5.6 — chat history. Chris: "the chat needs a history bro."
