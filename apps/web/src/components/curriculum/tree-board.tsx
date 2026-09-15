@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useMemo, useState, useSyncExternalStore, type FormEvent } from "react";
 import { useTranslations } from "next-intl";
 import { AlertTriangle, BookOpen, ChevronDown, ChevronUp, Loader2, Plus, RefreshCw, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -61,8 +61,49 @@ const MODULE_POLL_DEADLINE_MS = 6 * 60_000;
  * tutor, not about one course. */
 const DETAILS_STORAGE_KEY = "curricula.board.detailsOpen";
 
-/** THE BOARD. A `max-w-3xl` reading column that OWNS the tree; every mutation
+/** localStorage read as an EXTERNAL STORE rather than as `useState` + an
+ * effect that seeds it. Both are hydration-safe — the server snapshot is
+ * `false`, the same closed board the server rendered — but `useSyncExternalStore`
+ * is the one that does not schedule a synchronous setState inside an effect,
+ * which is a cascading render and which this repo's lint rules reject outright
+ * (`react-hooks/set-state-in-effect`). The subscription also means every board
+ * on the page agrees about the toggle without any of them owning it. */
+const detailsListeners = new Set<() => void>();
+
+function subscribeDetailsOpen(onChange: () => void) {
+  detailsListeners.add(onChange);
+  return () => {
+    detailsListeners.delete(onChange);
+  };
+}
+
+function readDetailsOpen(): boolean {
+  try {
+    return window.localStorage.getItem(DETAILS_STORAGE_KEY) === "true";
+  } catch {
+    // A browser with site data blocked. The board is not the place to complain
+    // about it — it stays closed, which is the default anyway.
+    return false;
+  }
+}
+
+function writeDetailsOpen(next: boolean) {
+  try {
+    window.localStorage.setItem(DETAILS_STORAGE_KEY, next ? "true" : "false");
+  } catch {
+    // Same as above: the toggle still works for this session.
+  }
+  detailsListeners.forEach((fn) => fn());
+}
+
+/** THE BOARD. A `max-w-4xl` reading column that OWNS the tree; every mutation
  * flows back up to it, and the draft-progress poll refetches into it.
+ *
+ * It was `max-w-3xl`, sized for 12-14px body text. The type inside it is 16px
+ * on a 17px root now (readability round, 2026-09-15), so the same column was
+ * holding noticeably fewer words per line and every lesson row wrapped harder.
+ * `4xl` puts the line length back where it was — a wider column carrying
+ * bigger type, not more of it.
  *
  * "ADD A MODULE" IS AN AI ACTION NOW. The button opens a one-line form: an
  * optional topic ("πετάλια και εφέ"), and Generate. The API plans ONE module that
@@ -83,32 +124,16 @@ export function TreeBoard({ root, locale, onRootDeleted }: TreeBoardProps) {
   const [generating, setGenerating] = useState(false); // the AI job, enqueue → done
   const [redrafting, setRedrafting] = useState(false);
   const [redraftError, setRedraftError] = useState<string | null>(null);
-  // Closed on the server AND on the first client render — the stored answer is
-  // read in an effect below rather than during render, because reading
-  // localStorage while rendering makes the server's HTML and the client's
-  // first pass disagree, and React calls that a hydration error.
-  const [detailsOpen, setDetailsOpen] = useState(false);
+  // Closed on the server, and closed on the hydrating render too (that is what
+  // the `false` server snapshot is for) — then React swaps in what this browser
+  // actually remembers. Reading localStorage during render instead would make
+  // the server's HTML and the client's first pass disagree, which React calls
+  // a hydration error.
+  const detailsOpen = useSyncExternalStore(subscribeDetailsOpen, readDetailsOpen, () => false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    try {
-      setDetailsOpen(window.localStorage.getItem(DETAILS_STORAGE_KEY) === "true");
-    } catch {
-      // A browser with site data blocked. The board is not the place to
-      // complain about it — it just stays closed, which is the default anyway.
-    }
-  }, []);
-
   function toggleDetails() {
-    setDetailsOpen((prev) => {
-      const next = !prev;
-      try {
-        window.localStorage.setItem(DETAILS_STORAGE_KEY, next ? "true" : "false");
-      } catch {
-        // Same as above: the toggle still works for this session.
-      }
-      return next;
-    });
+    writeDetailsOpen(!detailsOpen);
   }
 
   /** Refetch the whole tree. Returns whether it landed — the progress bar's poll
@@ -252,7 +277,7 @@ export function TreeBoard({ root, locale, onRootDeleted }: TreeBoardProps) {
   const degraded = library != null && library.full_context === false;
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-6" data-testid="tree-board">
+    <div className="mx-auto flex w-full max-w-4xl flex-col gap-6" data-testid="tree-board">
       <header className="flex flex-col gap-3">
         {library && (
           <div

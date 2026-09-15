@@ -127,4 +127,15 @@
   html {
     @apply font-sans;
   }
+  /* 17px INSTEAD OF 16, FROM `md` UP. The tutor is ~45 and reads this app
+     glasses-off; every size in it is rem-based, so one number here lifts the
+     whole thing — body copy, buttons, chips, the tree — by 6.25% without
+     touching a single component. Held back below `md` on purpose: a phone
+     is already at its comfortable minimum, and 17px there just costs
+     columns. */
+  @media (min-width: 768px) {
+    html {
+      font-size: 106.25%;
+    }
+  }
 }

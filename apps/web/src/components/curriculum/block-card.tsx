@@ -680,7 +680,7 @@ export function BlockCard({
             the panel's actions all rewrite text a worker is mid-way through. */}
         {isLesson && lessonAi && (
           <Button
-            type="button" variant="ghost" size="sm"
+            type="button" variant="ghost"
             data-testid="lesson-ai"
             disabled={draftStatus === "drafting" || draftStatus === "queued"}
             onClick={() => lessonAi.openForLesson(node.id, node.title, parentTitle ?? "")}
@@ -692,7 +692,7 @@ export function BlockCard({
 
         {isLesson && (
           <Button
-            type="button" variant="ghost" size="sm"
+            type="button" variant="ghost"
             data-testid="lesson-deepen"
             disabled={busy || draftStatus === "drafting"}
             onClick={handleDeepen}
@@ -710,7 +710,7 @@ export function BlockCard({
             drawer opens identically either way. */}
         {isModule && reviseScope && (
           <Button
-            type="button" variant="ghost" size="sm"
+            type="button" variant="ghost"
             data-testid="module-ai"
             onClick={() =>
               reviseScope.openForModule(
@@ -923,7 +923,9 @@ export function BlockCard({
             // is in the middle of. Only the Cancel restore locks it, and by then
             // the editor is closed anyway.
             disabled={cancelling}
-            className={cn(isSegment && "text-sm leading-relaxed")}
+            // Reads at the same size it will render at once saved — the whole
+            // point of editing in place.
+            className={cn("text-base", isSegment && "leading-relaxed")}
           />
           <div className="flex items-center gap-2 self-end">
             <Button
@@ -952,7 +954,12 @@ export function BlockCard({
             data-testid="block-card-body"
             className={cn(
               "whitespace-pre-wrap",
-              isSegment ? "text-sm leading-relaxed" : "text-xs text-muted-foreground",
+              // BODY COPY IS BODY COPY. A course's or a module's summary was
+              // `text-xs text-muted-foreground` — 12px of grey, i.e. styled as
+              // a footnote about the block rather than as the block's own
+              // words. Same size and same ink as a segment's body now; the
+              // tutor reads all three glasses-off.
+              isSegment ? "text-base leading-relaxed" : "text-base text-foreground leading-relaxed",
             )}
           >
             <InlineMarks text={node.body} />
@@ -970,7 +977,7 @@ export function BlockCard({
         <p
           data-testid="lesson-words-line"
           className={cn(
-            "text-xs text-muted-foreground",
+            "text-sm text-muted-foreground",
             meta.meets_floor === false && "text-amber-600 dark:text-amber-400",
           )}
         >
