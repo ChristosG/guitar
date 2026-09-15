@@ -61,6 +61,11 @@ const MODULE_POLL_DEADLINE_MS = 6 * 60_000;
  * tutor, not about one course. */
 const DETAILS_STORAGE_KEY = "curricula.board.detailsOpen";
 
+/** The id the toggle's `aria-controls` points at. A constant rather than a
+ * literal in two places, because a broken idref is invisible to everything
+ * except a screen reader. */
+const DETAILS_BLOCK_ID = "board-details";
+
 /** localStorage read as an EXTERNAL STORE rather than as `useState` + an
  * effect that seeds it. Both are hydration-safe — the server snapshot is
  * `false`, the same closed board the server rendered — but `useSyncExternalStore`
@@ -276,6 +281,19 @@ export function TreeBoard({ root, locale, onRootDeleted }: TreeBoardProps) {
   const shape = tree.meta?.shape;
   const degraded = library != null && library.full_context === false;
 
+  // A DOOR TO AN EMPTY ROOM IS JUST FURNITURE. «Λεπτομέρειες» has exactly two
+  // things behind it, and on some boards it has neither: a curriculum with no
+  // `shape.target_words_per_lesson` (nothing to say about word targets) and no
+  // lessons at all (the progress bar renders nothing — it returns null on
+  // `total === 0`) would have offered a toggle that reveals a blank. The lesson
+  // total is counted from the tree the board is already holding rather than
+  // waited on from the bar's poll: it is the same population the API's
+  // `/progress` GROUP BY counts, and it is here now instead of a render later.
+  const shapeTarget = shape?.target_words_per_lesson;
+  const hasShapeWords = typeof shapeTarget === "number" && shapeTarget > 0;
+  const lessonsInTree = tree.children.reduce((n, module) => n + module.children.length, 0);
+  const showDetailsToggle = hasShapeWords || lessonsInTree > 0;
+
   return (
     <div className="mx-auto flex w-full max-w-4xl flex-col gap-6" data-testid="tree-board">
       <header className="flex flex-col gap-3">
@@ -314,25 +332,41 @@ export function TreeBoard({ root, locale, onRootDeleted }: TreeBoardProps) {
             over. They were appended to that sentence and bolted under it,
             which turned the answer into a dashboard. They live behind this
             toggle now, and the toggle remembers itself. */}
-        <div className="flex items-center">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            data-testid="board-details-toggle"
-            aria-expanded={detailsOpen}
-            onClick={toggleDetails}
-          >
-            {detailsOpen ? <ChevronUp /> : <ChevronDown />}
-            {t("details")}
-          </Button>
-        </div>
+        {showDetailsToggle && (
+          <div className="flex items-center">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              data-testid="board-details-toggle"
+              aria-expanded={detailsOpen}
+              // The disclosure region. The draft tallies are the other half of
+              // what this toggle reveals, but they live inside
+              // `DraftProgressBar` — which owns the news exception that puts
+              // them back on screen regardless of this toggle, so they are not
+              // a stable target for `aria-controls`. `aria-expanded` is what
+              // carries the state for both halves; this id names the half that
+              // is always exactly as open as the toggle says.
+              aria-controls={DETAILS_BLOCK_ID}
+              onClick={toggleDetails}
+            >
+              {detailsOpen ? <ChevronUp /> : <ChevronDown />}
+              {t("details")}
+            </Button>
+          </div>
+        )}
 
-        {detailsOpen && shape?.target_words_per_lesson ? (
-          <p data-testid="board-shape-words" className="text-sm text-muted-foreground">
-            {t("shapeWords", { words: shape.target_words_per_lesson })}
-          </p>
-        ) : null}
+        {/* `contents` so an empty region (a board with lessons but no word
+            target) does not sit in the header's `gap-3` as a phantom row. */}
+        {showDetailsToggle && (
+          <div id={DETAILS_BLOCK_ID} className="contents">
+            {detailsOpen && hasShapeWords && (
+              <p data-testid="board-shape-words" className="text-sm text-muted-foreground">
+                {t("shapeWords", { words: shapeTarget })}
+              </p>
+            )}
+          </div>
+        )}
 
         <DraftProgressBar
           rootId={tree.id}

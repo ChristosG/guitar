@@ -435,6 +435,19 @@ test.describe("the module tier badge", () => {
   // missing, Claude simply wrote it from what it knows — so the row is quiet
   // now. Pinned so a future widening of the rule has to argue with a test
   // rather than slip through.
+  // Borrows this describe's barest-possible board on purpose: one module, no
+  // lessons under it, no `meta.library`, no `meta.shape`, and a `/progress`
+  // that answers `total: 0`. There is a word target for nobody and a tally of
+  // nothing, so «Λεπτομέρειες» would open onto a blank — and a door to an
+  // empty room is furniture. It is not rendered at all.
+  test("a board with no library metadata and no lessons offers no «Λεπτομέρειες» at all", async ({ page }) => {
+    await mockModule(page, { tier: "library" });
+    await page.goto(`/el/curricula/${ROOT_ID}`);
+    await expect(page.getByTestId("tree-board")).toBeVisible();
+    await expect(page.getByTestId("board-details-toggle")).toHaveCount(0);
+    await expect(page.getByTestId("board-shape-words")).toHaveCount(0);
+  });
+
   test("general_knowledge is quiet too — the row is not a status board", async ({ page }) => {
     await mockModule(page, { tier: "general_knowledge", coverage_note: "Not in your books." });
     await page.goto(`/el/curricula/${ROOT_ID}`);
