@@ -230,18 +230,82 @@ function tagAround(text: string, i: number): { at: number; length: number } | nu
   return null;
 }
 
-/** Move an offset OUT of a marker, leftwards. */
-function snapStart(text: string, i: number): number {
-  while (i > 0 && i < text.length && text[i - 1] === "*" && text[i] === "*") i--;
-  const tag = tagAround(text, i);
-  return tag ? tag.at : i;
+/**
+ * A span the parser actually opened, with the offsets the tree does not carry.
+ *
+ * `parseInlineMarks` returns nodes, not positions, and `toggleMark` has to know
+ * WHERE the opener and closer of the span under the tutor's selection are —
+ * which is a question only the grammar can answer. So this walks the text with
+ * the same rules as `parseRange`, in the same order, using the same
+ * `findCloser`, and records the four offsets instead of building children. It
+ * is private on purpose: the tree is the public shape, and a second exported
+ * view of the same walk is a second thing to keep in step with Python.
+ */
+type Span = {
+  mark: MarkName;
+  openStart: number;
+  innerStart: number;
+  innerEnd: number;
+  closeEnd: number;
+};
+
+function collectSpans(text: string): Span[] {
+  const spans: Span[] = [];
+
+  const walk = (start: number, end: number, depth: number): void => {
+    const absent: Absent = new Map();
+    let i = start;
+    outer: while (i < end) {
+      if (depth < MAX_DEPTH) {
+        for (const m of MARKERS) {
+          if (i + m.open.length > end || !text.startsWith(m.open, i)) continue;
+          const contentStart = i + m.open.length;
+          if (m.mark !== "u" && (contentStart >= end || isSpace(text[contentStart]))) {
+            i = contentStart; // rule 4 — literal, and no second chance
+            continue outer;
+          }
+          const closerAt = findCloser(text, contentStart, end, m, absent);
+          if (closerAt === null) continue; // rule 2
+          spans.push({
+            mark: m.mark,
+            openStart: i,
+            innerStart: contentStart,
+            innerEnd: closerAt,
+            closeEnd: closerAt + m.close.length,
+          });
+          walk(contentStart, closerAt, depth + 1);
+          i = closerAt + m.close.length;
+          continue outer;
+        }
+      }
+      i++;
+    }
+  };
+
+  walk(0, text.length, 0);
+  return spans;
 }
 
-/** Move an offset OUT of a marker, rightwards. */
-function snapEnd(text: string, i: number): number {
-  while (i > 0 && i < text.length && text[i - 1] === "*" && text[i] === "*") i++;
+/** Widen an offset leftwards over the markers the selection is touching. */
+function extendStart(text: string, i: number): number {
   const tag = tagAround(text, i);
-  return tag ? tag.at + tag.length : i;
+  if (tag) i = tag.at;
+  while (i > 0 && text[i - 1] === "*") i--;
+  for (const t of TAGS) {
+    if (i >= t.length && text.startsWith(t, i - t.length)) return i - t.length;
+  }
+  return i;
+}
+
+/** Widen an offset rightwards over the markers the selection is touching. */
+function extendEnd(text: string, i: number): number {
+  const tag = tagAround(text, i);
+  if (tag) i = tag.at + tag.length;
+  while (i < text.length && text[i] === "*") i++;
+  for (const t of TAGS) {
+    if (text.startsWith(t, i)) return i + t.length;
+  }
+  return i;
 }
 
 /** How many asterisks run away from `i` — leftwards when `step` is -1. */
@@ -263,26 +327,60 @@ export type ToggleResult = { text: string; start: number; end: number };
  */
 export function toggleMark(text: string, start: number, end: number, mark: MarkName): ToggleResult {
   const m = markerFor(mark);
-  let s = Math.max(0, Math.min(start, text.length));
+  const caret = Math.max(0, Math.min(start, text.length));
+  let s = caret;
   let e = Math.max(s, Math.min(end, text.length));
 
+  // 1. THE SPACE THE MOUSE PICKED UP. A double-click, or a drag that overshot
+  //    by one character, hands us «πάνω » with the trailing space in it. Wrapped
+  //    as selected that becomes `*πάνω *`, and the grammar is right to call a
+  //    closer with whitespace in front of it literal (rule 4) — so the tutor is
+  //    left looking at raw asterisks. The space was never part of the word he
+  //    meant to italicise: push it back out of the selection.
+  while (s < e && isSpace(text[s])) s++;
+  while (e > s && isSpace(text[e - 1])) e--;
+
   if (s === e) {
+    // Nothing but whitespace was selected (or nothing at all) — this is a caret.
+    s = caret;
     const word = wordAround(text, s);
     if (word === null) {
       // On whitespace: drop an empty pair and put the caret between the markers.
-      const caret = s + m.open.length;
-      return { text: text.slice(0, s) + m.open + m.close + text.slice(s), start: caret, end: caret };
+      const at = s + m.open.length;
+      return { text: text.slice(0, s) + m.open + m.close + text.slice(s), start: at, end: at };
     }
     [s, e] = word;
   }
 
-  // A selection that starts or ends INSIDE a marker is a selection the tutor
-  // made with the mouse, not a statement about the markers. Drag it out of them
-  // first, or `**abc**` selected from offset 1 gets bolded into `****ab**c**`.
-  s = snapStart(text, s);
-  e = Math.max(s, snapEnd(text, e));
+  // 2. A selection that stops just short of a marker — or one character into it
+  //    — is a selection the tutor made with the mouse, not a statement about the
+  //    markers. Widen over whatever markers touch either edge, so an opener or a
+  //    closer left just outside (or just inside) the selection is still his.
+  const xs = extendStart(text, s);
+  const xe = Math.max(xs, extendEnd(text, e));
 
   const sel = text.slice(s, e);
+
+  const off = (span: Span): ToggleResult => ({
+    text:
+      text.slice(0, span.openStart) +
+      text.slice(span.innerStart, span.innerEnd) +
+      text.slice(span.closeEnd),
+    start: span.innerStart - m.open.length,
+    end: span.innerEnd - m.open.length,
+  });
+
+  // 3. Is the selection a span of this mark that the PARSER agrees is a span?
+  //    Asked of the grammar's own walk, not of the characters either side: the
+  //    markers next to an offset may be literal text, part of a `**` that is not
+  //    ours, or the closer of something else entirely.
+  const spans = collectSpans(text).filter((span) => span.mark === mark);
+  const same = (a: number, b: number, c: number, d: number) => a === c && b === d;
+  const hit =
+    spans.find((span) => same(span.openStart, span.closeEnd, xs, xe)) ??
+    spans.find((span) => same(span.openStart, span.closeEnd, s, e)) ??
+    spans.find((span) => same(span.innerStart, span.innerEnd, s, e));
+  if (hit) return off(hit);
 
   // PARITY, not adjacency. In a run of asterisks the `**` pairs are taken from
   // the outside in, so a run of ODD length has exactly one `*` left over and
@@ -295,35 +393,36 @@ export function toggleMark(text: string, start: number, end: number, mark: MarkN
   const runLeftOf = (i: number) => asteriskRun(text, i, -1);
   const runRightOf = (i: number) => asteriskRun(text, i, 1);
 
-  // Where a span of this mark opens at the selection's start, if one does.
-  const leadRun = runRightOf(s);
+  // Where a span of this mark opens at the widened start, if one does.
+  const leadRun = runRightOf(xs);
   const opensAt =
     mark === "em"
       ? leadRun % 2 === 1
-        ? s + leadRun - 1 // the leftover `*` is the LAST of the run
+        ? xs + leadRun - 1 // the leftover `*` is the LAST of the run
         : null
-      : text.startsWith(m.open, s)
-        ? s
+      : text.startsWith(m.open, xs)
+        ? xs
         : null;
 
-  // 1. The selection starts at a span of this mark — take the whole span off,
+  // 4. The selection starts at a span of this mark — take the whole span off,
   //    whether or not the selection reaches its closer.
   if (opensAt !== null) {
     const o = opensAt;
     const closerAt = findCloser(text, o + m.open.length, text.length, m, new Map());
     if (closerAt !== null && closerAt + m.close.length >= e) {
-      return {
-        text:
-          text.slice(0, o) +
-          text.slice(o + m.open.length, closerAt) +
-          text.slice(closerAt + m.close.length),
-        start: s,
-        end: closerAt - m.open.length,
-      };
+      return off({
+        mark,
+        openStart: o,
+        innerStart: o + m.open.length,
+        innerEnd: closerAt,
+        closeEnd: closerAt + m.close.length,
+      });
     }
   }
 
-  // 2. The markers sit just outside the selection.
+  // 5. The markers sit just outside the selection, literal as far as the parser
+  //    is concerned — `****x****`, where the pairs the tutor sees are empty
+  //    spans to the grammar. One pair comes off.
   const outerConfusedByStrong =
     mark === "em" && (runLeftOf(s) % 2 === 0 || runRightOf(e) % 2 === 0);
   if (
@@ -339,7 +438,7 @@ export function toggleMark(text: string, start: number, end: number, mark: MarkN
     };
   }
 
-  // 3. Nothing to remove: wrap.
+  // 6. Nothing to remove: wrap what is left after the whitespace was handed back.
   return {
     text: text.slice(0, s) + m.open + sel + m.close + text.slice(e),
     start: s + m.open.length,

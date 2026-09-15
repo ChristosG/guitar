@@ -251,6 +251,68 @@ test.describe("toggleMark", () => {
     }
   });
 
+  test("a selection that swept up the trailing space still closes next to the word", () => {
+    // What the tutor did: double-clicked «πάνω», which took the space after it
+    // too, and pressed Ctrl+I. `*πάνω *` puts whitespace in front of the closer,
+    // and rule 4 is right to call that closer literal — so he was left reading
+    // his own asterisks. The space is handed back before anything is inserted.
+    const base = "Καλωσορίσατε στο πρώτο μας μάθημα πάνω στο Guitar Tone.";
+    const i = base.indexOf(" στο Guitar");
+
+    const withSpace = toggleMark(base, 0, i + 1, "em"); // case E
+    expect(withSpace).toEqual({
+      text: "*Καλωσορίσατε στο πρώτο μας μάθημα πάνω* στο Guitar Tone.",
+      start: 1,
+      end: 39,
+    });
+    expect(parseInlineMarks(withSpace.text)).toEqual([
+      {
+        type: "em",
+        children: [{ type: "text", value: "Καλωσορίσατε στο πρώτο μας μάθημα πάνω" }],
+      },
+      { type: "text", value: " στο Guitar Tone." },
+    ]);
+
+    // …and without the space it is the same string, which is the point.
+    const clean = toggleMark(base, 0, i, "em");
+    expect(clean).toEqual({ text: withSpace.text, start: 1, end: 39 });
+  });
+
+  test("and toggling it back OFF works however much of the closer he caught", () => {
+    // The follow-up he actually performs: select roughly the same thing again
+    // and press Ctrl+I to undo it. Every one of these used to produce garbage —
+    // `**…πάνω* *στο` or `**…**` — because the closer, the space after it, or
+    // both were inside the selection.
+    const base = "Καλωσορίσατε στο πρώτο μας μάθημα πάνω στο Guitar Tone.";
+    const italic = toggleMark(base, 0, base.indexOf(" στο Guitar"), "em");
+    expect(italic).toEqual({
+      text: "*Καλωσορίσατε στο πρώτο μας μάθημα πάνω* στο Guitar Tone.",
+      start: 1,
+      end: 39,
+    });
+    const plain = [{ type: "text", value: base }];
+
+    const inner_closer_space = toggleMark(italic.text, 1, 41, "em"); // case C
+    expect(inner_closer_space).toEqual({ text: base, start: 0, end: 38 });
+    expect(parseInlineMarks(inner_closer_space.text)).toEqual(plain);
+
+    const everything = toggleMark(italic.text, 0, 41, "em"); // case D
+    expect(everything).toEqual({ text: base, start: 0, end: 38 });
+    expect(parseInlineMarks(everything.text)).toEqual(plain);
+
+    const inner_closer = toggleMark(italic.text, 1, 40, "em"); // case J
+    expect(inner_closer).toEqual({ text: base, start: 0, end: 38 });
+    expect(parseInlineMarks(inner_closer.text)).toEqual(plain);
+  });
+
+  test("spaces on BOTH sides of the selection are handed back", () => {
+    expect(toggleMark(" x ", 0, 3, "strong")).toEqual({ text: " **x** ", start: 3, end: 4 });
+  });
+
+  test("the trailing space stays outside the underline tags too", () => {
+    expect(toggleMark("a b c", 2, 4, "u")).toEqual({ text: "a <u>b</u> c", start: 5, end: 6 });
+  });
+
   test("out-of-range offsets are clamped, not crashed on", () => {
     expect(toggleMark("σόλο", -5, 99, "strong")).toEqual({
       text: "**σόλο**",
@@ -645,6 +707,25 @@ test.describe("editor", () => {
       return ta.value.slice(ta.selectionStart, ta.selectionEnd);
     });
     expect(picked).toBe("σόλο");
+  });
+
+  test("a selection with the trailing space in it puts the closer next to the word", async ({
+    page,
+  }) => {
+    // The bug as the tutor met it: the mouse took the space after «σόλο», and
+    // `*σόλο *` renders as four literal characters on the board.
+    const patches: Patch[] = [];
+    await mockEditor(page, patches);
+    const segment = await openEditor(page);
+    const textarea = segment.getByTestId("body-edit-textarea");
+
+    await select(textarea, 3, 8); // «σόλο » — the space is in the selection
+    await segment.getByTestId("mark-italic").click();
+
+    await expect(textarea).toHaveValue("Το *σόλο* ξεκινά αργά");
+    const value = await textarea.inputValue();
+    expect(value.indexOf("σόλο*")).toBeGreaterThan(-1); // closer BEFORE the space
+    expect(value).not.toContain("σόλο *");
   });
 
   test("Ctrl+Shift+B is the browser's, not ours", async ({ page }) => {
