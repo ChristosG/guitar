@@ -770,10 +770,20 @@ export function ChatPanel({ sessionId, rootId, blockTitles, onJobDone, seedDraft
               // eat the composition and send a half-word.
               if (e.nativeEvent.isComposing) return;
               e.preventDefault();
-              // `requestSubmit`, not a direct `sendContent` call: it runs the
-              // form's own `onSubmit` (and its validation), so Enter and the
-              // Send button stay literally the same path forever.
-              e.currentTarget.form?.requestSubmit();
+              // `requestSubmit` first, because it runs the form's own
+              // `onSubmit` — Enter and the Send button stay literally one path.
+              // But the .deb runs against whatever WebKitGTK the host ships,
+              // and older WebKit has no `requestSubmit` at all: calling it
+              // there throws and Enter does nothing, on the one build we cannot
+              // pin the browser for. Feature-detected, with the same
+              // `sendContent(draft.trim())` `handleSend` itself calls as the
+              // fallback.
+              const form = e.currentTarget.form;
+              if (form && typeof form.requestSubmit === "function") {
+                form.requestSubmit();
+              } else {
+                void sendContent(draft.trim());
+              }
             }}
             placeholder={t("placeholder")}
             disabled={composerDisabled}

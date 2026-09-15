@@ -11,15 +11,27 @@ import { cn } from "@/lib/utils";
  * Chris, relaying him: "what happens with the ones saying nothing in your library
  * for this module? does it use the llm knowledge? does it search the internet?"
  * There is no way to answer that in a paragraph of documentation he will never
- * read. So it is a badge, on every module, always:
+ * read. So it is a badge — on every module where there is something to say:
  *
  *   library            his own sources actually teach this — the segments below it
- *                      carry page citations he can click
+ *                      carry page citations he can click. THE RESTING STATE, AND
+ *                      THE ONE TIER THAT IS SILENT ON THE BOARD: it is the normal
+ *                      outcome, it was on almost every row, and a chip on almost
+ *                      every row is wallpaper the eye learns to skip — which is
+ *                      what made the three below it invisible. (The badge still
+ *                      renders this tier wherever it IS asked for, such as the
+ *                      interview's outline and confirm steps, where the tiers are
+ *                      being compared against each other rather than read one row
+ *                      at a time.)
  *   general_knowledge  they do not, and Claude wrote it from what it knows. Not a
  *                      failure. An UNLABELLED one would be.
  *   web                it needed current information neither of them has
  *   gap                he asked for library-only, his library does not cover it,
  *                      and NOTHING WAS WRITTEN. The most honest badge of the four.
+ *
+ * Those last three all say the same load-bearing thing in three different ways —
+ * this module did not come from your books — so all three speak, each with its
+ * coverage note on hover.
  *
  * The tier was assigned by the model AFTER READING THE WHOLE LIBRARY, not by a
  * cosine score clearing a constant — that constant's separation margin on his real

@@ -226,13 +226,18 @@ test.describe("draft progress bar — resume (mocked API)", () => {
 
     // ...and it finishes, without a reload.
     fixture.advanceToReady();
-    await expect(page.getByTestId("draft-progress")).toHaveAttribute("data-done", "true", { timeout: 5_000 });
-    // SETTLED, SO THE NUMBERS GO QUIET. "2 of 2" is a status report while
-    // something is still being written and plain arithmetic once nothing is;
-    // on a settled board it lives behind «Λεπτομέρειες», which starts closed.
+    // SETTLED, SO THE WHOLE CARD GOES QUIET. "2 of 2" is a status report while
+    // something is still being written and plain arithmetic once nothing is —
+    // and with the tallies behind «Λεπτομέρειες» the card had nothing left in
+    // it but a 100% bar and an empty row. Nothing failed and there is nothing
+    // to resume, so it removes itself.
+    await expect(page.getByTestId("draft-progress")).toHaveCount(0, { timeout: 5_000 });
     await expect(page.getByTestId("draft-progress-count")).toHaveCount(0);
     await expect(page.getByTestId("draft-progress-states")).toHaveCount(0);
+    // «Λεπτομέρειες» brings the whole card back, `data-done` and all — the poll
+    // never stopped, the card was only hidden.
     await page.getByTestId("board-details-toggle").click();
+    await expect(page.getByTestId("draft-progress")).toHaveAttribute("data-done", "true");
     await expect(page.getByTestId("draft-progress-count")).toContainText("2 of 2");
     await expect(page.getByTestId("draft-progress-states")).toBeVisible();
     // The pill DISAPPEARS on `ready` (Task 1.5: ready is the resting state, and

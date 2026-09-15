@@ -954,11 +954,13 @@ test.describe("the guided interview, v2 (mocked API)", () => {
 
     // ...and then the rest lands, without a reload.
     mock.finishDraft();
-    await expect(page.getByTestId("draft-progress")).toHaveAttribute("data-done", "true", { timeout: 15_000 });
-    // The tally is behind «Λεπτομέρειες» once the board is settled — closed by
-    // default, so it has to be asked for. The bar itself never hides.
-    await expect(page.getByTestId("draft-progress-count")).toHaveCount(0);
+    // A settled board with nothing failed has nothing to say: the tallies are
+    // behind «Λεπτομέρειες» (closed by default) and a bordered card holding a
+    // 100% bar and an empty row is furniture, so the card removes itself.
+    await expect(page.getByTestId("draft-progress")).toHaveCount(0, { timeout: 15_000 });
+    // Asked for, it comes back whole — the poll never stopped.
     await page.getByTestId("board-details-toggle").click();
+    await expect(page.getByTestId("draft-progress")).toHaveAttribute("data-done", "true");
     await expect(page.getByTestId("draft-progress-count")).toContainText("3 of 3");
   });
 

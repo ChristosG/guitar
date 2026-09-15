@@ -61,11 +61,6 @@ const MODULE_POLL_DEADLINE_MS = 6 * 60_000;
  * tutor, not about one course. */
 const DETAILS_STORAGE_KEY = "curricula.board.detailsOpen";
 
-/** The id the toggle's `aria-controls` points at. A constant rather than a
- * literal in two places, because a broken idref is invisible to everything
- * except a screen reader. */
-const DETAILS_BLOCK_ID = "board-details";
-
 /** localStorage read as an EXTERNAL STORE rather than as `useState` + an
  * effect that seeds it. Both are hydration-safe — the server snapshot is
  * `false`, the same closed board the server rendered — but `useSyncExternalStore`
@@ -77,8 +72,19 @@ const detailsListeners = new Set<() => void>();
 
 function subscribeDetailsOpen(onChange: () => void) {
   detailsListeners.add(onChange);
+  // A `storage` event fires in every OTHER tab on the same origin, so a tutor
+  // with two curricula open does not get two boards disagreeing about whether
+  // he wants numbers. Filtered on the key (the event also fires for every other
+  // key this origin writes) and on `null`, which is what a `localStorage.clear()`
+  // reports — that one means "back to the default", i.e. re-read and get false.
+  const onStorage = (e: StorageEvent) => {
+    if (e.key !== null && e.key !== DETAILS_STORAGE_KEY) return;
+    onChange();
+  };
+  window.addEventListener("storage", onStorage);
   return () => {
     detailsListeners.delete(onChange);
+    window.removeEventListener("storage", onStorage);
   };
 }
 
@@ -339,15 +345,13 @@ export function TreeBoard({ root, locale, onRootDeleted }: TreeBoardProps) {
               variant="ghost"
               size="sm"
               data-testid="board-details-toggle"
+              // `aria-expanded` alone, no `aria-controls`: what this toggle
+              // reveals is two things in two components — a line here and the
+              // tallies inside `DraftProgressBar`, which owns the news
+              // exception that re-reveals them regardless of the toggle. There
+              // is no single stable element to point an idref at, and an idref
+              // that is right only half the time is worse than none.
               aria-expanded={detailsOpen}
-              // The disclosure region. The draft tallies are the other half of
-              // what this toggle reveals, but they live inside
-              // `DraftProgressBar` — which owns the news exception that puts
-              // them back on screen regardless of this toggle, so they are not
-              // a stable target for `aria-controls`. `aria-expanded` is what
-              // carries the state for both halves; this id names the half that
-              // is always exactly as open as the toggle says.
-              aria-controls={DETAILS_BLOCK_ID}
               onClick={toggleDetails}
             >
               {detailsOpen ? <ChevronUp /> : <ChevronDown />}
@@ -356,16 +360,10 @@ export function TreeBoard({ root, locale, onRootDeleted }: TreeBoardProps) {
           </div>
         )}
 
-        {/* `contents` so an empty region (a board with lessons but no word
-            target) does not sit in the header's `gap-3` as a phantom row. */}
-        {showDetailsToggle && (
-          <div id={DETAILS_BLOCK_ID} className="contents">
-            {detailsOpen && hasShapeWords && (
-              <p data-testid="board-shape-words" className="text-sm text-muted-foreground">
-                {t("shapeWords", { words: shapeTarget })}
-              </p>
-            )}
-          </div>
+        {detailsOpen && hasShapeWords && (
+          <p data-testid="board-shape-words" className="text-sm text-muted-foreground">
+            {t("shapeWords", { words: shapeTarget })}
+          </p>
         )}
 
         <DraftProgressBar

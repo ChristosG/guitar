@@ -166,6 +166,15 @@ export function DraftProgressBar({
   const inFlight = drafting > 0 || queued > 0 || failed > 0;
   const showCounts = inFlight || detailsOpen;
 
+  // NOTHING LEFT TO SAY, SO NO CARD. With the tallies behind «Λεπτομέρειες»,
+  // a settled board rendered this as a bordered card containing a 100% bar and
+  // an empty row — furniture, and furniture that implied something was still
+  // happening. Every path that HAS something to say keeps it: anything in
+  // flight, an open toggle, a Resume to offer, a failure to explain, a failed
+  // draft run, or a poll error. Placed after every hook, so the poll loop above
+  // keeps ticking either way — this hides the card, it does not stop watching.
+  if (!showCounts && !canResume && failed === 0 && !draftError && !error) return null;
+
   async function handleResume() {
     setResuming(true);
     setError(null);

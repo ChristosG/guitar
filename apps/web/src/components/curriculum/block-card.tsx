@@ -609,15 +609,19 @@ export function BlockCard({
         </span>
       )}
 
-      {/* ONLY A REAL GAP EARNS A CHIP. The rule used to be "anything that
-          isn't a plain library tier", which put a chip on almost every module
-          row — `library` with a coverage note got one too, and a coverage note
-          is the NORMAL case for a module written from his own books. A chip on
-          every row is wallpaper, and wallpaper is exactly what makes the one
-          row that says «κενό» invisible. A gap is the only tier that is asking
-          him for something; it keeps its chip (and its note in the tooltip),
-          everything else says nothing. */}
-      {isModule && meta.tier === "gap" && (
+      {/* «Η ΒΙΒΛΙΟΘΗΚΗ ΣΟΥ» IS THE ONE CHIP THAT SAYS NOTHING. It sat on almost
+          every module row — a module written from his own books is the normal
+          case, and a coverage note on one is normal too, so the old rule
+          ("anything that isn't a plain library tier") still chipped most of
+          the board. Wallpaper, and wallpaper is what made the rows that
+          matter invisible.
+
+          `library` is the resting state and is now silent. The other three are
+          NOT decoration and all three stay: `general_knowledge` and `web` say
+          this module was not written from his books, and `gap` says it was not
+          written at all. Each keeps its coverage-note tooltip, which is the
+          answer to the question the chip provokes. */}
+      {isModule && meta.tier && meta.tier !== "library" && (
         <TierBadge tier={meta.tier} coverageNote={meta.coverage_note} />
       )}
 

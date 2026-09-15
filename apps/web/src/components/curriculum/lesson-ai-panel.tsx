@@ -385,9 +385,13 @@ export function LessonAiPanel({ tree, onApplied }: LessonAiPanelProps) {
               }
             >
               <BookOpen className="size-3.5 shrink-0" aria-hidden />
-              <span className="truncate font-medium">{lesson.title}</span>
+              {/* `min-w-0` or `truncate` is decoration: a flex child's default
+                  `min-width: auto` refuses to shrink below its content, so a
+                  long lesson title pushed the chip past the panel and produced
+                  a horizontal scrollbar instead of an ellipsis. */}
+              <span className="min-w-0 truncate font-medium">{lesson.title}</span>
               {lesson.moduleTitle && (
-                <span className="truncate text-muted-foreground">{" · "}{lesson.moduleTitle}</span>
+                <span className="min-w-0 truncate text-muted-foreground">{" · "}{lesson.moduleTitle}</span>
               )}
             </span>
             <p className="text-sm text-muted-foreground">{t("description")}</p>

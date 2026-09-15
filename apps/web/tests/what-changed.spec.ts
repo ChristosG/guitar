@@ -409,10 +409,10 @@ test.describe("the module tier badge", () => {
 
   // WAS "keeps the badge". A coverage note is the NORMAL state of a module
   // written from his own library, so this branch put a chip on nearly every
-  // module row — and a chip on every row is wallpaper the eye learns to skip,
-  // which is what made the one row that says «κενό» invisible. Only a gap is
-  // asking him for anything, so only a gap gets a chip now.
-  test("library tier WITH a coverage note says nothing either — a note is not a gap", async ({ page }) => {
+  // module row — and «Η βιβλιοθήκη σου» on almost every row is wallpaper the
+  // eye learns to skip, which is what made the three tiers that DO say
+  // something invisible. `library` is silent with a note or without one.
+  test("library tier WITH a coverage note says nothing either — the note is not the news", async ({ page }) => {
     await mockModule(page, { tier: "library", coverage_note: "Your book, p. 12." });
     await page.goto(`/el/curricula/${ROOT_ID}`);
     await expect(page.getByTestId("tree-board")).toBeVisible();
@@ -421,7 +421,7 @@ test.describe("the module tier badge", () => {
     ).toHaveCount(0);
   });
 
-  test("a gap is the one tier that is shown — it is the only one asking for something", async ({ page }) => {
+  test("a gap is shown — nothing was written, and he has to know", async ({ page }) => {
     await mockModule(page, { tier: "gap" });
     await page.goto(`/el/curricula/${ROOT_ID}`);
     await expect(page.getByTestId("tree-board")).toBeVisible();
@@ -430,11 +430,19 @@ test.describe("the module tier badge", () => {
     ).toBeVisible();
   });
 
-  // The tier the old rule justified itself with: `general_knowledge` was
-  // shown because it "isn't library". It is not a gap either — nothing is
-  // missing, Claude simply wrote it from what it knows — so the row is quiet
-  // now. Pinned so a future widening of the rule has to argue with a test
-  // rather than slip through.
+  // The load-bearing half of the rule: `library` is silent because it is the
+  // RESTING STATE, not because the board went quiet. `general_knowledge` says
+  // this module did not come from his books — the thing he asked to be told in
+  // the first place — so it speaks, coverage note and all.
+  test("general_knowledge speaks — it says the module did not come from his books", async ({ page }) => {
+    await mockModule(page, { tier: "general_knowledge", coverage_note: "Not in your books." });
+    await page.goto(`/el/curricula/${ROOT_ID}`);
+    await expect(page.getByTestId("tree-board")).toBeVisible();
+    await expect(
+      page.locator('[data-testid="block-card"][data-kind="module"]').getByTestId("tier-badge"),
+    ).toBeVisible();
+  });
+
   // Borrows this describe's barest-possible board on purpose: one module, no
   // lessons under it, no `meta.library`, no `meta.shape`, and a `/progress`
   // that answers `total: 0`. There is a word target for nobody and a tally of
@@ -446,14 +454,5 @@ test.describe("the module tier badge", () => {
     await expect(page.getByTestId("tree-board")).toBeVisible();
     await expect(page.getByTestId("board-details-toggle")).toHaveCount(0);
     await expect(page.getByTestId("board-shape-words")).toHaveCount(0);
-  });
-
-  test("general_knowledge is quiet too — the row is not a status board", async ({ page }) => {
-    await mockModule(page, { tier: "general_knowledge", coverage_note: "Not in your books." });
-    await page.goto(`/el/curricula/${ROOT_ID}`);
-    await expect(page.getByTestId("tree-board")).toBeVisible();
-    await expect(
-      page.locator('[data-testid="block-card"][data-kind="module"]').getByTestId("tier-badge"),
-    ).toHaveCount(0);
   });
 });

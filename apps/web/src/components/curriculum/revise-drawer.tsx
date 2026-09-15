@@ -217,7 +217,10 @@ export function ReviseDrawer({ rootId, tree, onApplied }: ReviseDrawerProps) {
                   <div className="mt-2 flex items-center gap-1.5" data-testid="revise-scope-chip">
                     <span className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-border bg-muted px-2.5 py-0.5 text-xs">
                       <Layers className="size-3 shrink-0" aria-hidden />
-                      <span className="truncate" title={scope.title}>
+                      {/* `min-w-0`: same latent bug as the lesson panel's chip —
+                          a flex child will not shrink below its content width
+                          without it, so `truncate` never engages. */}
+                      <span className="min-w-0 truncate" title={scope.title}>
                         {t("scopedTo", { title: scope.title })}
                       </span>
                     </span>
